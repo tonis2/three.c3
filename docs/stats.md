@@ -44,7 +44,8 @@
   completed frame slot. Overflow clusters use the all-light loop, preserving illumination at extra cost.
 - `shadowViews` — Resident atlas tiles, including six per admitted point light.
 - `shadowRejected` — Lights denied shadow residency by the view, texel or atlas limits.
-- `shadowUpdates` — Views requiring rendering this frame.
+- `shadowUpdates` — Views refreshed this frame. An unaffected complete cached view costs no update;
+  a cache copy that clears an old dynamic overlay counts once.
 - `shadowUpdateTexels` — Total rasterized shadow texels this frame. Rebuilding static depth and
   drawing dynamic depth into the same view counts its texels twice.
 - `shadowDeferred` — Views awaiting an update budget. New or invalid deferred views contribute light

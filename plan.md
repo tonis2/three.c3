@@ -187,15 +187,6 @@ answers the idea; the argument is not.
 
 ---
 
-## 21. Systems and a cast
-
-- [ ] **`three.systems.report()` has no way to reach a HUD.** It is the CPU half
-      of `three.stats()` and there is nowhere to draw either — §5's text work is
-      what unblocks it, and until then the numbers reach a person through
-      `console.log` and a probe.
-
----
-
 ## 22. Shipping a game
 
 What a bundle needs that a viewer does not. Audio is §6. Steamworks and macOS
@@ -376,40 +367,6 @@ have, and it buys curved receivers that the mesh decal already gets by clipping.
 The mesh decal is what covers cracks, leaks, posters and edge grime, and it is
 the one that composes with instancing and with the exporter.
 
-## 29. The Evil Forest glb
-
-`~/Documents/FF9/evil_forest.glb` is the first level authored end to end in
-Blender and exported by the `blender_gltf` addon: 63 meshes, 21 materials, eight
-of them `CUSTOM_materials_layers` stacks masked by painted `COLOR_0`, 61 KTX2
-images, seven `KHR_lights_punctual` lights and a camera. Loading it as it is
-draws the wrong picture, and every reason is below. The scripts that show each
-one are in `~/Documents/FF9/build/`: `render_glb.js` is the file loaded the
-plain way (`glb_plain.png`), `render_layered2.js` is the same frame with the
-stacks imported by hand (`glb_layered2.png`), and the `diag_*.js` beside them
-are the probes. Run any of them with
-
-```sh
-./build/three --assets ~/Documents/FF9 --no-boot --script ~/Documents/FF9/build/render_glb.js --frames 3
-```
-
-The order is the order the picture gets fixed in.
-
-- [ ] **What a round trip now loses, visibly.** `scene.export` writes a stack's
-      base normal as the core `normalTexture` and stops: the base occlusion,
-      emissive and metallic-roughness maps item four gave the stack are not
-      written back (`gltf::GltfBuilder` has no `metallicRoughnessTexture`), and
-      a light exported by this renderer carries `three.lights`'s own multiplier
-      where the import reads Watts, so a file that goes out and comes back is
-      lit differently. Neither is a regression — nothing was carried before —
-      but both are now gaps a reader can see.
-
-Not defects, and worth knowing before someone files them: the soldiers and the
-moogle are in the export on purpose; the dry-branch bundles are pale, not white
-(`diag_branches.png` draws one five ways beside a rock and all five are the same
-bark); the cut-outs (`alphaMode MASK` on the ferns, shrubs, weeds and vine leaves)
-and `EXT_mesh_gpu_instancing` both work, 580 meshes in 76 draw calls; and 1.0 of
-the frame's 1.2 million triangles are the 414 weed instances, all LOD0, which is a
-question for the scatter and not for the renderer.
 
 ## 30. The Evil Forest in play
 

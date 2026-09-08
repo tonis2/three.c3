@@ -20,6 +20,7 @@ struct ShadowManager
 	uint caster_signature;
 	uint frame_slot;
 	bool[SHADOW_MAX_VIEWS] scheduled;
+	bool[SHADOW_MAX_VIEWS] overlay;
 	uint updates;
 	usz update_texels;
 	uint deferred;
@@ -250,6 +251,75 @@ fn Matrix4f MeshPass.shadow_projection(&self, Light light, uint index, uint part
 		* matrix::look_at{float}(eye, eye + direction, up);
 }
 
+// Whether one contiguous instance range reaches this shadow view. The bounds
+// match the conservative boxes used to build the frame's draw list.
+fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, Bucket bucket,
+	uint offset, uint count, Frustum* view, Light* point = null)
+{
+	if (count == 0) return false;
+	// Morph weights can be combined beyond the imported union, and a vertex body
+	// may do more than its declared culling margin. Keep both on the safe path.
+	if (mesh.morph_targets > 0 || material.vertex.len > 0) return true;
+	collision::Aabb3 local = mesh.bounds;
+	if (mesh.has_skin)
+	{
+		Asset* owner = self.assets.slot(bucket.asset);
+		if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
+	}
+	if (bucket.node != NO_NODE)
+	{
+		SoftMesh* soft = self.scene.physics.soft_for(bucket.node);
+		if (soft != null) local = soft.bounds;
+	}
+	Vec3 centre;
+	float range2 = 0;
+	if (point != null)
+	{
+		centre = { point.direction[0], point.direction[1], point.direction[2] };
+		range2 = point.direction[3] * point.direction[3];
+	}
+	for (uint n = 0; n < count; n++)
+	{
+		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
+		collision::Aabb3 box = local.transform_matrix(copy.model);
+		if (material.bounds > 0)
+		{
+			float margin = material.bounds;
+			box = { .min = box.min - { margin, margin, margin },
+				.max = box.max + { margin, margin, margin } };
+		}
+		if (point != null)
+		{
+			Vec3 nearest = math::min(math::max(centre, box.min), box.max);
+			Vec3 delta = nearest - centre;
+			if (delta.dot(delta) > range2) continue;
+		}
+		if (view.contains(box)) return true;
+	}
+	return false;
+}
+
+fn bool MeshPass.dynamic_shadow_reaches(&self, ShadowView* view, Light* light)
+{
+	Frustum frustum = frustum_of(view.view_projection);
+	Light* point = view.key.kind == ShadowViewKind.POINT ? light : null;
+	foreach (i, bucket : self.scene.buckets)
+	{
+		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+		if (at == NOT_DRAWN) continue;
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		Material* material = self.material(bucket.material);
+		if (mesh == null || material == null || !self.casts_shadow(material)) continue;
+		uint tail = bucket.static_first + bucket.static_count;
+		if (self.shadow_range_reaches(mesh, material, bucket, 0, bucket.static_first, &frustum, point)
+			|| self.shadow_range_reaches(mesh, material, bucket, tail, bucket.count - tail, &frustum, point))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 {
 	ShadowViewSet* entries = &self.shadow_view_set;
@@ -406,7 +476,11 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	manager.updates = 0; manager.update_texels = 0; manager.deferred = 0;
 	ShadowGpuView* uploaded = self.shadow_view_buffers[manager.frame_slot].buffer != null
 		? (ShadowGpuView*)self.shadow_view_buffers[manager.frame_slot].data() : null;
-	for (uint at = 0; at < entries.count; at++) manager.scheduled[at] = false;
+	for (uint at = 0; at < entries.count; at++)
+	{
+		manager.scheduled[at] = false;
+		manager.overlay[at] = false;
+	}
 	for (uint packed = 0; packed < entries.active; packed++)
 	{
 		for (uint at = 0; at < entries.count; at++)
@@ -418,10 +492,17 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				view.static_valid = false;
 				view.live_valid = false;
 			}
-			uint passes = manager.plan == SHADOW_PLAN_FULL ? 1u : (view.static_valid ? 0u : 1u);
-			if (manager.plan == SHADOW_PLAN_COMBINED) passes++;
+			bool static_work = manager.plan != SHADOW_PLAN_FULL && !view.static_valid;
+			bool overlay = manager.plan == SHADOW_PLAN_COMBINED
+				&& self.dynamic_shadow_reaches(view, &self.lighting.lights[manager.light_indices[at]]);
+			bool copy = manager.plan == SHADOW_PLAN_COMBINED
+				&& (static_work || overlay || !view.live_valid || view.live_dynamic);
+			manager.overlay[at] = overlay;
+			uint passes = manager.plan == SHADOW_PLAN_FULL ? 1u
+				: (static_work ? 1u : 0u) + (overlay ? 1u : 0u);
+			bool work = passes > 0 || copy;
 			usz texels = (usz)view.size * view.size * passes;
-			bool fits = passes == 0 || (manager.updates < entries.budget.max_updates
+			bool fits = !work || (manager.updates < entries.budget.max_updates
 				&& manager.update_texels + texels <= entries.budget.max_update_texels);
 			if (!fits)
 			{
@@ -434,8 +515,8 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				manager.deferred++;
 				continue;
 			}
-			manager.scheduled[at] = true;
-			if (passes > 0) manager.updates++;
+			manager.scheduled[at] = work;
+			if (work) manager.updates++;
 			manager.update_texels += texels;
 		}
 	}
@@ -487,6 +568,12 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 	{
 		ShadowView* view = &entries.views[at];
 		if (!view.live || !manager.scheduled[at]) continue;
+		if (manager.plan == SHADOW_PLAN_COMBINED && !manager.overlay[at])
+		{
+			view.live_valid = true;
+			view.live_dynamic = false;
+			continue;
+		}
 		manager.atlas.begin_tile(cmd, manager.tiles[at], manager.plan == SHADOW_PLAN_FULL);
 		uint i = manager.light_indices[at]; Light* light = &self.lighting.lights[i];
 		uint draws = self.record_casters(cmd, manager.plan == SHADOW_PLAN_FULL ? CASTERS_ALL : CASTERS_DYNAMIC,
@@ -495,6 +582,7 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		else { self.point_shadows.draws += draws; }
 		vk::cmdEndRendering(cmd);
 		view.live_valid = true;
+		view.live_dynamic = manager.plan == SHADOW_PLAN_COMBINED;
 	}
 	manager.atlas.end_live(cmd);
 }

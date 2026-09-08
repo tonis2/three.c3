@@ -189,6 +189,70 @@ fn void rectangle_disk_and_spot_are_not_point_fallbacks() @test
 		"the spot cone direction gates illumination");
 }
 
+<*
+ The combined area-light walk used by standard shading agrees with the two
+ single-lobe walks exposed to custom bodies. Head-on near and far views exercise
+ emitter distance across the plane; the oblique view exercises the GGX lobe at
+ grazing angles.
+*>
+fn void combined_area_lobes_match_the_separate_helpers_across_views() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		globalThis.combined = new three.MeshLambertMaterial({
+			color: 0xb07040, roughness: 0.3, metalness: 0.4, reflectance: 0.8
+		});
+		globalThis.separate = new three.ShaderMaterial({
+			color: 0xb07040, roughness: 0.3, metalness: 0.4, reflectance: 0.8,
+			fragment: "float3 shade(Surface s) { return s.albedo * lambert(s.normal) * (1.0 - s.metalness) + specular(s); }"
+		});
+		globalThis.areaPlane = new three.Mesh(new three.PlaneGeometry(12, 9), combined);
+		scene.add(areaPlane);
+		three.light.intensity = 0;
+		three.light.ambient = 0;
+		three.lights.add({ shape: 'rectangle', position: [0, 0, 2.5], range: 30,
+			right: [1, 0, 0], up: [0, 1, 0], width: 4, height: 2,
+			color: [0.7, 0.9, 1.0], intensity: 220 });
+		three.camera.target.set(0, 0, 0);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the area comparison scene built: %s", built.error);
+
+	float[3] yaw = { 0, 76, 0 };
+	float[3] distance = { 3.5, 8, 20 };
+	String[3] view = { "near", "grazing", "far" };
+	for (uint i = 0; i < 3; i++)
+	{
+		renderer.pass.camera.yaw = yaw[i];
+		renderer.pass.camera.pitch = 0;
+		renderer.pass.camera.distance = distance[i];
+
+		three::RunResult use_combined = runtime.run(`areaPlane.material = combined`);
+		defer use_combined.free();
+		test::@check(use_combined.ok, "the combined material was selected: %s", use_combined.error);
+		image::Image standard = renderer.capture()!!;
+		defer standard.free();
+
+		three::RunResult use_separate = runtime.run(`areaPlane.material = separate`);
+		defer use_separate.free();
+		test::@check(use_separate.ok, "the separate helpers were selected: %s", use_separate.error);
+		image::Image helpers = renderer.capture()!!;
+		defer helpers.free();
+
+		test::@check(
+			max_rgb_difference(&standard, &helpers) <= 1,
+			"the %s view differs by at most one channel level, got %d",
+			view[i], max_rgb_difference(&standard, &helpers)
+		);
+	}
+}
+
 fn void a_held_light_tracks_its_stable_id_across_remove() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
@@ -275,14 +339,25 @@ fn void a_deferred_combined_view_keeps_its_last_complete_depth() @test
 	defer limited.free();
 	test::@check(limited.ok, "the sun rebuild budget was set: %s", limited.error);
 	renderer.capture()!!.free();
-	test::@check(renderer.pass.stats().shadow_deferred >= 6,
-		"the sun rebuild defers the point-light faces");
+	test::@check(renderer.pass.stats().shadow_deferred >= 1,
+		"the sun rebuild defers each affected point-light face");
 
 	uint slot = renderer.pass.shadow_manager.frame_slot;
-	uint local = renderer.pass.lighting.lights[1].meta[1];
+	uint local = three::SHADOW_VIEW_NONE;
+	uint point_id = renderer.pass.lighting.lights[1].meta[0];
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		three::ShadowView* view = &renderer.pass.shadow_view_set.views[at];
+		if (view.live && view.key.light == point_id && renderer.pass.shadow_manager.overlay[at]
+			&& !renderer.pass.shadow_manager.scheduled[at])
+		{
+			local = renderer.pass.shadow_manager.gpu_indices[at];
+			break;
+		}
+	}
 	three::ShadowGpuView* uploaded = (three::ShadowGpuView*)renderer.pass.shadow_view_buffers[slot].data();
 	test::@check(local != three::SHADOW_VIEW_NONE && uploaded[local].params[3] > 0,
-		"a deferred combined local view retains its complete live shadow");
+		"a deferred affected local view retains its complete live shadow");
 }
 
 fn void moving_one_local_light_invalidates_only_its_six_cached_views() @test
@@ -321,6 +396,79 @@ fn void moving_one_local_light_invalidates_only_its_six_cached_views() @test
 	changed.free();
 	test::@check(renderer.pass.stats().shadow_updates == 6,
 		"moving one point light updates its six views while the other stays cached");
+}
+
+fn void dynamic_shadow_overlays_only_refresh_views_the_caster_reaches() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene=new three.Scene();
+		const floor=new three.Mesh(new three.PlaneGeometry(16,16));
+		floor.rotation.x=-Math.PI/2;floor.static=true;scene.add(floor);
+		globalThis.shadowMover=new three.Mesh(new three.BoxGeometry(1,1,1));
+		shadowMover.position.set(0,1,0);scene.add(shadowMover);
+		three.camera.target.set(0,0,0);three.camera.orbit(35,18,12);
+		three.shadows.budget={maxViews:16,maxUpdates:16};
+		three.light.set([.2,1,.1],.2);
+		three.light.shadow={enabled:true,size:256,follow:false,distance:24};
+		three.lights.shadow={enabled:true,size:256};
+		three.lights.add({position:[-4,1,0],range:10,intensity:18});
+		three.lights.add({shape:'disk',position:[0,6,0],right:[1,0,0],up:[0,0,-1],
+			width:2,height:2,range:12,intensity:80});
+	`);
+	defer built.free();
+	test::@check(built.ok, "the mixed per-view shadow scene built: %s", built.error);
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+
+	three::SceneStats stats = renderer.pass.stats();
+	test::@check(stats.shadow_views == 8,
+		"the directional, point and area lights keep all eight resident views");
+	test::@check(stats.shadow_updates == 3,
+		"only the sun, area view and reached point face submit dynamic overlays");
+	test::@check(stats.shadow_update_texels == 3 * 256 * 256,
+		"update texels count the three rasterized overlays only");
+
+	uint point_id = renderer.pass.lighting.lights[1].meta[0];
+	uint point_scheduled = 0;
+	uint point_cached = 0;
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		three::ShadowView* view = &renderer.pass.shadow_view_set.views[at];
+		if (!view.live || view.key.kind != three::ShadowViewKind.POINT || view.key.light != point_id) continue;
+		if (renderer.pass.shadow_manager.scheduled[at]) point_scheduled++;
+		if (view.live_valid) point_cached++;
+	}
+	test::@check(point_scheduled == 1, "the caster reaches one point-light cube face");
+	test::@check(point_cached == 6, "the other five point faces retain complete cached depth");
+
+	three::RunResult moved = runtime.run(`shadowMover.position.x=-7`);
+	defer moved.free();
+	test::@check(moved.ok, "the caster moved between point faces: %s", moved.error);
+	renderer.capture()!!.free();
+	stats = renderer.pass.stats();
+	test::@check(stats.shadow_updates == 4,
+		"the exited point face adds one cache cleanup to three overlays");
+	test::@check(stats.shadow_update_texels == 3 * 256 * 256,
+		"a cache-only cleanup adds no rasterized texels");
+	point_scheduled = 0;
+	uint point_overlaid = 0;
+	uint point_cleared = 0;
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		three::ShadowView* view = &renderer.pass.shadow_view_set.views[at];
+		if (!view.live || view.key.kind != three::ShadowViewKind.POINT || view.key.light != point_id) continue;
+		if (renderer.pass.shadow_manager.scheduled[at]) point_scheduled++;
+		if (renderer.pass.shadow_manager.overlay[at]) point_overlaid++;
+		if (renderer.pass.shadow_manager.scheduled[at] && !renderer.pass.shadow_manager.overlay[at]
+			&& !view.live_dynamic) point_cleared++;
+	}
+	test::@check(point_scheduled == 2 && point_overlaid == 1 && point_cleared == 1,
+		"the entered face is overlaid and the exited face is restored from static depth");
 }
 
 fn void mixed_shadow_cache_stays_admitted_under_a_tight_byte_budget() @test

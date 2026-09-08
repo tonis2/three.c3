@@ -2312,7 +2312,7 @@ fn void an_area_light_round_trips_watts_shape_and_basis() @test
 			const scene = new three.Scene();
 			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
 			three.lights.add({ position: [2, 3, 4], shape: 'ellipse', width: 6, height: 2,
-				right: [0, 0, 1], up: [0, 1, 0], color: 0x80c0ff, intensity: 500 });
+				right: [0, 0, 1], up: [0, 1, 0], range: 37, color: 0x80c0ff, intensity: 500 });
 			scene.export("build/export_area_light.glb");
 		`);
 		defer written.free();
@@ -2324,17 +2324,21 @@ fn void an_area_light_round_trips_watts_shape_and_basis() @test
 			"shape and unconverted watts cross: %s", json);
 		test::@check(json.contains(`"width":6`) && json.contains(`"height":2`),
 			"both full dimensions cross: %s", json);
+		test::@check(json.contains(`"range":37`), "the authored cutoff crosses: %s", json);
 
 		three::RunResult read = run.run(`
-			const back = three.load("build/export_area_light.glb").lights.find(l => l.powerWatts !== undefined);
+			const asset = three.load("build/export_area_light.glb");
+			const back = asset.lights.find(l => l.powerWatts !== undefined);
+			const scene = new three.Scene();
+			scene.add(asset.instantiate("area", { lights: true }));
 			const q = x => Math.round(x * 1000) / 1000;
-			return [back.type, ...[back.powerWatts, back.width, back.height,
-				...back.node.position, ...back.node.right, ...back.node.up].map(q)].join(',');
+			return [back.type, ...[back.powerWatts, back.width, back.height, back.range,
+				...back.node.position, ...back.node.right, ...back.node.up, three.lights[1].range].map(q)].join(',');
 		`);
 		defer read.free();
 		test::@check(read.ok, "the exported area reads back: %s", read.error);
-		test::@check(read.value == `"ellipse,500,6,2,2,3,4,0,0,1,0,1,0"`,
-			"placement and oriented footprint survive: %s", read.value);
+		test::@check(read.value == `"ellipse,500,6,2,37,2,3,4,0,0,1,0,1,0,37"`,
+			"placement, oriented footprint and instantiated cutoff survive: %s", read.value);
 	};
 }
 
