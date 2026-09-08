@@ -71,6 +71,144 @@ fn sz differing_rgb(image::Image* a, image::Image* b)
 	return changed;
 }
 
+fn long rgb_sum(image::Image* shot)
+{
+	long sum = 0;
+	sz bpp = shot.bytes_per_pixel();
+	for (sz p = 0; p < shot.pixels.len; p += bpp)
+	{
+		sum += (long)(char)shot.pixels[p];
+		sum += (long)(char)shot.pixels[p + 1];
+		sum += (long)(char)shot.pixels[p + 2];
+	}
+	return sum;
+}
+
+<*
+ A small caster still makes a measurable contact shadow at both ends of a local
+ light's useful depth range. The far case uses a LayeredMaterial because its
+ generated shading body has a separate copy of the shared lighting template.
+
+ Bias zero exercises the automatic projection-aware offset. Comparing the same
+ frame with sampling disabled isolates the shadow from inverse-square
+ attenuation and tone mapping.
+*>
+fn void local_bias_keeps_near_and_far_contact_shadows_in_both_material_templates() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		globalThis.contactPlain = new three.MeshLambertMaterial({ color: 0xb8b8b8 });
+		globalThis.contactLayered = new three.LayeredMaterial({
+			layers: [{ name: 'soil', tint: [0.72, 0.72, 0.72], opacity: 0.35 }]
+		});
+		globalThis.contactGround = new three.Mesh(new three.PlaneGeometry(18, 18), contactPlain);
+		contactGround.rotation.x = -Math.PI / 2; scene.add(contactGround);
+		globalThis.contactCaster = new three.Mesh(new three.BoxGeometry(0.7, 0.7, 0.7),
+			new three.MeshLambertMaterial({ color: 0x909090 }));
+		contactCaster.position.set(0, 0.35, 0); scene.add(contactCaster);
+		three.light.intensity = 0; three.light.ambient = 0;
+		globalThis.contactLamp = three.lights.add({ shape: 'spot', position: [2, 3, 1],
+			direction: [-2, -3, -1], range: 30, innerAngle: 0.75, outerAngle: 1.05,
+			intensity: 80 });
+		globalThis.contactPoint = three.lights.add({ position: [6, 12, 3], range: 30, intensity: 0 });
+		globalThis.contactArea = three.lights.add({ shape: 'rectangle', position: [4, 8, 2],
+			right: [1, 0, 0], up: [0, 0, -1], width: 0.75, height: 0.75,
+			range: 30, intensity: 0 });
+		three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 };
+		three.camera.target.set(0, 0, 0); three.camera.orbit(28, 24, 8);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the local contact-shadow scene built: %s", built.error);
+
+	String[4] setup = {
+		`contactGround.material=contactPlain;contactPoint.intensity=0;contactArea.intensity=0;contactLamp.intensity=80`,
+		`contactGround.material=contactLayered;contactPoint.intensity=0;contactArea.intensity=0;
+		 three.lights.remove(contactLamp);contactLamp=three.lights.add({shape:'spot',position:[6,12,3],
+		 direction:[-6,-12,-3],range:30,innerAngle:0.75,outerAngle:1.05,intensity:1280})`,
+		`contactGround.material=contactPlain;contactLamp.intensity=0;contactArea.intensity=0;contactPoint.intensity=1280`,
+		`contactGround.material=contactPlain;contactLamp.intensity=0;contactPoint.intensity=0;contactArea.intensity=700`,
+	};
+	String[4] distance = { "near spot", "far spot", "far point", "area" };
+	for (uint i = 0; i < 4; i++)
+	{
+		three::RunResult placed = runtime.run(setup[i]);
+		defer placed.free();
+		test::@check(placed.ok, "the %s contact-shadow case was placed: %s", distance[i], placed.error);
+		image::Image shadowed = renderer.capture()!!;
+		defer shadowed.free();
+		three::RunResult off = runtime.run(`three.lights.shadow.enabled=false`);
+		defer off.free();
+		test::@check(off.ok, "local shadows were disabled: %s", off.error);
+		image::Image open = renderer.capture()!!;
+		defer open.free();
+		long darkening = rgb_sum(&open) - rgb_sum(&shadowed);
+		sz changed = differing_rgb(&open, &shadowed);
+		test::@check(changed > 20,
+			"the %s local shadow changes receiver pixels, got %d", distance[i], changed);
+		test::@check(darkening > 600,
+			"the %s local contact shadow measurably darkens the receiver, got %d", distance[i], darkening);
+		three::RunResult on = runtime.run(`three.lights.shadow.enabled=true;contactCaster.visible=false`);
+		defer on.free();
+		test::@check(on.ok, "local shadows were restored: %s", on.error);
+		image::Image bare_shadowed = renderer.capture()!!;
+		defer bare_shadowed.free();
+		three::RunResult bare_off = runtime.run(`three.lights.shadow.enabled=false`);
+		defer bare_off.free();
+		test::@check(bare_off.ok, "the bare receiver's shadows were disabled: %s", bare_off.error);
+		image::Image bare_open = renderer.capture()!!;
+		defer bare_open.free();
+		test::@check(max_rgb_difference(&bare_shadowed, &bare_open) <= 1,
+			"the %s bare receiver does not self-shadow (largest channel error %d)",
+			distance[i], max_rgb_difference(&bare_shadowed, &bare_open));
+		three::RunResult restore = runtime.run(`three.lights.shadow.enabled=true;contactCaster.visible=true`);
+		defer restore.free();
+		test::@check(restore.ok, "the contact caster was restored: %s", restore.error);
+	}
+}
+
+<*
+ Static caching changes how depth is assembled, not the image. Reclassifying the
+ same caster as dynamic must therefore leave every receiver pixel unchanged.
+*>
+fn void cached_and_dynamic_local_contact_shadows_are_identical() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		const ground = new three.Mesh(new three.PlaneGeometry(12, 12));
+		ground.rotation.x = -Math.PI / 2; ground.static = true; scene.add(ground);
+		globalThis.cacheContact = new three.Mesh(new three.BoxGeometry(0.8, 0.8, 0.8));
+		cacheContact.position.y = 0.4; cacheContact.static = true; scene.add(cacheContact);
+		three.light.intensity = 0; three.light.ambient = 0;
+		three.lights.add({ shape: 'spot', position: [3, 7, 2], direction: [-3, -7, -2],
+			range: 18, innerAngle: 0.7, outerAngle: 1.0, intensity: 420 });
+		three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 };
+		three.camera.target.set(0, 0, 0); three.camera.orbit(32, 22, 7);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the cache-equivalence scene built: %s", built.error);
+	renderer.capture()!!.free();
+	image::Image cached = renderer.capture()!!;
+	defer cached.free();
+	three::RunResult dynamic = runtime.run(`cacheContact.static=false`);
+	defer dynamic.free();
+	test::@check(dynamic.ok, "the caster became dynamic: %s", dynamic.error);
+	image::Image overlaid = renderer.capture()!!;
+	defer overlaid.free();
+	test::@check(differing_rgb(&cached, &overlaid) == 0,
+		"cached and dynamic local contact shadows are byte-identical");
+}
+
 fn void clustered_matches_the_all_light_oracle_past_eight_and_at_edges() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);

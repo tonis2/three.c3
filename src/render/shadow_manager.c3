@@ -396,7 +396,8 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 			view.atlas = { (float)tile.size / manager.atlas.width, (float)tile.size / manager.atlas.height,
 				(float)tile.x / manager.atlas.width, (float)tile.y / manager.atlas.height };
 			view.params = i == 0 ? self.shadows.params() : (float[4]){
-				1.0f / tile.size, self.point_shadows.bias, 0, self.point_shadows.intensity };
+				1.0f / tile.size, self.point_shadows.bias, -LOCAL_SHADOW_NORMAL_OFFSET_TEXELS,
+				self.point_shadows.intensity };
 			manager.light_indices[at] = i; manager.gpu_indices[at] = count;
 			packed[count++] = { view.view_projection, view.atlas, view.params };
 		}

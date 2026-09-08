@@ -1906,12 +1906,17 @@ A lazy static-cache atlas uses the same allocation and rendering path.
 `three.lights.shadow` controls the requested tile quality for the other lights:
 
 ```js
-three.lights.shadow = { enabled: true, size: 512, bias: 0.00001, intensity: 1 };
+three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 };
 three.shadows.budget = { maxViews: 64, maxUpdates: 32 };
 ```
 
 An explicit local size is required before enabling local shadows. The point-light setting is
 now a compatibility spelling for the shared manager, not a cube-array allocation.
+
+Local shadows automatically correct receiver depth using the geometric surface normal,
+projection depth and texel size. Each filtered sample accounts for the receiver's slope.
+Start with `bias: 0`: explicit bias still subtracts from normalized projected depth, so a
+large positive value can erase contact shadows, especially far from a perspective light.
 
 The scene-local budget accepts partial, atomic updates:
 
@@ -1933,10 +1938,13 @@ cached entries across packed-list reordering. Static geometry/material changes i
 cache; moving one light invalidates its own projections. Dynamic casters are rendered over
 copied static tiles. Deforming static casters conservatively bypass caching.
 
-Area shadows use a representative 150-degree perspective view from the emitter center and
-ordinary filtered depth comparisons. This does not reproduce extended-source penumbrae;
-receivers outside that view are unshadowed. It shares all storage, caching, rendering and
-filtering machinery with the other light types.
+Area shadows use a representative 150-degree perspective view from the emitter center. Their
+fixed twelve-tap filter grows with the emitter's apparent size, up to six shadow texels, while
+fully occluded filter footprints remain dark. This is bounded emitter-aware edge filtering,
+not a physical contact-hardening penumbra: it has no blocker-distance search, and receivers
+outside the representative view are unshadowed. Shadow `intensity` controls strength, not
+softness; reducing it leaves direct light behind every occluder. Area views share the other
+lights' storage, caching and rendering machinery.
 
 ## asset.instantiate(name, { lights: true })
 
