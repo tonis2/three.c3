@@ -2574,6 +2574,7 @@ fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 				.width = lamp.width * sx,
 				.height = lamp.height * sy,
 				.spread = lamp.spread,
+				.range = lamp.range,
 				.gltf_node = (int)source.index,
 			};
 			if (source.name.len > 0) light.name = source.name.copy(mem);

@@ -90,6 +90,39 @@ const three::ShaderEntry[2] BOTH_STAGES = {
 
 macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
 
+fn String function_body(String source, String header)
+{
+	sz? found = source.index_of(header);
+	if (catch found) return "";
+	usz open = (usz)found;
+	while (open < source.len && source[open] != '{') open++;
+	if (open == source.len) return "";
+
+	int depth = 0;
+	for (usz i = open; i < source.len; i++)
+	{
+		if (source[i] == '{') depth++;
+		if (source[i] != '}') continue;
+		depth--;
+		if (depth == 0) return source[open : i + 1 - open];
+	}
+	return "";
+}
+
+fn usz occurrence_count(String source, String needle)
+{
+	usz count = 0;
+	usz start = 0;
+	while (start < source.len)
+	{
+		sz? found = source[start..].index_of(needle);
+		if (catch found) break;
+		count++;
+		start += (usz)found + needle.len;
+	}
+	return count;
+}
+
 // ============================================================================
 // Compiling
 // ============================================================================
@@ -113,6 +146,60 @@ fn void the_mesh_shader_compiles_from_a_string() @test
 	test::@check(mod.spirv.len > 0, "and produced a module");
 	test::@check(mod.spirv.len % 4 == 0, "which is a whole number of words");
 	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
+}
+
+<*
+ Built-in shading owns one light walk, while the custom single-lobe entry points
+ remain available. The source shape matters here: rendering can prove that the
+ answer is right, but cannot prove that two identical shadow or emitter walks did
+ not produce it.
+*>
+fn void standard_lighting_reuses_visibility_and_area_samples() @test
+{
+	String lighting_path = three::find_shader("lighting.slang", mem)!!;
+	defer lighting_path.free(mem);
+	String lighting = three::load_source(lighting_path)!!;
+	defer lighting.free(mem);
+
+	String standard = function_body(lighting, "SharedLightTerms shared_standard_lights");
+	String area = function_body(lighting, "SharedAreaTerms shared_area_terms");
+	test::@check(standard.len > 0 && area.len > 0, "the two combined light routines are present");
+	test::@check(
+		occurrence_count(standard, "shared_point_shadow_factor(i,light,position)") == 3,
+		"each directional, area and punctual branch has one visibility lookup"
+	);
+	test::@check(
+		standard.contains("terms.diffuse+=light.color.rgb*area.diffuse*visibility")
+			&& standard.contains("terms.specular+=area.specular*visibility"),
+		"one area visibility feeds both lobes"
+	);
+	test::@check(
+		occurrence_count(area, "for(uint y=0u;y<4u;++y)for(uint x=0u;x<4u;++x)") == 1
+			&& area.contains("terms.diffuse=") && area.contains("terms.specular="),
+		"one quadrature walk returns both area terms"
+	);
+	test::@check(
+		lighting.contains("float shared_area_diffuse(") && lighting.contains("float3 shared_area_specular("),
+		"custom single-lobe helpers remain available"
+	);
+	test::@check(
+		!standard.contains("MAX_LIGHTS") && !lighting.contains("Sampler2D"),
+		"the shared path adds neither a per-light array nor a sampled binding"
+	);
+
+	String[2] names = { "mesh.slang", "material.slang" };
+	foreach (name : names)
+	{
+		@pool()
+		{
+			String path = three::find_shader(name, tmem)!!;
+			String template = three::load_source(path, tmem)!!;
+			test::@check(
+				occurrence_count(template, "shared_standard_lights(") == 1,
+				"%s sends its built-in standard shading through one shared walk", name
+			);
+		};
+	}
 }
 
 <*

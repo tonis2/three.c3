@@ -3439,7 +3439,8 @@ fn void Exporter.write_light(&self)
 				: (width == height ? gltf::AreaLightShape.SQUARE : gltf::AreaLightShape.RECTANGLE);
 			String name = string::tformat("area %d", i);
 			uint written = self.out.add_area_light(name, shape, width, height,
-				color: { light.color[0], light.color[1], light.color[2] }, power_watts: light.color[3]);
+				color: { light.color[0], light.color[1], light.color[2] }, power_watts: light.color[3],
+				range: light.direction[3]);
 			uint node = self.out.add_node(name,
 				translation: { light.direction[0], light.direction[1], light.direction[2] },
 				rotation: quat_from_basis(right.normalize(), up.normalize(), outward));

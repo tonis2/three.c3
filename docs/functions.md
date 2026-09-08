@@ -1952,15 +1952,17 @@ range is derived using an illumination threshold of 0.01. This convention is spe
 authoring pipeline and is not a general candela/lux conversion.
 
 Area `powerWatts` is passed unchanged to extended-emitter shading. World-space right/up axes
-and dimensions are derived from the node transform, including scale. Area source files preserve
-square, rectangle, disk and ellipse shapes, dimensions, color, watts and spread on roundtrip.
-Rendering currently assumes one-sided cosine emission; the stored spread parameter is not
-a complete implementation of Blender's area-light spread control.
+and dimensions are derived from the node transform, including scale. When Blender's **Custom
+Distance** is enabled, its cutoff is imported as the area's Forward+ `range`; without an authored
+range, the existing `sqrt(powerWatts / 0.01)` fallback is retained. Area source files preserve
+square, rectangle, disk and ellipse shapes, dimensions, color, watts, spread and optional range
+on roundtrip. Rendering currently assumes one-sided cosine emission; the stored spread parameter
+is not a complete implementation of Blender's area-light spread control.
 
 The importer does not enable shadows or set ambient/world lighting. Configure those explicitly.
 Environment lighting and tone-mapping exposure still need to match Blender separately.
 
-`scene.export` roundtrips area-light power and dimensions through `CUSTOM_lights_area`.
+`scene.export` roundtrips area-light power, dimensions and range through `CUSTOM_lights_area`.
 The pre-existing punctual export convention still writes engine intensity directly, so those
 values are not an automatic Blender-watt roundtrip.
 
@@ -1977,7 +1979,7 @@ Punctual types are `directional`, `point`, and `spot`. Their descriptions contai
 A spot additionally has `cone: [inner, outer]` in radians.
 
 Area types are `square`, `rectangle`, `disk`, and `ellipse`. They additionally expose
-`powerWatts`, `width`, `height`, and `spread`.
+`powerWatts`, `width`, `height`, `spread`, and `range`; zero means the optional range was absent.
 `node` contains the glTF node index, position and emission direction, plus area right/up axes.
 The light's displayed name comes from its node.
 

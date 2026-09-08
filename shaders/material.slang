@@ -879,19 +879,7 @@ float3 area_specular_term(Light light,float3 position,float3 normal,float3 view,
 
 float point_shadow_factor(uint index, Light light, float3 position)
 {
-    uint view = light.meta.y;
-    if (view == 0xffffffffu) return 1.0;
-    if (light.meta.z == 1u)
-    {
-        float3 ray = position - light.direction.xyz;
-        float3 a = abs(ray);
-        uint face;
-        if (a.x >= a.y && a.x >= a.z) face = ray.x >= 0.0 ? 0u : 1u;
-        else if (a.y >= a.z) face = ray.y >= 0.0 ? 2u : 3u;
-        else face = ray.z >= 0.0 ? 4u : 5u;
-        view += face;
-    }
-    return shadow_view_factor(view, position, float3(0.0));
+    return shared_point_shadow_factor(index, light, position);
 }
 
 
@@ -1146,8 +1134,16 @@ float3 standard(Surface s, float3 albedo, float3 normal, float ao)
     // the light rather than about the colour, so it stays out of the bake too.
     return albedo;
 #else
-    return albedo * lambert(normal, ao) * (1.0 - s.metalness)
-         + specular_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance)
+    SharedLightTerms direct = shared_standard_lights(
+        push.frame, g_screen_position, normal, s.position, albedo,
+        s.roughness, s.metalness, s.reflectance, g_shadow
+    );
+    float ambient_visibility = ao * g_crevice;
+    float3 diffuse = push.frame[0].lighting.x * ambient_visibility
+        + (1.0 - push.frame[0].lighting.x) * direct.diffuse
+        + push.frame[0].world.rgb * ambient_visibility;
+    return albedo * diffuse * (1.0 - s.metalness)
+         + direct.specular
          + environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * ao * g_crevice
          // Last, and reached by nothing above it — not the occlusion, not the
          // shadow, not the metalness. A surface that gives off light gives it off

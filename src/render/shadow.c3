@@ -179,6 +179,9 @@ struct ShadowView
 	bool static_valid;
 	// The live atlas may be reused when a combined update is deferred.
 	bool live_valid;
+	// Whether that complete live tile includes a dynamic overlay. When the last
+	// caster leaves this view, one cache copy is needed to erase its old depth.
+	bool live_dynamic;
 	bool live;
 	bool wanted;
 }
