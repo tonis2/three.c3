@@ -159,21 +159,8 @@ count is not the trigger and never was.
       bone, so foot planting, a look-at and a weapon aim are a binding away.
 - [ ] GPU Particles
 
-## 19. Shadows at game scale
+## 19. Unified lighting and shadows at game scale
 
-- [ ] **A shadow atlas and a casting budget.** One depth image, tiles allocated
-      per light by screen-space importance; "four casters this frame" rather than
-      a per-light bool; cascades for the sun become atlas tiles like everything
-      else. **Do it when the second casting light arrives**, and before point
-      lights — a cubemap is six fits and six passes, and the atlas makes that a
-      tiling question rather than an allocation question.
-- [ ] **Forward+ (clustered forward).** A compute pass bins lights into
-      screen-space clusters, the frame block carries the grid, `lambert` loops the
-      cluster's list, and **not one material body has to change**. **Trigger:** the
-      fifth light. The shading side is not what is hurting.
-- [ ] **Revisit `SHADOW_PLAN_STATIC` on a device where the full-image copy is not
-      free.** Two lines in `MeshPass.plan_shadow`; the measurement came out
-      backwards on this device, so the numbers to beat want taking again.
 - [ ] **Take the turntable measurement again.** `Camera.view_sphere` and
       `shadow.follow` were built against the numbers in the report — Evil Forest
       at 1080p, 2048 map, `shadow.distance = 24`, 20 rebuilds in 300 frames of a
@@ -184,7 +171,7 @@ count is not the trigger and never was.
       camera, whose target sits at the eye and whose fit is therefore the widest
       this shape produces.
 
-**Not doing:** the depth prepass (measured — pay 0.59 ms to save at most 0.23),
+**Not doing:** a depth prepass solely to reduce overdraw (measured — pay 0.59 ms to save at most 0.23),
 and deferred shading (it breaks the material contract). The measurement is what
 answers the idea; the argument is not.
 
@@ -389,20 +376,6 @@ have, and it buys curved receivers that the mesh decal already gets by clipping.
 The mesh decal is what covers cracks, leaks, posters and edge grime, and it is
 the one that composes with instancing and with the exporter.
 
-## 28. Wearing a sheet on somebody else's mesh
-
-None of this is blocking:
-
-- [ ] **A point light casts nothing**, and cannot: the shadow map is fitted around
-      light zero, which is a direction. A lamp that shadows wants a cube map or a
-      second fit, and `plan.md` §19's atlas is what turns that into a tiling
-      question rather than an allocation one.
-
-- [ ] **Four lights is still four.** A point light spends one of the same four
-      slots a directional one does, so a room with three lamps has one left for
-      the sun. §19 already names the fifth light as clustered forward's trigger;
-      point lights are what make reaching it plausible.
-
 ## 29. The Evil Forest glb
 
 `~/Documents/FF9/evil_forest.glb` is the first level authored end to end in
@@ -420,16 +393,6 @@ are the probes. Run any of them with
 ```
 
 The order is the order the picture gets fixed in.
-
-- [ ] **The nearest-to-camera rule leaves the crack unlit.** `{ lights: true }`
-      fills the three point slots by distance from the file's camera, and in
-      this file `hull_glow` — the cold light inside the breach — is the
-      farthest of the six, so the breach draws 10% darker than the hand-lit
-      frame. Ranking by `intensity / d²` from the eye or the target does not
-      change the pick either. The warning names it and `asset.lights` puts it
-      back in a line; if that stays the answer, say so in the docs beside the
-      rule, and if not, an `except`/`prefer` list on the option is the smallest
-      knob.
 
 - [ ] **What a round trip now loses, visibly.** `scene.export` writes a stack's
       base normal as the core `normalTexture` and stops: the base occlusion,
@@ -450,121 +413,36 @@ question for the scatter and not for the renderer.
 
 ## 30. The Evil Forest in play
 
-`./build/three --assets ~/Documents/FF9` boots the file as §29 left it. The load
-and the freeze on touch are gone — 2.4 s to the first frame with mip chains, 4 s
-without, 60 fps in the window — and what is left is the frame's tail, a texture
-export that could be half the size, and a picture that is not the one Blender
-draws. Every number below was measured on 2026-09-06 with the scripts in
-`~/Documents/FF9/build/`: `probe_frames.js` is the frame harness, `probe_freeze.js`
-and `probe_sweep.js` the collision one, and the picture is `blender_ref.png`
-beside `game_shot.png` with `compare_shots.py` reading both. The groups are independent;
-inside a group the order is the order to do them in.
+Remaining work after the 2026-09-07 revalidation of the polished
+`~/Documents/FF9/evil_forest.glb` against
+`evil_forest.blend`:
 
-- [ ] **`three.frame.ms` says what the host spent.** The split is `{ handlers,
-      fixed, frame, jobs }` and `solver`, all script or solver; the frame's own host
-      work — `MeshPass.prepare`, the draw list, the shadow fit, the upload — has no
-      number. Measured 2026-09-06 on the Evil Forest at -O0: a 54 ms frame whose
-      `ms.total` read 2.2 and `gpuMs` 1.2, so the 50 ms in `Scene.bounds` was visible
-      only to a stack sampler. Add `host` (wall minus script, solver and the present
-      wait) so `probe_frames.js`'s "wall minus script minus GPU" is a field.
-- [ ] **A fixed step lands on a frame, not between two.** The character moves in
-      the 60 Hz fixed loop and `Player.pose` copies its position into the object once
-      a frame, with no interpolation; the display is 59.98 Hz. Measured windowed at
-      -O3, 670 frames at a steady 16.6 ms: 656 took one step, 9 took none, 5 took
-      two — fourteen frames where the character, and the camera on him, moved by
-      zero or twice the usual, each a visible tick. Either the follow camera and
-      `pose` read a position blended between the last two fixed states by the
-      accumulator's remainder, or the fixed rate follows the display when they are
-      within a percent of each other.
-- [ ] **The exporter picks the block format from the map's use.** `export/
-      texture.py` already knows `usage` — colour, normal, height — when it chooses
-      the codec; a native BC export should choose the family too: BC1 for opaque
-      colour (half a byte a texel), BC4 for a single channel (height, roughness,
-      occlusion, a mask), BC5 for a normal's two channels, BC7 where BC1's
-      artefacts show or alpha is carried, with RDO (`bc7enc_rdo`'s method) for the
-      Zstd that follows once the encoder has it. That halves the 93 MiB on the
-      device and would bring a native export of this scene to roughly 40 MiB. The
-      shader side has to come first, because it is why `transcode_ktx2_blocks`
-      refused BC5 and BC4: a BC5 normal has no z and a BC4 mask only red, so
-      `material.slang` reconstructs z and broadcasts red for those families
-      before any file ships them. Second, after the transcoder, and only if a
-      native export is wanted at all — the transcoder makes the Basis file both
-      small and quick.
-- [ ] **A sweep against geometry still costs a frame at -O0.** The ten-second
-      freeze is gone, but `probe_frames.js` on 2026-09-06 still finds the tail of the
-      frame in `Player.step`: 27 ms at its peak and one frame in twenty over 15 ms at
-      -O0, 2.6 ms at its peak at -O3, with 6.9 sweeps a frame gathering about 100
-      triangles each. The per-triangle SAT in `query_all_triangles`
-      (`lib/collision.c3l`), run on each of up to `SWEEP_MAX_STEPS` (24) advancement
-      steps, is where the time is.
-
-**The picture is not Blender's, by a little.** `build/blender_ref.png` is EEVEE
-through the file's camera at 1920×1080, rendered headless by
-`build/dump_render_settings.py` (`blender -b evil_forest.blend --python …`, 3 s),
-and `build/game_shot.png` is the engine's frame at the same size. `python3
-build/compare_shots.py` prints both, and every item below moves one of its rows.
-Measured 2026-09-07, after the camera, the tonemap, the units, the world light,
-the reflectance and the emissive strength all landed:
-
-| | engine | reference |
-| --- | --- | --- |
-| mean luminance | 30.5 | 30.6 |
-| luminance histogram, five bins % | 75, 25, 0, 0, 0 | 85, 15, 0, 0, 0 |
-| sky | 51, 77, 75 | 41, 64, 62 |
-| wall, moonlit | 17, 22, 19 | 18, 25, 22 |
-| wall, in the tree's shadow | 4, 7, 5 | 9, 14, 12 |
-| ground | 58, 58, 43 | 48, 52, 42 |
-| barrel | 68, 46, 16 | 62, 46, 20 |
-| lantern bulb | 188, 189, 187 | 227, 224, 217 |
-| wheel | 10, 14, 9 | 34, 41, 34 |
-
-The sky is ten units light because three.js's AgX is a polynomial fit that runs
-light in the deep shadows — Blender's own curve would land it, and that is a
-choice, not an item. Only lanterns 1–3 light: `MAX_LIGHTS` is 4, the importer
-keeps the three nearest the camera and `main.js` swaps `hull_glow` in over the
-farthest; the reference lights all seven, but at Blender's units a lantern is dim
-beyond a couple of metres. None of the world colour, the view transform, the
-exposure or EEVEE's shadow and GI settings are in the glb, because glTF has no
-words for them: they are constants in `main.js`, read off the dump, exactly as
-`scene.background` is — no `extras` and no extension for what a script can state
-in three lines.
-
-- [ ] **The importer reads the angle back the same way.** `import_/scene.py` line
-      355 still does `cam.angle_y = persp.yfov`, so a glb → Blender import now
-      narrows the camera: set `sensor_fit = 'VERTICAL'` beside it, or derive the
-      fit-axis angle from `aspectRatio` when the file carries one.
-- [ ] **The chain carries light above 1.** Image A, the post chain's intermediate
-      (`TARGET_COLOR_FORMAT`), is `R8G8B8A8_SRGB`, so the scene pass clamps at 1.0
-      before the tonemap reads it: an emissive at 8 reaches AgX as 1, and the
-      roll-off measured on it (255 → 202) was of a clamped value. A float image A
-      (`R16G16B16A16_SFLOAT`) for the target and the script passes, the sRGB encode
-      kept for the blit, is what lets the bulbs, the barrels and the lantern pools
-      roll off instead of clip. `postBytes` and `targetBytes` double; `docs/stats.md`
-      says so. The bulb row above is what it moves.
-- [ ] **The bounce.** The wall in the tree's shadow reads `[4, 7, 5]` against
-      Blender's `[9, 14, 12]`, and the wheel `[10, 14, 9]` against `[34, 41, 34]`:
-      EEVEE's fast GI carries the moonlit wall's light into the shadow, and the
-      world term alone is a fifth of that. The cheap spelling is grading —
-      `three.light.world` at two to three times the world colour in `main.js`, which
-      the compare script will confirm or refuse; the correct one is an irradiance
-      term from the environment, which `environment_light` half has. Decide with
-      the SSAO item, since the two pull the same pixels in opposite directions.
-- [ ] **Shadows from the lanterns, if the reference says they matter.** A cube
-      map per point slot, or one spot-shaped map per light, is the largest engine
-      item in this section; measure the wall under lanterns 1–3 in both renders
-      before deciding it earns its place.
-- [ ] **The crevices.** Blender's horizon scan is an occlusion on the world term.
-      The cheapest spelling is a script pass in `main.js` — `three.addPass` bodies
-      already read `p.depth`, linearised — that estimates occlusion from depth and
-      multiplies the picture; an engine pass that multiplies only the world term
-      is the correct one and comes second. Check the corner where the wall meets
-      the ground against the reference.
-- [ ] **Eight light slots**, if lanterns 0 and 4 read as missing beside the reference:
-      `MAX_LIGHTS` 4 → 8, and `lights` is the last fixed field in `FrameBlock` for
-      exactly this reason.
-
-Not defects, and worth knowing: the instancing and the cut-outs match; the
-ground's 31,720 triangles cost a sweep 46 µs, which is fine.
+- [ ] **Usage-aware native BC export.** Choose block formats from map usage in
+      the custom Blender exporter's `export/texture.py`: BC1 for suitable opaque
+      colour, BC4 for single-channel data, BC5 for normals, and BC7 where colour
+      quality or alpha requires it. BC5 upload exists, but BC4 support and
+      semantic sampling are incomplete: reconstruct normal z and broadcast
+      single-channel values where required before shipping those formats.
+      Defer this optional optimization as a unit; the current Basis/KTX2 file
+      already loads. See also §24.
+- [ ] **Revisit the unoptimized sweep tail only if it matters in practice.**
+      The old claim that geometry gathering repeats inside every advancement
+      step no longer matches the code: gathering is outside advancement and
+      candidates are pruned. The fresh optimized walking run measured 3.67 ms
+      peak player fixed work, 3.81 ms whole-frame p95 and zero dropped steps
+      (`build/section30/profile_foundation_o3.log`). No optimized frame-cost
+      issue was reproduced; preserve collision behavior unless a fresh profile
+      establishes one.
+- [ ] **Diffuse environment / bounce lighting, if a matched reference needs it.**
+      Not reproduced as a fast-GI contribution in the current Blender file:
+      toggling `use_fast_gi` changes effectively no pixels and
+      `use_raytracing` is false. Environment irradiance remains a feature gap,
+      not a demonstrated cause of this scene's mismatch. Use the matched
+      `build/section19` reference pair before choosing an implementation:
+      `evil_forest_area.glb`, camera `Camera`, aspect 1.6, world
+      `[0.18, 0.24, 0.22]` × 0.3, exposure -0.12, and all three disk area emitters.
+      Distinguish material/normal differences and approximate area visibility
+      from missing bounce light; do not apply a blanket world-light multiplier.
 
 ## Standing constraints
 

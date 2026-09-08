@@ -152,7 +152,8 @@ export class MeshRef {
 	//       normalMap,
 	//       emissive, emissiveMap, emissiveIntensity,
 	//       aoMap,
-	//       metalness, roughness, metalnessRoughnessMap }
+	//       metalness, roughness, metalnessRoughnessMap,
+	//       repeat, offset }
 	//
 	// The base colour and its map are deliberately NOT in here: the mesh already
 	// carries both and a material that names no map draws the mesh's, so
@@ -194,6 +195,18 @@ export class MeshRef {
 	// both mean. A `LayeredMaterial` layer takes its own `metallicRoughness`
 	// beside these, for a stack that wants one per layer.
 	//
+	// `repeat` and `offset` are the file's `KHR_texture_transform`, under the
+	// names of the two properties they go on. **One pair for the whole material**,
+	// not one per map: glTF puts a transform on every `textureInfo` separately and
+	// there is one uv here, so `scene/asset.c3` takes the base colour map's and
+	// warns by name when the maps disagree. `[1, 1]` and `[0, 0]` for a file that
+	// wrote none, which is what either setter reads as the identity. A rotation is
+	// dropped — nothing here turns a uv — and is warned about by name too.
+	//
+	// It is the whole of why one plane is a ground: a level authored in Blender
+	// tiles its terrain with a Mapping node, and without this every surface in the
+	// file draws one stretched copy of its texture.
+	//
 	// `metalness` and `roughness` themselves are applied now.
 	// `instantiate({ materials: true })` puts them on the material it builds, and
 	// they are the file's own numbers — glTF's defaults are 1 and 1, so a file
@@ -212,6 +225,7 @@ export class MeshRef {
 		const [
 			alphaMode, alphaCutoff, doubleSided, emissiveIntensity,
 			er, eg, eb, aoMap, metalness, roughness, normalMap, mrMap, emissiveMap,
+			repeatU, repeatV, offsetU, offsetV,
 		] = row;
 		return {
 			alphaMode: ALPHA_MODE_BY_ORDINAL[alphaMode] ?? 'OPAQUE',
@@ -225,6 +239,8 @@ export class MeshRef {
 			metalness,
 			roughness,
 			metalnessRoughnessMap: layerTexture(mrMap),
+			repeat: [repeatU, repeatV],
+			offset: [offsetU, offsetV],
 		};
 	}
 
@@ -275,6 +291,7 @@ export class MeshRef {
 				r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture,
 				metalness, roughness, metallicRoughness, layerHeight,
 				layerBumpStrength, layerBumpDistance,
+				uvScaleU, uvScaleV, uvOffsetU, uvOffsetV,
 			]) => ({
 				name,
 				enabled,
@@ -324,6 +341,15 @@ export class MeshRef {
 					height: layerTexture(layerHeight),
 					bump: { strength: layerBumpStrength, distance: layerBumpDistance },
 				}),
+				// This layer's `KHR_texture_transform`, **as the step from the base
+				// material's** rather than as the file's own numbers — which is what
+				// `uvScale` and `uvOffset` mean here, because the base's transform is
+				// already on `s.uv` before a layer's uv is computed. So the pair to set
+				// beside this description is `material.repeat` and `material.offset`
+				// from `ref.material`, and `instantiate({ materials: true })` is what
+				// does both.
+				uvScale: [uvScaleU, uvScaleV],
+				uvOffset: [uvOffsetU, uvOffsetV],
 			})),
 		};
 	}
@@ -598,7 +624,7 @@ export class Asset {
 	// light hangs: `{ index, position, direction }`, the node's world translation
 	// and the way the light travels, which is its -Z.
 	//
-	// The reason it stops there is that there are four light slots and a level
+	// The reason it stops there is that there are eight light slots and a level
 	// may author twenty, so which of them get lit is a choice.
 	// `instantiate({ lights: true })` is one policy over this list and a script
 	// is free to write another.
@@ -612,15 +638,21 @@ export class Asset {
 		if (!this._lights) {
 			H.checkAsset(this._a, this._g);
 			this._lights = H.assetLights(this._a, this._g).map((row) => {
-				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node] = row;
+				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node,
+					areaShape, width, height, spread, rx, ry, rz, ux, uy, uz] = row;
 				const light = {
 					name,
-					type: LIGHT_BY_ORDINAL[kind] || 'point',
+					type: kind >= 3 ? ['square', 'rectangle', 'disk', 'ellipse'][areaShape] : (LIGHT_BY_ORDINAL[kind] || 'point'),
 					color: [r, g, b],
 					intensity,
 					range,
 					node: { index: node, position: [px, py, pz], direction: [dx, dy, dz] },
 				};
+				if (kind >= 3) {
+					light.powerWatts = intensity;
+					light.width = width; light.height = height; light.spread = spread;
+					light.node.right = [rx, ry, rz]; light.node.up = [ux, uy, uz];
+				}
 				if (light.type === 'spot') light.cone = [inner, outer];
 				return light;
 			});
@@ -1008,7 +1040,7 @@ export class Asset {
 	// the direction the light travels, so the one negation in the importer is
 	// here.
 	//
-	// **The remaining slots go to the point lights nearest the file's camera**,
+	// **Local lights are ordered nearest the file's camera**,
 	// or nearest the origin when the file has none. Three slots and six lanterns
 	// is the ordinary case for a level, and "nearest the shot" is the only
 	// ordering that puts the ones you can see in them. A spot light competes for
@@ -1052,7 +1084,30 @@ export class Asset {
 		const room = three.lights.max - 1;
 		const lit = near.slice(0, room);
 		for (const point of lit) {
+			if (point.type === 'square' || point.type === 'rectangle' || point.type === 'disk' || point.type === 'ellipse') {
+				let right = point.node.right.slice(), up = point.node.up.slice();
+				const emitted = [
+					-(right[1]*up[2]-right[2]*up[1]),
+					-(right[2]*up[0]-right[0]*up[2]),
+					-(right[0]*up[1]-right[1]*up[0]),
+				];
+				if (emitted[0]*point.node.direction[0]+emitted[1]*point.node.direction[1]+emitted[2]*point.node.direction[2] < 0)
+					right = right.map((v) => -v);
+				const power = point.powerWatts;
+				three.lights.add({ position: point.node.position, shape: point.type,
+					right, up, width: point.width, height: point.height,
+					range: point.range > 0 ? point.range : Math.sqrt(power / LIGHT_THRESHOLD),
+					color: point.color, intensity: power });
+				continue;
+			}
 			const intensity = point.intensity * POINT_FROM_WATTS;
+			if (point.type === 'spot') {
+				three.lights.add({ position: point.node.position, shape: 'spot', direction: point.node.direction,
+					innerAngle: point.cone[0], outerAngle: point.cone[1],
+					range: point.range > 0 ? point.range : Math.sqrt(intensity / LIGHT_THRESHOLD),
+					color: point.color, intensity });
+				continue;
+			}
 			three.lights.add({
 				position: point.node.position,
 				// The file's own reach, or the distance Blender would have stopped
@@ -1393,6 +1448,12 @@ export class Asset {
 	//    the map multiplies the factor exactly as glTF says. A file with a glow
 	//    texture and no `emissiveFactor` therefore glows black, which is the
 	//    specification's own answer and not this importer's.
+	//  - `KHR_texture_transform` becomes `repeat` and `offset`. **A material that
+	//    says nothing else still gets built when it tiles**, unlike the rule below,
+	//    because a transform is the one thing in this list that changes every pixel
+	//    of a mesh drawn with the file's own base colour map — the map is the
+	//    mesh's and the tiling is the material's, so dropping the material drops
+	//    the tiling and a ground draws one stretched copy of its grass.
 	//
 	// **What used to happen instead, and why it stopped.** A normal map or a glow
 	// routed the material through a `LayeredMaterial` — a generated shading body,
@@ -1443,13 +1504,15 @@ export class Asset {
 
 		const glow = d.emissiveMap !== null
 			|| d.emissive[0] > 0 || d.emissive[1] > 0 || d.emissive[2] > 0;
+		const tiled = d.repeat[0] !== 1 || d.repeat[1] !== 1
+			|| d.offset[0] !== 0 || d.offset[1] !== 0;
 		// Against this renderer's defaults rather than against glTF's, because the
 		// question is whether saying it changes anything. `scene/material.c3` has
 		// why they are 1 and 0.
 		const surface = d.roughness !== 1 || d.metalness !== 0;
 		const maps = d.normalMap !== null || d.aoMap !== null
 			|| d.metalnessRoughnessMap !== null;
-		if (!transparent && alphaTest === 0 && !d.doubleSided && !glow && !surface && !maps) {
+		if (!transparent && alphaTest === 0 && !d.doubleSided && !glow && !surface && !maps && !tiled) {
 			return null;
 		}
 
@@ -1463,6 +1526,10 @@ export class Asset {
 			d.metalnessRoughnessMap ? d.metalnessRoughnessMap._index() : -1,
 			d.emissiveMap ? d.emissiveMap._index() : -1,
 			d.emissive.join(','), d.emissiveIntensity,
+			// Two meshes tiled differently are two materials: the transform is a
+			// property of the pipeline's uniforms, not of the images in it, so a
+			// shared entry would draw the second mesh at the first one's density.
+			d.repeat.join(','), d.offset.join(','),
 		].join('|');
 		const hit = cache.get(key);
 		if (hit) return hit;
@@ -1488,6 +1555,13 @@ export class Asset {
 			emissive: d.emissive,
 			emissiveIntensity: d.emissiveIntensity,
 		});
+		// After construction rather than in the options, because they are properties
+		// every material has — the two setters are the one place a zero repeat is
+		// refused by name.
+		if (tiled) {
+			built.repeat = d.repeat;
+			built.offset = d.offset;
+		}
 		cache.set(key, built);
 		return built;
 	}
@@ -1518,6 +1592,11 @@ export class Asset {
 	//  - `emissive` and `emissiveIntensity` go on after construction, because they
 	//    are properties every material has rather than options a stack declares.
 	//    Without them the emissive map above would multiply a factor of zero.
+	//  - `repeat` and `offset` are the core material's `KHR_texture_transform`, and
+	//    they are the base of the stack's tiling in exactly the way `normal` is the
+	//    base of its normal chain: the fragment stage puts them on `s.uv` before the
+	//    generated body runs, and each layer's own `uvScale` arrived measured from
+	//    them. Set after construction, for `emissive`'s reason.
 	//  - `name` is the mesh's, and is only ever read by a warning.
 	//
 	// **A stack that will not build costs its own mesh and nothing else.** Twelve
@@ -1549,8 +1628,10 @@ export class Asset {
 		// The emissive pair is in the key because it is set after construction and
 		// so is not in the signature — two materials differing only in how brightly
 		// they glow are two materials.
+		// The transform is in the key for the same reason the emissive pair is: it is
+		// set after construction and so is not in the signature.
 		const key = `layers|${look.alphaTest}|${d.emissive.join(',')}|${d.emissiveIntensity}`
-			+ `|${stackSignature(options)}`;
+			+ `|${d.repeat.join(',')}|${d.offset.join(',')}|${stackSignature(options)}`;
 		if (cache.has(key)) {
 			// Built already, off another mesh wearing the same glTF material. The
 			// handles this read produced are a second set over the same images and
@@ -1581,6 +1662,8 @@ export class Asset {
 			built.emissive = d.emissive;
 			built.emissiveIntensity = d.emissiveIntensity;
 		}
+		if (built !== null && (d.repeat[0] !== 1 || d.repeat[1] !== 1)) built.repeat = d.repeat;
+		if (built !== null && (d.offset[0] !== 0 || d.offset[1] !== 0)) built.offset = d.offset;
 		cache.set(key, built);
 		return built;
 	}

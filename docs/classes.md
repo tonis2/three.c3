@@ -801,7 +801,10 @@ blend over it.
   `'softLight'`, `'difference'`, `'darken'` or `'lighten'` — Blender's Mix node modes, because that is
   where the glTF extension this implements comes from.
 - `uvScale` is per layer and tiles the detail without tiling the mask, which is the whole trick of a
-  splat map. It composes with `material.repeat` rather than replacing it.
+  splat map. It composes with `material.repeat` rather than replacing it: the uv a layer starts from
+  already carries the material's transform, so the two multiply. `uv * uvScale + uvOffset` is the
+  order, which is glTF's, so an imported layer arrives with the *step* from its material's tiling to
+  its own — a ground at 3 with a gravel layer at 7 imports as `repeat` 3 and `uvScale` 7/3.
 - The mask is read at the mesh's own uv — `material.repeat` and `material.offset` are not on it. A
   splat map describes one specific surface, so a terrain whose base map tiles twelve times gets one
   mask across it and not twelve. `uvScale` on a layer is what tiles that layer's detail.
@@ -1039,8 +1042,8 @@ holding a reference, so read it once and keep what it gave you.
 #### material
 
 `{ alphaMode, alphaCutoff, doubleSided, normalMap, emissive, emissiveMap, emissiveIntensity, aoMap,
-metalness, roughness, metalnessRoughnessMap }`, or null for a primitive that names no material. This
-is what the loader used to drop.
+metalness, roughness, metalnessRoughnessMap, repeat, offset }`, or null for a primitive that names no
+material. This is what the loader used to drop.
 
 Each map arrives with its colourspace already right — normal, occlusion and metallic-roughness are
 data and load linear, emissive is a colour and loads sRGB — which is decided by the importer rather
@@ -1055,6 +1058,12 @@ so a description goes straight onto a material that compiles nothing:
 `new three.MeshLambertMaterial({ normalMap: d.normalMap, metalness: d.metalness })`. `metalness` and
 `roughness` are the file's own numbers, and the map multiplies them — glTF defaults both to 1, so a
 file that says nothing is fully metallic and is dark without a sky to reflect.
+
+`repeat` and `offset` are the file's `KHR_texture_transform`, under the names of the two properties
+they go on. **One pair for the whole material**, not one per map: glTF puts a transform on every
+texture reference separately and there is one uv here, so the base colour map's is taken and a
+material whose maps disagree says so on the console. `[1, 1]` and `[0, 0]` for a file that wrote
+none. A rotation is dropped — nothing here turns a uv — and is named on the console too.
 
 Like `layers`, this uploads the mesh and every read hands back fresh Texture handles holding
 references, so read it once and keep it.
@@ -1203,7 +1212,12 @@ the file's clips, and a channel naming a node outside the subtree drives nothing
 
 `{ materials: true }` builds a material per glTF material and puts it on the meshes that wear it, which
 is how a `.glb` authored with `alphaMode BLEND` renders blended and how a file's normal maps and
-emissive maps reach the frame. Without it the file draws with its base colour and base colour map and
+emissive maps reach the frame. `KHR_texture_transform` comes with them, as `repeat` and `offset` on
+the material and as `uvScale` and `uvOffset` on each layer of a stack — a level authored in Blender
+tiles its terrain with a Mapping node, and without this every surface in the file draws one stretched
+copy of its texture. It is also the one thing in that list which makes a material get built on its
+own: the base colour map belongs to the mesh and the tiling to the material, so dropping the material
+would drop the tiling. Without it the file draws with its base colour and base colour map and
 nothing else. Every material it builds gets `reflectance` 0.5 — the 4% glTF fixes a dielectric's F0 at,
 which is a number the file states even though it has no slot for it — where a material a script builds
 starts at 0. It builds nothing for a material that is opaque, single-sided and has no maps and this
@@ -1250,7 +1264,7 @@ did. `asset.colliders` is the file's own list, and `## asset.instantiate(name, {
 `{ camera: true }` aims `three.camera` from the file's camera — a level laid out in Blender arrives lit
 and framed the way it was composed. Those two are `instantiate()`'s alone: a file's lighting is a
 property of the file and not of one piece of it, so `node(name)` parses them and does nothing with them. There are
-four light slots and a file may author twenty, so the import takes the directional one as the sun and the
+eight light slots and a file may author twenty, so the import takes the directional one as the sun and the
 point lights nearest the camera, and names the rest in one `console.warn`. `asset.lights` and
 `asset.cameras` are the file's own list, for a script that wants to choose differently. `three.lights`
 and the two `## asset.instantiate` entries in `docs/functions.md` have the intensity conversion, which is

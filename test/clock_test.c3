@@ -184,6 +184,26 @@ fn void the_scale_and_the_rate_read_back() @test
 	};
 }
 
+// The render-side blend is the accumulator remainder after completed fixed
+// steps, not a second state update and not the frame delta.
+fn void fixed_alpha_is_the_fraction_between_fixed_states() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		@ok(run, "three.clock.fixedRate = 20; three.setFixedLoop(() => {});");
+		run.tick(0);
+		run.tick(75);
+
+		String alpha = @answer(run, "return Math.round(three.clock.fixedAlpha * 1000);");
+		defer alpha.free(mem);
+		test::@check(alpha == "500", "25 ms of a 50 ms step is 0.5, got '%s'", alpha);
+
+		String refusal = @refusal(run, "three.clock.fixedAlpha = 1;");
+		defer refusal.free(mem);
+		test::@check(refusal.contains("read-only"), "the derived fraction accepted a write: '%s'", refusal);
+	};
+}
+
 <*
  A rewind is refused by name rather than clamped to zero.
 

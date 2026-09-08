@@ -1880,10 +1880,13 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 						name: 'gravel', map: gravel, mask: 'r', blend: 'multiply', opacity: 0.5,
 						roughness: 0.3, metalness: 0.7, metallicRoughness: surface,
 						height: bumps, bump: { strength: 0.25, distance: 0.08 },
+						uvScale: [2.5, 3.5], uvOffset: [0.125, -0.25],
 					},
 					{ name: 'snow', tint: [0.9, 0.95, 1], mask: 'g', invert: true, blend: 'screen' },
 				],
 			});
+			mat.repeat = [3, 4];
+			mat.offset = [0.2, -0.1];
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
 
 			const report = scene.export("build/export_script_layers.glb");
@@ -1913,6 +1916,8 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 					stack.layers[0].height !== null,
 					round(stack.layers[0].bump.strength), round(stack.layers[0].bump.distance),
 				].join(","),
+				gravelUv: [...stack.layers[0].uvScale, ...stack.layers[0].uvOffset]
+					.map(round).join(","),
 				// The layer that said nothing about either still says nothing on the
 				// way back: glTF writes 1 and 1 for it, and a default is not a
 				// statement.
@@ -1945,6 +1950,8 @@ fn void a_stack_a_script_built_survives_the_round_trip() @test
 			"and a layer with no map did not acquire one: %s", result.value);
 		test::@check(result.value.contains(`"shared":true`),
 			"the mask both layers read is one texture: %s", result.value);
+		test::@check(result.value.contains(`"gravelUv":"2.5,3.5,0.125,-0.25"`),
+			"the layer's tiling and offset survived the export: %s", result.value);
 
 		// Still a generated shader, so still counted as one. The two numbers
 		// answer different questions and this is the scene where that shows.
@@ -2291,6 +2298,43 @@ fn void a_point_light_is_a_place_in_the_file() @test
 			"the position is on the node, where a place belongs: %s", json);
 		test::@check(!json.contains(`"name":"light 1","rotation"`),
 			"and a point light is not aimed at anything: %s", json);
+	};
+}
+
+fn void an_area_light_round_trips_watts_shape_and_basis() @test
+{
+	String path = "build/export_area_light.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult written = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.add({ position: [2, 3, 4], shape: 'ellipse', width: 6, height: 2,
+				right: [0, 0, 1], up: [0, 1, 0], color: 0x80c0ff, intensity: 500 });
+			scene.export("build/export_area_light.glb");
+		`);
+		defer written.free();
+		test::@check(written.ok, "the area export succeeded: %s", written.error);
+
+		String json = json_chunk(path);
+		test::@check(json.contains(`"CUSTOM_lights_area"`), "the private extension is declared: %s", json);
+		test::@check(json.contains(`"shape":"ellipse"`) && json.contains(`"powerWatts":500`),
+			"shape and unconverted watts cross: %s", json);
+		test::@check(json.contains(`"width":6`) && json.contains(`"height":2`),
+			"both full dimensions cross: %s", json);
+
+		three::RunResult read = run.run(`
+			const back = three.load("build/export_area_light.glb").lights.find(l => l.powerWatts !== undefined);
+			const q = x => Math.round(x * 1000) / 1000;
+			return [back.type, ...[back.powerWatts, back.width, back.height,
+				...back.node.position, ...back.node.right, ...back.node.up].map(q)].join(',');
+		`);
+		defer read.free();
+		test::@check(read.ok, "the exported area reads back: %s", read.error);
+		test::@check(read.value == `"ellipse,500,6,2,2,3,4,0,0,1,0,1,0"`,
+			"placement and oriented footprint survive: %s", read.value);
 	};
 }
 

@@ -2793,17 +2793,34 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 	foreach (&layer : source.script_layers.layers)
 	{
 		float[4] params = source.layer_params(layer);
+		float[4] base_uv = source.uv_transform_or_identity();
+		gltf::WriteTextureRef layer_map = self.script_layer_texture(source, layer.map_binding);
+		layer_map.scale = {
+			base_uv[0] * layer.uv_scale[0], base_uv[1] * layer.uv_scale[1]
+		};
+		layer_map.offset = {
+			base_uv[2] * layer.uv_scale[0] + layer.uv_offset[0],
+			base_uv[3] * layer.uv_scale[1] + layer.uv_offset[1],
+		};
 
 		gltf::WriteMaterialLayer written = gltf::material_layer(layer.name);
 		written.baseColorFactor = { params[0], params[1], params[2], 1.0 };
 		written.opacity = params[3];
-		written.baseColorTexture = self.script_layer_texture(source, layer.map_binding);
+		written.baseColorTexture = layer_map;
 		written.normalTexture = self.script_layer_texture(source, layer.normal_binding);
 		written.emissiveTexture = self.script_layer_texture(source, layer.emissive_binding);
 		written.metallicRoughnessTexture = self.script_layer_texture(source, layer.mr_binding);
+		written.normalTexture.scale = layer_map.scale;
+		written.normalTexture.offset = layer_map.offset;
+		written.emissiveTexture.scale = layer_map.scale;
+		written.emissiveTexture.offset = layer_map.offset;
+		written.metallicRoughnessTexture.scale = layer_map.scale;
+		written.metallicRoughnessTexture.offset = layer_map.offset;
 		written.metallicFactor = layer.metallic;
 		written.roughnessFactor = layer.roughness;
 		written.heightTexture = self.script_layer_texture(source, layer.height_binding);
+		written.heightTexture.scale = layer_map.scale;
+		written.heightTexture.offset = layer_map.offset;
 		written.bump = { .strength = layer.bump_strength, .distance = layer.bump_distance };
 		written.emissiveFactor = { layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2] };
 		written.blend_mode = (gltf::LayerBlendMode)layer.blend_mode;
@@ -3410,6 +3427,27 @@ fn void Exporter.write_light(&self)
 	for (uint i = 0; i < self.pass.lighting.count; i++)
 	{
 		Light light   = self.pass.lighting.lights[i];
+		if (light.meta[2] >= 2)
+		{
+			Vec3 right = { light.area_right[0], light.area_right[1], light.area_right[2] };
+			Vec3 up = { light.area_up[0], light.area_up[1], light.area_up[2] };
+			Vec3 outward = right.cross(up).normalize();
+			float width = light.area_right[3] * 2.0f;
+			float height = light.area_up[3] * 2.0f;
+			gltf::AreaLightShape shape = light.meta[2] == 3
+				? (width == height ? gltf::AreaLightShape.DISK : gltf::AreaLightShape.ELLIPSE)
+				: (width == height ? gltf::AreaLightShape.SQUARE : gltf::AreaLightShape.RECTANGLE);
+			String name = string::tformat("area %d", i);
+			uint written = self.out.add_area_light(name, shape, width, height,
+				color: { light.color[0], light.color[1], light.color[2] }, power_watts: light.color[3]);
+			uint node = self.out.add_node(name,
+				translation: { light.direction[0], light.direction[1], light.direction[2] },
+				rotation: quat_from_basis(right.normalize(), up.normalize(), outward));
+			self.out.set_node_area_light(node, written);
+			self.out.add_root(node);
+			self.report.nodes++;
+			continue;
+		}
 		Vec3 where    = { light.direction[0], light.direction[1], light.direction[2] };
 		float range   = light.direction[3];
 		bool punctual = range > 0.0f;

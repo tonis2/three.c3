@@ -202,9 +202,8 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
  combined image sampler counts against both — and Vulkan's mandatory minimum for
  each is 16. A generated material's fragment stage declares
  `MATERIAL_BINDING_FIRST` reserved bindings (`base_color_map`, `shadow_map`,
- `environment_map`) plus this many, so three plus twelve is fifteen and fits on
- the least capable conformant device with one binding to spare — which is what a
- fourth reserved binding would cost, the way `environment_map` was the third.
+ `environment_map`, `point_shadow_map`) plus this many, so four plus twelve is
+ sixteen and fits exactly on the least capable conformant device.
  Nothing has to be queried and there is no fallback path, because the number
  cannot be refused. `Gpu.report` prints all three limits under `--debug` for a
  device whose answers are worth checking.
@@ -303,7 +302,9 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// folds into the direct light, and the body would compile and come out lit.
 	"shadow_map",
 	"shadow_factor",
-	"g_shadow", // The sky the same way: the reserved sampler at binding 2, the term that
+	"g_shadow",
+	"point_shadow_map",
+	"point_shadow_factor", // The sky the same way: the reserved sampler at binding 2, the term that
 	// reads it and the mapping that term projects a direction through. A body
 	// naming any of the three would compile against its own and the reflection
 	// would resolve the binding to a texture the pass never wrote.
