@@ -302,9 +302,9 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	// After the extent, because that is what they are created at.
 	self.ensure_keeps(gpu)!;
 
-	// `target.color_format`, not `POST_CHAIN_FORMAT`: this is what the scene's own
-	// pipelines render into, and they declare their colour format at build time.
-	if (!self.scene.exists()) self.scene.init(gpu, target.color_format, self.extent)!;
+	// The scene stays linear and unclamped until the final display encode. Mesh
+	// pipelines declare this same format in `MeshPipeline.init`.
+	if (!self.scene.exists()) self.scene.init(gpu, POST_CHAIN_FORMAT, self.extent)!;
 
 	// P0 from the first script pass on, because the tonemap reads a pong image
 	// rather than A once there is one; P1 only from the second. A chain that is
@@ -635,8 +635,6 @@ fn void? PostPass.record_chain(
 	// The chain runs for the tonemap alone — that is what `three.toneMapping`
 	// switches on — so there is no early return for an empty stage list, only the
 	// loop below running zero times and the tonemap reading A.
-	if (count == 0 && self.tonemap_mode == ToneMap.NONE) return;
-
 	// Kept so a stage compiled *between* frames has something to stamp itself
 	// against. At worst one frame stale, which is the difference between `p.time`
 	// starting at zero and starting at a sixtieth; threading the clock into every

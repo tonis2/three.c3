@@ -314,6 +314,14 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		{
 			samplers.add(SHADOW_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
 		}
+		if (pipeline_declares_binding(pipeline, POINT_SHADOW_BINDING))
+		{
+			samplers.add(POINT_SHADOW_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
 		samplers.collect(pipeline, &material.textures, &self.pass.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);
 
@@ -392,7 +400,7 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 		.shadow = { 0, 0, 0, 0 },
 		.debug = { 0, 0, 0, 0 },
 		.camera = { eye.x, eye.y, eye.z, 0 },
-		.lights = self.pass.lighting.lights,
+		.lights = 0,
 	};
 	self.frame.upload(&frame, FrameBlock::size);
 

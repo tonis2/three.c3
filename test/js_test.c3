@@ -405,6 +405,49 @@ fn void two_scenes_are_independent() @test
 	};
 }
 
+fn void shadow_budgets_are_partial_atomic_and_scene_local() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			three.shadows.budget = { maxViews: 12, maxUpdates: 3 };
+			const saved = three.shadows.budget;
+			const second = new three.Scene();
+			const fresh = three.shadows.budget;
+			first.activate();
+			return { saved, fresh, restored: three.shadows.budget };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the shadow budget script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"saved":{"maxViews":12,"maxTexels":67108864,"maxBytes":268435456,"maxUpdates":3,"maxUpdateTexels":33554432}`),
+			"a partial write preserves defaults: %s", result.value);
+		test::@check(result.value.contains(`"fresh":{"maxViews":64`), "a new scene gets the default budget: %s", result.value);
+		test::@check(result.value.contains(`"restored":{"maxViews":12`), "reactivation restores the scene budget: %s", result.value);
+	};
+}
+
+fn void invalid_shadow_budget_writes_change_nothing() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const before = JSON.stringify(three.shadows.budget);
+			const bad = [
+				{maxViews:0},{maxViews:65},{maxTexels:65535},{maxTexels:67108865},
+				{maxBytes:1048575},{maxBytes:1073741825},{maxUpdates:-1},{maxUpdates:65},
+				{maxUpdateTexels:-1},{maxUpdateTexels:67108865},{maxViews:1.5},{maxBytes:Infinity},
+			];
+			let refused=0;
+			for(const value of bad){try{three.shadows.budget=value;}catch(e){refused++;}}
+			return [refused,before===JSON.stringify(three.shadows.budget)];
+		`);
+		defer result.free();
+		test::@check(result.ok, "invalid budget checks ran: %s", result.error);
+		test::@check(result.value == `[12,true]`, "all invalid writes were atomic, got %s", result.value);
+	};
+}
+
 <*
  A handle from a scene that is not being rendered reaches its own scene.
 
@@ -2191,6 +2234,39 @@ fn uint count_near(image::Image* shot, int r, int g, int b, int tolerance = 40)
 }
 
 <*
+ How many times the colour changes from one pixel to the one on its left.
+
+ `three_tests::texture`'s `row_transitions` over the whole frame rather than one
+ row, and copied rather than imported for the reason `count_near` above is: it is
+ three subtractions, and a suite reaching into another suite for them costs more
+ than it saves. Every row, because a tiling this reads is a lattice and a single
+ row can land along one of its flat bands.
+
+ What it counts is how many tile boundaries are on screen, which is what a repeat
+ multiplies, and it does not care how much of the frame the surface covers or how
+ the sampler filtered its edges.
+*>
+fn uint horizontal_edges(image::Image* shot)
+{
+	sz bpp = shot.bytes_per_pixel();
+	uint changes = 0;
+	for (sz y = 0; y < (sz)shot.height; y++)
+	{
+		sz row = y * (sz)shot.width * bpp;
+		for (sz x = 1; x < (sz)shot.width; x++)
+		{
+			sz a = row + (x - 1) * bpp;
+			sz b = row + x * bpp;
+			int delta = math::abs((int)shot.pixels[a] - (int)shot.pixels[b])
+				+ math::abs((int)shot.pixels[a + 1] - (int)shot.pixels[b + 1])
+				+ math::abs((int)shot.pixels[a + 2] - (int)shot.pixels[b + 2]);
+			if (delta > 60) changes++;
+		}
+	}
+	return changes;
+}
+
+<*
  A fragment body an agent wrote reaches the screen and changes it.
 
  The claim is not that a material compiles — `three_tests::material` proves that
@@ -3939,7 +4015,7 @@ fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
 		defer result.free();
 		test::@check(result.ok, "the script ran: %s", result.error);
 
-		test::@check(result.value.contains(`"count":4`),
+		test::@check(result.value.contains(`"count":6`),
 			"every slot there is: %s", result.value);
 		test::@check(result.value.contains(`"sun":[0,1,0]`),
 			"the sun is the file's directional light, negated into surface-to-light: %s", result.value);
@@ -4069,6 +4145,134 @@ fn void an_imported_material_is_a_dielectric_and_a_scripted_one_is_not() @test
 		test::@check(result.value.contains(`"scripted":0`),
 			"and a scripted material still reflects nothing: %s", result.value);
 	};
+}
+
+
+<*
+ A file's `KHR_texture_transform` reaches the material it belongs to.
+
+ **Every textured surface in a level tiled once before this.** `gltf.c3l` parsed
+ the extension and nothing on this side read it, so a ground authored in Blender
+ at three repeats with a gravel layer at seven drew one stretched copy of each.
+ It reads as the images being wrong rather than as a transform being dropped,
+ which is why it went unnoticed for as long as it did.
+
+ `tiled.glb` is a quad whose material tiles at 3 with a `grit` layer at 6, beside
+ a quad whose material says nothing at all. Four things are checked and each
+ fails on its own:
+
+ - the base transform reaches `ref.material` as `repeat` and `offset`, under the
+   names of the two properties it goes on;
+ - the layer's reaches its description as `uvScale` and `uvOffset` **measured
+   from the base** — 6 over 3 is 2 — because the base's transform is already on
+   `s.uv` by the time the generated body computes a layer's uv, so the file's own
+   7 there would tile at 21;
+ - both land on the material `{ materials: true }` builds, which is a
+   `LayeredMaterial` here and a `MeshLambertMaterial` on the plain quad;
+ - and a material with no transform still has the identity, which is what keeps
+   this from being a tiling applied to every file.
+*>
+fn void a_files_texture_transform_reaches_the_material_it_belongs_to() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const asset = three.load("test/fixtures/tiled.glb");
+			const ground = asset.mesh("tiled_ground");
+			const stack = ground.layers;
+			const root = asset.instantiate("tiled", { materials: true });
+			const built = {};
+			root.traverse(o => {
+				if (o.material) built[o.name] = [o.material.repeat, o.material.offset, o.material.toJSON().type];
+			});
+			return {
+				repeat: ground.material.repeat,
+				offset: ground.material.offset,
+				uvScale: stack.layers[0].uvScale,
+				uvOffset: stack.layers[0].uvOffset,
+				built,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"repeat":[3,3]`) && result.value.contains(`"offset":[0.25,0.5]`),
+			"the material's own transform crosses as repeat and offset: %s", result.value);
+		// 6 over 3, and the offset that lands the two on the same texel:
+		// -1 - 0.5 * 2 for v, 0 - 0.25 * 2 for u.
+		test::@check(result.value.contains(`"uvScale":[2,2]`) && result.value.contains(`"uvOffset":[-0.5,-2]`),
+			"and the layer's crosses as the step from it: %s", result.value);
+		test::@check(
+			result.value.contains(`"tiled_ground":[[3,3],[0.25,0.5],"LayeredMaterial"]`),
+			"the built material carries the file's tiling: %s", result.value
+		);
+		test::@check(
+			result.value.contains(`"plain_ground":[[1,1],[0,0],"MeshLambertMaterial"]`),
+			"and a material that stated none still tiles once: %s", result.value
+		);
+	};
+}
+
+<*
+ The imported transform is on the draw and not only in the description.
+
+ **Asserted on the frame**, because everything above passes on a value that
+ crossed two boundaries and was never pushed. The fixture's base colour is a
+ checker of two-texel cells, so the number of colour changes in the frame is a
+ direct reading of how many tiles the quad was drawn with: at the file's repeat
+ of 3 there are several times as many as at 1.
+
+ The same material is rendered twice and the second frame is the control, which
+ makes this robust to how much of the frame the quad covers and to what the
+ sampler did at the edges.
+*>
+fn void an_imported_transform_tiles_the_surface_it_arrived_on() @test
+{
+	uint tiled;
+	uint once;
+
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const asset = three.load("test/fixtures/tiled.glb");
+			const scene = new three.Scene();
+			const root = asset.instantiate("tiled", { materials: true });
+			root.traverse(o => { if (o.name === "plain_ground") o.visible = false; });
+			scene.add(root);
+			three.light.ambient = 1;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3);
+			three.render(scene);
+			globalThis.__scene = scene;
+			globalThis.__ground = null;
+			root.traverse(o => { if (o.name === "tiled_ground") globalThis.__ground = o; });
+			return { drawn: three.stats().drawCalls };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		image::Image first = run.renderer.capture()!!;
+		defer first.free();
+		tiled = horizontal_edges(&first);
+
+		three::RunResult flat = run.run(`
+			globalThis.__ground.material.repeat = [1, 1];
+			globalThis.__ground.material.offset = [0, 0];
+			three.render(globalThis.__scene);
+			return { ok: true };
+		`);
+		defer flat.free();
+		test::@check(flat.ok, "the control ran: %s", flat.error);
+
+		image::Image second = run.renderer.capture()!!;
+		defer second.free();
+		once = horizontal_edges(&second);
+	};
+
+	test::@check(once > 0, "the checker has edges to begin with, got %d transitions", once);
+	test::@check(tiled > once * 2,
+		"the file's repeat of 3 multiplies them: %d imported against %d at repeat 1", tiled, once
+	);
 }
 
 <*

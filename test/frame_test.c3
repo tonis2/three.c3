@@ -815,3 +815,54 @@ fn void the_frame_counters_are_readable_from_javascript() @test
 		test::@check(fixed == "true", "and nothing worth a millisecond on the fixed loop, which never ran: '%s'", fixed);
 	};
 }
+
+<*
+ Host accounting is completed outside tick because only the caller owns the
+ render boundary and only the renderer can identify its blocking waits.
+*>
+fn void host_time_is_outer_cpu_work_without_script_solver_or_waits() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.frame_spend = {
+			.handlers_ns = 1_000_000,
+			.fixed_ns = 2_000_000,
+			.frame_ns = 3_000_000,
+			.jobs_ns = 4_000_000,
+			.solver_ns = 5_000_000,
+		};
+		run.complete_host_frame(22_000_000, 2_000_000);
+
+		String measured = @answer(run, `
+			const m = three.frame.ms;
+			return { host: m.host, total: m.total, solver: m.solver };
+		`);
+		defer measured.free(mem);
+		test::@check(measured == `{"host":5,"total":10,"solver":5}`,
+			"host is the residual CPU span and total remains script-only, got '%s'", measured);
+	};
+}
+
+<*
+ Publishing after the draw must not turn `three.frame.ms` into a half-current
+ record. A callback reads the frame whose outer boundary completed previously.
+*>
+fn void a_callback_reads_the_previous_completed_host_frame() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		@ok(run, `
+			globalThis.hostFrames = [];
+			three.setAnimationLoop(() => hostFrames.push(three.frame.ms.host));
+		`);
+		run.tick(0);
+		long accounted = run.frame_spend.script_ns() + run.frame_spend.solver_ns;
+		run.complete_host_frame(accounted + 7_000_000);
+		run.tick(16);
+
+		String seen = @answer(run, "return hostFrames;");
+		defer seen.free(mem);
+		test::@check(seen == "[0,7]",
+			"the current callback sees only the prior completed host record, got '%s'", seen);
+	};
+}

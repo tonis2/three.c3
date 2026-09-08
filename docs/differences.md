@@ -602,9 +602,9 @@ ignored.
 
 ## lights
 
-Up to four lights, and none of them is an Object3D. `three.lights` is the list;
-`three.lights[0] === three.light` is the sun, the only one that casts a shadow, which is why the shadow
-settings hang off it.
+Up to eight lights, and none of them is an Object3D. `three.lights` is the list;
+`three.lights[0] === three.light` is the sun and owns the fitted directional shadow. Point-light shadows
+are a separate shared opt-in at `three.lights.shadow`.
 
 Each has `color` (white by default) and `intensity` (1 by default, multiplying the colour, so it is how a
 light goes brighter than white), and is a *direction* or a *place*:
@@ -623,11 +623,12 @@ a sun of 1 at three metres wants about 9. The window is what lets a light end �
 reaches zero, so every light would contribute a little to every pixel.
 
 `three.lights[0]` is a direction and refuses to be anything else: it is the light the shadow map is fitted
-around, and a fit takes a heading. A point light goes in one of the other three slots.
+around, and a fit takes a heading. A point light goes in one of the other seven slots.
 
 `three.lights.add([1, 0, 0], 0x4060ff, 0.5)` fills the next slot and answers with it;
-`three.lights.remove(i)` closes the gap. Light 0 cannot be removed — set its intensity to 0. Adding a fifth
-throws.
+`three.lights.remove(i)` closes the gap. Light 0 cannot be removed — set its intensity to 0. Adding a ninth
+throws. Point shadows are off and unallocated until an explicit resolution is enabled, for example
+`three.lights.shadow = { enabled: true, size: 512 }`; enabled point lights then render all six faces.
 
 Not `scene.add(new DirectionalLight(...))`: nothing can be parented to a light and `scene.remove` does not
 reach it. A direction is not normalized, so it reads back as you wrote it, and a zero one throws rather than
@@ -720,7 +721,9 @@ scene is. If shadows look blocky the scene is large, not the map small: raise `t
 draw the part that matters and leave the rest out. There are no cascades.
 
 Self-shadowing stripes should not appear — each sample is lifted two texels along its own normal first — and
-if they do, `three.light.shadow.bias` is the knob, in small numbers like 0.0005.
+if they do, `three.light.shadow.bias` is the knob, in small numbers like 0.0005. On a back face of a
+`DoubleSide` material the normal used for the lift and for the shading is turned toward the camera first, the
+way Blender turns it, so an inside-out wall neither goes black nor shadows itself.
 
 ## shadow-costs-a-draw
 

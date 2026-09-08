@@ -214,7 +214,7 @@ fn void a_texture_survives_its_own_round_trip() @test
 		// builds its face along +z — so the shading term is exactly 1 and the
 		// ambient floor cannot contribute. Without this the default direction is
 		// a diagonal and the strongest claim available would be an inequality.
-		renderer.pass.lighting = { .count = 1, .ambient = 0, .lights = { { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } }, {}, {}, {} } };
+		renderer.pass.lighting = { .count = 1, .ambient = 0, .lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } } };
 
 		image::Image shot = renderer.capture()!!;
 		defer shot.free();

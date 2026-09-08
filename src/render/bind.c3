@@ -36,7 +36,7 @@ import vk;
 
 // One past the last binding each kind of shader can have: its template's
 // reserved bindings plus what an agent may declare on top of them. A material
-// reserves three and a post pass four — see `MATERIAL_BINDING_FIRST`.
+// reserves four and a post pass four — see `MATERIAL_BINDING_FIRST`.
 //
 // `mesh.slang` is not in the arithmetic and does not need to be: it declares seven
 // bindings of its own and no agent ever adds to them, so it fits under whichever
@@ -55,7 +55,9 @@ const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  than a per-kind number: one struct holds either kind's slots, indexed by the
  binding itself.
 *>
-const uint MAX_SAMPLED_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
+const uint MAX_USER_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
+const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_BINDING + 1
+	? MAX_USER_BINDINGS : SHADOW_ATLAS_BINDING + 1;
 
 <*
  The image writes for one draw, gathered before any of them is pushed.
@@ -122,6 +124,12 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
 	{
 		if (binding.binding < first) continue;
 		if (binding.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+		bool supplied = false;
+		for (uint i = 0; i < self.count; i++)
+		{
+			if (self.writes[i].dstBinding == binding.binding) { supplied = true; break; }
+		}
+		if (supplied) continue;
 
 		int index = slots == null ? NO_TEXTURE : slots.at(binding.binding);
 		self.add(binding.binding, assets.texture_at(index).descriptor());
@@ -157,6 +165,7 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
 	ShaderBinding* found = pipeline.shader.binding_of(name);
 	if (found == null) return 0;
 	if (found.binding < first) return 0;
+	if (first == MATERIAL_BINDING_FIRST && found.binding == SHADOW_ATLAS_BINDING) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
 	return found.binding;
 }

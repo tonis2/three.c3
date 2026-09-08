@@ -69,11 +69,21 @@ struct Light
 {
     float4 direction;
     float4 color;
+    float4 area_right;
+    float4 area_up;
+    uint4 meta;
 };
 
 // Byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare. This pass reads
 // `light_view_projection` and `live_poses` and nothing else in it — the fields
 // are here because the offsets are the contract, not because they are all used.
+struct ShadowGpuView
+{
+    float4x4 view_projection;
+    float4 atlas;
+    float4 params;
+};
+
 struct FrameBlock
 {
     float4x4 view_projection;
@@ -93,7 +103,7 @@ struct FrameBlock
     //      `roughness` into a blur.
     //   w  unused.
     float4 environment;
-    Light lights[4];
+    Light* lights;
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -110,6 +120,14 @@ struct FrameBlock
     // `three.light.world` — nothing in this pass reads it, and it is here because
     // the offsets are the contract. See `mesh.slang`.
     float4 world;
+    float4 point_shadow;
+    float4x4 inverse_view_projection;
+    float4 ambient_occlusion;
+    ShadowGpuView* shadow_views;
+    uint* cluster_counts;
+    uint* cluster_indices;
+    uint4 cluster_grid;
+    float4 cluster_screen;
 };
 
 // Byte for byte what `mesh.slang` and `shaders/skin.slang` declare.
@@ -189,6 +207,8 @@ struct PushData
     FrameBlock* frame;
     Instance* instances;
     Draw* draw;
+    uint2 padding;
+    float4x4 projection;
 };
 [vk_push_constant] const PushData push;
 
@@ -320,7 +340,7 @@ float4 posed_clip(uint vid, uint iid)
     // camera, and the only order that makes sense: a joint matrix is in the
     // character's space, the model matrix puts the character in the world, and
     // the light looks at the world.
-    return mul(push.frame[0].light_view_projection, mul(instance.model, float4(position, 1.0)));
+    return mul(push.projection, mul(instance.model, float4(position, 1.0)));
 }
 
 #ifdef THREE_SHADOW_CUTOUT

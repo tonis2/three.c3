@@ -146,6 +146,11 @@ struct FrameSpend
 	long frame_ns;
 	long jobs_ns;
 	long solver_ns;
+	// Host CPU work for the whole completed frame, excluding the script spans,
+	// solver and renderer waits. Filled by the application after tick returns and
+	// the draw has completed. A script inside tick still reads the prior record;
+	// no script can observe this new record before the outer boundary fills it.
+	long host_ns;
 }
 
 <*
@@ -155,6 +160,20 @@ struct FrameSpend
 fn long FrameSpend.script_ns(&self)
 {
 	return self.handlers_ns + self.fixed_ns + self.frame_ns + self.jobs_ns;
+}
+
+<*
+ Completes the timing record for the tick most recently run.
+
+ `elapsed_ns` spans the tick and its render. `wait_ns` is measured at the actual
+ blocking Vulkan calls, never inferred from GPU timestamps. Script and solver
+ have their own spans inside tick and remain outside `host`.
+*>
+fn void JsRuntime.complete_host_frame(&self, long elapsed_ns, long wait_ns = 0)
+{
+	long accounted = self.frame_spend.script_ns() + self.frame_spend.solver_ns + wait_ns;
+	long host = elapsed_ns - accounted;
+	self.frame_spend.host_ns = host > 0 ? host : 0;
 }
 
 <*
@@ -918,6 +937,7 @@ fn void js_frame_stats(
 	js.set_property(ms, "jobs", qjs::number_value(spend.jobs_ns / 1e6));
 	// Outside `total`, as it is outside the budget. See `FrameSpend`.
 	js.set_property(ms, "solver", qjs::number_value(spend.solver_ns / 1e6));
+	js.set_property(ms, "host", qjs::number_value(spend.host_ns / 1e6));
 
 	qjs::Value object = js.object();
 	js.set_property(object, "running", qjs::bool_value(self.frame_active));

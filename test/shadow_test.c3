@@ -164,7 +164,7 @@ fn void the_fit_holds_the_whole_scene() @test
 				light[0], light[1], light[2], corner, clip[2]
 			);
 		}
-	}
+	};
 }
 
 <*
@@ -292,9 +292,9 @@ fn void the_shadow_shader_is_the_mesh_contract() @test
 		);
 	}
 	test::@check(
-		mod.layout.push_size == three::MeshPush::size,
-		"and the block is the mesh contract and nothing else: %d bytes, want %d",
-		mod.layout.push_size, three::MeshPush::size
+		mod.layout.push_size == three::ShadowPush::size,
+		"and the block adds exactly one face projection: %d bytes, want %d",
+		mod.layout.push_size, three::ShadowPush::size
 	);
 
 	test::@check(mod.entries.len() == 1, "one entry point, got %d", mod.entries.len());
@@ -1348,7 +1348,7 @@ fn void a_focus_box_narrows_the_fit_without_losing_the_depth() @test
 			"scene corner %d is at depth %f, so a caster outside the focus would be clipped",
 			corner, clip[2]
 		);
-	}
+	};
 }
 
 <*
@@ -2450,6 +2450,33 @@ fn void an_alpha_tested_card_casts_the_shadow_of_its_holes() @test
 	};
 }
 
+fn void a_point_shadow_keeps_alpha_mask_holes() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(CUTOUT_SCENE);
+		defer built.free();
+		test::@check(built.ok, "the cut-out scene built: %s", built.error);
+		three::RunResult point = run.run(`
+			three.light.intensity = 0;
+			three.lights.add({ position: [8, 18, 5], range: 40, intensity: 300 });
+			three.lights.shadow = { enabled: true, size: 256, bias: 0.00001 };
+			leaf.alphaTest = 0;
+		`);
+		defer point.free();
+		test::@check(point.ok, "the point shadow enabled: %s", point.error);
+		image::Image whole = renderer.capture()!!;
+		defer whole.free();
+
+		three::RunResult cut = run.run(`leaf.alphaTest = 0.5`);
+		defer cut.free();
+		image::Image holes = renderer.capture()!!;
+		defer holes.free();
+		test::@check(differing_bytes(&whole, &holes) > 0,
+			"the point caster uses the shared alpha-cutout pipeline");
+	};
+}
+
 <*
  A scene with no cut-out in it compiles no second shadow pipeline.
 
@@ -2480,5 +2507,486 @@ fn void a_scene_with_no_cutout_builds_no_second_shadow_pipeline() @test
 		defer cut.free();
 		test::@check(cut.ok, "the cut-out was set: %s", cut.error);
 		test::@check(cut.value == "true", "and a scene with one did not build it");
+	};
+}
+
+// ============================================================================
+// Back faces, which are shaded and shadowed with the normal turned round
+// ============================================================================
+
+// The largest single-channel disagreement between two frames over a rectangle,
+// and where it was. Ordinary `differing_bytes` counts bytes that moved at all,
+// which is the wrong question for two frames that are meant to be the same
+// picture computed from mirrored geometry: the interpolators are fed positions
+// a rotation of exactly π has rounded, so a handful of texels land a unit apart
+// and none of that is the flip.
+fn uint worst_gap(image::Image* a, image::Image* b, uint x0, uint y0, uint x1, uint y1, uint* at_x, uint* at_y)
+{
+	uint worst = 0;
+	for (uint y = y0; y < y1; y++)
+	{
+		for (uint x = x0; x < x1; x++)
+		{
+			char[3] one = pixel_at(a, x, y);
+			char[3] two = pixel_at(b, x, y);
+			for (uint c = 0; c < 3; c++)
+			{
+				uint gap = one[c] > two[c] ? (uint)one[c] - (uint)two[c] : (uint)two[c] - (uint)one[c];
+				if (gap > worst)
+				{
+					worst = gap;
+					*at_x = x;
+					*at_y = y;
+				}
+			}
+		}
+	}
+	return worst;
+}
+
+// A double-sided quad filling the frame, a bar hung in front of it to lay a
+// shadow across it, and the sun on the camera's side of both. `quad.rotation.y`
+// is the whole experiment: 0 winds and normals it at the camera, π winds and
+// normals it into the screen and leaves `DoubleSide` to draw it anyway.
+//
+// The light is up and toward the viewer so that the quad's *own* normal decides
+// whether it is lit at all — a sun straight overhead would graze both cases
+// equally and say nothing.
+const String FACING_SCENE = `
+	const scene = new three.Scene();
+	globalThis.quad = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial({ side: three.DoubleSide }));
+	scene.add(quad);
+	const bar = new three.Mesh(new three.BoxGeometry(6, 0.5, 0.5), new three.MeshLambertMaterial());
+	bar.position.set(0, 1.6, 2.0);
+	scene.add(bar);
+	three.light.set([0.0, 0.55, 0.83], 0.15);
+	three.camera.lookAt(0, 0, 0);
+	three.camera.orbit(0, 0, 9);
+`;
+
+// The band the bar's shadow falls in, and a patch of quad well below it that no
+// caster reaches. Both are clear of the bar's own silhouette near the top of the
+// frame. The arithmetic is in `FACING_SCENE`'s light direction: the bar sits at
+// y 1.6, z 2.0, and the sun's ray drops it to about y 0.27 on the plane.
+// The material the scene names, spelled once so `a_shader_material_flips_its_back_face_too`
+// can lift it back out and put a body in its place.
+const String FACING_MATERIAL = `new three.MeshLambertMaterial({ side: three.DoubleSide })`;
+
+const uint BAND_Y0 = 76;
+const uint BAND_Y1 = 90;
+const uint OPEN_Y0 = 140;
+const uint OPEN_Y1 = 170;
+
+<*
+ An inside-out double-sided quad renders and shadows exactly as its outside-out
+ twin.
+
+ **The rule is Blender's and every other renderer's**: a back face is shaded with
+ its normal turned toward the eye. It matters because a file is free to wind a
+ wall into itself and rely on `side: DoubleSide` to draw it — the FF9 hatch does
+ exactly that — and the engine shaded such a wall with the normal as it came.
+ Two things went wrong at once and this asserts both, which is why the shadow
+ pass is turned on for the second half: `n·l` came out negative so the surface
+ was black, and `shadow_factor` lifted its sample *along* that normal and so into
+ the slab, so the wall shadowed itself.
+
+ The two frames are the same scene with `rotation.y` at 0 and at π, so nothing is
+ compared against a stored number: the claim is that the two are the same
+ picture, which is what "flipped toward the viewer" means. A tolerance of 2 rather
+ than byte equality because a rotation of exactly π rounds the positions the
+ interpolators are fed.
+
+ `the_shadow_band_is_darker` below it is not decoration — without it a fix that
+ turned the shadow lookup off entirely would pass this check twice over.
+*>
+fn void an_inside_out_quad_shades_like_its_twin() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(FACING_SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		image::Image front = renderer.capture()!!;
+		defer front.free();
+
+		three::RunResult turned = run.run(`quad.rotation.y = Math.PI`);
+		defer turned.free();
+		test::@check(turned.ok, "the quad turned round: %s", turned.error);
+
+		image::Image back = renderer.capture()!!;
+		defer back.free();
+
+		uint gap_x, gap_y;
+		uint gap = worst_gap(&front, &back, 0, 60, W, H, &gap_x, &gap_y);
+		test::@check(
+			gap <= 2,
+			"with no shadow pass the two windings draw the same quad, worst channel gap %d at (%d, %d)",
+			gap, gap_x, gap_y
+		);
+
+		// It has to be a quad and not a background: a flip that discarded every
+		// back face would make the two frames agree perfectly.
+		test::@check(
+			luma_at(&front, W / 2, OPEN_Y0 + 5) > 30,
+			"and the quad is lit rather than black, luma %d",
+			luma_at(&front, W / 2, OPEN_Y0 + 5)
+		);
+
+		three::RunResult on = run.run(`
+			quad.rotation.y = 0;
+			three.light.shadow = { enabled: true, size: 1024, distance: 40 };
+		`);
+		defer on.free();
+		test::@check(on.ok, "shadows went on: %s", on.error);
+
+		image::Image front_shadow = renderer.capture()!!;
+		defer front_shadow.free();
+
+		three::RunResult turned_again = run.run(`quad.rotation.y = Math.PI`);
+		defer turned_again.free();
+		test::@check(turned_again.ok, "the quad turned round again: %s", turned_again.error);
+
+		image::Image back_shadow = renderer.capture()!!;
+		defer back_shadow.free();
+
+		gap = worst_gap(&front_shadow, &back_shadow, 0, 60, W, H, &gap_x, &gap_y);
+		test::@check(
+			gap <= 2,
+			"and with the shadow pass on they shadow the same, worst channel gap %d at (%d, %d)",
+			gap, gap_x, gap_y
+		);
+
+		// The half that says the agreement above is about a shadowed picture: the
+		// bar's band is darker than the open quad below it, in both windings.
+		uint band_front = luma_at(&front_shadow, W / 2, (BAND_Y0 + BAND_Y1) / 2);
+		uint open_front = luma_at(&front_shadow, W / 2, (OPEN_Y0 + OPEN_Y1) / 2);
+		uint band_back = luma_at(&back_shadow, W / 2, (BAND_Y0 + BAND_Y1) / 2);
+		uint open_back = luma_at(&back_shadow, W / 2, (OPEN_Y0 + OPEN_Y1) / 2);
+		test::@check(
+			band_front + 20 < open_front,
+			"the bar's shadow is on the quad, band %d against open %d",
+			band_front, open_front
+		);
+		test::@check(
+			band_back + 20 < open_back,
+			"and on the turned quad too, band %d against open %d",
+			band_back, open_back
+		);
+	};
+}
+
+<*
+ A single-sided quad seen from behind still draws nothing.
+
+ **The other half of the flip, and the one that says it changed no cull.** The
+ negation in both fragment stages runs on every back-facing fragment there is —
+ what keeps it from touching an ordinary mesh is that `material.side` gives a
+ `FrontSide` material a cull mode that never rasterises one. So this asserts the
+ culling directly: the same quad, the same rotation, a material that is not
+ double-sided, and a frame byte-identical to the one with the quad hidden.
+*>
+fn void a_single_sided_quad_is_still_culled_from_behind() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			globalThis.quad = new three.Mesh(
+				new three.PlaneGeometry(12, 12),
+				new three.MeshLambertMaterial()
+			);
+			scene.add(quad);
+			three.light.set([0.0, 0.55, 0.83], 0.15);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 9);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		image::Image drawn = renderer.capture()!!;
+		defer drawn.free();
+
+		three::RunResult hidden = run.run(`quad.visible = false`);
+		defer hidden.free();
+		test::@check(hidden.ok, "the quad was hidden: %s", hidden.error);
+
+		image::Image empty = renderer.capture()!!;
+		defer empty.free();
+
+		three::RunResult behind = run.run(`quad.visible = true; quad.rotation.y = Math.PI`);
+		defer behind.free();
+		test::@check(behind.ok, "the quad turned round: %s", behind.error);
+
+		image::Image culled = renderer.capture()!!;
+		defer culled.free();
+
+		test::@check(differing_bytes(&drawn, &empty) > 0, "the quad drew something facing the camera");
+		test::@check(
+			differing_bytes(&culled, &empty) == 0,
+			"and nothing at all facing away, %d bytes differ from the empty frame",
+			differing_bytes(&culled, &empty)
+		);
+	};
+}
+
+<*
+ A `ShaderMaterial` flips its back face the same way the built-in one does.
+
+ `material.slang` carries its own copy of the negation, beside its own copy of
+ `lambert` and `shadow_factor` and for the same reason: a body whose text is the
+ default has to land where no material at all lands. So the check is the one
+ `a_body_of_standard_draws_the_built_in_frame` makes — the same scene twice, once
+ with `MeshLambertMaterial` and once with a body of `standard(s)`, byte for byte
+ identical — asked of a quad turned away from the camera, with the shadow pass on.
+
+ Proved by injection: take the flip out of `material.slang` alone and the two
+ frames stop matching, because the built-in one still flips.
+*>
+fn void a_shader_material_flips_its_back_face_too() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@pool()
+		{
+			// `FACING_SCENE`, with the material left open and the quad already
+			// turned round. Built from the same string the two checks above use, so
+			// the three of them cannot drift apart.
+			String scene = string::tformat(
+				"%s%s",
+				FACING_SCENE.treplace(FACING_MATERIAL, "MATERIAL"),
+				`
+					quad.rotation.y = Math.PI;
+					three.light.shadow = { enabled: true, size: 1024, distance: 40 };
+				`
+			);
+
+			three::RunResult plain = run.run(scene.treplace("MATERIAL", FACING_MATERIAL));
+			defer plain.free();
+			test::@check(plain.ok, "the plain scene built: %s", plain.error);
+
+			image::Image built_in = renderer.capture()!!;
+			defer built_in.free();
+
+			three::RunResult custom = run.run(scene.treplace(
+				"MATERIAL",
+				`new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return standard(s); }", side: three.DoubleSide })`
+			));
+			defer custom.free();
+			test::@check(custom.ok, "the ShaderMaterial scene built: %s", custom.error);
+
+			image::Image with_body = renderer.capture()!!;
+			defer with_body.free();
+
+			test::@check(
+				differing_bytes(&built_in, &with_body) == 0,
+				"the two shaders draw the turned quad identically, %d bytes differ",
+				differing_bytes(&built_in, &with_body)
+			);
+			// And it is a lit quad rather than two matching black frames.
+			test::@check(
+				luma_at(&built_in, W / 2, OPEN_Y0 + 5) > 30,
+				"and it is lit rather than black, luma %d",
+				luma_at(&built_in, W / 2, OPEN_Y0 + 5)
+			);
+		};
+	};
+}
+
+fn void point_shadow_settings_are_opt_in_shared_and_scene_owned() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult set = run.run(`
+			three.lights.shadow = { enabled: true, size: 700, bias: 0.0009765625, intensity: 0.5 };
+			const s = three.lights.shadow;
+			return [s.enabled, s.size, s.bias, s.intensity].join(',');
+		`);
+		defer set.free();
+		test::@check(set.ok, "point shadow settings ran: %s", set.error);
+		test::@check(set.value == `"true,512,0.0009765625,0.5"`, "settings clamp independently: %s", set.value);
+
+		three::RunResult reset = run.run(`new three.Scene(); return [three.lights.shadow.enabled, three.lights.shadow.size].join(',')`);
+		defer reset.free();
+		test::@check(reset.ok && reset.value == `"false,0"`, "a new scene restores unconfigured opt-out: %s", reset.value);
+	};
+}
+
+fn void a_point_light_casts_through_builtin_and_layered_shading() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		String[*] materials = {
+			`new three.MeshLambertMaterial()`,
+			`new three.LayeredMaterial({ layers: [{ tint: [1, 1, 1] }] })`,
+		};
+		foreach (material : materials)
+		{
+			@pool()
+			{
+				String source = string::tformat(`
+					const s = new three.Scene();
+					three.light.intensity = 0; three.light.ambient = 0.02;
+					const m = %s;
+					const floor = new three.Mesh(new three.BoxGeometry(12, .2, 12), m);
+					floor.position.y = -1.1; s.add(floor);
+					s.add(new three.Mesh(new three.BoxGeometry(1, 2, 1), m));
+					three.lights.add({ position: [3, 2, 1], range: 12, intensity: 30 });
+					three.camera.target.set(0, 0, 0); three.camera.orbit(35, 20, 11);
+				`, material);
+				three::RunResult built = run.run(source);
+				defer built.free();
+				test::@check(built.ok, "the point-shadow scene built: %s", built.error);
+
+				image::Image open = renderer.capture()!!;
+				defer open.free();
+				three::RunResult enabled = run.run(`three.lights.shadow = { enabled: true, size: 256, bias: 0.00001 }`);
+				defer enabled.free();
+				test::@check(enabled.ok, "point shadows enabled: %s", enabled.error);
+				image::Image shadowed = renderer.capture()!!;
+				defer shadowed.free();
+				test::@check(differing_bytes(&open, &shadowed) > 100,
+					"six-face point depth changes the %s frame", material);
+			};
+		}
+	};
+}
+
+fn void point_shadow_resources_survive_resize_toggle_and_light_removal() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.add({ position: [2, 2, 2], range: 8, intensity: 10 });
+			three.lights.shadow = { enabled: true, size: 512 };
+		`);
+		defer built.free();
+		// The renderer device and its allocator pages are shared by the GPU suite.
+		// Reserve process-owned pages after this test's scene allocations so a new
+		// permanent page cannot be misreported as this lifecycle's host-memory leak.
+		device::reserve_point_shadow_pages(renderer);
+		renderer.capture()!!.free();
+		usz large = renderer.pass.shadow_manager.atlas.bytes();
+		test::@check(renderer.pass.shadow_manager.atlas.static_image == null,
+			"a scene with no static caster allocates no atlas cache");
+
+		three::RunResult resized = run.run(`three.lights.shadow.size = 256`);
+		defer resized.free();
+		renderer.capture()!!.free();
+		usz small = renderer.pass.shadow_manager.atlas.bytes();
+		test::@check(small < large, "a resize replaces the atlas allocation: %d then %d", large, small);
+
+		three::RunResult removed = run.run(`three.lights.shadow.enabled = false; three.lights.remove(1)`);
+		defer removed.free();
+		renderer.capture()!!.free();
+		test::@check(renderer.pass.shadow_manager.atlas.bytes() == small,
+			"disable/remove retains the reusable allocation without another pass");
+		test::@check(renderer.pass.point_shadows.draws == 0, "no point light records no faces");
+	};
+}
+
+fn void static_point_casters_are_drawn_once_and_invalidated_by_the_light() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			const wall = new three.Mesh(new three.BoxGeometry(2, 2, 2));
+			s.add(wall); wall.static = true;
+			three.light.intensity = 0;
+			three.lights.add({ position: [3, 2, 1], range: 10, intensity: 8 });
+			three.lights.shadow = { enabled: true, size: 256 };
+		`);
+		defer built.free();
+		test::@check(built.ok, "the cached point-shadow scene built: %s", built.error);
+
+		renderer.capture()!!.free();
+		three::RunResult warm = run.run(`three.render(); return three.stats().shadowStaticDraws`);
+		defer warm.free();
+		test::@check(warm.ok && warm.value == `0`, "an unchanged point map records no static draws: %s", warm.value);
+
+		three::RunResult moved = run.run(`three.lights[1].position.x += 1; three.render(); return three.stats().shadowStaticDraws`);
+		defer moved.free();
+		test::@check(moved.ok && moved.value != `0`, "moving the point light rebuilds its static depth: %s", moved.value);
+
+		three::RunResult ranged = run.run(`three.render(); three.lights[1].range = 6; three.render(); return three.stats().shadowStaticDraws`);
+		defer ranged.free();
+		test::@check(ranged.ok && ranged.value != `0`, "changing point range rebuilds static depth: %s", ranged.value);
+	};
+}
+
+fn void point_cutout_state_invalidates_the_static_cache() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			globalThis.cachedPointMaterial = new three.MeshLambertMaterial({ alphaTest: .4 });
+			const card = new three.Mesh(new three.PlaneGeometry(2, 2), cachedPointMaterial);
+			s.add(card); card.static = true;
+			three.lights.add({ position: [2, 2, 2], range: 8, intensity: 8 });
+			three.lights.shadow = { enabled: true, size: 256 };
+		`);
+		defer built.free();
+		test::@check(built.ok, "the static cutout scene built: %s", built.error);
+		renderer.capture()!!.free();
+
+		three::RunResult changed = run.run(`
+			three.render();
+			cachedPointMaterial.alphaTest = .6;
+			cachedPointMaterial.repeat = [2, 1];
+			three.render();
+			return three.stats().shadowStaticDraws;
+		`);
+		defer changed.free();
+		test::@check(changed.ok && changed.value != `0`,
+			"alpha threshold and UV state rebuild cached point depth: %s", changed.value);
+	};
+}
+
+fn void a_point_mover_over_cached_depth_matches_a_full_map() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			three.light.intensity = 0; three.light.ambient = .03;
+			const floor = new three.Mesh(new three.BoxGeometry(10, .2, 10));
+			floor.position.y = -1.1; s.add(floor); floor.static = true;
+			globalThis.pointMover = new three.Mesh(new three.BoxGeometry(1, 2, 1));
+			s.add(pointMover);
+			three.lights.add({ position: [3, 3, 2], range: 12, intensity: 24 });
+			three.lights.shadow = { enabled: true, size: 256, bias: .00001 };
+			three.camera.target.set(0, 0, 0); three.camera.orbit(35, 18, 10);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the mixed point-shadow scene built: %s", built.error);
+		renderer.capture()!!.free();
+
+		three::RunResult moved = run.run(`pointMover.position.x = 1.25`);
+		defer moved.free();
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		three::RunResult full = run.run(`floor.static = false`);
+		defer full.free();
+		image::Image uncached = renderer.capture()!!;
+		defer uncached.free();
+		test::@check(differing_bytes(&cached, &uncached) == 0,
+			"a moving point caster over cached depth matches a full rebuild, %d bytes differ",
+			differing_bytes(&cached, &uncached));
+
+		three::RunResult removed = run.run(`floor.static = true; s.remove(pointMover); three.render()`);
+		defer removed.free();
+		image::Image cached_removed = renderer.capture()!!;
+		defer cached_removed.free();
+		three::RunResult removed_full = run.run(`floor.static = false`);
+		defer removed_full.free();
+		image::Image full_removed = renderer.capture()!!;
+		defer full_removed.free();
+		test::@check(differing_bytes(&cached_removed, &full_removed) == 0,
+			"removing the mover leaves the same point map as a full rebuild, %d bytes differ",
+			differing_bytes(&cached_removed, &full_removed));
 	};
 }

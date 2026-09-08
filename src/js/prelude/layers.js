@@ -1218,6 +1218,8 @@ export class LayeredMaterial extends ShaderMaterial {
 				l.roughness ?? 1,
 				l.bump.strength,
 				l.bump.distance,
+				l.uvScale[0], l.uvScale[1],
+				l.uvOffset[0], l.uvOffset[1],
 			);
 		}
 	}

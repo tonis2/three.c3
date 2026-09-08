@@ -1273,6 +1273,14 @@ fn void js_add_material_layer(
 			.roughness = (float)arg_number(&js, argc, args, 15),
 			.bump_strength = (float)arg_number(&js, argc, args, 16),
 			.bump_distance = (float)arg_number(&js, argc, args, 17),
+			.uv_scale = {
+				argc > 19 ? (float)arg_number(&js, argc, args, 18) : 1.0f,
+				argc > 19 ? (float)arg_number(&js, argc, args, 19) : 1.0f,
+			},
+			.uv_offset = {
+				argc > 21 ? (float)arg_number(&js, argc, args, 20) : 0.0f,
+				argc > 21 ? (float)arg_number(&js, argc, args, 21) : 0.0f,
+			},
 		};
 		material.add_script_layer(layer);
 	};

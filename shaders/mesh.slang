@@ -84,25 +84,26 @@ struct Instance
     uint morph;
 };
 
-// One light, and there are four slots for them in the frame block.
-
-// **Light zero is the sun.** It is the one `render/shadow.c3` fits the shadow map
-// around and the only one that casts; the rest light and do not shadow. That is a
-// limitation with a price on it rather than an oversight — a second caster is a
-// second fit and a second depth pass, and `plan.md` §19 has the atlas that turns
-// that into a tiling question.
-//
-// Four because the fifth is the trigger for clustered forward, also §19: a loop
-// this short is cheaper than the compute pass that would bin it.
+// One registry light. The frame carries a pointer to the variable-length table.
 struct Light
 {
     float4 direction;
     float4 color;
+    float4 area_right;
+    float4 area_up;
+    uint4 meta;
 };
 
 // What every draw in the frame shares. Written once per frame rather than
 // pushed per draw, which is what freed the room in the push block for
 // instancing — see gpu/pipeline.c3.
+struct ShadowGpuView
+{
+    float4x4 view_projection;
+    float4 atlas;
+    float4 params;
+};
+
 struct FrameBlock
 {
     float4x4 view_projection;
@@ -111,8 +112,7 @@ struct FrameBlock
     //
     //   x  the ambient floor: how much of its own colour a surface keeps where no
     //      light reaches it. `three.light.ambient`.
-    //   y  how many of `lights` are lit this frame, 0 to 4. The rest of the array
-    //      is stale bytes the loop never reaches.
+    //   y  how many entries in the light registry are live.
     //   z  game clock seconds — `three.clock.time`, the same number `p.time` is.
     //   w unused.
     float4 lighting;
@@ -179,7 +179,7 @@ struct FrameBlock
     // **At the end of the block on purpose.** Everything above kept the offset it
     // had when there was one light, and `shaders/shadow.slang` reads
     // `light_view_projection` at 88 by that offset.
-    Light lights[4];
+    Light* lights;
     // This frame's morph weights: one float per target per morphing copy, packed
     // end to end. An instance names its slice with `Instance.morph`, and the
     // bucket says how many of them to read with `Draw.morph_targets`.
@@ -205,6 +205,14 @@ struct FrameBlock
     // **After `lights` and after `morph_weights`**, which is the rule the two
     // comments above state: every field kept the offset it had.
     float4 world;
+    float4 point_shadow;
+    float4x4 inverse_view_projection;
+    float4 ambient_occlusion;
+    ShadowGpuView* shadow_views;
+    uint* cluster_counts;
+    uint* cluster_indices;
+    uint4 cluster_grid;
+    float4 cluster_screen;
 };
 
 // Everything about one bucket that is not the geometry itself: where to read the
@@ -447,7 +455,7 @@ static const uint POSE_MASK = 0x7fffffffu;
 // **Binding 1 is the shadow map, in every shader that shades a surface.** It is
 // reserved the way `base_color_map` is — declared by the template rather than by
 // anything a script writes — which, with the environment map below it, is why
-// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// `MATERIAL_BINDING_FIRST` is 4 and an agent's first sampler is numbered from
 // there. `shader/assemble.c3` has the
 // argument for why reserving a binding is a constant and never a shared bump.
 //
@@ -458,11 +466,46 @@ static const uint POSE_MASK = 0x7fffffffu;
 // there is one pipeline and one descriptor layout whether shadows are on or off,
 // and turning them on is a different image in the same slot rather than a
 // recompile.
-[vk::binding(1, 0)] Sampler2D shadow_map;
+[vk::binding(17, 0)] Sampler2D shadow_atlas;
+[vk::binding(4, 0)] Sampler2D ambient_occlusion_depth;
+
+float crevice_occlusion(float3 position, float3 normal)
+{
+    float4 settings = push.frame[0].ambient_occlusion;
+    if (settings.x <= 0.0) return 1.0;
+    float4 clip = mul(push.frame[0].view_projection, float4(position, 1.0));
+    float2 uv = float2(0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w);
+    if (clip.w <= 0.0) return 1.0;
+    float3 right = normalize(mul(push.frame[0].inverse_view_projection, float4(1,0,0,0)).xyz);
+    float3 up = normalize(mul(push.frame[0].inverse_view_projection, float4(0,1,0,0)).xyz);
+    float4 clip_right = mul(push.frame[0].view_projection, float4(position + right * settings.y, 1.0));
+    float4 clip_up = mul(push.frame[0].view_projection, float4(position + up * settings.y, 1.0));
+    float2 axis_x = float2(0.5 * clip_right.x / clip_right.w + 0.5 - uv.x, 0.5 - 0.5 * clip_right.y / clip_right.w - uv.y);
+    float2 axis_y = float2(0.5 * clip_up.x / clip_up.w + 0.5 - uv.x, 0.5 - 0.5 * clip_up.y / clip_up.w - uv.y);
+    const float2 taps[12] = {
+        float2(.25,0), float2(0,.25), float2(-.25,0), float2(0,-.25),
+        float2(.424,.424), float2(-.424,.424), float2(-.424,-.424), float2(.424,-.424),
+        float2(1,0), float2(0,1), float2(-1,0), float2(0,-1)
+    };
+    float blocked = 0.0;
+    for (uint i = 0; i < 12; i++) {
+        float2 at = uv + axis_x * taps[i].x + axis_y * taps[i].y;
+        if (any(at <= 0.0) || any(at >= 1.0)) continue;
+        float depth = ambient_occlusion_depth.SampleLevel(at, 0.0).r;
+        if (depth >= 0.999999) continue;
+        float4 world = mul(push.frame[0].inverse_view_projection, float4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, depth, 1.0));
+        if (abs(world.w) <= 1e-6) continue;
+        float3 delta = world.xyz / world.w - position;
+        float distance = length(delta);
+        if (distance > settings.y || distance <= 1e-5) continue;
+        blocked += step(settings.z, dot(normalize(normal), delta)) * (1.0 - distance / settings.y);
+    }
+    return 1.0 - settings.x * blocked / 12.0;
+}
 
 // **Binding 2 is the environment map, in every shader that shades a surface.**
 // The third and last binding a template reserves, which is why
-// `MATERIAL_BINDING_FIRST` is 3 and an agent's first sampler is numbered from
+// `MATERIAL_BINDING_FIRST` is 4 and an agent's first sampler is numbered from
 // there.
 //
 // Always bound and always valid, exactly like the two above: with no sky it
@@ -478,7 +521,7 @@ static const uint POSE_MASK = 0x7fffffffu;
 
 // **Bindings 3, 4 and 5 are the built-in material's other three maps**, and they
 // are this shader's alone: `material.slang` reserves three bindings and numbers
-// an agent's first sampler at `MATERIAL_BINDING_FIRST`, which is also 3. Two
+// an agent's first sampler at `MATERIAL_BINDING_FIRST`, which is also 4. Two
 // templates, two meanings for one number, and nothing is confused by it because
 // a binding is only ever resolved against the pipeline that declared it — see
 // `render/bind.c3`, where the write site walks the *reflected* layout.
@@ -497,22 +540,22 @@ static const uint POSE_MASK = 0x7fffffffu;
 // bends every value: a normal that means "no tilt" arrives leaning, and a
 // roughness of 0.5 arrives at 0.21. `js/prelude/texture.js` is where a script
 // says so, and the glTF importer already does.
-[vk::binding(3, 0)] Sampler2D normal_map;
+[vk::binding(5, 0)] Sampler2D normal_map;
 // glTF's packing, and the reason this is one image rather than two: **green is
 // roughness and blue is metalness**, which is what `pbrMetallicRoughness` in
 // glTF 2.0 defines and what every exporter writes. Red is unused here and is
 // where the specification allows an occlusion map to be packed alongside; this
 // renderer keeps occlusion in its own binding so the two can come from different
 // files.
-[vk::binding(4, 0)] Sampler2D metalness_roughness_map;
+[vk::binding(6, 0)] Sampler2D metalness_roughness_map;
 // Ambient occlusion, red channel, glTF's `occlusionTexture`. What it multiplies
 // is in `fragmentMain` and is the whole of why it is worth having a term rather
 // than folding it into albedo.
-[vk::binding(5, 0)] Sampler2D occlusion_map;
+[vk::binding(7, 0)] Sampler2D occlusion_map;
 // glTF's `emissiveTexture`, multiplied by `Draw.emissive` and added after the
 // shading. **A picture and not data** — it is the colour of the light this
 // surface gives off — so it uploads sRGB, unlike the three above it.
-[vk::binding(6, 0)] Sampler2D emissive_map;
+[vk::binding(8, 0)] Sampler2D emissive_map;
 
 // The four influences of one vertex against one palette, summed into the matrix
 // that poses it.
@@ -835,43 +878,44 @@ float3 srgb_to_linear(float3 c)
 // one a script can set. Zero by default: the normal offset does the work, and a
 // depth bias large enough to matter on its own is a shadow visibly detached from
 // its caster.
+
+
+float shadow_view_factor(uint index, float3 position, float3 normal)
+{
+    if (index == 0xffffffffu) return 1.0;
+    ShadowGpuView view = push.frame[0].shadow_views[index];
+    if (view.params.w <= 0.0) return 1.0;
+    float3 offset = position + normal * view.params.z;
+    float4 clip = mul(view.view_projection, float4(offset, 1.0));
+    if (clip.w <= 0.0) return 1.0;
+    float3 ndc = clip.xyz / clip.w;
+    float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+    if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
+    float2 step = view.params.x * view.atlas.xy;
+    float2 uv = local * view.atlas.xy + view.atlas.zw;
+    float2 lo = view.atlas.zw + step * 0.5;
+    float2 hi = view.atlas.zw + view.atlas.xy - step * 0.5;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
+    {
+        float depth = shadow_atlas.SampleLevel(clamp(uv + float2(x,y) * step, lo, hi), 0.0).r;
+        lit += ndc.z - view.params.y <= depth ? 1.0 : 0.0;
+    }
+    return lerp(1.0, lit / 9.0, view.params.w);
+}
+
 float shadow_factor(float3 position, float3 normal)
 {
-    float4 params = push.frame[0].shadow;
-    if (params.w <= 0.0) return 1.0;
+    return shadow_view_factor(push.frame[0].lights[0].meta.y, position, normal);
+}
 
-    float3 offset = position + normalize(normal) * params.z;
-    float4 clip = mul(push.frame[0].light_view_projection, float4(offset, 1.0));
-    // The fit is orthographic, so `clip.w` is 1 and this divide is free. Written
-    // anyway, because a perspective fit — a spot light — would need it and a
-    // divide that was silently missing is a shadow that is subtly in the wrong
-    // place rather than an error.
-    float3 ndc = clip.xyz / clip.w;
-    if (ndc.z < 0.0 || ndc.z > 1.0) return 1.0;
-
-    // ndc to uv, and the y is flipped because `gpu/target.c3`'s negative-height
-    // viewport is what the shadow pass rasterises with too. Undoing that here is
-    // not optional bookkeeping: get it wrong and every shadow is mirrored about
-    // the middle of the map, which on a symmetric scene looks *almost* right.
-    float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-
-    // Nine taps a texel apart — the cheapest thing that turns a hard stair-step
-    // edge into something that reads as a shadow. `SampleLevel` rather than
-    // `Sample`: the map has one level and asking for a derivative-chosen one
-    // inside a loop is work for a mip chain that does not exist.
-    float reference = ndc.z - params.y;
-    float lit = 0.0;
-    for (int y = -1; y <= 1; y++)
-    {
-        for (int x = -1; x <= 1; x++)
-        {
-            float depth = shadow_map.SampleLevel(uv + float2(x, y) * params.x, 0.0).r;
-            lit += reference <= depth ? 1.0 : 0.0;
-        }
-    }
-
-    return 1.0 - params.w * (1.0 - lit / 9.0);
+float shadow_debug_depth(float2 local)
+{
+    uint index = push.frame[0].lights[0].meta.y;
+    if (index == 0xffffffffu) return 1.0;
+	ShadowGpuView view = push.frame[0].shadow_views[index];
+	if (view.params.w <= 0.0) return 1.0;
+	return shadow_atlas.SampleLevel(saturate(local) * view.atlas.xy + view.atlas.zw, 0.0).r;
 }
 
 // This fragment's shadow, looked up once and left where `lambert` can reach it.
@@ -893,6 +937,50 @@ static float g_shadow = 1.0;
 // directional lights alone, which is a scene missing a campfire and no diagnostic
 // anywhere. `specular_light` already takes the position and uses its own.
 static float3 g_position = float3(0.0, 0.0, 0.0);
+static float4 g_screen_position = float4(0.0);
+static float g_crevice = 1.0;
+//@lighting
+
+uint fragment_cluster()
+{
+    return shared_fragment_cluster(push.frame,g_screen_position,g_position);
+}
+
+float area_diffuse(Light light, float3 position, float3 normal)
+{
+    return shared_area_diffuse(light,position,normal);
+}
+
+bool cluster_contains(uint lightIndex)
+{
+    return shared_cluster_contains(push.frame,fragment_cluster(),lightIndex);
+}
+
+float3 area_specular_term(Light light, float3 position, float3 normal, float3 view,
+    float3 f0, float f90, float a2, float k, float nDotV)
+{
+    return shared_area_specular(light,position,normal,view,f0,f90,a2,k,nDotV);
+}
+
+// Visibility from point-light `index`. Cube faces use a conventional 90 degree
+// perspective projection, whose depth is a function of the face-forward
+// distance (the largest absolute component), not radial distance.
+float point_shadow_factor(uint index, Light light, float3 position)
+{
+    uint view = light.meta.y;
+    if (view == 0xffffffffu) return 1.0;
+    if (light.meta.z == 1u)
+    {
+        float3 ray = position - light.direction.xyz;
+        float3 a = abs(ray);
+        uint face;
+        if (a.x >= a.y && a.x >= a.z) face = ray.x >= 0.0 ? 0u : 1u;
+        else if (a.y >= a.z) face = ray.y >= 0.0 ? 2u : 3u;
+        else face = ray.z >= 0.0 ? 4u : 5u;
+        view += face;
+    }
+    return shadow_view_factor(view, position, float3(0.0));
+}
 
 
 // The direct light reaching this point, as a colour.
@@ -914,8 +1002,7 @@ static float3 g_position = float3(0.0, 0.0, 0.0);
 // the whole result instead would make `three.light.ambient` mean nothing wherever
 // a shadow fell.
 //
-// **Only light zero is shadowed**, because only light zero was fitted — see
-// `struct Light`.
+// Each light names its shadow-atlas view through stable metadata.
 //
 // **`occlusion` multiplies the ambient floor and the world light, and nothing
 // else** — the two terms that arrive from everywhere — which is the one thing
@@ -932,16 +1019,39 @@ float3 lambert(float3 normal, float occlusion)
     float ambient = push.frame[0].lighting.x;
     uint count = (uint)push.frame[0].lighting.y;
     float3 direct = float3(0.0, 0.0, 0.0);
+    // Directional emitters are global. Local lights come from
+    // this fragment's cluster; an overflow bit deliberately falls back to the
+    // all-light reference path rather than dropping illumination.
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
+        if (light.meta.z != 0u) continue;
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
         if (i == 0u) n_dot_l *= g_shadow;
+        else n_dot_l *= point_shadow_factor(i, light, g_position);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
-    return ambient * occlusion + (1.0 - ambient) * direct + push.frame[0].world.rgb * occlusion;
+    uint cluster = fragment_cluster();
+    uint packedCount = push.frame[0].cluster_grid.w==0u?0x80000000u:push.frame[0].cluster_counts[cluster];
+    bool overflow = (packedCount & 0x80000000u) != 0u;
+    uint localCount = overflow ? count : packedCount;
+    for (uint k = 0u; k < localCount; ++k)
+    {
+        uint i = overflow ? k : push.frame[0].cluster_indices[cluster * push.frame[0].cluster_grid.w + k];
+        Light light = push.frame[0].lights[i];
+        if (light.meta.z == 2u || light.meta.z == 3u) { direct += light.color.rgb*area_diffuse(light,g_position,normal)*point_shadow_factor(i,light,g_position); continue; }
+        if (light.meta.z != 1u && light.meta.z != 4u) continue;
+        float reach;
+        float3 to_light = light_toward(light.direction, g_position, reach);
+        if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
+        float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
+        n_dot_l *= point_shadow_factor(i, light, g_position);
+        direct += light.color.rgb * light.color.w * n_dot_l;
+    }
+    float ambient_visibility = occlusion * g_crevice;
+    return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
 }
 
 // The same light with nothing occluding it, which is every caller that has no
@@ -993,8 +1103,11 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     for (uint i = 0u; i < count; i++)
     {
         Light light = push.frame[0].lights[i];
+        if (light.meta.z != 0u && !cluster_contains(i)) continue;
+        if (light.meta.z == 2u || light.meta.z == 3u) { sum += area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v)*point_shadow_factor(i,light,position); continue; }
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
+        if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
         float n_dot_l = max(dot(normal, to_light), 0.0);
         if (n_dot_l <= 0.0) continue;
 
@@ -1010,7 +1123,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
         // The shadow multiplies the light rather than the geometry term, unlike in
         // `lambert` where the two are the same multiply: an occluded light delivers
         // less energy, it does not change the shape of the microfacets.
-        float occlusion = i == 0u ? g_shadow : 1.0;
+        float occlusion = i == 0u ? g_shadow : point_shadow_factor(i, light, position);
         sum += light.color.rgb * light.color.w * occlusion * reach
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
@@ -1140,13 +1253,18 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
         return true;
     }
 
-    answer = float3(shadow_map.SampleLevel(uv, 0.0).r);
+    answer = float3(shadow_debug_depth(uv));
     return true;
 }
 
+// `front_facing` is a parameter rather than a field of `VertexOutput`: that struct
+// is the vertex stage's output as well as this stage's input, and a system value
+// the rasteriser produces has no meaning there. `material.slang` declares it the
+// same way, for the same reason.
 [shader("fragment")]
-float4 fragmentMain(VertexOutput input) : SV_Target
+float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
 {
+    g_screen_position = input.sv_position;
     // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
     // 0]` works with no material at all — which is the point of it being here
     // rather than only in `material.slang`. White is the identity and is what
@@ -1174,6 +1292,16 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // take it away — and `material.slang` looks the shadow up with `s.normal` for
     // the same reason, so the two shaders shadow a surface identically.
     float3 geometric = normalize(input.normal);
+    // **A back face is shaded with its normal turned toward the eye**, which is
+    // Blender's rule and every other renderer's. Only a double-sided material
+    // ever rasterises one — `material.side` picks the cull mode, so a single
+    // sided draw never reaches this line with `front_facing` false — and the
+    // face the eye can see is by definition the lit side of a leaf, a sheet of
+    // cloth, or a slab the file wound inside-out. Taken as it came, `n·l` is
+    // negative and the surface is black; worse, `shadow_factor` lifts its
+    // sample along this normal and so lifts it *into* the slab, and the wall
+    // shadows itself. The shadow pass reads no normal and needs none of this.
+    if (!front_facing) geometric = -geometric;
     float3 normal = geometric;
     float4 surface = draw.surface;
     float occlusion = 1.0;
@@ -1271,6 +1399,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // lookup the same number of times as well as the same way.
     g_shadow = shadow_factor(input.world, geometric);
     g_position = input.world;
+    g_crevice = crevice_occlusion(input.world, geometric);
 
     // After the normal and before the shading, which is the only place it can
     // be: the views need a world position and a normal, and they answer instead
@@ -1298,7 +1427,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     return float4(
         albedo * lambert(normal, occlusion) * (1.0 - surface.y)
             + specular_light(normal, input.world, albedo, surface.x, surface.y, surface.z)
-            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z) * occlusion
+            + environment_light(normal, input.world, albedo, surface.x, surface.y, surface.z) * occlusion * g_crevice
             // Added last and reached by nothing above it — not the occlusion, not
             // the shadow, not the metalness. A surface that gives off light gives
             // it off in a crevice, in shadow and on a metal, which is what makes

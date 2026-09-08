@@ -281,3 +281,7 @@ fn double GameClock.fixed_step_ms(&self) => 1000.0 / self.fixed_hz;
 // One fixed step in seconds — what the fixed callback is handed, and what
 // `three.clock.fixedDelta` reads.
 fn double GameClock.fixed_dt(&self) => 1.0 / self.fixed_hz;
+
+// How far the render frame lies between the last completed fixed state and the
+// next one. Read after `take_fixed_steps`, so it is always in [0, 1).
+fn double GameClock.fixed_alpha(&self) => self.fixed_ms / self.fixed_step_ms();

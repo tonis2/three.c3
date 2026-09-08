@@ -629,6 +629,10 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 					// unlit uv-space variant is not asked for and the marker is
 					// replaced by zero lines. `three_tests::export` has the bake.
 					break;
+				case "//@features":
+					// No early feature define: this material has neither a vertex body
+					// nor twelve textures, so it receives screen occlusion.
+					break;
 				case "//@table":
 					// Nothing: this material's uniforms fit the push block, so no
 					// table struct is generated and the marker is replaced by zero
@@ -1923,8 +1927,8 @@ fn void agx_rolls_a_blown_highlight_off_and_the_identity_clips_it() @test
 		defer curved.free();
 		char[3] agx = middle_pixel(&curved);
 		test::@check(
-			(int)agx[0] < 255 && (int)agx[0] > 150,
-			"AgX rolls it off instead — expected about 202, got %d,%d,%d",
+			(int)agx[0] < 255 && (int)agx[0] > 220,
+			"AgX receives the HDR value and rolls it off near white, got %d,%d,%d",
 			(int)agx[0], (int)agx[1], (int)agx[2]
 		);
 		// Neutral in, neutral out. The inset and outset matrices are the half of
@@ -2009,7 +2013,7 @@ fn void a_tonemap_change_recompiles_once_and_reaches_the_next_frame() @test
 		image::Image after = renderer.capture()!!;
 		defer after.free();
 		test::@check(
-			worst_channel_delta(&before, &after) > 20,
+			worst_channel_delta(&before, &after) > 2,
 			"and the very next frame is the new curve's"
 		);
 

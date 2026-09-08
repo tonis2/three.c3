@@ -123,8 +123,8 @@ The six `...Ms` are the exception: they measure the last frame drawn rather than
 move when nothing about the scene has. `gpuMs` is the frame and the other five are what it was spent
 on — which is how you find out that a slow scene is slow in the shadow pass.
 
-The four `...Bytes` that are not `textureBytes` or `poseBytes` — `geometryBytes`, `targetBytes`,
-`postBytes`, `shadowBytes` — are memory the renderer owns rather than the scene, so they read the
+The five `...Bytes` that are not `textureBytes` or `poseBytes` — `geometryBytes`, `targetBytes`,
+`postBytes`, `shadowBytes`, `occlusionBytes` — are memory the renderer owns rather than the scene, so they read the
 same whichever scene you ask, and between them they are most of what a three process holds.
 
 ## three.scenes
@@ -445,9 +445,9 @@ construction is picked up — the export reads live samplers and uniforms.
 The scene around the meshes goes too: the camera as a glTF camera and every light as a
 KHR_lights_punctual directional light, each on its own node, so the file opens framed and lit the way
 three had it. The ambient floor has no glTF equivalent and is the one thing lost. Materials carry
-`side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform, and a source material's
-normal, occlusion and emissive maps with the metalness and roughness the specular term drew them
-with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
+`side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform — which an import reads back
+onto the same two properties, so a tiling survives the round trip — and a source material's normal,
+occlusion and emissive maps with the metalness and roughness the specular term drew them with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
 what an import applies, so a material that came in at 0.5 comes back at 0.5. Lines are not written yet.
 
 ## three.renderSize()
@@ -1307,7 +1307,7 @@ rest, so the game falls behind honestly instead of owing eight more of them to t
 difference between a stutter and a ten-second freeze. The engine says so once and counts the rest here; a
 number that keeps climbing while you play is a fixed system too slow for the rate it asked for.
 
-`ms` is the last finished frame, split five ways — read it from inside a system and it describes the frame
+`ms` is the last finished frame — read it from inside a system and it describes the frame
 before, which is complete. `{ handlers, fixed, frame, jobs }` are the four spans that add up to `total` and
 are what the 8 ms is measured against:
 
@@ -1319,6 +1319,18 @@ are what the 8 ms is measured against:
 `solver` is outside `total`, because it is outside the budget: the physics step runs above the script's window
 and is the host's own work, so a callback is never stopped or counted for it. It is reported because a frame
 that spends 10 ms in the solver and 3 ms in script is a frame whose script is not the problem.
+
+`host` is residual wall time across the engine's tick-and-render boundary: scene preparation and bounds,
+draw-list and shadow fitting, uploads and command recording, after subtracting the measured script and solver
+spans and the waits instrumented around steady-state Vulkan fences, swapchain acquire/present and headless
+completion/readback. It is not the whole host thread: event polling and MCP request handling happen before
+this boundary. Resize and swapchain-rebuild work is inside it, including any device-idle wait that exceptional
+path needs. A `--screenshot` frame also includes PNG encoding and file I/O after its readback wait.
+
+It is therefore neither `total` nor “wall minus GPU”: GPU timestamps are a separate clock and are never
+subtracted to manufacture a CPU number. Windowed and fixed-count headless renders publish it only after the
+draw completes, so a callback consistently sees the previous completed frame. A server running headless
+without drawing reports the residual work around its tick alone.
 
 `three.systems.report()` is the rolling per-system version and the one to reach for next: this splits a frame
 into four spans, that splits two of those spans by name.
@@ -1802,7 +1814,7 @@ and it is culled as well as clipped, so `stats().culledLastFrame` moves too.
 
 ## three.light.direction / three.light.color / three.light.intensity
 
-The sun — light zero, and the only one that casts a shadow.
+The primary directional light — light zero, also called the sun.
 
 `direction` is a world-space surface-to-light vector — the way a face has to point to be fully lit — and is a
 live Vector3, so `three.light.direction.y = -1` writes through. It is not normalized, so it reads back as you
@@ -1841,101 +1853,133 @@ meaning: every scene written against `ambient` renders exactly as it did.
 ## three.light.set(direction, ambient)
 
 The sun and the floor at once. `ambient` may be omitted to leave it alone, and it is the floor rather than a
-colour — `three.light.color` is how the sun is coloured. There are up to four lights; `three.lights` is the list.
+colour — `three.light.color` is how the sun is coloured. `three.lights` is the scene's light registry.
 
 ## three.lights
 
-The list of lights, four slots, the sun in the first — `three.lights[0] === three.light`. `length` is how many
-are lit and `max` is how many there can be.
+The scene's light registry, including the primary sun at index zero:
+`three.lights[0] === three.light`. `length` reports the current count; `max` is the explicit
+256-light safety ceiling. GPU storage grows with the number of lights rather than reserving a
+fixed array in every frame block.
 
-`add(direction, color, intensity)` fills the next slot and answers with it, and also takes
-`add({ direction, color, intensity })`; it throws once four are lit rather than dropping the fifth.
+`add(direction, color, intensity)` and `add({ direction, color, intensity })` add directional
+lights. `add({ position, range, color, intensity })` adds a point light; its default range is
+10 world units. Point intensity is brightness at one metre, with inverse-square attenuation
+and a smooth cutoff at range.
 
-`add({ position, range, color, intensity })` is the other kind: a point light standing at `position` and
-reaching `range` metres, which is a campfire, a torch, a lamp. `range` defaults to 10 and naming both a
-`position` and a `direction` throws, because they are one field and a light is one or the other. On a light
-you already have, `light.position` and `light.range` are the same switch — writing either makes it a point
-light, and `light.range = 0` makes it directional again.
+Spot lights additionally take `shape: 'spot'`, an emission `direction`, and
+`innerAngle`/`outerAngle` in radians. Area lights take `shape: 'square' | 'rectangle' |
+'disk' | 'ellipse'`, `position`, world-space `right` and `up` axes, `width`, `height`,
+`range`, and `intensity` in watts. Disk/ellipse dimensions are diameters; area lights emit
+toward the negative cross product of right and up.
 
-The falloff is inverse-square with a window that brings it to zero at `range`, so **`intensity` on a point
-light is its brightness one metre away**: to read like a sun of 1 at three metres it wants about 9.
+```js
+three.lights.add({
+  shape: 'disk', position: [0, 8, 0],
+  right: [1, 0, 0], up: [0, 0, -1],
+  width: 4.2, height: 4.2, range: 100,
+  color: [0.78, 0.86, 0.72], intensity: 1000
+});
+```
 
-`three.lights[0]` is the sun the shadow map is fitted around and is a direction — setting a position on it
-throws rather than silently aiming the shadow pass somewhere nobody asked for.
+Area diffuse and GGX specular illumination use deterministic 4×4 numerical integration,
+with samples outside an ellipse discarded. This is an approximation of the extended emitter,
+not a point-light substitution or exact Blender rendering.
 
-`remove(i)` or `remove(light)` takes one out and closes the gap, exactly as `Array.splice` does, so an index
-held across a remove names a different light. Light zero cannot be removed — it is the one the shadow map is
-fitted around — so turn it off with `three.light.intensity = 0`.
+`add` returns a handle with a stable identity: removing an earlier light does not redirect
+a retained handle to another lamp. `remove(index)` or `remove(handle)` closes the packed
+list's gap; numeric indices themselves are not stable. Light zero cannot be removed.
+Turn it off with `three.light.intensity = 0`. The list is iterable.
 
-It is iterable: `for (const l of three.lights)`. Only light zero casts; the rest light and do not shadow.
+Local lights are assigned by GPU compute to a 16×9×24 camera-relative grid with logarithmic
+distance slices. Directional lights are evaluated globally. Each cluster holds 64 local
+indices; overflow switches that cluster to an all-light reference loop, never silently dropping
+illumination. See `stats().clusterBytes` and `stats().clusterOverflow`.
+
+## three.shadows.budget
+
+One shadow manager serves every light type. Directional views, the six views of a point light,
+spot views and representative area views occupy tiles in a shared rectangular depth atlas.
+A lazy static-cache atlas uses the same allocation and rendering path.
+
+`three.light.shadow` still controls the primary directional fit and quality.
+`three.lights.shadow` controls the requested tile quality for the other lights:
+
+```js
+three.lights.shadow = { enabled: true, size: 512, bias: 0.00001, intensity: 1 };
+three.shadows.budget = { maxViews: 64, maxUpdates: 32 };
+```
+
+An explicit local size is required before enabling local shadows. The point-light setting is
+now a compatibility spelling for the shared manager, not a cube-array allocation.
+
+The scene-local budget accepts partial, atomic updates:
+
+- `maxViews`: resident shadow views, 1–64; default 64. A point light needs six, admitted together.
+- `maxTexels`: total admitted tile texels; default 67,108,864.
+- `maxBytes`: atlas allocation budget; default 268,435,456 bytes.
+- `maxUpdates`: views refreshed per frame, 0–64; default 64.
+- `maxUpdateTexels`: rasterized shadow texels per frame; default 33,554,432.
+  A static rebuild plus dynamic overlay counts both passes.
+
+Unchanged valid static views use no update budget. A new or invalid view that cannot be
+refreshed is temporarily unshadowed. A combined static-plus-dynamic view instead keeps its
+last complete live depth until the budget refreshes it, avoiding light changes when another
+cached view rebuilds. Admission favors projected influence and retains a small preference for
+cached entries. Requested tile resolution may be reduced to fit the allocation budget.
+
+Mark fixed scenery with `object.static = true`. Stable light identities preserve independent
+cached entries across packed-list reordering. Static geometry/material changes invalidate the
+cache; moving one light invalidates its own projections. Dynamic casters are rendered over
+copied static tiles. Deforming static casters conservatively bypass caching.
+
+Area shadows use a representative 150-degree perspective view from the emitter center and
+ordinary filtered depth comparisons. This does not reproduce extended-source penumbrae;
+receivers outside that view are unshadowed. It shares all storage, caching, rendering and
+filtering machinery with the other light types.
 
 ## asset.instantiate(name, { lights: true })
 
-Fill `three.lights` from the file's own `KHR_lights_punctual` lights.
+Populate the light registry from `KHR_lights_punctual` and the private `CUSTOM_lights_area`
+extension. The primary directional light becomes `three.light`; local lights are added up
+to the registry ceiling, with a warning if anything cannot fit. Spot cones and area
+dimensions/orientation are preserved.
 
-The file's directional light becomes light zero — the sun, the only one that casts and the only one that
-cannot hold a position — aimed down its node's -Z. `three.light.direction` is a *surface-to-light* vector
-and the file's is the direction the light travels, so the importer is where the one negation lives. A file
-with no directional light leaves light zero exactly as the script had it.
+The custom Blender exporter writes punctual powers using its existing Blender-watt convention,
+rather than standard glTF photometric units. The importer retains the corresponding conversion:
+directional intensity is divided by π, and point/spot intensity by 4π². A missing punctual
+range is derived using an illumination threshold of 0.01. This convention is specific to this
+authoring pipeline and is not a general candela/lux conversion.
 
-The remaining three slots go to the point lights **nearest the file's camera**, or nearest the origin when
-the file has none: three slots and six lanterns is the ordinary case for a level, and "nearest the shot" is
-the only ordering that puts the ones you can see in them. A spot light competes for the same slots and
-lights a sphere — there is no cone here — and everything that did not fit is named once by `console.warn`,
-because a lantern that quietly does not light is what somebody spends an afternoon looking for in a shader.
-`asset.lights` is the whole list, so a script that wants a different three picks them itself.
+Area `powerWatts` is passed unchanged to extended-emitter shading. World-space right/up axes
+and dimensions are derived from the node transform, including scale. Area source files preserve
+square, rectangle, disk and ellipse shapes, dimensions, color, watts and spread on roundtrip.
+Rendering currently assumes one-sided cosine emission; the stored spread parameter is not
+a complete implementation of Blender's area-light spread control.
 
-### The intensities are Blender's, and the conversion is arithmetic
+The importer does not enable shadows or set ambient/world lighting. Configure those explicitly.
+Environment lighting and tone-mapping exposure still need to match Blender separately.
 
-**The convention is Blender's, because Blender's is the only one the numbers in the file have.** glTF
-measures a directional light in lux and a point light in candela; Blender's glTF exporter writes neither
-— it writes the lamp's own Watts — so the units to convert out of are the ones Blender's own shading gives
-those Watts, and the conversion is division with nothing tuned in it.
-
-- `directional`, intensity *w* → `intensity = w / pi`. A sun of *w* W/m² lights a white diffuse face to
-  *w*/pi, which is Lambert's 1/pi and the whole of it. 2.2 W arrives as 0.700.
-- `point` or `spot`, intensity *w* → `intensity = w / (4 pi²)`. A lamp of *w* W delivers *w*/(4 pi² d²) at
-  *d* metres — 4 pi for the sphere it radiates into, pi again for the same Lambert term — and this
-  renderer's point falloff is inverse-square from one metre, so that factor *is* the brightness at one
-  metre and the distance takes care of itself. 45 W arrives as 1.140, 60 W as 1.520.
-- `range` *r* → `range = r`. A light that names none reaches to where Blender would have stopped tracing
-  it: EEVEE's `light_threshold` is the illumination it drops a lamp below, its default is 0.01, so the
-  reach is `sqrt(intensity / 0.01)` — 10.7 metres for a 45 W lantern, 12.3 for a 60 W one.
-
-A spot light converts as a point and lights a sphere, because there is no cone here. Blender's own default
-sun of 1 W arrives at 0.318, against this renderer's default sun of 1 — the file is dimmer than the
-default, which is what a physical unit against an arbitrary one looks like, and `three.light.world` and
-`three.light.ambient` are the two knobs that answer for what is not being simulated.
-
-**A file this renderer exported does not round trip through it.** `scene.export` writes `three.lights`'s own
-numbers straight into the file, because there is no unit to convert them to; the import reads them back as
-Watts. `asset.lights` reports the file's raw numbers, which is the pair of doors a script needs to do
-better than either default.
-
-`KHR_lights_punctual` has no ambient light — it was taken out of the extension before ratification — so
-`three.light.ambient` is never written by an import, and neither is `three.light.shadow`: glTF records
-nothing about which light casts.
+`scene.export` roundtrips area-light power and dimensions through `CUSTOM_lights_area`.
+The pre-existing punctual export convention still writes engine intensity directly, so those
+values are not an automatic Blender-watt roundtrip.
 
 ## asset.lights
 
-The file's lights as descriptions, each placed in world space, whether or not any of them ever reaches a
-slot.
+The file's light descriptions in world space, including lights not instantiated:
 
 ```js
 for (const l of asset.lights) console.log(l.name, l.type, l.intensity);
 ```
 
-`{ name, type, color, intensity, range, node }`, with `type` one of `'directional'`, `'point'` or `'spot'`,
-`color` linear rgb, and `intensity` and `range` **exactly as the file wrote them** — glTF's units, not
-this renderer's. `node` is `{ index, position, direction }`: the light's node in world space, and
-`direction` is the way the light travels, its -Z. A spot also carries `cone: [inner, outer]` in radians,
-which nothing here reads.
+Punctual types are `directional`, `point`, and `spot`. Their descriptions contain
+`{ name, type, color, intensity, range, node }`; intensity/range are the raw file values.
+A spot additionally has `cone: [inner, outer]` in radians.
 
-The name is the *node's*. glTF names the light and the node separately and every exporter gives them the
-same name; the node's is the one that survives to here, and it is also the one that finds the same node in
-an instantiated tree.
-
-Read out of the JSON chunk at load, so it costs no upload, and cached.
+Area types are `square`, `rectangle`, `disk`, and `ellipse`. They additionally expose
+`powerWatts`, `width`, `height`, and `spread`.
+`node` contains the glTF node index, position and emission direction, plus area right/up axes.
+The light's displayed name comes from its node.
 
 ## asset.instantiate(name, { physics: true })
 
@@ -2035,6 +2079,28 @@ engine's.
 — exactly what `three.physics.joint` takes.
 
 Read out of the JSON chunk at load, so it costs no upload, and cached.
+
+## three.light.occlusion
+
+Current-frame depth-based crevice occlusion. It is off by default and affects only indirect light: the ambient
+floor, world light, and environment reflection. Direct lights, emissive surfaces, the sky, and UI are unchanged.
+
+Set `three.light.occlusion = true`, or set `{ enabled, radius, intensity, bias }`. `radius` is the world-space
+sampling distance and defaults to 1; `intensity` is 0..1 and defaults to 1; `bias` rejects nearly coplanar
+neighbours and defaults to 0.02. Each property can also be read and written independently. Enabling allocates one
+full-resolution depth image and adds a camera depth prepass plus twelve depth samples per shaded pixel. Disabling
+stops both costs while retaining the allocation for a later toggle. `stats().occlusionBytes` reports this image.
+
+Opaque and alpha-tested geometry enters the depth prepass; blended geometry and debug lines do not. A
+`ShaderMaterial` with a custom vertex body neither contributes nor receives screen occlusion, because this depth
+pass cannot reproduce its displaced geometry. Use authored geometry when its silhouette must participate. A
+`ShaderMaterial` using all twelve of its own texture slots keeps that
+capacity and omits screen occlusion, because Vulkan's portable fragment-stage minimum has room for only sixteen
+samplers including the renderer's reserved images.
+
+This is a screen-space approximation: off-screen and hidden geometry cannot occlude a surface. Partial
+scene viewports currently bypass it; the requested settings are retained for the next full-frame viewport.
+Its prepass and sampling time are included in `stats().sceneMs`, not `shadowMs`.
 
 ## three.light.shadow
 
@@ -2292,6 +2358,11 @@ and scaling one by -1 instead does nothing, because a negative scale does not re
 
 `DoubleSide` keeps both and is what a plane seen from either direction wants — a flag, a leaf card, a piece of a
 wall you can walk past.
+
+A back face is shaded with its normal turned toward the camera — Blender's rule, and every other renderer's. The
+side you can see is the side the light has to reach, so a leaf card, a sheet of cloth or a wall a file wound
+inside-out lights and self-shadows the same whichever way its triangles happen to face. Only `DoubleSide` ever
+draws a back face, so this changes nothing a `FrontSide` material does.
 
 # Textures
 
