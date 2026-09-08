@@ -159,8 +159,9 @@ struct Node
 	int skin;
 
 	// Where this node's joint matrices start, in matrices, with `POSE_LIVE` in
-	// the top bit for a character posed from its bone nodes rather than from a
-	// baked clip. Copied straight into `Instance.pose`.
+	// the top bit for a character posed from its bone nodes — or from matrices an
+	// application handed over, `Scene.set_palette` — rather than from a baked
+	// clip. Copied straight into `Instance.pose`.
 	// 
 	// Seeded to the skin's rest offset, so a character that has never played
 	// anything draws its bind pose — there is no "nothing is playing" case in
