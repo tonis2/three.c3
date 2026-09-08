@@ -395,6 +395,25 @@ struct GeometryBuilder
 	// layer whose mask reads a vertex colour needs the attribute written beside
 	// it, or the mask it names is one the file does not carry.
 	List{Vec4} colors;
+
+	// glTF's JOINTS_0 and WEIGHTS_0, already in the width the shader reads: four
+	// joint indices as a `uint[4]` and four weights as a `Vec4`, per vertex. The
+	// same layout `upload_primitive` widens a file's narrow indices into, so a
+	// mesh handed in from outside and a mesh read out of a .glb reach the device
+	// through one upload.
+	//
+	// Empty on everything three.c3 tessellates — a box rides no skeleton — and
+	// filled by a caller that skins its own geometry. `Assets.attach_skin` is the
+	// other half of that: influences name joints of a skin, and a built asset has
+	// none until something gives it one.
+	//
+	// **Both or neither**, unlike the three streams above, which stand alone.
+	// `upload_geometry` sets `has_skin` only when each covers every vertex,
+	// because joints without weights is four bones with no say in how much each
+	// pulls and weights without joints is four numbers naming nothing — either on
+	// its own is a palette read through whichever buffer happened to be there.
+	List{uint[4]} joints;
+	List{Vec4} weights;
 	List{uint} indices;
 }
 
@@ -409,6 +428,11 @@ fn void GeometryBuilder.init(&self)
 	self.normals.init(mem, 256);
 	self.uvs.init(mem, 256);
 	self.colors.init(mem, 0);
+	// Sized like `colors` and for its reason: almost nothing that reaches this
+	// builder is skinned, so an unskinned shape pays a pointer per stream and no
+	// allocation at all.
+	self.joints.init(mem, 0);
+	self.weights.init(mem, 0);
 	self.indices.init(mem, 512);
 }
 
@@ -418,6 +442,8 @@ fn void GeometryBuilder.free(&self)
 	self.normals.free();
 	self.uvs.free();
 	self.colors.free();
+	self.joints.free();
+	self.weights.free();
 	self.indices.free();
 }
 
@@ -834,6 +860,11 @@ fn AssetId? Assets.built(&self, String key)
  `has_uvs = false` and the shader's no-uv branch. That is the same test
  `upload_primitive` applies to a glTF accessor.
 
+ The influence pair is the exception, and it is both-or-neither: `joints` and
+ `weights` are uploaded only when *each* covers every vertex. A mesh that comes
+ out of this with `has_skin` still draws at rest until an asset has a palette to
+ index — `Assets.attach_skin` is what gives a built one.
+
  `key` and `label` are copied; the caller may hand over temporary strings.
 
  @param key : `What Asset.path becomes: the shape's identity, and what Assets.built matches on.`
@@ -889,6 +920,11 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 		// had one — but a mesh handed in from outside does, and the exporter's
 		// re-read path fills it for a mesh that came out of a file carrying one.
 		.has_colors = geometry.colors.len() == geometry.positions.len(),
+		// **Both or neither**, which is the one place this differs from the three
+		// tests above it — see `GeometryBuilder.joints`. The same rule
+		// `upload_primitive` applies to a file's JOINTS_0/WEIGHTS_0 pair.
+		.has_skin = geometry.joints.len() == geometry.positions.len()
+			&& geometry.weights.len() == geometry.positions.len(),
 		.base_color = srgb_to_linear_rgb(PRIMITIVE_COLOR),
 		.texture = -1,
 		.bounds = bounds_of(geometry.positions.array_view()),
@@ -914,6 +950,11 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 	if (mesh.has_colors)
 	{
 		mesh.colors = gpu.upload_stream(geometry.colors.entries, Vec4::size * geometry.colors.len())!;
+	}
+	if (mesh.has_skin)
+	{
+		mesh.joints = gpu.upload_stream(geometry.joints.entries, uint[4]::size * geometry.joints.len())!;
+		mesh.weights = gpu.upload_stream(geometry.weights.entries, Vec4::size * geometry.weights.len())!;
 	}
 	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
 	// Not for lines. The index buffer is pairs and `build_bvh` reads it in threes,

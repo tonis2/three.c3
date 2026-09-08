@@ -492,6 +492,12 @@ struct Scene
 	// not carry ten thousand empty lists for a feature none of them use.
 	List{MorphWeights} morphs;
 
+	// The nodes an application poses by hand — `Scene.set_palette`. A side table
+	// beside `morphs` and for its reason, and empty in every scene whose
+	// characters are posed by a clip or by bone nodes, which is all of them until
+	// something outside three.c3 owns a skeleton. See `scene/skin.c3`.
+	List{LivePalette} palettes;
+
 	// Rebuilt by `update`; read by `MeshPass.record`.
 	List{Draw} draws;
 	List{Instance} instances;
@@ -772,6 +778,7 @@ fn Scene* Scene.init(&self)
 	self.players.init(mem, 4);
 	self.sockets.init(mem, 4);
 	self.morphs.init(mem, 4);
+	self.palettes.init(mem, 1);
 	self.draws.init(mem, 64);
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
@@ -937,6 +944,11 @@ fn void Scene.free(&self)
 	foreach (&entry : self.morphs) entry.weights.free();
 	self.morphs.free();
 	self.morphs = { };
+	// The matrices before the table, for the morphs' reason: each entry owns a
+	// `List` of its own and freeing the table alone would leak one per posed node.
+	foreach (&entry : self.palettes) entry.matrices.free();
+	self.palettes.free();
+	self.palettes = { };
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
@@ -2384,6 +2396,21 @@ fn void Scene.build_draw_list(
 			{
 				Asset* owner = assets.slot(node.asset);
 				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
+				// A node posed from outside is not described by the bake at all: its
+				// asset's `skinned_bounds` is the union over frames nobody sampled,
+				// which for an asset `Assets.attach_skin` built is just the rest box.
+				// So the box this frame's palette actually reaches wins — measured by
+				// `set_palette`, which is the only moment those matrices are known.
+				//
+				// Guarded on the list being non-empty rather than searched
+				// unconditionally, so a scene that poses nothing by hand — every scene
+				// until one does — pays one compare per skinned node and no scan.
+				if (self.palettes.len() > 0)
+				{
+					NodeId here          = { (uint)slot, node.generation };
+					LivePalette* posed   = self.live_palette(here);
+					if (posed != null) local = posed.bounds;
+				}
 			}
 			// A soft body is not the shape it was modelled as, and the mesh's own
 			// bounds describe the shape it stopped being. The box the solver
