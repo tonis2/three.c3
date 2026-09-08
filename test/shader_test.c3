@@ -165,7 +165,7 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 	String area = function_body(lighting, "SharedAreaTerms shared_area_terms");
 	test::@check(standard.len > 0 && area.len > 0, "the two combined light routines are present");
 	test::@check(
-		occurrence_count(standard, "shared_point_shadow_factor(i,light,position)") == 3,
+		occurrence_count(standard, "shared_point_shadow_factor(i,light,position,receiverNormal)") == 3,
 		"each directional, area and punctual branch has one visibility lookup"
 	);
 	test::@check(

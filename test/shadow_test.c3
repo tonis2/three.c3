@@ -2460,11 +2460,10 @@ fn void a_point_shadow_keeps_alpha_mask_holes() @test
 		three::RunResult point = run.run(`
 			three.light.intensity = 0;
 			three.lights.add({ position: [8, 18, 5], range: 40, intensity: 300 });
-			three.lights.shadow = { enabled: true, size: 256, bias: 0.00001 };
 			leaf.alphaTest = 0;
 		`);
 		defer point.free();
-		test::@check(point.ok, "the point shadow enabled: %s", point.error);
+		test::@check(point.ok, "the point light was added: %s", point.error);
 		image::Image whole = renderer.capture()!!;
 		defer whole.free();
 
@@ -2472,8 +2471,25 @@ fn void a_point_shadow_keeps_alpha_mask_holes() @test
 		defer cut.free();
 		image::Image holes = renderer.capture()!!;
 		defer holes.free();
-		test::@check(differing_bytes(&whole, &holes) > 0,
-			"the point caster uses the shared alpha-cutout pipeline");
+		sz unshadowed = differing_bytes(&whole, &holes);
+		test::@check(unshadowed > 0, "the point-lit card itself shows its alpha cut-out");
+
+		three::RunResult opaque_shadow = run.run(`
+			leaf.alphaTest = 0;
+			three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 };
+		`);
+		defer opaque_shadow.free();
+		test::@check(opaque_shadow.ok, "the point shadow enabled: %s", opaque_shadow.error);
+		image::Image whole_shadow = renderer.capture()!!;
+		defer whole_shadow.free();
+		three::RunResult cut_shadow = run.run(`leaf.alphaTest = 0.5`);
+		defer cut_shadow.free();
+		image::Image holes_shadow = renderer.capture()!!;
+		defer holes_shadow.free();
+		sz shadowed = differing_bytes(&whole_shadow, &holes_shadow);
+		test::@check(shadowed > unshadowed,
+			"the cut-out changed %d bytes without local shadows and %d with them — its holes reach the receiver",
+			unshadowed, shadowed);
 	};
 }
 

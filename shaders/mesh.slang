@@ -880,14 +880,34 @@ float3 srgb_to_linear(float3 c)
 // its caster.
 
 
-float shadow_view_factor(uint index, float3 position, float3 normal)
+float shadow_view_factor_filtered(uint index, float3 position, float3 normal, float filter_radius)
 {
     if (index == 0xffffffffu) return 1.0;
     ShadowGpuView view = push.frame[0].shadow_views[index];
     if (view.params.w <= 0.0) return 1.0;
-    float3 offset = position + normal * view.params.z;
-    float4 clip = mul(view.view_projection, float4(offset, 1.0));
+    float4 clip = mul(view.view_projection, float4(position, 1.0));
     if (clip.w <= 0.0) return 1.0;
+    if (view.params.z != 0.0)
+    {
+        float distance = view.params.z;
+        if (distance < 0.0)
+        {
+            // Convert receiver texels to world units at this exact perspective
+            // depth. This keeps the offset useful far from a local light without
+            // making it enormous close to the light.
+            float2 ndc = clip.xy / clip.w;
+            float4 dx = mul(view.view_projection, float4(1.0, 0.0, 0.0, 0.0));
+            float4 dy = mul(view.view_projection, float4(0.0, 1.0, 0.0, 0.0));
+            float4 dz = mul(view.view_projection, float4(0.0, 0.0, 1.0, 0.0));
+            float sx = length((dx.xy - ndc * dx.w) / clip.w);
+            float sy = length((dy.xy - ndc * dy.w) / clip.w);
+            float sz = length((dz.xy - ndc * dz.w) / clip.w);
+            float ndc_per_world = max(max(sx, sy), sz);
+            distance = (-view.params.z) * (2.0 * view.params.x) / max(ndc_per_world, 1e-6);
+        }
+        clip = mul(view.view_projection, float4(position + normal * distance, 1.0));
+        if (clip.w <= 0.0) return 1.0;
+    }
     float3 ndc = clip.xyz / clip.w;
     float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
     if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
@@ -895,13 +915,56 @@ float shadow_view_factor(uint index, float3 position, float3 normal)
     float2 uv = local * view.atlas.xy + view.atlas.zw;
     float2 lo = view.atlas.zw + step * 0.5;
     float2 hi = view.atlas.zw + view.atlas.xy - step * 0.5;
+    // Project two receiver-plane tangents. Their depth change gives the depth
+    // of this same plane at every neighboring PCF tap, without fragment
+    // derivatives inside a light-dependent branch.
+    float3 axis = abs(normal.y) < 0.999 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 tangent = normalize(cross(normal, axis));
+    float3 bitangent = cross(normal, tangent);
+    float4 tangentClip = mul(view.view_projection, float4(tangent, 0.0));
+    float4 bitangentClip = mul(view.view_projection, float4(bitangent, 0.0));
+    float3 tangentNdc = (tangentClip.xyz - ndc * tangentClip.w) / clip.w;
+    float3 bitangentNdc = (bitangentClip.xyz - ndc * bitangentClip.w) / clip.w;
+    float determinant = tangentNdc.x * bitangentNdc.y - tangentNdc.y * bitangentNdc.x;
+    float2 depthGradient = abs(determinant) > 1e-8
+        ? float2(tangentNdc.z * bitangentNdc.y - tangentNdc.y * bitangentNdc.z,
+            tangentNdc.x * bitangentNdc.z - tangentNdc.z * bitangentNdc.x) / determinant
+        : float2(0.0);
     float lit = 0.0;
+    if (filter_radius > 1.0)
+    {
+        float taps = 0.0;
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        {
+            float2 q = (float2(x, y) + 0.5) * 0.5 - 1.0;
+            if (dot(q, q) > 1.0) continue;
+            float2 tap = q * filter_radius;
+            float depth = shadow_atlas.SampleLevel(clamp(uv + tap * step, lo, hi), 0.0).r;
+            float2 sampleLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
+                view.params.x * 0.5, 1.0 - view.params.x * 0.5);
+            float2 tapNdc = (sampleLocal - local) * float2(2.0, -2.0);
+            float receiverDepth = ndc.z + dot(depthGradient, tapNdc);
+            lit += receiverDepth - view.params.y <= depth ? 1.0 : 0.0;
+            taps += 1.0;
+        }
+        return lerp(1.0, lit / taps, view.params.w);
+    }
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
     {
-        float depth = shadow_atlas.SampleLevel(clamp(uv + float2(x,y) * step, lo, hi), 0.0).r;
-        lit += ndc.z - view.params.y <= depth ? 1.0 : 0.0;
+        float2 tap = float2(x, y);
+        float depth = shadow_atlas.SampleLevel(clamp(uv + tap * step, lo, hi), 0.0).r;
+        float2 sampleLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
+            view.params.x * 0.5, 1.0 - view.params.x * 0.5);
+        float2 tapNdc = (sampleLocal - local) * float2(2.0, -2.0);
+        float receiverDepth = ndc.z + dot(depthGradient, tapNdc);
+        lit += receiverDepth - view.params.y <= depth ? 1.0 : 0.0;
     }
     return lerp(1.0, lit / 9.0, view.params.w);
+}
+
+float shadow_view_factor(uint index, float3 position, float3 normal)
+{
+    return shadow_view_factor_filtered(index, position, normal, 1.0);
 }
 
 float shadow_factor(float3 position, float3 normal)
@@ -937,6 +1000,7 @@ static float g_shadow = 1.0;
 // directional lights alone, which is a scene missing a campfire and no diagnostic
 // anywhere. `specular_light` already takes the position and uses its own.
 static float3 g_position = float3(0.0, 0.0, 0.0);
+static float3 g_receiver_normal = float3(0.0, 1.0, 0.0);
 static float4 g_screen_position = float4(0.0);
 static float g_crevice = 1.0;
 //@lighting
@@ -965,9 +1029,9 @@ float3 area_specular_term(Light light, float3 position, float3 normal, float3 vi
 // Visibility from point-light `index`. Cube faces use a conventional 90 degree
 // perspective projection, whose depth is a function of the face-forward
 // distance (the largest absolute component), not radial distance.
-float point_shadow_factor(uint index, Light light, float3 position)
+float point_shadow_factor(uint index, Light light, float3 position, float3 normal)
 {
-    return shared_point_shadow_factor(index, light, position);
+    return shared_point_shadow_factor(index, light, position, g_receiver_normal);
 }
 
 
@@ -1018,7 +1082,7 @@ float3 lambert(float3 normal, float occlusion)
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
         if (i == 0u) n_dot_l *= g_shadow;
-        else n_dot_l *= point_shadow_factor(i, light, g_position);
+        else n_dot_l *= point_shadow_factor(i, light, g_position, normal);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
     uint cluster = fragment_cluster();
@@ -1029,13 +1093,13 @@ float3 lambert(float3 normal, float occlusion)
     {
         uint i = overflow ? k : push.frame[0].cluster_indices[cluster * push.frame[0].cluster_grid.w + k];
         Light light = push.frame[0].lights[i];
-        if (light.meta.z == 2u || light.meta.z == 3u) { direct += light.color.rgb*area_diffuse(light,g_position,normal)*point_shadow_factor(i,light,g_position); continue; }
+        if (light.meta.z == 2u || light.meta.z == 3u) { direct += light.color.rgb*area_diffuse(light,g_position,normal)*point_shadow_factor(i,light,g_position,normal); continue; }
         if (light.meta.z != 1u && light.meta.z != 4u) continue;
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
-        n_dot_l *= point_shadow_factor(i, light, g_position);
+        n_dot_l *= point_shadow_factor(i, light, g_position, normal);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
     float ambient_visibility = occlusion * g_crevice;
@@ -1092,7 +1156,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if (light.meta.z != 0u && !cluster_contains(i)) continue;
-        if (light.meta.z == 2u || light.meta.z == 3u) { sum += area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v)*point_shadow_factor(i,light,position); continue; }
+        if (light.meta.z == 2u || light.meta.z == 3u) { sum += area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v)*point_shadow_factor(i,light,position,normal); continue; }
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
         if(light.meta.z==4u)reach*=shared_spot_reach(light,to_light);
@@ -1111,7 +1175,7 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
         // The shadow multiplies the light rather than the geometry term, unlike in
         // `lambert` where the two are the same multiply: an occluded light delivers
         // less energy, it does not change the shape of the microfacets.
-        float occlusion = i == 0u ? g_shadow : point_shadow_factor(i, light, position);
+        float occlusion = i == 0u ? g_shadow : point_shadow_factor(i, light, position, normal);
         sum += light.color.rgb * light.color.w * occlusion * reach
              * distribution * geometry * fresnel / (4.0 * n_dot_v);
     }
@@ -1387,6 +1451,8 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // lookup the same number of times as well as the same way.
     g_shadow = shadow_factor(input.world, geometric);
     g_position = input.world;
+    float3 faceNormal = normalize(cross(ddx(input.world), ddy(input.world)));
+    g_receiver_normal = dot(faceNormal, geometric) < 0.0 ? -faceNormal : faceNormal;
     g_crevice = crevice_occlusion(input.world, geometric);
 
     // After the normal and before the shading, which is the only place it can
@@ -1413,7 +1479,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // has the argument, and the short version is that a lamp pointed into a
     // crevice lights it.
     SharedLightTerms direct = shared_standard_lights(
-        push.frame, g_screen_position, normal, input.world, albedo,
+        push.frame, g_screen_position, normal, g_receiver_normal, input.world, albedo,
         surface.x, surface.y, surface.z, g_shadow
     );
     float ambient_visibility = occlusion * g_crevice;

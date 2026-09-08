@@ -46,6 +46,7 @@ const uint SHADOW_MAX_SIZE = 8192;
  offset to grow with them.
 *>
 const float SHADOW_NORMAL_OFFSET_TEXELS = 2.0;
+const float LOCAL_SHADOW_NORMAL_OFFSET_TEXELS = 0.5;
 
 <*
  How much bigger than it needs to be the fitted square is made, once a scene has
@@ -172,7 +173,9 @@ struct ShadowView
 	ShadowViewKey key;
 	Matrix4f view_projection;
 	float[4] atlas;
-	float[4] params; // texel, bias, normal offset, intensity
+	// z is a world-space normal offset when nonnegative. A negative value asks
+	// the shader for that many projection-sized receiver texels instead.
+	float[4] params; // texel, bias, normal offset/texels, intensity
 	uint size;
 	uint static_revision;
 	uint signature;

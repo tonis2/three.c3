@@ -75,7 +75,7 @@ float3 shared_area_specular(Light light,float3 position,float3 normal,float3 vie
     return light.color.rgb*light.color.w*sum*window*window/(3.14159265*max(samples,1u));
 }
 
-float shared_point_shadow_factor(uint index,Light light,float3 position)
+float shared_point_shadow_factor(uint index,Light light,float3 position,float3 normal)
 {
     uint view=light.meta.y;
     if(view==0xffffffffu)return 1.0;
@@ -89,7 +89,17 @@ float shared_point_shadow_factor(uint index,Light light,float3 position)
         else face=ray.z>=0.0?4u:5u;
         view+=face;
     }
-    return shadow_view_factor(view,position,float3(0.0));
+    if(light.meta.z==2u||light.meta.z==3u)
+    {
+        // The representative area view cannot reproduce a physical penumbra,
+        // but its filter footprint follows the emitter's apparent size.
+        float halfExtent=max(light.area_right.w,light.area_up.w);
+        float receiverDistance=max(distance(position,light.direction.xyz),1e-4);
+        float texel=push.frame[0].shadow_views[view].params.x;
+        float radius=clamp(halfExtent/(receiverDistance*7.4641016*texel),1.0,6.0);
+        return shadow_view_factor_filtered(view,position,normal,radius);
+    }
+    return shadow_view_factor(view,position,normal);
 }
 
 struct SharedLightTerms
@@ -111,7 +121,7 @@ float3 shared_punctual_specular(float3 normal,float3 view,float3 toward,float nl
 
 // Standard shading walks every contributing light once. Visibility is a local
 // value so diffuse and specular share it without a per-light temporary array.
-SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility)
+SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 receiverNormal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility)
 {
     float3 view=normalize(frame[0].camera.xyz-position);
     float3 f0=lerp(float3(0.16*reflectance*reflectance),albedo,metalness);
@@ -124,7 +134,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
         Light light=frame[0].lights[i];if(light.meta.z!=0u)continue;
         float reach;float3 toward=light_toward(light.direction,position,reach);
         float nl=max(dot(normal,toward),0.0);if(nl<=0.0)continue;
-        float visibility=i==0u?sunVisibility:shared_point_shadow_factor(i,light,position);
+        float visibility=i==0u?sunVisibility:shared_point_shadow_factor(i,light,position,receiverNormal);
         float3 energy=light.color.rgb*light.color.w*reach*visibility;
         terms.diffuse+=energy*nl;
         terms.specular+=energy*shared_punctual_specular(normal,view,toward,nl,f0,f90,a2,k,nv);
@@ -139,7 +149,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
         if(light.meta.z==2u||light.meta.z==3u)
         {
             SharedAreaTerms area=shared_area_terms(light,position,normal,view,f0,f90,a2,k,nv);
-            float visibility=shared_point_shadow_factor(i,light,position);
+            float visibility=shared_point_shadow_factor(i,light,position,receiverNormal);
             terms.diffuse+=light.color.rgb*area.diffuse*visibility;
             terms.specular+=area.specular*visibility;
             continue;
@@ -148,7 +158,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
         float reach;float3 toward=light_toward(light.direction,position,reach);
         if(light.meta.z==4u)reach*=shared_spot_reach(light,toward);
         float nl=max(dot(normal,toward),0.0);if(nl<=0.0)continue;
-        float visibility=shared_point_shadow_factor(i,light,position);
+        float visibility=shared_point_shadow_factor(i,light,position,receiverNormal);
         float3 energy=light.color.rgb*light.color.w*reach*visibility;
         terms.diffuse+=energy*nl;
         terms.specular+=energy*shared_punctual_specular(normal,view,toward,nl,f0,f90,a2,k,nv);
