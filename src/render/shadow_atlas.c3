@@ -12,6 +12,15 @@ struct ShadowAtlas
 	vk::ImageView view;
 	vk::Memory memory;
 	vk::Sampler sampler;
+	// The same image again, through a depth-compare sampler: one tap is four
+	// texel comparisons filtered in the texture unit.
+	vk::Sampler compare_sampler;
+	// A 1x1 depth image the compare descriptor points at when there is no atlas:
+	// a comparison sampler is only defined against a depth image.
+	vk::Image blank_image;
+	vk::ImageView blank_view;
+	vk::Memory blank_memory;
+	bool blank_ready;
 	vk::Image static_image;
 	vk::ImageView static_view;
 	vk::Memory static_memory;
@@ -66,6 +75,49 @@ fn void ShadowAtlas.destroy_images(&self, Gpu* gpu)
 	self.width = 0; self.height = 0; self.initialized = false; self.static_initialized = false;
 }
 
+fn void ShadowAtlas.pick_format(&self, Gpu* gpu)
+{
+	if (self.format != FORMAT_UNDEFINED) return;
+	vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+		| FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+	self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
+}
+
+<*
+ The comparison sampler and the 1x1 depth image behind it.
+
+ Made whether or not a shadow pass ever runs: the templates always declare the
+ compare binding, so the descriptor always has to be a depth image and a
+ comparison sampler.
+*>
+fn void? ShadowAtlas.ensure_compare(&self, Gpu* gpu)
+{
+	if (self.compare_sampler != null && self.blank_image != null) return;
+	self.pick_format(gpu);
+	if (self.compare_sampler == null)
+	{
+		self.compare_sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
+			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST).setMinLod(0).setMaxLod(0)
+			.setCompareEnable(1).setCompareOp(COMPARE_OP_LESS_OR_EQUAL)
+			.setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
+	}
+	if (self.blank_image == null)
+	{
+		self.create_image(gpu, 1, 1, &self.blank_image, &self.blank_view, &self.blank_memory)!;
+		self.blank_ready = false;
+	}
+}
+
+// One barrier, once, so the blank is readable in the layout its descriptor names.
+fn void ShadowAtlas.record_blank(&self, vk::CommandBuffer cmd)
+{
+	if (self.blank_image == null || self.blank_ready) return;
+	self.begin_image(cmd, self.blank_image, false, true);
+	self.finish_image(cmd, self.blank_image);
+	self.blank_ready = true;
+}
+
 fn void? ShadowAtlas.ensure(&self, Gpu* gpu, uint width, uint height, bool want_static = false,
 	usz max_bytes = usz::max)
 {
@@ -76,11 +128,7 @@ fn void? ShadowAtlas.ensure(&self, Gpu* gpu, uint width, uint height, bool want_
 	if (self.image == null || self.width != width || self.height != height)
 	{
 		if (self.image != null) { gpu.wait_idle(); self.destroy_images(gpu); }
-		if (self.format == FORMAT_UNDEFINED)
-		{
-			vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-			self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
-		}
+		self.pick_format(gpu);
 		self.create_image(gpu, width, height, &self.image, &self.view, &self.memory, max_bytes)!;
 		defer catch self.destroy_images(gpu);
 		if (self.sampler == null)
@@ -105,6 +153,14 @@ fn void? ShadowAtlas.ensure(&self, Gpu* gpu, uint width, uint height, bool want_
 fn vk::DescriptorImageInfo ShadowAtlas.descriptor(&self, bool sample_static = false)
 {
 	return { .sampler = self.sampler, .imageView = sample_static ? self.static_view : self.view,
+		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+}
+
+fn vk::DescriptorImageInfo ShadowAtlas.compare_descriptor(&self, bool sample_static = false, bool live = true)
+{
+	vk::ImageView view = sample_static ? self.static_view : self.view;
+	bool readable = live && view != null && (sample_static ? self.static_initialized : self.initialized);
+	return { .sampler = self.compare_sampler, .imageView = readable ? view : self.blank_view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 }
 
@@ -201,5 +257,8 @@ fn void ShadowAtlas.free(&self, Gpu* gpu)
 	if (gpu.handle == null) return;
 	gpu.wait_idle(); self.destroy_images(gpu);
 	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
+	if (self.compare_sampler != null) vk::destroySampler(gpu.handle, self.compare_sampler, null);
+	if (self.blank_view != null) vk::destroyImageView(gpu.handle, self.blank_view, null);
+	if (self.blank_memory.image != null) self.blank_memory.free();
 	*self = { };
 }

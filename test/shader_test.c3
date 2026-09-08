@@ -473,9 +473,10 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Eight descriptors, and every one of them is the template's own: the
-	// material's map at 0, the shadow map at 1, the environment map at 2, and the
-	// four maps the built-in material shades with at 3 to 6. Derived, not declared
+	// Nine descriptors, and every one of them is the template's own: the
+	// material's map at 0, the four maps the built-in material shades with, the
+	// ambient-occlusion depth, and the shadow atlas twice — once plain for the
+	// debug view and once through the comparison sampler. Derived, not declared
 	// — until M4 this was a literal in `MeshPipeline.init`, and it was one binding
 	// until the shadow pass claimed the second.
 	//
@@ -485,7 +486,7 @@ fn void the_mesh_push_block_matches_the_struct() @test
 	// an agent's first sampler at 3; this file reserves seven and has no agent. A
 	// binding is only ever resolved against the pipeline that declared it, so the
 	// two meanings of "3" never meet — see `NORMAL_MAP_BINDING`.
-	test::@check(mod.layout.bindings.len() == 8, "eight descriptors, got %d", mod.layout.bindings.len());
+	test::@check(mod.layout.bindings.len() == 9, "nine descriptors, got %d", mod.layout.bindings.len());
 	test::@check(
 		mod.layout.binding_of("normal_map") != null
 			&& mod.layout.binding_of("metalness_roughness_map") != null
@@ -1004,7 +1005,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 8, "from eight reflected bindings");
+		test::@check(pipeline.shader.bindings.len() == 9, "from nine reflected bindings");
 		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
 		test::@check(pipeline.shader.binding_of("shadow_atlas") != null, "and so is the shared shadow atlas");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");

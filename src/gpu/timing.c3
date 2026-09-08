@@ -137,11 +137,28 @@ struct FrameTimer
 	// ending, or ends twice, cannot leave a stale run to be read as a fresh one.
 	bool[MAX_FRAMES_IN_FLIGHT] armed;
 	FrameTiming timing;
+
+	// One pipeline statistics query per slot, wrapping the scene rendering.
+	// Null when the device does not offer `pipelineStatisticsQuery`, and then
+	// `fragments` stays 0.
+	vk::QueryPool stats_pool;
+	// Fragment shader invocations of the last scene pass — see `scene_begin`.
+	ulong fragments;
 }
 
 fn FrameTimer? FrameTimer.init(&self, Gpu* gpu)
 {
 	*self = { };
+
+	if (gpu.limits.pipeline_statistics)
+	{
+		self.stats_pool = vk::queryPoolCreateInfo().setQueryType(QUERY_TYPE_PIPELINE_STATISTICS)
+			.setPipelineStatistics(QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)
+			.setQueryCount(MAX_FRAMES_IN_FLIGHT)
+			.build(gpu.handle)!;
+		vk::resetQueryPool(gpu.handle, self.stats_pool, 0, MAX_FRAMES_IN_FLIGHT);
+	}
+
 	if (!gpu.limits.timestamps) return *self;
 
 	self.period = gpu.limits.timestamp_period;
@@ -159,7 +176,11 @@ fn FrameTimer? FrameTimer.init(&self, Gpu* gpu)
 
 fn void FrameTimer.free(&self, Gpu* gpu)
 {
-	if (self.pool != null && gpu.handle != null) vk::destroyQueryPool(gpu.handle, self.pool, null);
+	if (gpu.handle != null)
+	{
+		if (self.pool != null) vk::destroyQueryPool(gpu.handle, self.pool, null);
+		if (self.stats_pool != null) vk::destroyQueryPool(gpu.handle, self.stats_pool, null);
+	}
 	*self = { };
 }
 
@@ -195,8 +216,12 @@ fn double FrameTimer.span(
 *>
 fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 {
-	if (self.pool == null || !self.armed[slot]) return;
+	if (!self.armed[slot]) return;
 	self.armed[slot] = false;
+
+	self.collect_fragments(gpu, slot)!;
+
+	if (self.pool == null) return;
 
 	ulong[FRAME_MARKS] stamps;
 	vk::getQueryPoolResults(
@@ -234,9 +259,12 @@ fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 *>
 fn void? FrameTimer.begin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 {
-	if (self.pool == null) return;
+	if (self.pool == null && self.stats_pool == null) return;
 
 	self.collect(gpu, slot)!;
+
+	if (self.stats_pool != null) vk::resetQueryPool(gpu.handle, self.stats_pool, slot, 1);
+	if (self.pool == null) return;
 
 	vk::resetQueryPool(gpu.handle, self.pool, slot * FRAME_MARKS, FRAME_MARKS);
 	vk::cmdWriteTimestamp2(cmd, PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, self.pool, slot * FRAME_MARKS);
@@ -265,8 +293,57 @@ fn void FrameTimer.mark(&self, vk::CommandBuffer cmd, uint slot, FrameMark at)
 *>
 fn void FrameTimer.end(&self, vk::CommandBuffer cmd, uint slot)
 {
-	if (self.pool == null) return;
+	if (self.pool == null && self.stats_pool == null) return;
 
 	self.mark(cmd, slot, FrameMark.END);
 	self.armed[slot] = true;
+}
+
+<*
+ Opens and closes the pipeline statistics query around the scene rendering.
+
+ Recorded outside the rendering, never inside one: a query begun inside a
+ render pass instance has to end inside the same one, and the pair here brackets
+ `begin_render` … `cmdEndRendering` so nothing the shadow pass or the post chain
+ draws is counted.
+*>
+fn void FrameTimer.scene_begin(&self, vk::CommandBuffer cmd, uint slot)
+{
+	if (self.stats_pool == null) return;
+
+	vk::cmdBeginQuery(cmd, self.stats_pool, slot, (vk::QueryControlFlags)0);
+}
+
+fn void FrameTimer.scene_end(&self, vk::CommandBuffer cmd, uint slot)
+{
+	if (self.stats_pool == null) return;
+
+	vk::cmdEndQuery(cmd, self.stats_pool, slot);
+}
+
+<*
+ Reads back the slot's fragment count, if the GPU has resolved it.
+
+ `WITH_AVAILABILITY` rather than trusting a zero: a scene pass that shaded
+ nothing and a query the GPU has not written yet both read back 0, and only the
+ availability word tells them apart. An unresolved query leaves the last
+ reading standing, the same way an unresolved timestamp run does.
+*>
+fn void? FrameTimer.collect_fragments(&self, Gpu* gpu, uint slot)
+{
+	if (self.stats_pool == null) return;
+
+	ulong[2] result;
+	vk::getQueryPoolResults(
+		gpu.handle,
+		self.stats_pool,
+		slot,
+		1,
+		(sz)@sizeof(result),
+		&result,
+		(vk::DeviceSize)@sizeof(result),
+		QUERY_RESULT_64_BIT | QUERY_RESULT_WITH_AVAILABILITY_BIT
+	)!;
+
+	if (result[1] != 0) self.fragments = result[0];
 }

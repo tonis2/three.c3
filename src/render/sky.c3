@@ -177,6 +177,10 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
 	// bucket loop below it: the first bucket sets its own material's mode, so
 	// this cannot be inherited in either direction.
 	vk::cmdSetCullMode(cmd, CULL_MODE_NONE);
+	// `SKY_STATE`'s two, put back by hand: the depth state is dynamic so the scene
+	// pass can put a prepassed bucket on EQUAL, and this draw comes before it.
+	vk::cmdSetDepthWriteEnable(cmd, vk::FALSE);
+	vk::cmdSetDepthCompareOp(cmd, COMPARE_OP_LESS_OR_EQUAL);
 
 	SampledBindings samplers;
 	samplers.add(0, self.assets.texture_at(sky.background).descriptor());

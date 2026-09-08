@@ -908,6 +908,52 @@ fn void configure_sets_what_it_is_given_and_nothing_else() @test
 }
 
 <*
+ `maxFps` is a cap the loop reads, so what a script sets is what it reads back —
+ with no window to pace, which is where every test runs.
+
+ Null is the way to say "no cap" and the way it reads back; 0 and Infinity are
+ accepted as the same thing so a settings slider at either end needs no special
+ case. A rate that is not a number, is negative or is past the ceiling throws
+ rather than pacing to something nobody asked for.
+*>
+fn void max_fps_is_kept_and_bounded() @test
+{
+	@with_home()
+	{
+		@with_js(; three::JsRuntime* run)
+		{
+			test::@check(@answer(run, `return three.window.maxFps;`) == "null", "a fresh runtime had a cap");
+			test::@check(@answer(run, `return three.configure({ maxFps: 60 }).maxFps;`) == "60",
+				"configure did not take the cap");
+			test::@check(@answer(run, `return three.window.maxFps;`) == "60", "the cap did not read back");
+			test::@check(run.max_fps == 60, "the cap did not reach the host");
+
+			test::@check(@answer(run, `return three.configure({}).maxFps;`) == "60", "an empty configure lifted the cap");
+			test::@check(@answer(run, `three.window.maxFps = 59.94; return three.window.maxFps;`) == "60",
+				"a fractional rate was not rounded");
+			test::@check(@answer(run, `three.window.maxFps = null; return three.window.maxFps;`) == "null",
+				"null did not lift the cap");
+			test::@check(run.max_fps == 0, "null did not reach the host");
+			test::@check(@answer(run, `three.window.maxFps = 30; three.window.maxFps = 0; return three.window.maxFps;`) == "null",
+				"0 did not lift the cap");
+			test::@check(@answer(run, `three.window.maxFps = 30; three.window.maxFps = Infinity; return three.window.maxFps;`)
+				== "null", "Infinity did not lift the cap");
+
+			three::RunResult negative = run.run(`three.window.maxFps = -1;`);
+			defer negative.free();
+			test::@check(!negative.ok, "a negative rate was taken");
+			three::RunResult text = run.run(`three.window.maxFps = 'fast';`);
+			defer text.free();
+			test::@check(!text.ok, "a string was taken as a rate");
+			three::RunResult high = run.run(`three.window.maxFps = 100000;`);
+			defer high.free();
+			test::@check(!high.ok, "a rate past the ceiling was taken");
+			test::@check(@answer(run, `return three.window.maxFps;`) == "null", "a refused rate changed the cap");
+		};
+	};
+}
+
+<*
  Under `--headless` there is no window, and the verbs say so without failing.
 
  A game that names itself has to start where there is no title bar — a

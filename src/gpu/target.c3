@@ -296,6 +296,55 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 }
 
 <*
+ Opens the depth buffer on its own, cleared, for the depth prepass.
+
+ A rendering of its own rather than the first draws of the scene's, because the
+ pipeline statistics query brackets the scene rendering and the prepass is not
+ part of what `fragmentsShaded` is meant to measure. `begin_render` is then asked
+ to keep what this left behind.
+
+ `vk::depthBarrier` opens from `UNDEFINED`, which is right here for the same
+ reason it is right there: the attachment is cleared on load.
+*>
+fn void Target.begin_depth(&self, vk::CommandBuffer cmd)
+{
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ vk::depthBarrier(self.depth) }));
+
+	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
+		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
+		.setClearValue({ .depthStencil = { 1.0, 0 } });
+
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+		.setDepthAttachment(&depth_attachment);
+
+	vk::cmdBeginRendering(cmd, &rendering);
+	set_full_viewport(cmd, self.extent, true);
+}
+
+<*
+ The depth attachment carried from one rendering into the next inside a frame.
+
+ Not `vk::depthBarrier`, which comes from `UNDEFINED` and so discards — which is
+ exactly what a prepass must not have happen to its result.
+*>
+fn vk::ImageMemoryBarrier2 depth_keep_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+}
+
+<*
  Transitions in, begins dynamic rendering, and sets a full-target viewport —
  into the target's own colour image.
 
@@ -304,8 +353,9 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 fn void Target.begin_render(
 	&self,
 	vk::CommandBuffer cmd,
-	float[4] clear = { 0, 0, 0, 1 }
-) => self.begin_render_to(cmd, self.color, self.color_view, clear);
+	float[4] clear = { 0, 0, 0, 1 },
+	bool keep_depth = false
+) => self.begin_render_to(cmd, self.color, self.color_view, clear, keep_depth);
 
 <*
  The same, into a colour image that is not necessarily the target's.
@@ -327,14 +377,16 @@ fn void Target.begin_render_to(
 	vk::CommandBuffer cmd,
 	vk::Image image,
 	vk::ImageView view,
-	float[4] clear = { 0, 0, 0, 1 }
+	float[4] clear = { 0, 0, 0, 1 },
+	bool keep_depth = false
 )
 {
 	// The one colour in the renderer that never meets a shader, so the one that
 	// cannot be decoded where the others are. `gpu/color.c3` says why the curve
 	// is the piecewise one.
 	float[4] clear_linear               = srgb_to_linear_rgb(clear);
-	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image), vk::depthBarrier(self.depth) };
+	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image),
+		keep_depth ? depth_keep_barrier(self.depth) : vk::depthBarrier(self.depth) };
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
 
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
@@ -345,7 +397,7 @@ fn void Target.begin_render_to(
 
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setLoadOp(keep_depth ? ATTACHMENT_LOAD_OP_LOAD : ATTACHMENT_LOAD_OP_CLEAR)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 

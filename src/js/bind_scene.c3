@@ -193,6 +193,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "shadowBudgetSet", &js_shadow_budget_set, 5);
 	self.bind(host, "occlusionGet", &js_occlusion_get, 0);
 	self.bind(host, "occlusionSet", &js_occlusion_set, 4);
+	self.bind(host, "depthPrepassGet", &js_depth_prepass_get, 0);
+	self.bind(host, "depthPrepassSet", &js_depth_prepass_set, 1);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -747,6 +749,30 @@ fn void js_occlusion_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qj
 		.bias = arg_float(&js, argc, args, 3),
 	};
 	self.set_ambient_occlusion(s);
+}
+
+<*
+ `depthPrepassGet()` — whether the depth prepass is on, as 1 or 0.
+*>
+fn void js_depth_prepass_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value(self.pass.prepass.enabled ? 1 : 0);
+}
+
+<*
+ `depthPrepassSet(on)` — draw the opaque and cut-out buckets depth-only before
+ the scene pass, or do not.
+
+ A property of the renderer rather than of the scene, like the post chain: a new
+ `three.Scene()` does not put it back.
+*>
+fn void js_depth_prepass_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	self.pass.prepass.enabled = arg_float(&js, argc, args, 0) != 0;
+	if (!self.pass.prepass.enabled) self.pass.prepass.live = false;
 }
 
 <*
@@ -1859,6 +1885,7 @@ fn void js_stats(
 	// `drawCalls` above counts the scene pass and always has. Zero with shadows
 	// off, which is the honest answer rather than an absent property.
 	js.set_property(object, "shadowDraws", qjs::int_value((int)stats.shadow_draws));
+	js.set_property(object, "prepassDraws", qjs::int_value((int)stats.prepass_draws));
 	// And what the cached half cost, on the frames it was rebuilt — §19.3. Zero
 	// is the number to want here: it says the shadow map held from one frame to
 	// the next, which is what marking things static is for. See
@@ -1890,6 +1917,11 @@ fn void js_stats(
 	js.set_property(object, "sceneMs", qjs::number_value(timing.scene));
 	js.set_property(object, "postMs", qjs::number_value(timing.post));
 	js.set_property(object, "presentMs", qjs::number_value(timing.present));
+	// Same join and the same unconditional zero as `gpuMs`: a device without
+	// `pipelineStatisticsQuery`, and a runtime with no device at all, both answer
+	// 0 rather than dropping the key.
+	js.set_property(object, "fragmentsShaded",
+		qjs::number_value(self.renderer != null ? (double)self.renderer.fragments_shaded() : 0.0));
 	*out = object;
 }
 

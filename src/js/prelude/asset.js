@@ -71,6 +71,14 @@ const POINT_FROM_WATTS = 1 / (4 * Math.PI * Math.PI);
 // is `light_threshold`, the illumination it stops tracing a lamp below, and its
 // default is 0.01. So the reach is where `intensity / d²` falls under it —
 // `sqrt(intensity / 0.01)`, 10.7 m for a 45 W lantern and 12.3 m for a 60 W one.
+//
+// **And then bounded by the file itself.** Wattage alone answers in the units of
+// a lamp and knows nothing of the room: an area light exported in Watts derives
+// hundreds of metres, and every one of those metres is a cluster the shader
+// walks the light in. The far corner of the file's own bounds is the longest
+// reach that can still be about this file — the light keeps lighting everything
+// in it and stops at the edge — so the derived distance is clamped there. A
+// file that states a `range` is left alone.
 const LIGHT_THRESHOLD = 0.01;
 
 // What an imported material's `reflectance` is, against 0 for one a script wrote.
@@ -503,6 +511,16 @@ function nameList(names) {
 	if (!names.length) return '(none)';
 	if (names.length <= NAMES_SHOWN) return names.join(', ');
 	return `${names.slice(0, NAMES_SHOWN).join(', ')} … and ${names.length - NAMES_SHOWN} more`;
+}
+
+// The distance from a point to the far corner of a box — how far a light
+// standing there has to reach to still light everything in the file, and no
+// further. Works with the point outside the box as well.
+function farCorner(box, p) {
+	const dx = Math.max(box.max.x - p[0], p[0] - box.min.x);
+	const dy = Math.max(box.max.y - p[1], p[1] - box.min.y);
+	const dz = Math.max(box.max.z - p[2], p[2] - box.min.z);
+	return Math.hypot(dx, dy, dz);
 }
 
 // Squared distance between two triples. Squared because the only thing that
@@ -952,7 +970,7 @@ export class Asset {
 		// After the tree, because both write the host's own camera and lights and
 		// neither reads it — the order only matters for what a script sees if it
 		// throws, and a half-built tree is the more useful half to have.
-		if (opt.lights) this._placeLights();
+		if (opt.lights) this._placeLights(root);
 		if (opt.camera) this._placeCamera(opt.camera);
 		return root;
 	}
@@ -1054,9 +1072,17 @@ export class Asset {
 	// Everything that did not fit is named once by `console.warn`, because a
 	// lantern that quietly does not light is the kind of thing somebody spends an
 	// afternoon looking for in a shader.
-	_placeLights() {
+	_placeLights(root) {
 		const found = this.lights;
 		if (!found.length) return;
+
+		// Measured once, and only for a file that has a light with no range of its
+		// own — the walk crosses to the host per drawn mesh. See LIGHT_THRESHOLD.
+		let box;
+		const reach = (position, derived) => {
+			if (box === undefined) box = (root && root.boundsInParent()) || null;
+			return box === null ? derived : Math.min(derived, farCorner(box, position));
+		};
 
 		const sun = found.find((l) => l.type === 'directional');
 		if (sun) {
@@ -1096,7 +1122,7 @@ export class Asset {
 				const power = point.powerWatts;
 				three.lights.add({ position: point.node.position, shape: point.type,
 					right, up, width: point.width, height: point.height,
-					range: point.range > 0 ? point.range : Math.sqrt(power / LIGHT_THRESHOLD),
+					range: point.range > 0 ? point.range : reach(point.node.position, Math.sqrt(power / LIGHT_THRESHOLD)),
 					color: point.color, intensity: power });
 				continue;
 			}
@@ -1104,15 +1130,15 @@ export class Asset {
 			if (point.type === 'spot') {
 				three.lights.add({ position: point.node.position, shape: 'spot', direction: point.node.direction,
 					innerAngle: point.cone[0], outerAngle: point.cone[1],
-					range: point.range > 0 ? point.range : Math.sqrt(intensity / LIGHT_THRESHOLD),
+					range: point.range > 0 ? point.range : reach(point.node.position, Math.sqrt(intensity / LIGHT_THRESHOLD)),
 					color: point.color, intensity });
 				continue;
 			}
 			three.lights.add({
 				position: point.node.position,
 				// The file's own reach, or the distance Blender would have stopped
-				// tracing it at — see LIGHT_THRESHOLD.
-				range: point.range > 0 ? point.range : Math.sqrt(intensity / LIGHT_THRESHOLD),
+				// tracing it at, bounded by the file itself — see LIGHT_THRESHOLD.
+				range: point.range > 0 ? point.range : reach(point.node.position, Math.sqrt(intensity / LIGHT_THRESHOLD)),
 				color: point.color,
 				intensity,
 			});

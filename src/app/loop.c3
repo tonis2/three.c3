@@ -180,6 +180,58 @@ struct WindowFrame
 	InputState input;
 }
 
+
+<*
+ Sleeps out what is left of the frame period `three.window.maxFps` allows.
+
+ The swapchain presents with vsync, so a cap above the display's refresh rate
+ changes nothing; one below it is what this is for. A window with an animation
+ callback draws every frame the display will take, and on a 144Hz display that
+ is more than twice the GPU work a 60fps game needs.
+
+ Paced against a due time rather than against the last frame's end, so a frame
+ that ran long borrows from the next instead of pushing every later frame
+ back — up to one period, after which the schedule restarts from now rather
+ than letting a stall be repaid as a burst.
+
+ @param max_fps : `The cap, or 0 for none.`
+ @param [inout] due_ns : `When the next frame may go out, on the loop's own clock.`
+*>
+fn void pace_frame(uint max_fps, Clock since_start, long* due_ns)
+{
+	if (max_fps == 0)
+	{
+		*due_ns = 0;
+		return;
+	}
+	long period = 1_000_000_000 / (long)max_fps;
+	long now    = (long)since_start.to_now();
+	if (*due_ns > now)
+	{
+		thread::sleep_ns((NanoDuration)(*due_ns - now))!!;
+		now = (long)since_start.to_now();
+	}
+	long next = *due_ns + period;
+	*due_ns = next > now ? next : now + period;
+}
+
+<*
+ How far apart the headless server loop's ticks are, in nanoseconds.
+
+ 60Hz, or slower when `three.window.maxFps` is below it: a callback that ran
+ at one rate with a window and another without would be a difference an agent
+ cannot see. The cap can only slow the ticks — a windowed loop cannot present
+ faster than its display, and `HEADLESS_FRAME_MS` is the display this stands in
+ for.
+*>
+fn long headless_tick_ns(uint max_fps)
+{
+	long floor = HEADLESS_FRAME_MS * 1_000_000;
+	if (max_fps == 0) return floor;
+	long capped = 1_000_000_000 / (long)max_fps;
+	return capped > floor ? capped : floor;
+}
+
 <*
  Poll, drive the interface, drive the camera, decide the cursor, latch the
  keyboard. One frame of window, in one place.
@@ -523,6 +575,10 @@ fn void? live(
 	bool quiet        = false;
 	bool camera_moved = false;
 
+	// When the next frame may be presented under `three.window.maxFps`. Zero
+	// until a frame has been paced, so the first one is never held.
+	long frame_due_ns = 0;
+
 	while (true)
 	{
 		if (window != null)
@@ -633,6 +689,10 @@ fn void? live(
 			//   is what clears it and a short-circuit would leave it standing.
 			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0
 				&& ui_idle;
+
+			// A quiet loop is about to sleep in the kernel anyway, and holding it
+			// here first would only delay the event that wakes it.
+			if (!quiet) pace_frame(runtime.max_fps, since_start, &frame_due_ns);
 		}
 		else
 		{
@@ -642,7 +702,7 @@ fn void? live(
 			// what makes it the same difference rather than merely present — this
 			// loop is bounded by a 4 ms sleep and would otherwise run a callback
 			// four times for every frame a vsynced window gives it.
-			if (elapsed_ns - last_tick_ns >= HEADLESS_FRAME_MS * 1_000_000)
+			if (elapsed_ns - last_tick_ns >= headless_tick_ns(runtime.max_fps))
 			{
 				last_tick_ns = elapsed_ns;
 				// No window, so no keyboard: the default empty state, and

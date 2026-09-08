@@ -479,22 +479,22 @@ A run with no host loop never performs a queued one. Sizes are 1 to 16384 a side
 
 ## three.configure(options)
 
-What a game declares about itself, at the top of `main.js`: `{ title, fullscreen, saveDir }`. Every
-key is optional and anything left out is left alone.
+What a game declares about itself, at the top of `main.js`: `{ title, fullscreen, maxFps, saveDir }`.
+Every key is optional and anything left out is left alone.
 
 ```js
-three.configure({ title: 'Wumpa Quest', fullscreen: false, saveDir: 'wumpa-quest' });
+three.configure({ title: 'Wumpa Quest', fullscreen: false, maxFps: 60, saveDir: 'wumpa-quest' });
 ```
 
 There are no command-line flags for these — a player never sees a command line, and a settings screen
-has to change the same things at runtime — so `title` and `fullscreen` are live properties on
-`three.window` as well, and this is the one call that sets them before the first frame.
+has to change the same things at runtime — so `title`, `fullscreen` and `maxFps` are live properties
+on `three.window` as well, and this is the one call that sets them before the first frame.
 
 `saveDir` is boot-only and has no property beside it, because moving it mid-run would strand
 everything already written. It is a folder name and not a path; a separator in it is refused.
 
-Returns `{ title, fullscreen, saveDir }` as they stand after the call, so a boot log can print one
-accurate line. Under `--headless` the window half is remembered and does nothing.
+Returns `{ title, fullscreen, maxFps, saveDir }` as they stand after the call, so a boot log can print
+one accurate line. Under `--headless` the window half is remembered and does nothing.
 
 ## three.save
 
@@ -524,7 +524,7 @@ run, and `list()` is `[]` before a folder has even been named, so a load menu ne
 
 ## three.window
 
-The window: `width`, `height`, `scale`, `resize(width, height)`, `title` and `fullscreen`.
+The window: `width`, `height`, `scale`, `resize(width, height)`, `title`, `fullscreen` and `maxFps`.
 
 `width` and `height` are device pixels, read off the drawable so they stay current through a live
 resize drag; `scale` is device pixels per logical point — 1.0 on an ordinary display, 2.0 on a retina
@@ -533,6 +533,15 @@ answers with whether there was a window to ask.
 
 `title` is writable at any time — `three.configure` names it at boot and this is what a level change
 or a pause menu uses — and reads back what was last set even under `--headless`.
+
+`maxFps` is the most frames a second the loop will present, or null for no cap. It is a cap and not a
+rate: every frame is vsynced regardless, so a number above the display's refresh rate changes nothing,
+and one below it makes the loop sleep out the rest of each frame — a game that fills the GPU at 144Hz
+is a game that could fill a third of it at 48, and the fan hears the difference. It takes effect on the
+next frame. Null, 0 and Infinity all lift the cap; anything else has to be a number between 1 and
+1000. A settings screen wants it beside `three.setRenderSize`: one halves the pixels, the other halves
+the frames. Under `--headless` it is remembered, and the server loop paces its ticks by it so a
+callback sees the same rate either way.
 
 `fullscreen` is a request in both directions: macOS animates into its own space over about half a
 second, a Wayland compositor answers with a configure some frames later, and an X11 window manager
@@ -1956,13 +1965,17 @@ dimensions/orientation are preserved.
 The custom Blender exporter writes punctual powers using its existing Blender-watt convention,
 rather than standard glTF photometric units. The importer retains the corresponding conversion:
 directional intensity is divided by π, and point/spot intensity by 4π². A missing punctual
-range is derived using an illumination threshold of 0.01. This convention is specific to this
+range is derived using an illumination threshold of 0.01, and then clamped to the distance from
+the light to the far corner of the file's own bounds — the light still reaches everything in the
+file and nothing beyond it, which keeps a lamp exported in Watts out of every cluster in a small
+level. A range the file states is used as it stands. This convention is specific to this
 authoring pipeline and is not a general candela/lux conversion.
 
 Area `powerWatts` is passed unchanged to extended-emitter shading. World-space right/up axes
 and dimensions are derived from the node transform, including scale. When Blender's **Custom
 Distance** is enabled, its cutoff is imported as the area's Forward+ `range`; without an authored
-range, the existing `sqrt(powerWatts / 0.01)` fallback is retained. Area source files preserve
+range, the `sqrt(powerWatts / 0.01)` fallback is used, bounded by the file the same way a punctual
+light's is. Area source files preserve
 square, rectangle, disk and ellipse shapes, dimensions, color, watts, spread and optional range
 on roundtrip. Rendering currently assumes one-sided cosine emission; the stored spread parameter
 is not a complete implementation of Blender's area-light spread control.
@@ -2603,6 +2616,27 @@ curve on works.
 It is a uniform on the tonemap rather than part of its shader, so writing it is a four-byte push that takes
 effect on the next frame with no compile. That is what makes it the half of this pair that can be animated —
 a fade to white is this, a change of curve is not.
+
+## three.depthPrepass
+
+Draw the opaque and cut-out geometry depth-only before the scene pass, so each pixel is shaded once instead of
+once per layer of overdraw. `true` by default.
+
+It costs a depth-only pass over the same geometry and pays wherever the fragment shader is expensive and things
+stand in front of each other — foliage, a crowd, a corridor. A flat scene with no overdraw pays the extra pass
+for nothing, which is what turning it off is for. `stats().fragmentsShaded` divided by the pixel count is how to
+tell which one you have: near 1 with it on, and whatever the overdraw is with it off.
+
+A material the prepass cannot speak for is drawn exactly as it was before: anything transparent, a debug line, a
+`vertex:` body — which moves the surface in a shader the prepass does not run — and a `fragment:` body that
+discards, since nothing here can know what shape it cuts. `stats().prepassDraws` is how many draw calls the
+prepass made, so a scene where that stays 0 is one it could not help.
+
+Like the post chain it belongs to the renderer rather than to the scene: `new three.Scene()` does not reset it.
+
+```js
+three.depthPrepass = false;
+```
 
 ## the handle three.setPost() and three.addPass() answer with
 

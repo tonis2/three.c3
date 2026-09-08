@@ -287,6 +287,10 @@ struct Material
 	// The vertex body, owned, or an empty slice for a material that has none.
 	// Kept for `toJSON` and for the same reason `fragment` is.
 	String vertex;
+	// Whether `fragment` cuts its own shape. Decided once, where the body arrives,
+	// because `MeshPass.prepassed` asks it per bucket per frame and the body can be
+	// kilobytes.
+	bool fragment_discards;
 	<*
 	 What the body was assembled *from*: the uniform and sampler declarations, with
 	 their names owned here.

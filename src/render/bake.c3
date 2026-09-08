@@ -281,8 +281,10 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 *>
 fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material, GpuMesh* mesh, ulong table_address)
 {
+	self.pass.shadow_manager.atlas.ensure_compare(self.gpu)!;
 	self.gpu.handle.@single_time_command(queue: self.gpu.graphics ; vk::CommandBuffer cmd)
 	{
+		self.pass.shadow_manager.atlas.record_blank(cmd);
 		// Transparent, so a texel no triangle covers and a texel a body discarded are
 		// the same value — which is what `alphaMode: MASK` then cuts out.
 		self.target.begin_render(cmd, { 0, 0, 0, 0 });
@@ -297,6 +299,10 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		// space has nothing to do with which way it faces in the world, so culling
 		// here would drop whichever half of a layout happened to be mirrored.
 		vk::cmdSetCullMode(cmd, CULL_MODE_NONE);
+		// `BAKE_STATE` has no depth at all; the state is dynamic on every pipeline
+		// `MeshPipeline.init` builds, so it is set rather than assumed.
+		vk::cmdSetDepthWriteEnable(cmd, vk::FALSE);
+		vk::cmdSetDepthCompareOp(cmd, COMPARE_OP_LESS_OR_EQUAL);
 
 		// The frame's own rule for binding 0: the material's map beats the mesh's
 		// image, because a script that set one and got the other would be overruled
@@ -321,6 +327,11 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_BINDING))
 		{
 			samplers.add(SHADOW_ATLAS_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
+				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
 		}
 		samplers.collect(pipeline, &material.textures, &self.pass.assets, MATERIAL_BINDING_FIRST);
 		samplers.push(cmd, pipeline);

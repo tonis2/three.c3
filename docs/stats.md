@@ -67,6 +67,11 @@
 - `shadowDraws` — Draw calls the last shadow pass made, 0 with shadows off. Roughly `drawCalls` minus
   the transparent buckets and helpers, so it is what shadows cost in draws. With static casters it
   counts the movers alone.
+- `prepassDraws` — Draw calls the depth prepass made, and 0 with `three.depthPrepass` off or in a
+  scene it cannot help. It is at most `drawCalls` minus the transparent buckets and helpers; the gap
+  is the materials the prepass has to leave out — a `vertex:` body, a `fragment:` body that
+  discards, a stochastically sampled cut-out. A scene where this stays 0 while `fragmentsShaded` is
+  high is one paying for its overdraw and not getting the saving.
 - `shadowStaticDraws` — Draw calls into the cached half of the shadow map, and 0 on every frame that
   did not rebuild it — which should be nearly all of them. Equal to the caster count every frame
   means something is invalidating the cache: an unsettled camera, or a static node still being moved.
@@ -111,3 +116,10 @@
 - `postMs` — Of `gpuMs`: the post chain, 0 with no post shader.
 - `presentMs` — Of `gpuMs`: getting the finished image out — the blit to the window, or the readback
   behind a screenshot. The five add up to `gpuMs`, so anything unaccounted for is a bug.
+- `fragmentsShaded` — Fragment shader invocations of the pass that drew the picture, from a pipeline
+  statistics query — the shadow pass, the depth prepass and the post chain are all outside it, so it
+  is the scene pass alone. Overdraw is `fragmentsShaded` divided by `width * height` of
+  `renderSize()`: 1 is a frame where every pixel was shaded once, and 3 is a frame paying for its
+  lighting three times over. With `three.depthPrepass` on it should sit near 1 — the prepass's own
+  cut-out fragments are not in here, and `prepassDraws` is what says the prepass ran. Same "which
+  frame" rules as `gpuMs`, and 0 on a device without `pipelineStatisticsQuery`.

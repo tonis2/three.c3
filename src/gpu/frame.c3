@@ -418,13 +418,21 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
 	self.pass.record_ambient_occlusion(cmd);
 
+	// The depth prepass, and outside the query below on purpose: it is what makes
+	// `fragmentsShaded` mean "how many times the scene pass shaded a pixel" rather
+	// than that plus the prepass's own cut-out fragments. `docs/stats.md` says so.
+	bool prepassed = self.pass.record_depth_prepass(cmd, &self.target);
+
+	// Around the scene rendering and outside it — `gpu/timing.c3` says why.
+	self.timer.scene_begin(cmd, slot);
+
 	if (posted)
 	{
-		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear);
+		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear, prepassed);
 	}
 	else
 	{
-		self.target.begin_render(cmd, self.clear);
+		self.target.begin_render(cmd, self.clear, prepassed);
 	}
 
 	// Everything drawn into the target, between `begin_render` and `close`. One
@@ -437,6 +445,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// a list of passes rather than a thing that also has to know how the frame
 	// started.
 	vk::cmdEndRendering(cmd);
+	self.timer.scene_end(cmd, slot);
 	self.timer.mark(cmd, slot, FrameMark.SCENE);
 
 	// The asset table comes down with it because each post shader's own samplers
@@ -496,6 +505,14 @@ fn double Renderer.gpu_ms(&self) => self.timer.timing.total;
  `gpu_ms`, because it is the same reading.
 *>
 fn FrameTiming Renderer.timing(&self) => self.timer.timing;
+
+<*
+ Fragment shader invocations of the last scene pass — the same "which frame"
+ rules as `gpu_ms`, and 0 on a device without `pipelineStatisticsQuery`.
+
+ Divided by the render size it is the frame's overdraw.
+*>
+fn ulong Renderer.fragments_shaded(&self) => self.timer.fragments;
 
 <*
  Tell the swapchain how big the window says it is, in device pixels.

@@ -4055,7 +4055,11 @@ fn void importing_a_files_lights_fills_the_slots_nearest_the_camera() @test
    inverse-square from one metre, so `intensity` *is* P/(4 pi²) — 45 arrives as
    1.1399
  - a lamp with no `range` reaches to where Blender stops tracing it, which is
-   EEVEE's `light_threshold` of 0.01: `sqrt(intensity / 0.01)`, 10.6764 metres
+   EEVEE's `light_threshold` of 0.01: `sqrt(intensity / 0.01)`, 10.6764 metres,
+   and then no further than the file it lights: the lamp stands at (0, 2, 0) over
+   a triangle spanning (-1, -1, 0) to (1, 1, 0), whose far corner is sqrt(10) =
+   3.1623 metres off. `a_derived_light_reach_stops_at_the_files_own_bounds` is
+   that clamp on its own.
 
  `asset.lights` still reports the file's raw Watts, which is the door a script
  that wants its own exposure goes through — asserted here so that the conversion
@@ -4092,10 +4096,77 @@ fn void a_files_watts_convert_by_blenders_own_arithmetic() @test
 			"2.2 Watts of sun is 2.2/pi: %s", result.value);
 		test::@check(result.value.contains(`"lamp":1.1399`),
 			"45 Watts of lantern is 45/(4 pi squared): %s", result.value);
-		test::@check(result.value.contains(`"range":10.6764`),
-			"and it reaches to Blender's light threshold: %s", result.value);
+		test::@check(result.value.contains(`"range":3.1623`),
+			"and it reaches Blender's threshold, or the far corner of the file, "
+			"whichever is nearer: %s", result.value);
 		test::@check(result.value.contains(`"raw":[2.2,45]`),
 			"while asset.lights still reports the file's own Watts: %s", result.value);
+	};
+}
+
+<*
+ A light the file gives no range reaches the far corner of the file and stops.
+
+ The derived reach is the lamp's own arithmetic and knows nothing of the room it
+ stands in — an area light exported in Watts derives hundreds of metres — and
+ every one of those metres is a cluster the shader has to walk the light in. So
+ the Watts answer first and the file's own bounds cap the answer: the light still
+ reaches everything in the file and nothing beyond it.
+
+ Both directions in one test, because a clamp that always fires and a clamp that
+ never fires are each satisfied by half of it:
+
+ - `watts.glb`'s 45 W lamp stands at (0, 2, 0) over a triangle spanning
+   (-1, -1, 0) to (1, 1, 0). The Watts say 10.6764 m and the far corner is
+   sqrt(1 + 9) = 3.1623 m, so it is shortened to the corner.
+ - `lit.glb`'s `wall_lamp` derives 6.7524 m from 18 W and its far corner is
+   7.3485 m away, so it keeps every metre of what the Watts gave it.
+ - `near_a` names a `range` of 4 in the file, and a stated range is never touched.
+*>
+fn void a_derived_light_reach_stops_at_the_files_own_bounds() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const round = n => Math.round(n * 1e4) / 1e4;
+			const corner = (box, p) => Math.hypot(
+				Math.max(box.max.x - p[0], p[0] - box.min.x),
+				Math.max(box.max.y - p[1], p[1] - box.min.y),
+				Math.max(box.max.z - p[2], p[2] - box.min.z));
+
+			const watts = three.load("test/fixtures/watts.glb");
+			const one = new three.Scene();
+			const wattsTree = watts.instantiate("watts", { lights: true });
+			one.add(wattsTree);
+			const lamp = round(three.lights[1].range);
+			const lampCorner = round(corner(wattsTree.boundingBox(), [0, 2, 0]));
+
+			const lit = three.load("test/fixtures/lit.glb");
+			const two = new three.Scene();
+			const litTree = lit.instantiate("lit", { lights: true });
+			two.add(litTree);
+			const at = p => [...three.lights].find(l => round(l.position.x) === p[0]
+				&& round(l.position.y) === p[1] && round(l.position.z) === p[2]);
+			const wall = at([0, 1, 7]), stated = at([0, 0, 8]);
+
+			return {
+				lamp, lampCorner,
+				wall: round(wall.range),
+				wallCorner: round(corner(litTree.boundingBox(), [0, 1, 7])),
+				stated: round(stated.range),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+
+		test::@check(result.value.contains(`"lamp":3.1623`)
+			&& result.value.contains(`"lampCorner":3.1623`),
+			"the 45 W lamp's 10.6764 m is cut to the file's far corner: %s", result.value);
+		test::@check(result.value.contains(`"wall":6.7524`)
+			&& result.value.contains(`"wallCorner":7.3485`),
+			"and a lamp already inside the file's bounds keeps its own reach: %s", result.value);
+		test::@check(result.value.contains(`"stated":4`),
+			"while a range the file states is nobody's to shorten: %s", result.value);
 	};
 }
 
@@ -5861,6 +5932,69 @@ fn void stats_splits_the_frame_into_its_passes() @test
 }
 
 <*
+ How many pixels the scene pass actually shaded, and so how much of the frame
+ was paid for twice.
+
+ Two boxes big enough to fill the frame, one in front of the other: every pixel
+ is covered, so `fragmentsShaded` cannot be below `width * height` whatever the
+ device does with the overlap. The upper half of the claim is deliberately not
+ asserted — early-Z is free to reject the farther box entirely, which would be a
+ correct frame reporting 1x rather than 2x, and a test that demanded 2x would be
+ asserting a driver's rasteriser rather than this binding.
+
+ On a device without `pipelineStatisticsQuery` there is no pool, the answer is
+ 0, and only the key and its type are checked — the same shape `gpuMs` takes on
+ a device that cannot write timestamps.
+
+ **Proved by injection.** `js_stats` setting `fragmentsShaded` to a hardcoded 0:
+ "the scene pass was counted: {"fragments":0,"pixels":30000,"covered":false}".
+ Restored, green again.
+*>
+fn void stats_counts_the_scene_passs_fragments() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const back = new three.Mesh(new three.BoxGeometry(40, 40, 1));
+			const front = new three.Mesh(new three.BoxGeometry(40, 40, 1));
+			front.position.set(1, 1, 2);
+			scene.add(back);
+			scene.add(front);
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.render(scene, three.camera);
+
+			const s = three.stats();
+			const r = three.renderSize();
+			return {
+				fragments: s.fragmentsShaded,
+				pixels: r.width * r.height,
+				present: "fragmentsShaded" in s,
+				number: typeof s.fragmentsShaded === "number",
+				covered: s.fragmentsShaded >= r.width * r.height,
+			};
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"present":true`) && result.value.contains(`"number":true`),
+			"stats() carries a fragmentsShaded: %s", result.value);
+
+		if (run.renderer.gpu.limits.pipeline_statistics)
+		{
+			test::@check(result.value.contains(`"covered":true`),
+				"the scene pass was counted: %s", result.value);
+		}
+		else
+		{
+			test::@check(result.value.contains(`"fragments":0`),
+				"a device without pipelineStatisticsQuery answers 0: %s", result.value);
+		}
+	};
+}
+
+<*
  No device, no measurement — but still a key, and still a number.
 
  This is the case that makes `gpuMs` unconditional. A scene-math runtime has no
@@ -5889,12 +6023,12 @@ fn void a_runtime_without_a_device_reports_zero_gpu_time() @test
 	{
 		three::RunResult result = run.run(`
 			const s = three.stats();
-			return { present: "gpuMs" in s, gpuMs: s.gpuMs };
+			return { present: "gpuMs" in s, gpuMs: s.gpuMs, fragmentsShaded: s.fragmentsShaded };
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value == `{"present":true,"gpuMs":0}`,
+		test::@check(result.value == `{"present":true,"gpuMs":0,"fragmentsShaded":0}`,
 			"a runtime with no device answers %s — the key has to be there, with a 0 behind it",
 			result.value);
 		test::@check(result.timing.total == 0.0, "and so does the run result: %f", result.timing.total);
