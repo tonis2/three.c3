@@ -271,6 +271,9 @@ struct GpuMesh
 	vk::Memory positions;
 	vk::Memory normals;
 	vk::Memory uvs;
+	// A generated, non-tiling coordinate stream used only by the static light
+	// cache. Material maps continue to read `uvs`.
+	vk::Memory lightmap_uvs;
 	// glTF's COLOR_0, as float4 per vertex whatever width the file stored it at.
 	// Uploaded only for a file that carries the attribute, which is a small
 	// minority of them — and read only by a material body, since no built-in
@@ -339,6 +342,9 @@ struct GpuMesh
 	 update. `three.lights.bake()` is the only reader.
 	*>
 	bool lightmap_eligible;
+	// True when `lightmap_uvs` is a conservative axis projection rather than
+	// the material's TEXCOORD_0.
+	bool lightmap_generated;
 	// The two areas that measurement produced, kept because the tile size needs
 	// them: metres of surface per unit of uv is `sqrt(local_area / uv_area)`, and
 	// a texel density in metres becomes a tile size from that. Zero on a mesh that
@@ -3336,6 +3342,25 @@ fn GpuMesh? Assets.upload_primitive(
 	// all in hand exactly here and nowhere later. `GpuMesh.lightmap_eligible` is
 	// what it leaves behind.
 	if (out.has_uvs) out.measure_lightmap(uvs.array_view(), positions.array_view(), indices.array_view());
+	if (!out.lightmap_eligible)
+	{
+		List{Vec2} generated;
+		generated.init(mem, positions.len());
+		defer generated.free();
+		for (uint axis = 0; axis < 3 && !out.lightmap_eligible; axis++)
+		{
+			generated.clear();
+			if (generate_projected_lightmap(positions.array_view(), indices.array_view(), axis, &generated))
+			{
+				out.measure_lightmap(generated.array_view(), positions.array_view(), indices.array_view());
+				if (out.lightmap_eligible)
+				{
+					out.lightmap_uvs = gpu.upload_stream(generated.entries, Vec2::size * generated.len())!;
+					out.lightmap_generated = true;
+				}
+			}
+		}
+	}
 
 	// The material, if the primitive names one.
 	sz? material_index = primitive.attributes.get("material");
@@ -3414,6 +3439,44 @@ const float LIGHTMAP_MAX_MULTIPLICITY = 1.05f;
 // Outside [0, 1] the layout tiles, which is the same collision seen from the
 // other side. The slack is a float32 uv that was authored at exactly 1.
 const float LIGHTMAP_UV_SLACK = 0.002f;
+
+<*
+ Make a second coordinate set from an axis projection.
+
+ This deliberately does not attempt a general unwrap. Height-field terrain and
+ simple walls project without seams; a box, foliage or folded mesh overlaps and
+ is refused by `measure_lightmap`. Trying all three axes lets that overlap test,
+ rather than a guessed scene orientation, decide. One scale on both axes keeps
+ projected area useful for choosing a tile size.
+*>
+fn bool generate_projected_lightmap(Vec3[] positions, uint[] indices, uint drop, List{Vec2}* out) @local
+{
+	usz triangles = indices.len / 3;
+	if (triangles == 0 || positions.len == 0) return false;
+	for (usz t = 0; t < triangles; t++)
+	{
+		uint ia = indices[t * 3];
+		uint ib = indices[t * 3 + 1];
+		uint ic = indices[t * 3 + 2];
+		if (ia >= positions.len || ib >= positions.len || ic >= positions.len) return false;
+	}
+	Vec2 uv_low = { float::max, float::max };
+	Vec2 uv_high = { -float::max, -float::max };
+	foreach (p : positions)
+	{
+		Vec2 uv = drop == 0 ? (Vec2){ p.y, p.z } : (drop == 1 ? (Vec2){ p.x, p.z } : (Vec2){ p.x, p.y });
+		uv_low = math::min(uv_low, uv);
+		uv_high = math::max(uv_high, uv);
+	}
+	float span = math::max(uv_high.x - uv_low.x, uv_high.y - uv_low.y);
+	if (span <= 1e-8f) return false;
+	foreach (p : positions)
+	{
+		Vec2 uv = drop == 0 ? (Vec2){ p.y, p.z } : (drop == 1 ? (Vec2){ p.x, p.z } : (Vec2){ p.x, p.y });
+		out.push((uv - uv_low) / span);
+	}
+	return out.len() == positions.len;
+}
 
 <*
  Measures whether this mesh's uvs could hold a light map, and how much surface
@@ -4964,6 +5027,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 		gpu.retire_memory(self.indices);
 		gpu.retire_memory(self.normals);
 		gpu.retire_memory(self.uvs);
+		gpu.retire_memory(self.lightmap_uvs);
 		gpu.retire_memory(self.colors);
 		gpu.retire_memory(self.joints);
 		gpu.retire_memory(self.weights);
@@ -4973,6 +5037,8 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	self.indices = { };
 	self.normals = { };
 	self.uvs = { };
+	self.lightmap_uvs = { };
+	self.lightmap_generated = false;
 	self.colors = { };
 	self.joints = { };
 	self.weights = { };

@@ -444,6 +444,7 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 		.positions = mesh.positions.address,
 		.normals = mesh.has_normals ? mesh.normals.address : 0,
 		.uvs = mesh.uvs.address,
+		.lightmap_uvs = mesh.uvs.address,
 		.colors = mesh.has_colors ? mesh.colors.address
 			: 0, // A skinned mesh bakes in its bind pose, which is the pose its vertices are
 			// written to the file in. Posing it would bake a frame of an animation into

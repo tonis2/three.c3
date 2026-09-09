@@ -1228,6 +1228,10 @@ fn void the_pass_is_charged_to_its_own_phase() @test
 {
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
 	{
+		// Keep the ordinary scene work present in both measurements so the delta
+		// isolates enabling the shadow pass rather than ending scene reuse.
+		renderer.scene_cache_disabled = true;
+		defer renderer.scene_cache_disabled = false;
 		three::RunResult built = run.run(SCENE);
 		defer built.free();
 		test::@check(built.ok, "the scene built: %s", built.error);

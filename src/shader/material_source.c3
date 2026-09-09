@@ -684,7 +684,8 @@ fn String? material_source(
 	// it belongs would silently turn one of those into a texture list.
 	MaterialTexture[] textures = { },
 	String vertex = "",
-	bool bake = false
+	bool bake = false,
+	bool lightmap = false
 )
 {
 	validate_material(fragment, uniforms, textures)!;
@@ -700,6 +701,7 @@ fn String? material_source(
 		MATERIAL_BINDING_FIRST,
 		allocator,
 		material_spills(uniforms),
-		bake
+		bake,
+		lightmap
 	);
 }

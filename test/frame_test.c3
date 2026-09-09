@@ -1041,6 +1041,14 @@ fn void always_render_and_an_explicit_frame_are_never_skipped() @test
 			renderer.rendered_frames - drew);
 
 		@ok(run, "three.alwaysRender = true;");
+		String cache_default = @answer(run, "return three.sceneCache;");
+		defer cache_default.free(mem);
+		test::@check(cache_default == "true", "the scene cache was not on by default");
+		@ok(run, "three.sceneCache = false;");
+		String switches = @answer(run, "return [three.sceneCache, three.alwaysRender];");
+		defer switches.free(mem);
+		test::@check(switches == "[false,true]", "the independent switches read back as %s", switches);
+		@ok(run, "three.sceneCache = true;");
 		drew = renderer.rendered_frames;
 		ulong skipped = renderer.skipped_frames;
 		@idle_frame(renderer);

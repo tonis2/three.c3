@@ -96,6 +96,7 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    float4 dynamic_rect;
     // Frame constants for the receiver-plane gradient: row i of the cofactor of
     // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
     // inverse-transpose times the projection's w row in w.
@@ -202,6 +203,9 @@ struct Draw
     float3* positions;
     float3* normals;
     float2* uvs;
+    // Separate non-tiling coordinates for the static light cache. Material
+    // sampling always continues through `uvs`.
+    float2* lightmap_uvs;
     // glTF's COLOR_0. Read into `Vertex.vertex_color` and carried to the body;
     // see `Surface.vertex_color` for what it is and what it deliberately is not.
     float4* colors;
@@ -1034,9 +1038,8 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if(light.meta.z!=0u&&!cluster_contains(i))continue;
-        // A lightmap holds diffuse and nothing else, so a baked light's highlight is
-        // dropped rather than moved. `docs/functions.md` says so out loud.
-        if(g_lightmapped&&shared_light_is_baked(light))continue;
+        // The lightmap holds diffuse only. Highlights remain view-dependent and
+        // therefore stay in this real-time loop for baked lights as well.
         if(light.meta.z==2u||light.meta.z==3u){float3 area=area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v); if(dot(area,float3(1.0))<=0.0)continue; sum+=area*point_shadow_factor(i,light,position,normal);continue;}
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
@@ -1163,7 +1166,9 @@ float3 specular(Surface s)
 // 1 is no occlusion, and is what the three overloads below hand in.
 float3 standard(Surface s, float3 albedo, float3 normal, float ao)
 {
-#ifdef THREE_BAKE
+#ifdef THREE_LIGHTMAP_BAKE
+    return shared_baked_diffuse(push.frame, normal, g_receiver_normal, s.position);
+#elif defined(THREE_BAKE)
     // The colour and not the colour times `1 - metalness`. With `lambert` at 1 and
     // the highlight at 0 the expression below would already be unlit, and it would
     // bake a metal as black — a surface whose colour comes back entirely through a
@@ -1562,7 +1567,8 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // The mesh's own TEXCOORD_0, kept for the same reason `bake_uv` is: the tile
     // was rasterised in this coordinate, so a body that computes its own uv must
     // not be what indexes it.
-    float2 lightmap_uv = v.uv;
+    float2 lightmap_uv = float2(0.0);
+    if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[vid];
 
     displace(v);
 
@@ -1580,6 +1586,8 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // uv (0,0) is the top-left texel of an image and every other pass in the
     // project flips Y to put world space the right way up.
     output.sv_position = float4(bake_uv * 2.0 - 1.0, 0.0, 1.0);
+#elif defined(THREE_LIGHTMAP_BAKE)
+    output.sv_position = float4(lightmap_uv * 2.0 - 1.0, 0.0, 1.0);
 #else
     // Built from the displaced position, which is the whole point: a vertex that
     // moved and a clip position that did not would be geometry lit and textured
@@ -1642,7 +1650,8 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // different answer at the same point of the same triangle — and the tile holds
     // the one the bake rasterised, which is the front. A back face falls back to
     // the whole real-time loop, which is right rather than merely safe.
-    g_lightmapped = front_facing && input.lightmap.z > 0.5;
+    g_lightmapped = front_facing && input.lightmap.z > 0.5
+        && !shared_baked_dynamic_shadow(push.frame, input.world);
     if (g_lightmapped) g_lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
 #endif
     Draw draw = push.draw[0];
@@ -1674,7 +1683,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
         s.albedo *= base.rgb;
     }
     s.normal = normalize(input.normal);
-#ifndef THREE_BAKE
+#if !defined(THREE_BAKE) && !defined(THREE_LIGHTMAP_BAKE)
     // **A back face is shaded with its normal turned toward the eye** — the flip
     // `mesh.slang` makes, and character for character the same rule, so a body
     // whose text is the default lands on the side no material at all lands on.

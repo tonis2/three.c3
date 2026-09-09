@@ -2519,6 +2519,13 @@ export const three = {
 	get alwaysRender() { return H.alwaysRenderGet() !== 0; },
 	set alwaysRender(v) { H.alwaysRenderSet(v ? 1 : 0); },
 
+	// Reuse unchanged colour and depth inside frames which are submitted. This is
+	// independent of `alwaysRender`: that property decides whether to submit an
+	// unchanged frame at all, while this one decides how much of a submitted scene
+	// is rebuilt.
+	get sceneCache() { return H.sceneCacheGet() !== 0; },
+	set sceneCache(v) { H.sceneCacheSet(v ? 1 : 0); },
+
 	// The shaders that run over the finished frame.
 	//
 	// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`

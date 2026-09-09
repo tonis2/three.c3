@@ -113,6 +113,12 @@ float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 tex
     float3 dp_dx_perp = cross(n, dp_dx);
     float3 tangent = dp_dy_perp * duv_dx.x + dp_dx_perp * duv_dy.x;
     float3 bitangent = dp_dy_perp * duv_dx.y + dp_dx_perp * duv_dy.y;
+#ifdef THREE_LIGHTMAP_BAKE
+    // Frames use a negative-height viewport; the UV bake is deliberately
+    // unflipped. One screen axis therefore reverses both reconstructed axes.
+    tangent = -tangent;
+    bitangent = -bitangent;
+#endif
 
     float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
     // No uv gradient, so there is no frame to build and nothing sensible to

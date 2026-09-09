@@ -109,6 +109,7 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    float4 dynamic_rect;
     // Frame constants for the receiver-plane gradient: row i of the cofactor of
     // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
     // inverse-transpose times the projection's w row in w.
@@ -283,6 +284,9 @@ struct Draw
     float3* positions;
     float3* normals;
     float2* uvs;
+    // Separate non-tiling coordinates for the static light cache. Material
+    // sampling always continues through `uvs`.
+    float2* lightmap_uvs;
     // glTF's COLOR_0, if the file carried one. Multiplied into albedo below when
     // `FLAG_HAS_COLORS` is set and `FLAG_COLORS_ARE_MASK` is not — the
     // specification defines it as a **linear** factor on the base colour, so it is
@@ -810,8 +814,10 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 
     // The mesh's own TEXCOORD_0, before `variant_uv` moves it — the coordinate the
     // bake rasterised in, and so the only one that indexes the tile.
+    float2 lightmap_uv = float2(0.0);
+    if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[vid];
     output.lightmap = float3(
-        instance.lightmap.xy + output.uv * instance.lightmap.zw,
+        instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
         instance.lightmap.z > 0.0 ? 1.0 : 0.0
     );
 #ifdef THREE_LIGHTMAP_BAKE
@@ -819,7 +825,7 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // surface, and the world position and normal cross into the fragment stage
     // exactly as they would in a frame. The viewport is what puts the square in
     // this copy's tile — see `render/lightmap.c3`.
-    output.sv_position = float4(output.uv * 2.0 - 1.0, 0.0, 1.0);
+    output.sv_position = float4(lightmap_uv * 2.0 - 1.0, 0.0, 1.0);
 #endif
     // This copy's own uv, before the fragment stage's repeat and offset —
     // `variant_uv` in `surface.slang`, and `plan.md` §27 for why a per-copy uv is
@@ -1107,9 +1113,8 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if (light.meta.z != 0u && !cluster_contains(i)) continue;
-        // A lightmap holds diffuse and nothing else, so a baked light's highlight
-        // is dropped rather than moved. `docs/functions.md` says so out loud.
-        if (g_lightmapped && shared_light_is_baked(light)) continue;
+        // The lightmap holds diffuse only. Highlights remain view-dependent and
+        // therefore stay in this real-time loop for baked lights as well.
         if (light.meta.z == 2u || light.meta.z == 3u) { float3 area = area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v); if (dot(area, float3(1.0)) <= 0.0) continue; sum += area*point_shadow_factor(i,light,position,normal); continue; }
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
@@ -1283,8 +1288,20 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // derivatives of the world position — measured on the reference scene the two
     // answer the same thing here, and a uv-space derivative is degenerate on a
     // triangle with no area in uv, which is a NaN this cannot afford.
-    float3 normal = normalize(input.normal);
-    return float4(shared_baked_diffuse(push.frame, normal, normal, input.world), 1.0);
+    float3 geometric = normalize(input.normal);
+    float3 normal = geometric;
+    Draw draw = push.draw[0];
+    if ((draw.flags & (FLAG_HAS_UVS | FLAG_HAS_NORMAL_MAP)) ==
+        (FLAG_HAS_UVS | FLAG_HAS_NORMAL_MAP))
+    {
+        float2 uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+        Map normal_map = map_at(SLOT_NORMAL);
+        float3 texel = (draw.flags & FLAG_STOCHASTIC) != 0
+            ? stochastic_sample(normal_map, uv).rgb
+            : normal_map.Sample(uv).rgb;
+        normal = mapped_normal_frame(geometric, input.world, uv, texel);
+    }
+    return float4(shared_baked_diffuse(push.frame, normal, geometric, input.world), 1.0);
 }
 #else
 [shader("fragment")]
@@ -1298,7 +1315,8 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // different answer at the same point of the same triangle — and the tile holds
     // the one the bake rasterised, which is the front. A back face falls back to
     // the whole real-time loop, which is right rather than merely safe.
-    g_lightmapped = front_facing && input.lightmap.z > 0.5;
+    g_lightmapped = front_facing && input.lightmap.z > 0.5
+        && !shared_baked_dynamic_shadow(push.frame, input.world);
     if (g_lightmapped) g_lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
     // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
     // 0]` works with no material at all — which is the point of it being here

@@ -163,8 +163,9 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 
 	String standard = function_body(lighting, "SharedLightTerms shared_standard_lights");
 	String area = function_body(lighting, "SharedAreaTerms shared_area_terms");
+	String cached = function_body(lighting, "SharedAreaTerms shared_area_terms_cached");
 	String reference = function_body(lighting, "SharedAreaTerms shared_area_reference_terms");
-	test::@check(standard.len > 0 && area.len > 0 && reference.len > 0,
+	test::@check(standard.len > 0 && area.len > 0 && cached.len > 0 && reference.len > 0,
 		"the combined light routines and the numeric reference are present");
 	test::@check(
 		occurrence_count(standard, "shared_point_shadow_factor(i,light,position,receiverNormal)") == 3,
@@ -193,8 +194,24 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 		"and the fit is two table reads, got %d", occurrence_count(lighting, "ltc_lut.SampleLevel")
 	);
 	test::@check(
+		occurrence_count(standard, "shared_area_ltc_context(") == 1
+			&& standard.contains("if(!areaContextReady)")
+			&& standard.contains("shared_area_terms_cached(light,shape,normal,areaContext,!skipDiffuse)"),
+		"standard shading lazily builds one surface LTC context for every area light"
+	);
+	test::@check(
+		!cached.contains("shared_area_ltc_context(")
+			&& occurrence_count(area, "shared_area_ltc_context(") == 1,
+		"the cached path reuses the context while the standalone helper remains complete"
+	);
+	test::@check(
 		lighting.contains("float shared_area_diffuse(") && lighting.contains("float3 shared_area_specular("),
 		"custom single-lobe helpers remain available"
+	);
+	test::@check(
+		occurrence_count(standard, "if(!skipDiffuse)terms.diffuse+=") == 3
+			&& occurrence_count(standard, "terms.specular+=") == 3,
+		"a baked light skips cached diffuse only and keeps its live specular lobe"
 	);
 	test::@check(
 		!standard.contains("MAX_LIGHTS") && !lighting.contains("Sampler2D"),
@@ -662,9 +679,9 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	// 280 of it is what `mesh.slang`'s `Draw` declares; the rest is the texture
+	// 288 of it is what `mesh.slang`'s `Draw` declares; the rest is the texture
 	// index row above, which nothing samples through yet.
-	test::@check(three::DrawRecord::size == 376, "and the record is 376 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 384, "and the record is 384 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
@@ -812,7 +829,7 @@ fn void storage_light_and_shadow_records_match_c3() @test
 	@check_storage_record(three::Light, "struct Light",
 		"push.direction + push.color + push.area_right + push.area_up + float4(push.meta)");
 	@check_storage_record(three::ShadowGpuView, "struct ShadowGpuView",
-		"mul(push.view_projection, push.params) + push.atlas + push.plane_x + push.plane_y + push.plane_z");
+		"mul(push.view_projection, push.params) + push.atlas + push.dynamic_rect + push.plane_x + push.plane_y + push.plane_z");
 }
 
 fn void every_shader_declares_the_same_contract() @test

@@ -2011,10 +2011,8 @@ lights stops matching the set the atlas was baked from.
 Moving a baked light is a different matter and does not drop the atlas: the tiles inside its
 reach are marked dirty and re-baked over the next frames. See `three.lights.bake`.
 
-What a baked light loses on the surfaces it was baked into is its **specular highlight**: a
-lightmap holds diffuse and a highlight is a fact about where the camera is. Soft fills are
-diffuse-dominant, which is what makes the trade worth taking; a light whose highlight is the
-point of it should not be baked.
+Only direct diffuse moves into the lightmap. Specular highlights remain in the real-time loop,
+because they change with the camera and cannot be stored in a surface texture.
 
 The flag lives in the light's own `meta.w` beside its shadow settings, so it travels with the
 registry through a scene switch and neither setting clears the other.
@@ -2029,9 +2027,9 @@ for (const l of three.lights) l.baked = true;
 const { receivers, skipped, texels, bytes, ms } = three.lights.bake();
 ```
 
-A receiver is eligible when **`mesh.static = true`** and its own `TEXCOORD_0` is a layout
-rather than a tiling. Three conditions, measured once when the geometry uploads and cached on
-the mesh:
+A receiver is eligible when **`mesh.static = true`** and it has coordinates that can hold one
+lighting answer per point. The engine first tests its own `TEXCOORD_0` as a layout rather than
+a tiling. Three conditions are measured once when the geometry uploads and cached on the mesh:
 
 - it has a `TEXCOORD_0` at all;
 - every uv is inside `[0, 1]` (a layout that runs outside it is tiling, and two pieces of
@@ -2039,19 +2037,25 @@ the mesh:
 - the uvs do not overlap themselves — the summed area of the triangles in uv against the area
   of the region they actually cover, rasterised, must be at most 1.05.
 
-That is the whole contract, and it is a contract rather than a list: a mesh unwrapped by hand
-in Blender and re-exported joins the bake the moment its uvs pass. `skipped` counts the static
-receivers that do not, and those keep the full real-time loop for every light, baked ones
-included — **nothing ever goes dark**.
+When those coordinates tile or overlap, the engine also tries each axis projection as a
+separate lightmap chart. Uneven terrain and a wall can pass: the surface need not be exactly
+flat, but its triangles must not fold over or overlap when seen along that axis. Material maps
+still use the original `TEXCOORD_0`; only the lightmap uses the generated chart.
+
+This is the contract rather than a mesh-name list: a mesh unwrapped by hand in Blender and
+re-exported joins the bake the moment its UVs pass, and a height field can join without changing
+its tiled texture coordinates. `skipped` counts static receivers that do not, and those keep the
+full real-time loop for every light, baked ones included — **nothing ever goes dark**.
 
 Each *copy* gets its own tile, not each mesh: two copies of one crate stand in different light.
 They stay one draw call.
 
-One more refusal, and it is about the material rather than the mesh: a `ShaderMaterial` that
-declares **every** texture slot it may have has no sampler binding left for the lightmap —
-sixteen sampled images per stage is all a portable device offers — so its draws stay real time
-for every light and are counted in `skipped`. It is the same trade that turns the
-ambient-occlusion depth and the area-light table off for such a material.
+Built-in materials bake their normal map. Imported `LayeredMaterial` stacks bake through their
+generated material program, including blended normal and parallax maps, so the light stored in
+the tile matches the normal used by the frame. An arbitrary `ShaderMaterial`, or a layered
+material with a custom vertex body, stays real time because the cache cannot infer its displaced
+surface or what its output means. Material images are bindless and do not compete with the
+lightmap for a per-material sampler slot.
 
 Options and answer:
 
@@ -2075,10 +2079,10 @@ writes one afterwards. Either may be `true` for the default path or a path of it
 whose shadow was not resident bakes without one — raise `three.lights.shadow.maxLocal` first in
 a scene with more baked lights than the four that hold shadows by default.
 
-The bake runs the mesh through `mesh.slang`'s own uv-space variant rather than through each
-material's body, because a lightmap holds light and no material body moves a light. What that
-gives up is a `vertex:` body's displacement and a `shade` body's `discard`: the bake sees the
-mesh as the file holds it.
+Built-in materials run through `mesh.slang`'s UV-space bake variant. Supported layered materials
+instead compile a bake variant of their generated program, so their blended normal and parallax
+inputs take part. Arbitrary shader bodies and vertex displacement are refused as receivers rather
+than cached with a different surface.
 
 Area lights are integrated numerically in the bake whatever the frame is using, so the cached
 answer is the higher-quality one.
@@ -2099,9 +2103,11 @@ frames:
   the receiver *shadows*, and there is no cheap exact answer to what that is;
 - **a static caster with no tile of its own moving** — the same rule. A mesh whose uvs cannot
   carry a tile still casts into the bake;
-- **a static receiver's material changing** — because the material decides whether the surface
-  casts a shadow at all. Its *colour* does not matter and never marks anything: a tile holds
-  light, not lit colour, so albedo, roughness and metalness are not in it;
+- **a cached receiver's layered material or camera changing** — its blended normal and parallax
+  sampling can change the direct diffuse even though the geometry did not. The tile is disabled
+  immediately and rebuilt for the new material state or view;
+- **a static receiver's shadow material changing** — because alpha testing decides whether the
+  surface casts a shadow. Plain albedo, roughness and metalness are not stored in a tile;
 - **a static receiver being added, removed, re-parented, hidden, or joining or leaving
   `mesh.static`** — every tile, because there is no node left to measure the change from.
 
@@ -2109,9 +2115,14 @@ Changing the *set* of lights marked `baked` is the one thing that does not re-ba
 stops being read at all until the next `three.lights.bake()`, which is what makes
 `light.baked = false` restore the real-time picture byte for byte.
 
-**A dirty tile is still displayed while it waits.** Stale light is nearer to right than none,
-and dropping the tile until it caught up would make a drag flicker between the cache and the
-real-time loop.
+**A dirty tile is not displayed while it waits.** Its receiver falls back to the complete
+real-time light loop, so a moved light, changed layered normal, or changed camera never presents
+stale cached diffuse. It returns to the atlas after its tile catches up.
+
+The bake reads the static shadow atlas. Dynamic casters remain live: inside a moving caster's
+current shadow-map footprint, affected receivers bypass their cached tile per fragment and use
+the real-time light and shadow loop. The rest of a large ground stays cached. Specular highlights
+also remain in the real-time loop everywhere because they depend on the view.
 
 ```js
 three.lights.bake.budgetMs = 4;      // how much re-bake work a frame may do, 4 ms by default
@@ -2146,8 +2157,8 @@ three.lights.saveBake('levels/forest.lightmap');
 The default path is `bake.lightmap`. The sandbox is `three.writeText`'s: a path that climbs out
 of the assets directory is refused, and a folder that is not there yet is made.
 
-The format is the engine's own — a header, one record per tile, then the tiles' texels packed
-one after another. `.ktx2` is what this project writes for textures and it is the wrong
+The format is the engine's own, currently version 3 — a header, one record per tile, then the
+tiles' texels packed one after another. `.ktx2` is what this project writes for textures and it is the wrong
 container here: it holds block-compressed colour where a lightmap is `RGBA16F`, and it has
 nowhere to put the tile table. Only the texels a tile actually covers are written, not the whole
 square, which on the Evil Forest scene is 9.0 MB rather than the atlas's 32.
@@ -2155,8 +2166,9 @@ square, which on the Evil Forest scene is 9.0 MB rather than the atlas's 32.
 A record names its receiver by **node name, mesh index and copy index** — the copy index counts
 nodes with the same name and mesh in scene order, so two hundred crates out of one file each
 find their own tile. Beside that it holds the tile's rectangle, its texel density, and a fold
-over the node's world matrix. The header holds the atlas side, the format, the set of baked
-lights the atlas is a sum over, and a hash over the whole payload.
+over the node's world matrix and material state. The header holds the atlas side, the format,
+the set of baked lights the atlas is a sum over, the camera signature needed by layered
+parallax, and a hash over the whole payload. Files from older versions are declined.
 
 ## three.lights.loadBake
 
@@ -2172,10 +2184,11 @@ another build, a bake of a different set of baked lights, a bake of a different 
 — because the caller's answer to all of them is the same: bake it now. `three.lights.bake({
 load: true })` is that whole sentence.
 
-`dirty` is how many of the tiles it loaded belong to a receiver whose world matrix has moved
-since the save. Those keep their rectangles and re-bake over the following frames under
-`bake.budgetMs`, so a level where one crate was nudged pays for one crate. The rest are used as
-they are — the loaded atlas is the baked atlas, texel for texel.
+`dirty` is how many loaded tiles have a different receiver transform or material signature.
+Those keep their rectangles but use real-time lighting while they re-bake over the following
+frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. A saved
+layered bake also records its camera signature; a different camera declines the file instead of
+loading view-dependent parallax lighting. The clean tiles are used as saved, texel for texel.
 
 On the Evil Forest scene, with all ten local lights baked: **about 50 ms to load, against 1.9 s
 to bake**, from a 9.0 MB file, with the frame it produces identical to the baked one pixel for
@@ -2941,6 +2954,23 @@ every screenshot always draw, whatever this is set to: each of those asks for a 
 
 ```js
 three.alwaysRender = true;
+```
+
+## three.sceneCache
+
+Reuse unchanged colour and depth inside a frame that is being drawn. `true` by default.
+
+This is a diagnostic and compatibility switch for the screen-space scene cache. Set it to `false` to force every
+submitted frame through the traditional full scene pass, which makes an image or GPU comparison use the same
+shaders without rebuilding the engine.
+
+It is independent of `three.alwaysRender`. `alwaysRender` decides whether an unchanged frame is submitted at all;
+`sceneCache` decides how many pixels of a submitted frame are rebuilt. With both enabled, every frame is submitted
+but a moving object can still redraw only its affected rectangle. `stats().sceneCachePixels` and
+`stats().sceneCacheReused` are cumulative rebuilt and preserved pixel counts.
+
+```js
+three.sceneCache = false;
 ```
 
 ## the handle three.setPost() and three.addPass() answer with

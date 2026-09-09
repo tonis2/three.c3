@@ -23,6 +23,32 @@ float shared_spot_reach(Light light,float3 toward)
 static const uint LIGHT_BAKED = 0x40000u;
 bool shared_light_is_baked(Light light) { return (light.meta.w & LIGHT_BAKED) != 0u; }
 
+// A cached diffuse texel contains the static shadow result. Inside a moving
+// caster's current light-space footprint the fragment uses the live light loop
+// instead, so that cached illumination can never paint over its shadow.
+bool shared_baked_dynamic_shadow(FrameBlock* frame, float3 position)
+{
+    uint count=(uint)frame[0].lighting.y;
+    for(uint i=0u;i<count;++i)
+    {
+        Light light=frame[0].lights[i];
+        if(!shared_light_is_baked(light)||light.meta.y==0xffffffffu)continue;
+        uint parts=light.meta.z==1u?6u:1u;
+        for(uint part=0u;part<parts;++part)
+        {
+            ShadowGpuView view=frame[0].shadow_views[light.meta.y+part];
+            float4 rect=view.dynamic_rect;
+            if(rect.z<=rect.x||rect.w<=rect.y)continue;
+            float4 clip=mul(view.view_projection,float4(position,1.0));
+            if(clip.w<=0.0)continue;
+            float2 ndc=clip.xy/clip.w;
+            float2 uv=float2(0.5+0.5*ndc.x,0.5-0.5*ndc.y);
+            if(all(uv>=rect.xy)&&all(uv<=rect.zw))return true;
+        }
+    }
+    return false;
+}
+
 // The range window, and zero wherever the integral cannot be anything else: the
 // point is behind the emitter plane, or the whole emitter is behind the surface.
 // Every sample shares the sign of `dot(emitter,-l)`, and the extent bound is the
@@ -203,9 +229,18 @@ float shared_area_ltc_diffuse(SharedAreaShape shape,float3 normal)
     return shape.scale*shared_ltc_clipped(sum,normal);
 }
 
-float3 shared_area_ltc_specular(SharedAreaShape shape,float3 normal,float3 view,float3 f0,float f90,float alpha,float nv)
+struct SharedAreaLtcContext
 {
     // The fit's own frame: x along the view's tangential part, z the normal.
+    float3 row0;
+    float3 row1;
+    float3 row2;
+    float3 fresnel;
+};
+
+SharedAreaLtcContext shared_area_ltc_context(float3 normal,float3 view,float3 f0,float f90,float alpha,float nv)
+{
+    SharedAreaLtcContext context;
     float3 tangential=view-normal*dot(view,normal);
     float len2=dot(tangential,tangential);
     float3 t1=len2>1e-8?tangential*rsqrt(len2)
@@ -218,20 +253,25 @@ float3 shared_area_ltc_specular(SharedAreaShape shape,float3 normal,float3 view,
 
     // The three rows of the fitted inverse already multiplied by the frame, so a
     // corner is three dot products rather than a change of basis and a matrix.
-    float3 row0=m.x*t1+m.y*normal;
-    float3 row2=m.z*t1+m.w*normal;
+    context.row0=m.x*t1+m.y*normal;
+    context.row1=t2;
+    context.row2=m.z*t1+m.w*normal;
+    context.fresnel=f0*norm.x+(float3(f90)-f0)*norm.y;
+    return context;
+}
 
+float3 shared_area_ltc_specular(SharedAreaShape shape,SharedAreaLtcContext context)
+{
     float3 local[6];
     [unroll] for(uint i=0u;i<6u;++i)
     {
         float3 c=shape.corner[i];
-        local[i]=normalize(float3(dot(row0,c),dot(t2,c),dot(row2,c)));
+        local[i]=normalize(float3(dot(context.row0,c),dot(context.row1,c),dot(context.row2,c)));
     }
     float3 sum=float3(0.0);
     [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(local[i],local[i==5u?0u:i+1u]);
     float form=shared_ltc_clipped(sum,float3(0.0,0.0,1.0));
-    float3 fresnel=f0*norm.x+(float3(f90)-f0)*norm.y;
-    return shape.scale*form*fresnel;
+    return shape.scale*form*context.fresnel;
 }
 
 #endif
@@ -258,7 +298,8 @@ float3 shared_area_specular(Light light,float3 position,float3 normal,float3 vie
     if(shape.scale<=0.0)return float3(0.0);
     // `k` is half the GGX alpha at every caller, which is the axis the fit is
     // tabulated against.
-    return light.color.rgb*shared_area_ltc_specular(shape,normal,view,f0,f90,k*2.0,nv);
+    SharedAreaLtcContext context=shared_area_ltc_context(normal,view,f0,f90,k*2.0,nv);
+    return light.color.rgb*shared_area_ltc_specular(shape,context);
 #endif
 }
 
@@ -273,11 +314,22 @@ SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,floa
     SharedAreaTerms terms;terms.diffuse=0.0;terms.specular=float3(0.0);
     SharedAreaShape shape=shared_area_shape(light,position,normal);
     if(shape.scale<=0.0)return terms;
+    SharedAreaLtcContext context=shared_area_ltc_context(normal,view,f0,f90,k*2.0,nv);
     terms.diffuse=shared_area_ltc_diffuse(shape,normal);
-    terms.specular=light.color.rgb*shared_area_ltc_specular(shape,normal,view,f0,f90,k*2.0,nv);
+    terms.specular=light.color.rgb*shared_area_ltc_specular(shape,context);
     return terms;
 #endif
 }
+
+#ifndef THREE_AREA_REFERENCE
+SharedAreaTerms shared_area_terms_cached(Light light,SharedAreaShape shape,float3 normal,SharedAreaLtcContext context,bool diffuse)
+{
+    SharedAreaTerms terms;terms.diffuse=0.0;terms.specular=float3(0.0);
+    if(diffuse)terms.diffuse=shared_area_ltc_diffuse(shape,normal);
+    terms.specular=light.color.rgb*shared_area_ltc_specular(shape,context);
+    return terms;
+}
+#endif
 
 bool shared_cluster_contains(FrameBlock* frame,uint cluster,uint lightIndex)
 {
@@ -474,23 +526,27 @@ float3 shared_punctual_specular(float3 normal,float3 view,float3 toward,float nl
 
 // Standard shading walks every contributing light once. Visibility is a local
 // value so diffuse and specular share it without a per-light temporary array.
-SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 receiverNormal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility,bool skipBaked)
+SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 receiverNormal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility,bool skipBakedDiffuse)
 {
     float3 view=normalize(frame[0].camera.xyz-position);
     float3 f0=lerp(float3(0.16*reflectance*reflectance),albedo,metalness);
     float f90=clamp(dot(f0,float3(16.5)),0.0,1.0);
     float a=max(roughness*roughness,1e-3),a2=a*a,nv=max(dot(normal,view),1e-4),k=a*0.5;
     SharedLightTerms terms;terms.diffuse=0.0;terms.specular=0.0;
+#ifndef THREE_AREA_REFERENCE
+    SharedAreaLtcContext areaContext = {};
+    bool areaContextReady=false;
+#endif
     uint count=(uint)frame[0].lighting.y;
     for(uint i=0u;i<count;++i)
     {
         Light light=frame[0].lights[i];if(light.meta.z!=0u)continue;
-        if(skipBaked&&shared_light_is_baked(light))continue;
+        bool skipDiffuse=skipBakedDiffuse&&shared_light_is_baked(light);
         float reach;float3 toward=light_toward(light.direction,position,reach);
         float nl=max(dot(normal,toward),0.0);if(nl*reach<=0.0)continue;
         float visibility=i==0u?sunVisibility:shared_point_shadow_factor(i,light,position,receiverNormal);
         float3 energy=light.color.rgb*light.color.w*reach*visibility;
-        terms.diffuse+=energy*nl;
+        if(!skipDiffuse)terms.diffuse+=energy*nl;
         terms.specular+=energy*shared_punctual_specular(normal,view,toward,nl,f0,f90,a2,k,nv);
     }
     uint cluster=shared_fragment_cluster(frame,screenPosition,position);
@@ -500,13 +556,30 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
     {
         uint i=overflow?kLocal:frame[0].cluster_indices[cluster*frame[0].cluster_grid.w+kLocal];
         Light light=frame[0].lights[i];
-        if(skipBaked&&shared_light_is_baked(light))continue;
+        bool skipDiffuse=skipBakedDiffuse&&shared_light_is_baked(light);
         if(light.meta.z==2u||light.meta.z==3u)
         {
+#ifdef THREE_AREA_REFERENCE
             SharedAreaTerms area=shared_area_terms(light,position,normal,view,f0,f90,a2,k,nv);
+#else
+            SharedAreaTerms area;
+            if(push.frame[0].lighting.w<=0.0)
+                area=shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
+            else
+            {
+                SharedAreaShape shape=shared_area_shape(light,position,normal);
+                if(shape.scale<=0.0)continue;
+                if(!areaContextReady)
+                {
+                    areaContext=shared_area_ltc_context(normal,view,f0,f90,k*2.0,nv);
+                    areaContextReady=true;
+                }
+                area=shared_area_terms_cached(light,shape,normal,areaContext,!skipDiffuse);
+            }
+#endif
             if(area.diffuse<=0.0&&dot(area.specular,float3(1.0))<=0.0)continue;
             float visibility=shared_point_shadow_factor(i,light,position,receiverNormal);
-            terms.diffuse+=light.color.rgb*area.diffuse*visibility;
+            if(!skipDiffuse)terms.diffuse+=light.color.rgb*area.diffuse*visibility;
             terms.specular+=area.specular*visibility;
             continue;
         }
@@ -516,7 +589,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
         float nl=max(dot(normal,toward),0.0);if(nl*reach<=0.0)continue;
         float visibility=shared_point_shadow_factor(i,light,position,receiverNormal);
         float3 energy=light.color.rgb*light.color.w*reach*visibility;
-        terms.diffuse+=energy*nl;
+        if(!skipDiffuse)terms.diffuse+=energy*nl;
         terms.specular+=energy*shared_punctual_specular(normal,view,toward,nl,f0,f90,a2,k,nv);
     }
     return terms;

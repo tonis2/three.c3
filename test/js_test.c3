@@ -5969,9 +5969,13 @@ fn void stats_counts_the_scene_passs_fragments() @test
 			const r = three.renderSize();
 			return {
 				fragments: s.fragmentsShaded,
+				cachePixels: s.sceneCachePixels,
+				cacheReused: s.sceneCacheReused,
 				pixels: r.width * r.height,
 				present: "fragmentsShaded" in s,
-				number: typeof s.fragmentsShaded === "number",
+				number: typeof s.fragmentsShaded === "number"
+					&& typeof s.sceneCachePixels === "number"
+					&& typeof s.sceneCacheReused === "number",
 				covered: s.fragmentsShaded >= r.width * r.height,
 			};
 		`);

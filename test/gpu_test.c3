@@ -862,9 +862,9 @@ fn void the_phases_account_for_the_whole_frame() @test
  An empty phase reports nothing, and the frame is charged to the one pass that
  did something.
 
- `@with_renderer` draws a clear: no shadow pass, no post chain, nothing to
- upload, and no blit or readback on `render_offscreen`. Four of the five spans
- therefore bound no commands at all, and the whole of the frame belongs to the
+ With scene reuse disabled, `@with_renderer` draws a clear: no shadow pass, no
+ post chain, nothing to upload, and no blit or readback on `render_offscreen`.
+ Four of the five spans therefore bound no commands at all, and the whole frame belongs to the
  rendering — which makes this the simplest possible attribution check, and one
  the sum above cannot make: five numbers can add up to the frame while being
  shared out wrongly among themselves.
@@ -885,6 +885,10 @@ fn void an_empty_phase_costs_a_zero_and_not_the_reading() @test
 {
 	@with_renderer(; three::Renderer* renderer)
 	{
+		// This test measures attribution for a pass which actually records the
+		// clear. Scene reuse intentionally has no such GPU work.
+		renderer.scene_cache_disabled = true;
+		defer renderer.scene_cache_disabled = false;
 		renderer.render_offscreen()!!;
 		renderer.render_offscreen()!!;
 

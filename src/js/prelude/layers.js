@@ -920,7 +920,15 @@ function emit(base, layers) {
 	// call it always did. `standard` folds `ao` into the ambient floor and the
 	// environment reflection and into nothing else — its header says why.
 	const shaded = ao === '1.0' ? 'standard(s, c, n)' : `standard(s, c, n, ${ao})`;
-	body.push(anyEmissive ? `    return ${shaded} + e;` : `    return ${shaded};`);
+	if (anyEmissive) {
+		body.push('    #ifdef THREE_LIGHTMAP_BAKE');
+		body.push(`    return ${shaded};`);
+		body.push('    #else');
+		body.push(`    return ${shaded} + e;`);
+		body.push('    #endif');
+	} else {
+		body.push(`    return ${shaded};`);
+	}
 	body.push('}');
 
 	stats.samplers = Object.keys(textures).length;

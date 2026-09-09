@@ -378,6 +378,9 @@ struct MeshPass
 	*>
 	Matrix4f frame_view_projection;
 	ulong frame_address;
+	// The shader-visible frame state with transient buffer addresses and time
+	// normalized. The scene cache uses this exact state as its global key.
+	FrameBlock scene_cache_frame;
 	ulong instance_address;
 	ulong draw_address;
 	// Where this frame's spilled uniform tables are, or 0 when no material spilled
@@ -390,6 +393,10 @@ struct MeshPass
 	// Where this frame's deformed vertices are, or 0 when no soft body drew —
 	// `write_soft_vertices`.
 	ulong soft_address;
+	// Content keys for buffers whose device addresses stay stable while bytes move.
+	ulong pose_content_key;
+	ulong morph_content_key;
+	ulong soft_content_key;
 
 	<*
 	 Everything `prepare` wrote for the GPU this frame, folded into one number.
@@ -407,6 +414,9 @@ struct MeshPass
 	// False when `prepare` found nothing to draw, which is what `record` returns on
 	// rather than repeating the emptiness checks.
 	bool prepared;
+	// A cached frame replays the ordinary draw list through this tighter scissor.
+	vk::Rect2D cache_rect;
+	bool cache_partial;
 
 	<*
 	 Which debug view the shading pass draws, or `DEBUG_VIEW_OFF`.
@@ -986,6 +996,9 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
 {
 	self.prepared = false;
+	self.pose_content_key = KEY_SEED;
+	self.morph_content_key = KEY_SEED;
+	self.soft_content_key = KEY_SEED;
 	// From nothing, every frame: the fold below has to describe this frame's
 	// uploads and nothing carried over from the last one.
 	self.frame_key = KEY_SEED;
@@ -1419,6 +1432,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.positions = soft ? soft_positions : mesh.positions.address,
 			.normals = soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0),
 			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
+			.lightmap_uvs = mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address,
 			.colors = mesh.has_colors ? mesh.colors.address : 0,
 			.joints = skinned ? mesh.joints.address : 0,
 			.weights = skinned ? mesh.weights.address : 0,
@@ -1508,6 +1522,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 	// Only when it is a pane. `begin_render` has already set the full viewport, so
 	// the ordinary full-target frame records nothing extra here and is unchanged.
 	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
+	if (self.cache_partial) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
 
 	// First, and the ordering is load-bearing — `render/sky.c3` has why a sky
 	// drawn last would paint over glass.
@@ -1786,12 +1801,15 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 
  @return `Whether anything was recorded — which is what tells the caller to keep the depth attachment rather than clear it.`
 *>
-fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* target)
+fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* target,
+	bool cached = false, bool sampled = false)
 {
 	if (!self.prepared || !self.prepass.live) return false;
 
-	target.begin_depth(cmd);
+	if (cached) { target.begin_cached_depth(cmd, self.cache_rect, sampled); }
+	else { target.begin_depth(cmd); }
 	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
+	if (cached) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
 
 	vk::Pipeline bound = (vk::Pipeline)null;
 	uint recorded = 0;
@@ -2082,6 +2100,7 @@ fn void MeshPass.fold_frame_key(&self, uint slot, FrameBlock* frame)
 	timeless.shadow_views = frame.shadow_views != 0 ? 1 : 0;
 	timeless.cluster_counts = frame.cluster_counts != 0 ? 1 : 0;
 	timeless.cluster_indices = frame.cluster_indices != 0 ? 1 : 0;
+	self.scene_cache_frame = timeless;
 	ulong key = hash_bytes(self.frame_key, &timeless, FrameBlock::size);
 	if (self.reads_clock_time()) key = @hash_value(key, self.clock.time);
 
@@ -2533,6 +2552,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	}
 
 	self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * Matrix4f::size));
+	self.pose_content_key = hash_bytes(KEY_SEED, palette, (usz)((sz)at * Matrix4f::size));
 	return self.pose_buffers[slot].address;
 }
 
@@ -2603,6 +2623,7 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 	}
 
 	self.frame_key = hash_bytes(self.frame_key, weights, (usz)((sz)at * float::size));
+	self.morph_content_key = hash_bytes(KEY_SEED, weights, (usz)((sz)at * float::size));
 	return self.morph_buffers[slot].address;
 }
 
@@ -2697,6 +2718,7 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 	}
 
 	self.frame_key = hash_bytes(self.frame_key, vertices, (usz)(needed * Vec3::size));
+	self.soft_content_key = hash_bytes(KEY_SEED, vertices, (usz)(needed * Vec3::size));
 	return self.soft_buffers[slot].address;
 }
 

@@ -816,6 +816,18 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 			manager.overlay[at] = overlay;
 			manager.dynamic_signatures[at] = dynamic_signature;
 			manager.dynamic_rects[at] = dynamic_rect;
+			if (uploaded != null && overlay)
+			{
+				ShadowTile tile = manager.tiles[at];
+				ShadowRect footprint = shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
+				float inv = 1.0f / (float)tile.size;
+				uploaded[packed].dynamic_rect = {
+					(float)(footprint.x - tile.x) * inv,
+					(float)(footprint.y - tile.y) * inv,
+					(float)(footprint.x + footprint.width - tile.x) * inv,
+					(float)(footprint.y + footprint.height - tile.y) * inv,
+				};
+			}
 			manager.update_rects[at] = static_work || !view.live_valid
 				? shadow_full_rect(manager.tiles[at])
 				: shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
