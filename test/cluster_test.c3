@@ -9,6 +9,7 @@ import three;
 import three_tests::device;
 import image;
 import std::core::test;
+import std::core::string;
 
 const uint W = 160;
 const uint H = 120;
@@ -229,6 +230,54 @@ fn void clustered_matches_the_all_light_oracle_past_eight_and_at_edges() @test
 	test::@check(max_rgb_difference(&reference, &clustered) <= 2,
 		"31 clustered lights match the all-light image (largest channel error %d)",
 		max_rgb_difference(&reference, &clustered));
+}
+
+<*
+ Screen rows and clip-space Y run in opposite numeric directions under the
+ geometry pass's negative-height viewport. Small lights above and below centre
+ catch a cluster builder that mirrors them vertically. Both surface templates
+ read the same cluster lists and must match the all-light oracle.
+*>
+fn void asymmetric_vertical_clusters_match_both_material_oracles() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene=new three.Scene();
+		globalThis.clusterPlain=new three.MeshLambertMaterial({color:0xffffff});
+		globalThis.clusterLayered=new three.LayeredMaterial({
+			layers:[{name:'base',tint:[1,1,1],opacity:1}]
+		});
+		globalThis.clusterPlane=new three.Mesh(new three.PlaneGeometry(10,8),clusterPlain);
+		scene.add(clusterPlane);
+		three.light.intensity=0;three.light.ambient=0;
+		three.lights.add({position:[-2.5,2.7,1],range:2.2,color:0xff3010,intensity:8});
+		three.lights.add({position:[2.5,-2.7,1],range:2.2,color:0x1030ff,intensity:8});
+		three.camera.target.set(0,0,0);three.camera.orbit(0,0,7);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the asymmetric cluster scene built: %s", built.error);
+
+	String[2] materials = { "clusterPlain", "clusterLayered" };
+	foreach (name : materials)
+	{
+		three::RunResult selected = runtime.run(
+			string::tformat("clusterPlane.material=%s", name));
+		defer selected.free();
+		test::@check(selected.ok, "%s was selected: %s", name, selected.error);
+		renderer.pass.cluster_bruteforce = true;
+		image::Image reference = renderer.capture()!!;
+		defer reference.free();
+		renderer.pass.cluster_bruteforce = false;
+		image::Image clustered = renderer.capture()!!;
+		defer clustered.free();
+		test::@check(max_rgb_difference(&reference, &clustered) <= 2,
+			"%s oracle differs by %d", name,
+			max_rgb_difference(&reference, &clustered));
+	}
 }
 
 fn void partial_viewport_conservatively_matches_the_all_light_oracle() @test

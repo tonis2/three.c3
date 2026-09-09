@@ -953,20 +953,25 @@ fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @tes
 			test::@check(material_dirty.value == "1",
 				"changing the layered normal coordinates dirties its tile: %s", material_dirty.value);
 			for (uint i = 0; i < 12; i++) { image::Image tick = renderer.capture()!!; tick.free(); }
+			three::RunResult restored = run.run(`layeredPlane.material.repeat = [1, 1]; return 1;`);
+			defer restored.free();
+			for (uint i = 0; i < 12; i++) { image::Image tick = renderer.capture()!!; tick.free(); }
+			three::RunResult clean = run.run(`return three.stats().lightmapDirty;`);
+			defer clean.free();
+			test::@check(clean.value == "0", "the restored material settled before moving the camera: %s", clean.value);
 
-			three::RunResult moved = run.run(
-				`three.camera.orbit(18, 45, 7); return three.lights.loadBake('layered.lightmap') === null;`);
+			three::RunResult moved = run.run(`three.camera.orbit(18, 45, 7); return 1;`);
 			defer moved.free();
-			test::@check(moved.value == "true", "a bake from another camera is refused: %s", moved.value);
-			image::Image fallback = renderer.capture()!!;
-			fallback.free();
+			image::Image moved_frame = renderer.capture()!!;
+			moved_frame.free();
 			three::RunResult dirty = run.run(`return three.stats().lightmapDirty;`);
 			defer dirty.free();
-			test::@check(dirty.value == "5", "all camera-dependent tiles fell back while dirty: %s", dirty.value);
-			for (uint i = 0; i < 12; i++) { image::Image tick = renderer.capture()!!; tick.free(); }
-			three::RunResult settled = run.run(`return three.stats().lightmapDirty;`);
-			defer settled.free();
-			test::@check(settled.value == "0", "the camera-dependent tile rebaked: %s", settled.value);
+			test::@check(dirty.value == "0", "camera movement leaves every layered tile live: %s", dirty.value);
+			three::RunResult loaded = run.run(
+				`const b = three.lights.loadBake('layered.lightmap'); return b && [b.tiles, b.dirty].join(' ');`);
+			defer loaded.free();
+			test::@check(loaded.value == `"5 0"`,
+				"the persisted diffuse loads cleanly from another camera: %s", loaded.value);
 		};
 	};
 }

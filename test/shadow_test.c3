@@ -3316,3 +3316,59 @@ fn void a_local_light_darkens_the_static_ground_under_a_static_box() @test
 		test::@check(darkened > 150, "the shadow covers %d pixels of plane", darkened);
 	};
 }
+
+<*
+ An area shadow edge is continuous, not four moving slabs.
+
+ Dividing the shadowed picture by the unshadowed one removes the emitter's
+ falloff and leaves its visibility. The old four-corner kernel can produce only
+ three interior steps; bilinear comparison resolves the edge between texels.
+*>
+fn void an_area_shadow_has_a_continuous_edge() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene(); three.scene = scene;
+			three.light.intensity = 0; three.light.ambient = 0; three.light.world = [0, 0, 0];
+			three.lights.shadow = { enabled: false, size: 1024, bias: 0, intensity: 1 };
+			const ground = new three.Mesh(new three.PlaneGeometry(14, 14),
+				new three.MeshLambertMaterial({ color: 0x909090 }));
+			ground.rotation.x = -Math.PI / 2; ground.static = true; scene.add(ground);
+			const blocker = new three.Mesh(new three.BoxGeometry(5, 1.5, 1.5),
+				new three.MeshLambertMaterial());
+			blocker.position.set(0, 1.25, 0); blocker.static = true; scene.add(blocker);
+			three.lights.add({ shape: 'square', position: [0, 8, 0], range: 20,
+				right: [1, 0, 0], up: [0, 0, -1], width: 6, height: 6,
+				color: 0xffffff, intensity: 800 });
+			three.camera.lookAt(0, 0, 0); three.camera.orbit(0, 58, 13);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the wide area-shadow scene built: %s", built.error);
+
+		image::Image unshadowed = renderer.capture()!!;
+		defer unshadowed.free();
+		three::RunResult enabled = run.run(`three.lights.shadow.enabled = true`);
+		defer enabled.free();
+		test::@check(enabled.ok, "area shadows went on: %s", enabled.error);
+		image::Image shadowed = renderer.capture()!!;
+		defer shadowed.free();
+
+		bool[25] visibility = {};
+		for (uint y = 45; y < 145; y++)
+		{
+			for (uint x = 30; x < 210; x++)
+			{
+				uint before = luma_at(&unshadowed, x, y);
+				if (before < 30) continue;
+				uint after = luma_at(&shadowed, x, y);
+				uint bin = math::min(24u, (after * 24u + before / 2u) / before);
+				visibility[bin] = true;
+			}
+		}
+		uint interior = 0;
+		for (uint bin = 1; bin < 24; bin++) if (visibility[bin]) interior++;
+		test::@check(interior >= 7,
+			"the area shadow edge resolves only %d interior visibility levels", interior);
+	};
+}

@@ -37,6 +37,10 @@ void computeMain(uint3 tid : SV_DispatchThreadID)
     uint z = cluster / (grid.x * grid.y);
     float2 lo = float2((float)x / grid.x, (float)y / grid.y) * 2.0 - 1.0;
     float2 hi = float2((float)(x + 1) / grid.x, (float)(y + 1) / grid.y) * 2.0 - 1.0;
+    // Fragment rows increase down the framebuffer, while the geometry viewport's
+    // negative height puts clip-space +Y at its top.
+    lo.y = 1.0 - 2.0 * (float)(y + 1) / grid.y;
+    hi.y = 1.0 - 2.0 * (float)y / grid.y;
     float zlo = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)z / grid.z);
     float zhi = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)(z + 1) / grid.z);
 
