@@ -362,8 +362,7 @@ float shared_shadow_compare(bool cached,float2 uv,float reference)
         : shadow_atlas_compare.SampleCmpLevelZero(uv,reference);
 }
 
-float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, float filter_radius,
-    bool cached)
+float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, bool cached)
 {
     if (index == 0xffffffffu) return 1.0;
     ShadowGpuView view = push.frame[0].shadow_views[index];
@@ -430,46 +429,28 @@ float shadow_view_factor_filtered_from(uint index, float3 position, float3 norma
     // reference and needs half a texel of the plane's drop as slack — which under
     // a local light's perspective is more ndc depth than a crate is tall, so the
     // contact shadows go with it.
-    const float2 quad[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };
-    if(filter_radius<=1.0)
+    const float2 adjacent[4] = { float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0) };
+    float2 texelPosition=local/view.params.x-0.5;
+    float2 fraction=frac(texelPosition);
+    float2 base=floor(texelPosition);
+    float samples[4];
+    [unroll] for(int i=0;i<4;i++)
     {
-        const float2 adjacent[4] = { float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0) };
-        float2 texelPosition=local/view.params.x-0.5;
-        float2 fraction=frac(texelPosition);
-        float2 base=floor(texelPosition);
-        float samples[4];
-        [unroll] for(int i=0;i<4;i++)
-        {
-            float2 tapLocal=clamp((base+adjacent[i]+0.5)*view.params.x,
-                view.params.x*0.5,1.0-view.params.x*0.5);
-            float2 tapNdc=(tapLocal-local)*float2(2.0,-2.0);
-            float reference=ndc.z+dot(depthGradient,tapNdc)-view.params.y;
-            samples[i]=shared_shadow_compare(cached,
-                clamp(tapLocal*view.atlas.xy+view.atlas.zw,lo,hi),reference);
-        }
-        float lit=lerp(lerp(samples[0],samples[1],fraction.x),
-            lerp(samples[2],samples[3],fraction.x),fraction.y);
-        return lerp(1.0,lit,view.params.w);
+        float2 tapLocal=clamp((base+adjacent[i]+0.5)*view.params.x,
+            view.params.x*0.5,1.0-view.params.x*0.5);
+        float2 tapNdc=(tapLocal-local)*float2(2.0,-2.0);
+        float reference=ndc.z+dot(depthGradient,tapNdc)-view.params.y;
+        samples[i]=shared_shadow_compare(cached,
+            clamp(tapLocal*view.atlas.xy+view.atlas.zw,lo,hi),reference);
     }
-
-    float spread = filter_radius > 1.0 ? filter_radius * 0.6 : 1.0;
-    float lit = 0.0;
-    for (int i = 0; i < 4; i++)
-    {
-        float2 tap = quad[i] * spread;
-        float2 tapLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
-            view.params.x * 0.5, 1.0 - view.params.x * 0.5);
-        float2 tapNdc = (tapLocal - local) * float2(2.0, -2.0);
-        float reference = ndc.z + dot(depthGradient, tapNdc) - view.params.y;
-        lit += shared_shadow_compare(cached,
-            clamp(tapLocal * view.atlas.xy + view.atlas.zw, lo, hi), reference);
-    }
-    return lerp(1.0, lit * 0.25, view.params.w);
+    float lit=lerp(lerp(samples[0],samples[1],fraction.x),
+        lerp(samples[2],samples[3],fraction.x),fraction.y);
+    return lerp(1.0,lit,view.params.w);
 }
 
-float shadow_view_factor_filtered(uint index,float3 position,float3 normal,float filter_radius)
+float shadow_view_factor_filtered(uint index,float3 position,float3 normal)
 {
-    return shadow_view_factor_filtered_from(index,position,normal,filter_radius,false);
+    return shadow_view_factor_filtered_from(index,position,normal,false);
 }
 
 float shared_point_shadow_factor_from(uint index,Light light,float3 position,float3 normal,bool cached)
@@ -486,17 +467,9 @@ float shared_point_shadow_factor_from(uint index,Light light,float3 position,flo
         else face=ray.z>=0.0?4u:5u;
         view+=face;
     }
-    if(light.meta.z==2u||light.meta.z==3u)
-    {
-        // The representative area view cannot reproduce a physical penumbra,
-        // but its filter footprint follows the emitter's apparent size.
-        float halfExtent=max(light.area_right.w,light.area_up.w);
-        float receiverDistance=max(distance(position,light.direction.xyz),1e-4);
-        float texel=push.frame[0].shadow_views[view].params.x;
-        float radius=clamp(halfExtent/(receiverDistance*7.4641016*texel),1.0,6.0);
-        return shadow_view_factor_filtered_from(view,position,normal,radius,cached);
-    }
-    return shadow_view_factor_filtered_from(view,position,normal,1.0,cached);
+    // Area emitters also have one depth view at their centre. Widening that one
+    // silhouette invents a blocky penumbra rather than integrating the area.
+    return shadow_view_factor_filtered_from(view,position,normal,cached);
 }
 
 float shared_point_shadow_factor(uint index,Light light,float3 position,float3 normal)

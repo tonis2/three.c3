@@ -374,7 +374,6 @@ struct Lightmap
 	uint settle;
 	uint stalled;
 	ulong camera_signature;
-
 	LightmapResult last;
 }
 
@@ -1654,7 +1653,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 4;
+const uint LIGHTMAP_FILE_VERSION = 5;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1950,7 +1949,6 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	ulong load_camera = hash_bytes(KEY_SEED, &load_eye, Vec3::size);
 	load_camera = hash_bytes(load_camera, &load_view_projection, Matrix4f::size);
 	if (header.camera_signature != load_camera) return LIGHTMAP_STALE~;
-
 	usz records = (usz)header.tiles * LightmapFileTile::size;
 	usz total = LightmapHeader::size + records + (usz)header.texel_bytes;
 	if (file.len != total) return LIGHTMAP_BAD_FILE~;

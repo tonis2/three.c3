@@ -536,8 +536,7 @@ fn bool MeshPass.shadow_range_rect(&self, GpuMesh* mesh, Material* material, Buc
 		}
 		min_x = math::clamp(min_x, -1.0f, 1.0f); max_x = math::clamp(max_x, -1.0f, 1.0f);
 		min_y = math::clamp(min_y, -1.0f, 1.0f); max_y = math::clamp(max_y, -1.0f, 1.0f);
-		// Include the widest area-light filter so its penumbra never escapes the
-		// dynamic comparison gate or the atlas rectangle refreshed beneath it.
+		// Pad for bilinear taps and the receiver normal offset.
 		const int FILTER_MARGIN = 7;
 		int left = (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - FILTER_MARGIN;
 		int right = (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + FILTER_MARGIN;

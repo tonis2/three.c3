@@ -906,7 +906,7 @@ float3 srgb_to_linear(float3 c)
 
 float shadow_view_factor(uint index, float3 position, float3 normal)
 {
-    return shadow_view_factor_filtered(index, position, normal, 1.0);
+    return shadow_view_factor_filtered(index, position, normal);
 }
 
 float shadow_factor(float3 position, float3 normal)
