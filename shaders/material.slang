@@ -68,6 +68,12 @@ struct Instance
     // unmorphed mesh carries. Per instance for `pose`'s reason: two faces built
     // from one head mesh wear different expressions and stay one draw call.
     uint morph;
+
+    // This copy's lightmap tile: xy the atlas uv of its corner, zw its size, and
+    // zw zero for a copy with no tile — which is every copy until
+    // `three.lights.bake()` has run. `mesh.slang` declares the same field last for
+    // the same reason: the order here is a wire format.
+    float4 lightmap;
 };
 
 // One light, byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare.
@@ -90,6 +96,12 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    // Frame constants for the receiver-plane gradient: row i of the cofactor of
+    // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
+    // inverse-transpose times the projection's w row in w.
+    float4 plane_x;
+    float4 plane_y;
+    float4 plane_z;
 };
 
 struct FrameBlock
@@ -250,6 +262,12 @@ struct Draw
     // lighting it, and a black surface can glow. Zero on every material nobody set
     // one on, which is the value the record already holds.
     float4 emissive;
+    // One slot of the device-wide texture array per binding — see `Map` and
+    // `map_at` in `surface.slang`. Indexed by what used to be the descriptor
+    // binding, so a material's maps kept their numbers when they left the
+    // per-draw descriptor set. Every slot nothing filled holds the array's
+    // reserved 1x1 white.
+    uint texture_index[24];
 };
 
 // **The three mesh fields come first, in this order, and material uniforms only
@@ -348,10 +366,13 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
     return pose + (from - pose) * instance.blend;
 }
 
-// Always bound, always valid — a 1x1 opaque white image when the material has no
-// texture, so an untextured material and a textured one are the same descriptor
-// layout and the same pipeline.
-[vk::binding(0, 0)] Sampler2D base_color_map;
+// `material.map` — and the material's own samplers below it — are **not**
+// bindings any more. Each is a slot of the device-wide texture array, named here
+// by the number it used to be bound at and reached through `map_at`; see `Map` in
+// `surface.slang`. A slot nothing filled holds the array's 1x1 opaque white, so
+// an untextured material and a textured one are still the same descriptor layout
+// and the same pipeline.
+static const uint SLOT_BASE_COLOR = 0u;
 
 // The shadow map, reserved exactly as binding 0 is — declared by the template
 // rather than by anything a script writes, and carrying the same 1x1 white image
@@ -363,6 +384,24 @@ float4x4 skin_matrix(Draw draw, Instance instance, uint vid)
 // comparisons filtered in hardware. `shadow_atlas` above stays for the debug
 // view, which wants the depth itself.
 [vk::binding(18, 0)] Sampler2DShadow shadow_atlas_compare;
+// The linearly-transformed-cosine table for area lights: one 64x128 image
+// holding the fitted inverse transform and the GGX norm/Fresnel split. See
+// `lighting.slang`; `FrameBlock.lighting.w` says whether it is bound. Absent
+// where the numeric integration is the answer, so a material at the sampler
+// limit still fits a portable device.
+#if !defined(THREE_AREA_REFERENCE) && !defined(THREE_BAKE)
+[vk::binding(19, 0)] Sampler2D ltc_lut;
+#endif
+// The baked static light cache — one image for the whole scene, indexed by this
+// copy's tile. `render/lightmap.c3` fills it.
+//
+// Dropped for a material holding every sampler slot it may declare: sixteen
+// sampled images per stage is all a portable device offers, and a material at the
+// ceiling has none left. Its static draws then shade every light in real time,
+// which is the same trade `THREE_NO_AO` above makes.
+#ifndef THREE_NO_LIGHTMAP
+[vk::binding(20, 0)] Sampler2D lightmap_atlas;
+#endif
 #ifndef THREE_NO_AO
 [vk::binding(4, 0)] Sampler2D ambient_occlusion_depth;
 #endif
@@ -423,13 +462,10 @@ float crevice_occlusion(float3 position, float3 normal)
 // nothing above this file ever spells a binding number and inserting a texture at
 // the front of the list cannot silently renumber the ones after it.
 //
-// They are declared here rather than beside the body so that `fragmentMain` is
-// downstream of them too. Nothing generated samples one — an unused sampler is
-// exactly what a material that declared a texture and never read it should be —
-// and each is bound every draw regardless, with the same 1x1 white image
-// `base_color_map` falls back to. A binding the layout declares and the draw
-// leaves unwritten is undefined behaviour that no validation layer reports.
-//@textures
+// They are written at `//@shared` below rather than here, because each is a
+// `Map` and that type is one of the things the shared block declares. Nothing
+// generated samples one — a declared texture a body never reads is exactly what
+// it looks like — and a slot the script left empty holds the array's 1x1 white.
 
 // **The contract with the agent.** Six values, all of them in world space, in
 // texture space, or per instance; none of them a pointer and none of them a
@@ -678,6 +714,10 @@ struct VertexOutput
     // are free to differ about this where they are not free to differ about a
     // struct the CPU also writes.
     nointerpolation float3 origin : TEXCOORD3;
+    // This copy's place in the lightmap atlas: xy the atlas uv here, z 1 where
+    // there is a tile. `mesh.slang` carries the same varying under the same
+    // semantic.
+    float3 lightmap : TEXCOORD4;
     float4 sv_position : SV_Position;
 };
 
@@ -833,6 +873,12 @@ static float3 g_position = float3(0.0, 0.0, 0.0);
 static float3 g_receiver_normal = float3(0.0, 1.0, 0.0);
 static float4 g_screen_position = float4(0.0);
 static float g_crevice = 1.0;
+// This fragment's baked light, read once out of the atlas, and whether there was
+// a tile to read it from. Zero and false on every dynamic receiver and on every
+// mesh whose uvs could not carry a tile, which is what keeps a baked light shaded
+// in real time wherever it was never baked.
+static float3 g_lightmap = float3(0.0);
+static bool g_lightmapped = false;
 //@lighting
 
 uint fragment_cluster()
@@ -905,6 +951,7 @@ float3 lambert(float3 normal, float occlusion)
     {
         Light light = push.frame[0].lights[i];
         if (light.meta.z != 0u) continue;
+        if (g_lightmapped && shared_light_is_baked(light)) continue;
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
@@ -918,11 +965,14 @@ float3 lambert(float3 normal, float occlusion)
     for(uint k=0u;k<localCount;++k){ uint i=overflow?k:push.frame[0].cluster_indices[cluster*push.frame[0].cluster_grid.w+k];
         // Nothing is sampled for a light already at zero: the shadow only scales
         // what the light delivers, and an area emitter out of range delivers none.
-        Light light=push.frame[0].lights[i]; if(light.meta.z==2u||light.meta.z==3u){float area=area_diffuse(light,g_position,normal); if(area<=0.0)continue; direct+=light.color.rgb*area*point_shadow_factor(i,light,g_position,normal);continue;} if(light.meta.z!=1u&&light.meta.z!=4u)continue; float reach;
+        Light light=push.frame[0].lights[i]; if(g_lightmapped&&shared_light_is_baked(light))continue; if(light.meta.z==2u||light.meta.z==3u){float area=area_diffuse(light,g_position,normal); if(area<=0.0)continue; direct+=light.color.rgb*area*point_shadow_factor(i,light,g_position,normal);continue;} if(light.meta.z!=1u&&light.meta.z!=4u)continue; float reach;
         float3 toward=light_toward(light.direction,g_position,reach); float n=max(dot(normal,toward),0.0)*reach;
         if(light.meta.z==4u)n*=shared_spot_reach(light,toward);
         if(n<=0.0)continue;
         n*=point_shadow_factor(i,light,g_position,normal); direct+=light.color.rgb*light.color.w*n; }
+    // The tile carries exactly the terms the loops above skipped, so adding it here
+    // is what makes a baked light and a real-time one the same picture.
+    direct += g_lightmap;
     float ambient_visibility = occlusion * g_crevice;
     return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
 #endif
@@ -984,6 +1034,9 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if(light.meta.z!=0u&&!cluster_contains(i))continue;
+        // A lightmap holds diffuse and nothing else, so a baked light's highlight is
+        // dropped rather than moved. `docs/functions.md` says so out loud.
+        if(g_lightmapped&&shared_light_is_baked(light))continue;
         if(light.meta.z==2u||light.meta.z==3u){float3 area=area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v); if(dot(area,float3(1.0))<=0.0)continue; sum+=area*point_shadow_factor(i,light,position,normal);continue;}
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
@@ -1082,6 +1135,10 @@ float3 environment_light(float3 normal, float3 position, float3 albedo, float ro
 // below are what give a body the `Surface` spelling of it.
 //@shared
 
+// The samplers the agent asked for: one `static const Map` each, at the rows
+// 5..N in the order they were declared. See the note above `Surface`.
+//@textures
+
 
 // This surface's highlight, so a body can have one without reproducing the four
 // terms above. `s.roughness`, `s.metalness` and `s.reflectance` are what it
@@ -1116,11 +1173,11 @@ float3 standard(Surface s, float3 albedo, float3 normal, float ao)
 #else
     SharedLightTerms direct = shared_standard_lights(
         push.frame, g_screen_position, normal, g_receiver_normal, s.position, albedo,
-        s.roughness, s.metalness, s.reflectance, g_shadow
+        s.roughness, s.metalness, s.reflectance, g_shadow, g_lightmapped
     );
     float ambient_visibility = ao * g_crevice;
     float3 diffuse = push.frame[0].lighting.x * ambient_visibility
-        + (1.0 - push.frame[0].lighting.x) * direct.diffuse
+        + (1.0 - push.frame[0].lighting.x) * (direct.diffuse + g_lightmap)
         + push.frame[0].world.rgb * ambient_visibility;
     return albedo * diffuse * (1.0 - s.metalness)
          + direct.specular
@@ -1232,6 +1289,7 @@ float3 base_albedo(Surface s, float2 uv)
     float3 albedo = draw.base_color.rgb * s.color.rgb;
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
+        Map base_color_map = map_at(SLOT_BASE_COLOR);
         albedo *= (draw.flags & FLAG_STOCHASTIC) != 0
             ? stochastic_sample(base_color_map, uv).rgb
             : base_color_map.Sample(uv).rgb;
@@ -1277,12 +1335,26 @@ float3 base_albedo(Surface s, float2 uv)
 // solve that one unit of u is a millimetre of surface and puts a line of enormous
 // parallax along every tile boundary. The unwrapped gradients are what the
 // surface actually has.
-float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float height, float depth)
+//
+// **The solve is separate from the height, because a surface has one and a stack
+// of layers has several.** `parallax_shift` answers "how far does one metre of
+// relief move this pixel's uv", which is a property of the surface and the view
+// and costs the whole of the arithmetic above; `parallax_step` is then one
+// multiply-add per height map. A LayeredMaterial solves once and steps per layer.
+//
+// **And it fades out where nobody can see it.** The rule, in one line: *the solve
+// is worth nothing once the deepest relief on the surface would move the texel
+// less than half a pixel*, which is the distance at which the whole effect is a
+// sub-pixel slide. `depth` is what picks that — the deepest relief the caller
+// carries, not the one it is about to step by — and past a pixel and a half it is
+// paid in full again. Distant ground therefore pays the two derivatives and one
+// dot product and stops.
+float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)
 {
 #ifdef THREE_BAKE
-    return uv;
+    return float2(0.0, 0.0);
 #else
-    if (depth == 0.0) return uv;
+    if (depth == 0.0) return float2(0.0, 0.0);
 
     float3 n = normalize(s.normal);
     float3 view = normalize(push.frame[0].camera.xyz - s.position);
@@ -1290,8 +1362,22 @@ float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float hei
     float3 dp_dx = ddx(s.position);
     float3 dp_dy = ddy(s.position);
 
+    // The view flattened into the surface. Its length is the sine of the angle to
+    // the normal, which is the offset limiting everybody uses: head-on it is zero
+    // and nothing moves, and at a grazing angle it is one rather than the
+    // infinity a divide by `dot(view, n)` would give — and that infinity is the
+    // texture sliding off the model at the silhouette.
+    float3 along = view - n * dot(view, n);
+
+    // Half the depth is as far as a texel can travel — the map runs either side
+    // of the plane the mesh has — and this is that distance against the world
+    // size of one pixel.
+    float pixel = max(max(length(dp_dx), length(dp_dy)), 1e-9);
+    float fade = saturate(0.5 * depth * length(along) / pixel - 0.5);
+    if (fade <= 0.0) return float2(0.0, 0.0);
+
     float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
-    if (abs(det) < 1e-12) return uv;
+    if (abs(det) < 1e-12) return float2(0.0, 0.0);
 
     // The world directions one unit of u and one unit of v run along, by solving
     // the two screen steps against each other.
@@ -1299,18 +1385,32 @@ float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float hei
     float3 dv = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / det;
     float du2 = dot(du, du);
     float dv2 = dot(dv, dv);
-    if (du2 <= 0.0 || dv2 <= 0.0) return uv;
+    if (du2 <= 0.0 || dv2 <= 0.0) return float2(0.0, 0.0);
 
-    // The view flattened into the surface. Its length is the sine of the angle to
-    // the normal, which is the offset limiting everybody uses: head-on it is zero
-    // and nothing moves, and at a grazing angle it is one rather than the
-    // infinity a divide by `dot(view, n)` would give — and that infinity is the
-    // texture sliding off the model at the silhouette.
-    float3 along = view - n * dot(view, n);
-    float lift = (height - 0.5) * depth;
-
-    return uv + lift * float2(dot(along, du) / du2, dot(along, dv) / dv2);
+    return fade * float2(dot(along, du) / du2, dot(along, dv) / dv2);
 #endif
+}
+
+// The same shift, read in the mesh's own uv — `material.repeat` is all that
+// stands between the two, so a stack whose mask is sampled at `s.mesh_uv` does
+// not solve the frame a second time to place it.
+float2 parallax_mesh_shift(float2 shift)
+{
+    float2 repeat = push.draw[0].uv_transform.xy;
+    return shift / float2(repeat.x == 0.0 ? 1.0 : repeat.x, repeat.y == 0.0 ? 1.0 : repeat.y);
+}
+
+// One height map's step along a shift already solved. **0.5 is the plane the mesh
+// already has**: half the map stands out of it and half sinks in, so a stack that
+// turns parallax on does not slide as a whole.
+float2 parallax_step(float2 uv, float2 shift, float height, float depth)
+{
+    return uv + (height - 0.5) * depth * shift;
+}
+
+float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float height, float depth)
+{
+    return parallax_step(uv, parallax_shift(s, duv_dx, duv_dy, depth), height, depth);
 }
 
 // The same, with the gradients the hardware computes — which is every caller
@@ -1459,6 +1559,10 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // reads as the mesh having lost its texture rather than as a mix-up here.
     float2 bake_uv = v.uv;
 #endif
+    // The mesh's own TEXCOORD_0, kept for the same reason `bake_uv` is: the tile
+    // was rasterised in this coordinate, so a body that computes its own uv must
+    // not be what indexes it.
+    float2 lightmap_uv = v.uv;
 
     displace(v);
 
@@ -1484,6 +1588,10 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 #endif
     output.normal = v.normal;
     output.uv = v.uv;
+    output.lightmap = float3(
+        instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
+        instance.lightmap.z > 0.0 ? 1.0 : 0.0
+    );
     // After `displace` and not before it, which is the same rule
     // `material.repeat` follows: a per-copy uv and a tiling density are both
     // answers to "how is the map laid across this surface", and a body that
@@ -1526,6 +1634,17 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
 {
     g_screen_position = input.sv_position;
+    // The tile, read once. Zero-sized on every copy with none, which the vertex
+    // stage already turned into a zero here.
+#ifndef THREE_NO_LIGHTMAP
+    // **Front faces only.** A double-sided surface is shaded with its normal turned
+    // toward the eye, so a leaf card lit from one side and seen from the other is a
+    // different answer at the same point of the same triangle — and the tile holds
+    // the one the bake rasterised, which is the front. A back face falls back to
+    // the whole real-time loop, which is right rather than merely safe.
+    g_lightmapped = front_facing && input.lightmap.z > 0.5;
+    if (g_lightmapped) g_lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
+#endif
     Draw draw = push.draw[0];
 
     Surface s;
@@ -1541,6 +1660,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
     if ((draw.flags & FLAG_HAS_UVS) != 0)
     {
+        Map base_color_map = map_at(SLOT_BASE_COLOR);
         float4 base = (draw.flags & FLAG_STOCHASTIC) != 0
             ? stochastic_sample(base_color_map, uv)
             : base_color_map.Sample(uv);

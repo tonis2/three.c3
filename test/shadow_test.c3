@@ -3006,3 +3006,304 @@ fn void a_point_mover_over_cached_depth_matches_a_full_map() @test
 			differing_bytes(&cached_removed, &full_removed));
 	};
 }
+
+<*
+ Per-light shadow policy: `three.lights[i].shadow` and `three.lights.shadow.maxLocal`.
+
+ Four properties, because four different things can go wrong. A light told to
+ stop casting must give its tiles back rather than keep them dark; a light with
+ a size of its own must get a tile that size and leave its neighbours theirs;
+ the `maxLocal` cut must keep the near lights and drop the far ones; and a
+ light whose script asked for a shadow must outrank the cut it would otherwise
+ have lost.
+*>
+fn void a_light_may_refuse_its_own_shadow() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.shadow = { enabled: true, size: 256, maxLocal: 8 };
+			for (let i = 0; i < 3; i++) {
+				three.lights.add({ position: [i * 2 - 2, 3, 0], range: 8, intensity: 6 });
+			}
+			three.render();
+			return three.stats().shadowViews;
+		`);
+		defer built.free();
+		test::@check(built.ok && built.value == `18`,
+			"three point lights hold six views each: %s %s", built.value, built.error);
+
+		three::RunResult off = run.run(`
+			three.lights[2].shadow = false;
+			three.render();
+			return [three.stats().shadowViews, three.lights[2].shadow.enabled,
+				three.lights[2].shadow.resident, three.lights[1].shadow.enabled].join(',');
+		`);
+		defer off.free();
+		test::@check(off.ok && off.value == `"12,false,false,true"`,
+			"a light told to stop casting releases its six views: %s %s", off.value, off.error);
+
+		three::RunResult back = run.run(`
+			three.lights[2].shadow = null;
+			three.render();
+			return [three.stats().shadowViews, three.lights[2].shadow.enabled].join(',');
+		`);
+		defer back.free();
+		test::@check(back.ok && back.value == `"18,true"`,
+			"and takes the registry default back when it stops saying: %s %s", back.value, back.error);
+	};
+}
+
+fn void a_light_may_ask_for_a_tile_size_of_its_own() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.lights.shadow = { enabled: true, size: 256, maxLocal: 8 };
+			three.lights.add({ shape: 'spot', position: [-2, 3, 0], direction: [0, -1, 0],
+				range: 8, intensity: 6 });
+			three.lights.add({ shape: 'spot', position: [2, 3, 0], direction: [0, -1, 0],
+				range: 8, intensity: 6 });
+			three.lights[1].shadow = { size: 1024 };
+			three.render();
+			return [three.lights[1].shadow.size, three.lights[2].shadow.size].join(',');
+		`);
+		defer built.free();
+		test::@check(built.ok && built.value == `"1024,256"`,
+			"one light's size is its own and its neighbour keeps the registry's: %s %s",
+			built.value, built.error);
+
+		uint big = 0;
+		uint small = 0;
+		for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+		{
+			if (!renderer.pass.shadow_view_set.views[at].live) continue;
+			uint i = renderer.pass.shadow_manager.light_indices[at];
+			if (i == 1) big = renderer.pass.shadow_manager.tiles[at].size;
+			if (i == 2) small = renderer.pass.shadow_manager.tiles[at].size;
+		}
+		test::@check(big == 1024 && small == 256,
+			"and the atlas gives each the tile it asked for, %d and %d", big, small);
+	};
+}
+
+fn void max_local_keeps_the_lights_that_light_the_shot() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.target.set(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			// Five spots in a line away from the camera, one view each. Equal
+			// power, so the rank is what each one delivers where the camera looks.
+			for (let i = 0; i < 5; i++) {
+				three.lights.add({ shape: 'spot', position: [0, 3, -i * 10], direction: [0, -1, 0],
+					range: 60, intensity: 6 });
+			}
+			three.lights.shadow = { enabled: true, size: 256, maxLocal: 2 };
+			three.render();
+			return [three.stats().shadowViews,
+				[...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('')].join(',');
+		`);
+		defer built.free();
+		test::@check(built.ok && built.value == `"2,11000"`,
+			"maxLocal 2 leaves the two nearest of five equal lights holding the only two views: %s %s",
+			built.value, built.error);
+
+		three::RunResult wider = run.run(`
+			three.lights.shadow.maxLocal = 4;
+			three.render();
+			return [three.stats().shadowViews,
+				[...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('')].join(',');
+		`);
+		defer wider.free();
+		test::@check(wider.ok && wider.value == `"4,11110"`,
+			"raising it admits the next nearest and still not the furthest: %s %s",
+			wider.value, wider.error);
+
+		// The rank is irradiance, so power buys back distance: the furthest
+		// light of the five, at a thousand times the intensity, takes the slot.
+		three::RunResult bright = run.run(`
+			three.lights.shadow.maxLocal = 1;
+			three.lights[5].intensity = 6000;
+			three.render();
+			return [...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('');
+		`);
+		defer bright.free();
+		test::@check(bright.ok && bright.value == `"00001"`,
+			"a bright far light outranks the dim near ones: %s %s", bright.value, bright.error);
+
+		// And the window is the shaders' own, so a light whose reach ends short
+		// of the shot scores nothing however near it stands.
+		three::RunResult reaching = run.run(`
+			three.lights[5].intensity = 6;
+			three.lights[1].range = 2;
+			three.render();
+			return [...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('');
+		`);
+		defer reaching.free();
+		test::@check(reaching.ok && reaching.value == `"01000"`,
+			"a light that does not reach the shot keeps nothing: %s %s",
+			reaching.value, reaching.error);
+
+		// A light dimmed to nothing gives its tiles up the same way.
+		three::RunResult dimmed = run.run(`
+			three.lights[1].range = 60;
+			three.lights[1].intensity = 0;
+			three.render();
+			return [...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('');
+		`);
+		defer dimmed.free();
+		test::@check(dimmed.ok && dimmed.value == `"01000"`,
+			"and so does one turned down to black: %s %s", dimmed.value, dimmed.error);
+	};
+}
+
+// The FF9 case in miniature: one disk of 350 W eleven metres up against a
+// lantern of 4 W four metres up. An area light's power is scaled by 1/pi in
+// `shared_area_shape`, and the rank does the same, so the two kinds compare —
+// the old distance-plus-range rank kept the lantern and the yard went flat.
+fn void an_area_light_and_a_lantern_rank_on_one_scale() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.target.set(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			three.lights.add({ position: [0, 4, 0], range: 20, intensity: 4 });
+			three.lights.add({ position: [0, 12, 0], shape: 'disk',
+				right: [0, 0, 1], up: [1, 0, 0], width: 2, height: 2,
+				range: 40, intensity: 350 });
+			three.lights.shadow = { enabled: true, size: 256, maxLocal: 1 };
+			three.render();
+			return [three.stats().shadowViews,
+				[...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('')].join(',');
+		`);
+		defer built.free();
+		test::@check(built.ok && built.value == `"1,01"`,
+			"the disk that lights the shot takes the one slot from the nearer lantern: %s %s",
+			built.value, built.error);
+
+		three::RunResult dimmer = run.run(`
+			three.lights[2].intensity = 3;
+			three.render();
+			return [...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('');
+		`);
+		defer dimmer.free();
+		test::@check(dimmer.ok && dimmer.value == `"10"`,
+			"and hands it back when it is the dimmer of the two: %s %s",
+			dimmer.value, dimmer.error);
+	};
+}
+
+fn void an_explicit_light_shadow_outranks_the_policy() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const s = new three.Scene();
+			s.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.target.set(0, 0, 0);
+			three.camera.orbit(0, 0, 6);
+			for (let i = 0; i < 5; i++) {
+				three.lights.add({ shape: 'spot', position: [0, 3, -i * 10], direction: [0, -1, 0],
+					range: 6, intensity: 6 });
+			}
+			three.lights.shadow = { enabled: true, size: 256, maxLocal: 1 };
+			three.lights[5].shadow = true;
+			three.render();
+			return [three.stats().shadowViews,
+				[...three.lights].slice(1).map(l => l.shadow.resident ? 1 : 0).join('')].join(',');
+		`);
+		defer built.free();
+		test::@check(built.ok && built.value == `"1,00001"`,
+			"the light the script asked for keeps the one shadow the budget allows: %s %s",
+			built.value, built.error);
+
+		// And it casts with the registry default off, on its own size.
+		three::RunResult alone = run.run(`
+			three.lights.shadow = { enabled: false, maxLocal: 4 };
+			three.lights[3].shadow = { enabled: true, size: 512 };
+			three.render();
+			return [three.stats().shadowViews, three.lights[3].shadow.size,
+				three.lights[5].shadow.enabled, three.lights[1].shadow.enabled].join(',');
+		`);
+		defer alone.free();
+		test::@check(alone.ok && alone.value == `"2,512,true,false"`,
+			"a light says yes where the registry says nothing: %s %s", alone.value, alone.error);
+	};
+}
+
+// A static box on a static plane, one point light, and the ground under the box
+// has to go dark.
+//
+// The lookup in `shadow_view_factor_filtered` answers "lit" for every reason it
+// cannot answer at all — no view, no pass, off the side of the map — so a
+// binding that reads the wrong image, a comparison sampler pointed at a blank
+// one, or a depth slack large enough to lift the receiver off its own caster all
+// come out as a frame with no shadow in it and nothing else to say so. This
+// asserts the one thing those share: the picture with local shadows on is darker
+// under the caster and identical away from it.
+const String LOCAL_CONTACT_SCENE = `
+	const scene = new three.Scene();
+	const ground = new three.Mesh(new three.PlaneGeometry(12, 12));
+	ground.rotation.x = -Math.PI / 2; ground.static = true; scene.add(ground);
+	const box = new three.Mesh(new three.BoxGeometry(1.2, 1.2, 1.2));
+	box.position.y = 0.6; box.static = true; scene.add(box);
+	three.light.intensity = 0; three.light.ambient = 0.05; three.light.world = [0, 0, 0];
+	three.lights.add({ position: [2.6, 3.4, 2.6], range: 14, intensity: 22 });
+	three.camera.target.set(0, 0, 0); three.camera.orbit(28, 26, 7);
+`;
+
+fn void a_local_light_darkens_the_static_ground_under_a_static_box() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(LOCAL_CONTACT_SCENE);
+		defer built.free();
+		test::@check(built.ok, "the local contact scene built: %s", built.error);
+
+		three::RunResult off = run.run(`three.lights.shadow = { enabled: false, size: 512 }`);
+		defer off.free();
+		test::@check(off.ok, "local shadows went off: %s", off.error);
+		image::Image unshadowed = renderer.capture()!!;
+		defer unshadowed.free();
+
+		three::RunResult on = run.run(`three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 }`);
+		defer on.free();
+		test::@check(on.ok, "local shadows went on: %s", on.error);
+		image::Image shadowed = renderer.capture()!!;
+		defer shadowed.free();
+
+		// The middle of the box's shadow, and a patch of the same plane the box
+		// stands too far from to reach.
+		uint under_before = luma_at(&unshadowed, 93, 91);
+		uint under_after = luma_at(&shadowed, 93, 91);
+		uint clear_before = luma_at(&unshadowed, 60, 160);
+		uint clear_after = luma_at(&shadowed, 60, 160);
+		test::@check(under_before > under_after + 90,
+			"the ground under the box went from %d to %d", under_before, under_after);
+		test::@check(clear_before == clear_after,
+			"and the ground away from it did not move: %d to %d", clear_before, clear_after);
+
+		// The shadow is a patch and not a rim: a lookup that only darkens the few
+		// texels where the box meets the plane has lost the shadow just as surely.
+		uint darkened = 0;
+		for (uint y = 60; y < 110; y++)
+		{
+			for (uint x = 70; x < 140; x++)
+			{
+				if (luma_at(&unshadowed, x, y) > luma_at(&shadowed, x, y) + 90) darkened++;
+			}
+		}
+		test::@check(darkened > 150, "the shadow covers %d pixels of plane", darkened);
+	};
+}

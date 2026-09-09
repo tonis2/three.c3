@@ -826,6 +826,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	float height = (float)io.extent.height;
 
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+	if (io.assets != null) io.assets.bind_texture_table(cmd, self.pipeline.layout);
 
 	// Pushed, not bound — the same argument `MeshPass.record` makes: there is no
 	// descriptor set anywhere in this project, so the images are specified inline

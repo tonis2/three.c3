@@ -101,6 +101,19 @@ struct Instance
 	// Per instance for `pose`'s reason: two faces built from one head mesh have to
 	// be able to wear different expressions and still be one draw call.
 	uint morph;
+
+	<*
+	 Where this copy's baked light sits in the lightmap atlas: xy the uv of its
+	 tile's corner, zw the tile's size. **zw zero is "this copy has no tile"**, and
+	 is what every copy carries until `three.lights.bake()` has run.
+
+	 Per copy rather than per bucket, which is the whole of how an instanced mesh
+	 is lightmapped at all: two copies of one crate stand in different light and
+	 need different tiles, and `SV_InstanceID` is renumbered by culling every frame
+	 — so the tile travels with the copy rather than being looked up by an index
+	 the shader cannot trust. It costs 16 bytes an instance and no draw call.
+	*>
+	float[4] lightmap;
 }
 
 <*
@@ -221,6 +234,13 @@ struct SceneStats
 	uint assets;
 	uint textures;
 	usz texture_bytes;
+	// Of those bytes, the block-compressed ones. `texture_bytes` less this is the
+	// RGBA8 share — a PNG or JPEG map that could have been BC7.
+	usz texture_compressed_bytes;
+	// Slots of the device-wide texture array in use, and how many it holds. Zero
+	// and zero on a device without descriptor indexing, where there is no array.
+	uint texture_slots;
+	uint texture_slot_capacity;
 	<*
 	 How many materials a script has built and not yet had collected.
 
@@ -372,6 +392,25 @@ struct SceneStats
 	bool shadow_cutout;
 
 	<*
+	 The static light cache, as `three.lights.bake()` last left it.
+
+	 `lightmap_receivers` is how many copies hold a tile and `lightmap_skipped` how
+	 many static receivers were refused one — a mesh with no uvs, uvs that tile, or
+	 uvs that overlap themselves. The gap between them is the whole of what a bake
+	 covers, and is the number to look at before wondering why a scene got no
+	 faster.
+
+	 The first three are zero until the first bake and stay at the last one's
+	 numbers afterwards. `lightmap_dirty` is the live one: how many tiles a light
+	 or a receiver has moved out from under and the catch-up has not reached yet.
+	 Those tiles are still displayed while they wait.
+	*>
+	uint lightmap_receivers;
+	uint lightmap_skipped;
+	usz lightmap_bytes;
+	uint lightmap_dirty;
+
+	<*
 	 The four blocks of memory the renderer owns, in bytes.
 
 	 `texture_bytes` and `pose_bytes` above were the only memory numbers here, and
@@ -513,6 +552,26 @@ struct Scene
 	List{Draw} draws;
 	List{Instance} instances;
 	List{Bucket} buckets;
+
+	// Whether the copies may read their lightmap tiles this frame — `MeshPass.
+	// refresh_lightmap` decides, from whether the atlas still holds the set of
+	// lights that are marked baked. False puts every light back in the real-time
+	// loop, which is what clearing `light.baked` has to do.
+	bool lightmap_live;
+
+	<*
+	 What has happened to the static receivers since the lightmap last looked.
+
+	 A counter for `static_revision`'s reason: the pass compares it against the
+	 number it last resolved and walks the node pool only when the two differ. It
+	 is bumped beside every one of those bumps that has a node in hand, and the
+	 node is marked rather than the atlas dropped — a tile is per copy.
+
+	 `lightmap_dirty_all` is the same signal for a change no node can be named for
+	 — a removal, a re-parenting — where the conservative answer is every tile.
+	*>
+	uint lightmap_changes;
+	bool lightmap_dirty_all;
 
 	bool cull;
 	// The working counter, zeroed at the top of every `build_draw_list`. It is zero
@@ -842,6 +901,31 @@ fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 		self.query.drop();
 	}
 	if (node == null || node.static_caster) self.static_revision++;
+	if (node == null)
+	{
+		self.lightmap_dirty_all = true;
+		self.lightmap_changes++;
+	}
+	else if (node.static_caster)
+	{
+		self.dirty_lightmap(node);
+	}
+}
+
+<*
+ This copy's lightmap tile is out of date, and so is whatever it shadows.
+
+ Beside every `static_revision++` that has a node in hand: what invalidates a
+ cached shadow map invalidates a cached lightmap. The difference is the reach —
+ a shadow map is one image and a lightmap is a tile per copy, so the node is
+ remembered and `MeshPass.resolve_lightmap` spreads the change to the receivers
+ the baked lights could carry it to.
+*>
+fn void Scene.dirty_lightmap(&self, Node* node)
+{
+	node.lightmap_dirty = true;
+	node.lightmap_seed = true;
+	self.lightmap_changes++;
 }
 
 <*
@@ -1128,6 +1212,8 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 		node.static_caster = false;
 		self.static_nodes--;
 		self.static_revision++;
+		self.dirty_lightmap(node);
+		node.lightmap = { 0, 0, 0, 0 };
 	}
 	if (skin < 0 || self.assets == null) return;
 
@@ -1510,6 +1596,11 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// recycled slot that stayed static would put a new node into a shadow map
 	// nothing is going to rebuild.
 	node.static_caster = false;
+	// Reset for `material`'s reason: a recycled slot that kept a tile would read a
+	// stranger's rectangle out of the lightmap atlas.
+	node.lightmap = { 0, 0, 0, 0 };
+	node.lightmap_dirty = false;
+	node.lightmap_seed = false;
 	node.visible = true;
 	node.world_visible = true;
 	// Reset for `material`'s reason: a recycled slot that stayed non-colliding
@@ -1602,8 +1693,18 @@ fn void Scene.kill(&self, NodeId id)
 	node.alive = false;
 	// Before the flag is cleared, so a static caster's removal is seen as one.
 	self.invalidate(node);
-	if (node.static_caster) self.static_nodes--;
+	if (node.static_caster)
+	{
+		self.static_nodes--;
+		// The tile dies with the node and there is nobody left to spread the change
+		// from, so the whole atlas is what is asked about.
+		self.lightmap_dirty_all = true;
+		self.lightmap_changes++;
+	}
 	node.static_caster = false;
+	node.lightmap = { 0, 0, 0, 0 };
+	node.lightmap_dirty = false;
+	node.lightmap_seed = false;
 
 	// `alive` is what makes every outstanding id to this slot stale from here, and
 	// the fresh number `create_slot` draws is what keeps it stale once the slot is
@@ -1761,7 +1862,11 @@ fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
 	if (node == null) return;
 
 	bool now = parent_visible && node.visible;
-	if (node.static_caster && node.world_visible != now) self.static_revision++;
+	if (node.static_caster && node.world_visible != now)
+	{
+		self.static_revision++;
+		self.dirty_lightmap(node);
+	}
 	node.world_visible = now;
 
 	sz count = node.children.len();
@@ -1824,7 +1929,11 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	// box is where it was. What *can* change is whether this copy casts at all —
 	// `MeshPass.casts_shadow` reads the material's blend mode — so a static caster
 	// changing material is a static map to rebuild.
-	if (node.static_caster) self.static_revision++;
+	if (node.static_caster)
+	{
+		self.static_revision++;
+		self.dirty_lightmap(node);
+	}
 }
 
 <*
@@ -1870,6 +1979,10 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 		self.static_nodes--;
 	}
 	self.static_revision++;
+	self.dirty_lightmap(node);
+	// A node that has stopped being static has stopped being a receiver: it is
+	// about to move, and a tile it kept reading would be last position's light.
+	if (!wanted) node.lightmap = { 0, 0, 0, 0 };
 	return wanted;
 }
 
@@ -1994,7 +2107,11 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		// static, so nothing there would have said anything — and the wall's world
 		// matrix changed all the same. `changed` carries down the tree, so asking
 		// here catches the whole subtree of every move.
-		if (node.static_caster) self.static_revision++;
+		if (node.static_caster)
+		{
+			self.static_revision++;
+			self.dirty_lightmap(node);
+		}
 	}
 
 	node.world_visible = parent_visible && node.visible;
@@ -2618,6 +2735,7 @@ fn void Scene.build_draw_list(
 						.blend, // Written by `MeshPass.write_morph_weights` just before this walk,
 						// and zero on everything it did not touch.
 					.morph = node.morph,
+					.lightmap = self.lightmap_live ? node.lightmap : (float[4]) { 0, 0, 0, 0 },
 			};
 			// Straight into the mapped buffer when there is one, and into the list
 			// when there is not. `placed` is the index either way, which is what makes
@@ -2744,6 +2862,9 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.assets = assets.resident(),
 		.textures = assets.texture_count(),
 		.texture_bytes = assets.texture_bytes(),
+		.texture_compressed_bytes = assets.texture_compressed_bytes(),
+		.texture_slots = assets.texture_slots(),
+		.texture_slot_capacity = assets.texture_slot_capacity(),
 		.culled_last_frame = self.culled_last_frame,
 		.shadow_culled_last_frame = self.shadow_culled_last_frame,
 		// Copied out rather than recounted: they are what the sweeps since the last

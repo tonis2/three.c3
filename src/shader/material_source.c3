@@ -190,41 +190,30 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
 <*
  How many samplers of its own a material may declare, on top of `map`.
 
- A budget rather than a device limit, the same way `PUSH_BUDGET` is — but unlike
- `PUSH_BUDGET` it is now close enough to a real ceiling to be arithmetic rather
- than taste, so here is the sum.
+ **What bounds it is the width of the draw record's row, not a device limit.**
+ A material's images are slots of the device-wide texture array — one descriptor
+ array bound once for the whole device, `src/gpu/texture_table.c3` — and the only
+ thing that is per material is the `uint` index of each, carried in
+ `DrawRecord.texture_index` and read in the shader through `map_at`. So the
+ per-stage sampler limits that used to set this number no longer see a material's
+ maps at all: whatever a stack declares, the fragment stage declares the
+ template's own `MATERIAL_FRAME_SAMPLERS` and nothing more.
 
- **What actually bounds it is the per-stage sampler limit, not
- `maxPushDescriptors`.** Push descriptors are the roomier of the two: an
- implementation offering VK_KHR_push_descriptor must report at least 32 of them,
- and one material's set is the samplers plus nothing else. The tighter pair is
- `maxPerStageDescriptorSamplers` and `maxPerStageDescriptorSampledImages` — a
- combined image sampler counts against both — and Vulkan's mandatory minimum for
- each is 16. A generated material's fragment stage declares
- `MATERIAL_BINDING_FIRST` reserved bindings (`base_color_map`, `shadow_map`,
- `environment_map`, `point_shadow_map`) plus this many, so four plus twelve is
- sixteen and fits exactly on the least capable conformant device.
- Nothing has to be queried and there is no fallback path, because the number
- cannot be refused. `Gpu.report` prints all three limits under `--debug` for a
- device whose answers are worth checking.
+ It was four, then eight, then twelve. Four was chosen against what a
+ hand-written effect uses — a pattern, a ramp and a mask; a `LayeredMaterial` is
+ not hand-written (`js/prelude/layers.js` generates one sampler per layer plus one
+ for the packed mask) and an ordinary terrain out of Blender asked for nine.
+ Twelve was that terrain with room over it, against a Vulkan minimum of sixteen
+ sampled images per stage that a stack of ten or eleven quietly went past. That
+ ceiling is gone; this one is the row, and widening it is `DRAW_TEXTURE_INDICES`
+ plus the same number in both templates' `Draw`.
 
- It was four, chosen against what a hand-written effect uses: a pattern, a ramp
- and a mask, with the fourth so three was not a cap anybody hit on their first
- attempt. A `LayeredMaterial` is not hand-written — `js/prelude/layers.js`
- generates one sampler per layer plus one for the packed mask — so four bought
- three layers over the base and no room for a normal map on any of them. Eight
- bought a mask and seven detail maps, and an ordinary terrain exported from
- Blender asked for nine: a base normal, a base height, a base metallic-roughness
- and two layers carrying an albedo, a normal, a metallic-roughness and a height
- each. Twelve is that terrain with room over it, and `layers.js` sheds maps in a
- stated order rather than refusing the surface when a stack still does not fit.
-
- The cost is per draw: the descriptors are pushed per bucket, so every declared
- sampler is command traffic on every material that declares one. A material
- wanting more images than this wants an atlas or a texture array — both of which
- are one binding, and neither of which exists here yet.
+ The cost is no longer per draw either: the descriptors used to be pushed per
+ bucket, so every declared sampler was command traffic on every material that
+ declared one. Now a bucket pushes the reserved images and its record carries the
+ rest as integers.
 *>
-const uint MATERIAL_TEXTURE_LIMIT = 12;
+const uint MATERIAL_TEXTURE_LIMIT = DRAW_TEXTURE_INDICES - MATERIAL_BINDING_FIRST;
 
 // The template, looked up the same way `mesh.slang` is — `shaders/` first, then
 // `build/shaders/`, both relative to the working directory.
@@ -319,7 +308,13 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"FLAG_HAS_NORMALS",
 	"FLAG_HAS_UVS",
 	"FLAG_HAS_COLORS",
-	"MATERIAL_ROWS", // The three push fields the mesh contract pins, and the record the third of
+	"MATERIAL_ROWS", // The device-wide texture array and what a declared texture is: the array,
+	// the type each name is given, the accessor the template's own maps go
+	// through, and the row `material.map` sits at.
+	"three_textures",
+	"Map",
+	"map_at",
+	"SLOT_BASE_COLOR", // The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
 	// no longer share a scope with a uniform — they stay refused because the

@@ -371,7 +371,79 @@ const String TWELVE_SAMPLES = `float3 shade(Surface s) {
 	return c * lambert(s.normal);
 }`;
 
-fn void twelve_live_material_samplers_keep_the_portable_layout_and_ao_fallback() @test
+<*
+ A material declares no samplers of its own, whatever its stack asks for.
+
+ The band this used to guard was the one where the assembler shed optional
+ bindings only at *exactly* twelve maps, so ten and eleven declared seventeen and
+ eighteen sampled images — over the sixteen a conformant device has to offer, on
+ hardware nobody here owns. There is no band any more and no shedding: a
+ material's images are slots of one device-wide array, so the fragment stage
+ declares the template's own reserved samplers and the count does not move with
+ the stack.
+
+ Walked from nine to the ceiling because those are the sizes a `LayeredMaterial`
+ reaches — the Evil Forest's `grass` is eleven — and asserted against the
+ *reflected* layout, which is the only thing that can answer what a linked module
+ declares.
+*>
+fn void a_material_declares_no_samplers_of_its_own_whatever_its_stack() @test
+{
+	uint reserved = 0;
+
+	for (uint n = 9; n <= three::MATERIAL_TEXTURE_LIMIT; n++)
+	{
+		@pool()
+		{
+			DString body;
+			body.tinit(512);
+			body.append_string("float3 shade(Surface s) { float3 c = float3(1.0);");
+			three::MaterialTexture[three::MATERIAL_TEXTURE_LIMIT] textures;
+			for (uint i = 0; i < n; i++)
+			{
+				textures[i] = { string::tformat("t%d", i) };
+				body.appendf(" c *= t%d.Sample(s.uv).rgb;", i)!!;
+			}
+			body.append_string(" return c * lambert(s.normal); }");
+
+			String source = three::material_source(body.str_view(), {}, mem, textures[:n])!!;
+			defer source.free(mem);
+
+			three::ShaderModule mod = three::compile_slang(source, "material.slang", AO_BOTH_STAGES[..])!!;
+			defer mod.free();
+			test::@check(mod.ok, "%d maps compile: %s", n, mod.diagnostic);
+
+			// Nothing a body declared is a binding any more, so nothing it declared
+			// can be found by name in the layout.
+			for (uint i = 0; i < n; i++)
+			{
+				test::@check(mod.layout.binding_of(string::tformat("t%d", i)) == null,
+					"%d maps: t%d is still a descriptor binding", n, i);
+			}
+
+			// The three that used to be shed are all present at every size.
+			test::@check(mod.layout.binding_of("ambient_occlusion_depth") != null, "%d maps lost the AO depth", n);
+			test::@check(mod.layout.binding_of("ltc_lut") != null, "%d maps lost the area table", n);
+			test::@check(mod.layout.binding_of("lightmap_atlas") != null, "%d maps lost the lightmap", n);
+
+			uint samplers = 0;
+			foreach (binding : mod.layout.bindings)
+			{
+				if (binding.set != 0) continue;
+				if (binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) samplers += binding.count;
+			}
+			test::@check(samplers == three::MATERIAL_FRAME_SAMPLERS,
+				"%d maps declare %d sampled images in set 0 and the template reserves %d",
+				n, samplers, three::MATERIAL_FRAME_SAMPLERS);
+			if (reserved == 0) reserved = samplers;
+			test::@check(samplers == reserved,
+				"%d maps declare %d sampled images and nine declared %d — the count moved with the stack",
+				n, samplers, reserved);
+		};
+	}
+}
+
+fn void twelve_live_material_samplers_draw_and_keep_their_ambient_occlusion() @test
 {
 	three::MaterialTexture[12] textures;
 	@pool()
@@ -387,6 +459,8 @@ fn void twelve_live_material_samplers_keep_the_portable_layout_and_ao_fallback()
 			if (binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) samplers += binding.count;
 		test::@check(samplers <= 16,
 			"portable material sampler count is %d, over 16", samplers);
+		test::@check(mod.layout.binding_of("ambient_occlusion_depth") != null,
+			"a twelve-sampler material lost the AO depth it no longer has to");
 	};
 
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
@@ -414,8 +488,11 @@ fn void twelve_live_material_samplers_keep_the_portable_layout_and_ao_fallback()
 		image::Image on = renderer.capture()!!;
 		defer on.free();
 		test::@check(rgb_sum(&off) > 1000, "twelve-sampler control drew no visible material");
+		// The frame is a lit plane with nothing in front of it, so there is nothing
+		// for the occlusion pass to find — which is what it used to prove about a
+		// material that had *lost* the sampler and now proves about one that has it.
 		test::@check(differing_rgb_bytes(&off, &on) == 0,
-			"AO fallback changed a saturated twelve-sampler material by %d bytes",
+			"the occlusion pass changed a flat twelve-sampler material by %d bytes",
 			differing_rgb_bytes(&off, &on));
 	};
 }

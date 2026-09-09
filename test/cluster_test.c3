@@ -391,6 +391,104 @@ fn void combined_area_lobes_match_the_separate_helpers_across_views() @test
 	}
 }
 
+fn double mean_rgb_difference(image::Image* a, image::Image* b)
+{
+	long total = 0;
+	sz bpp = a.bytes_per_pixel();
+	sz channels = 0;
+	for (sz p = 0; p < a.pixels.len; p += bpp)
+	{
+		for (sz c = 0; c < 3; c++)
+		{
+			int av = (int)(uint)(char)a.pixels[p + c];
+			int bv = (int)(uint)(char)b.pixels[p + c];
+			total += (long)(av > bv ? av - bv : bv - av);
+			channels++;
+		}
+	}
+	return channels == 0 ? 0.0 : (double)total / (double)channels;
+}
+
+<*
+ The fitted area-light integration answers what the numeric one answers.
+
+ `three.pass.area_reference` swaps the two in one build, so this is the same
+ frame twice rather than two builds compared by hand — which is also how the bake
+ keeps the numeric answer while the frame uses the fit.
+
+ The tolerances are what the approximation is worth rather than what it happened
+ to score: the fit is a few percent off ground truth, so a mean of a couple of
+ 8-bit levels over a lit plane is the right order and half a level would be
+ asserting that an approximation is not one. Measured 2.7, 1.2 and 1.0 levels
+ with a worst pixel of 32, at the terminator where the fit's horizon term is
+ weakest. Total energy is the claim that matters for a scene — the fit must not
+ change how bright the frame is — and 3% is tighter than any per-pixel number;
+ the three views come out at 1.2%, 0.8% and 1.2%.
+
+ The grazing view is here for the two failures that would not show head-on: a
+ horizon artefact on the far half of the plane, and a specular streak where the
+ lobe is widest.
+*>
+fn void the_fitted_area_lights_match_the_numeric_integration() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		scene.add(new three.Mesh(new three.PlaneGeometry(12, 9), new three.MeshLambertMaterial({
+			color: 0xb07040, roughness: 0.3, metalness: 0.4, reflectance: 0.8
+		})));
+		three.light.intensity = 0;
+		three.light.ambient = 0;
+		three.lights.add({ shape: 'rectangle', position: [-2.2, 0, 2.5], range: 30,
+			right: [1, 0, 0], up: [0, 1, 0], width: 3, height: 1.6,
+			color: [1.0, 0.9, 0.8], intensity: 200 });
+		three.lights.add({ shape: 'disk', position: [2.4, 0.4, 2.0], range: 30,
+			right: [1, 0, 0], up: [0, 1, 0], width: 2.2, height: 2.2,
+			color: [0.7, 0.9, 1.0], intensity: 200 });
+		three.camera.target.set(0, 0, 0);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the rectangle-and-disk scene built: %s", built.error);
+
+	float[3] yaw = { 0, 74, 0 };
+	float[3] distance = { 4.5, 8, 16 };
+	String[3] view = { "near", "grazing", "far" };
+	for (uint i = 0; i < 3; i++)
+	{
+		renderer.pass.camera.yaw = yaw[i];
+		renderer.pass.camera.pitch = 0;
+		renderer.pass.camera.distance = distance[i];
+
+		renderer.pass.area_reference = false;
+		image::Image fitted = renderer.capture()!!;
+		defer fitted.free();
+		test::@check(renderer.pass.ltc.live, "the fit is on the device");
+
+		renderer.pass.area_reference = true;
+		image::Image numeric = renderer.capture()!!;
+		defer numeric.free();
+
+		test::@check(differing_rgb(&fitted, &numeric) > 0,
+			"the %s view is actually integrated two different ways", view[i]);
+		double mean = mean_rgb_difference(&fitted, &numeric);
+		test::@check(mean < 3.5,
+			"the %s view differs by %.2f channel levels on average", view[i], mean);
+		test::@check(max_rgb_difference(&fitted, &numeric) < 48,
+			"and by at most %d anywhere", max_rgb_difference(&fitted, &numeric));
+		long lit = rgb_sum(&numeric);
+		double energy = lit == 0 ? 0.0 : (double)(rgb_sum(&fitted) - lit) / (double)lit;
+		test::@check(lit > 0 && energy > -0.03 && energy < 0.03,
+			"and carries %.3f of the numeric frame's energy", 1.0 + energy);
+	}
+
+	renderer.pass.area_reference = false;
+}
+
 fn void a_held_light_tracks_its_stable_id_across_remove() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
@@ -414,6 +512,7 @@ fn void shadow_update_budget_defers_new_work_but_keeps_valid_cache() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
+	device::reserve_sun_shadow_pages(renderer);
 	three::JsRuntime runtime;
 	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
@@ -660,7 +759,7 @@ fn void sixty_four_shadow_views_record_without_crossing_the_plan_array() @test
 		three.camera.frameAll();
 		three.shadows.budget={maxViews:64,maxUpdates:64};
 		three.light.shadow={enabled:true,size:256,follow:false,distance:20};
-		three.lights.shadow={enabled:true,size:256};
+		three.lights.shadow={enabled:true,size:256,maxLocal:64};
 		for(let i=0;i<10;i++)three.lights.add({
 			position:[(i%5-2)*2,3,Math.floor(i/5)*3-1.5],range:12,intensity:8
 		});

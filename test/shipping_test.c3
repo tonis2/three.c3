@@ -1116,3 +1116,103 @@ fn void a_refused_size_leaves_the_target_alone() @test
 			"a refused resize moved the target anyway");
 	};
 }
+
+// ============================================================================
+// The render scale
+// ============================================================================
+
+<*
+ A scale is what a game ships and a pinned size is what a tool call uses.
+
+ The difference is what happens next: a window drag, a fullscreen key or a move
+ to a denser display all change how many pixels the window has, and a pinned
+ number is wrong after any of them while a fraction is still right. So the scale
+ lives where the follow already is, and setting one gives the follow back.
+
+ Headless here, where there is no window to take a share of, because the state
+ is the whole of what is under test — `scale_side` below is the arithmetic and
+ `follow_window` is the same call on either path.
+*>
+fn void a_render_scale_is_kept_and_bounded() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		test::@check(@answer(run, `return three.window.renderScale;`) == "1",
+			"a fresh renderer was already scaled");
+
+		@ok(run, `three.window.renderScale = 0.5;`);
+		test::@check(renderer.render_scale == 0.5f, "the scale did not reach the renderer: %s", renderer.render_scale);
+		test::@check(@answer(run, `return three.window.renderScale;`) == "0.5", "the scale did not read back");
+		test::@check(!renderer.render_size_pinned, "a scale pinned the size");
+
+		test::@check(@answer(run, `return three.configure({ renderScale: 0.75 }).renderScale;`) == "0.75",
+			"configure did not take the scale");
+		test::@check(@answer(run, `return three.configure({}).renderScale;`) == "0.75",
+			"an empty configure cleared the scale");
+
+		test::@check(@answer(run, `three.window.renderScale = null; return three.window.renderScale;`) == "1",
+			"null did not give full resolution back");
+
+		three::RunResult small = run.run(`three.window.renderScale = 0.1;`);
+		defer small.free();
+		test::@check(!small.ok, "a scale below the floor was taken");
+		three::RunResult large = run.run(`three.window.renderScale = 3;`);
+		defer large.free();
+		test::@check(!large.ok, "a scale past the ceiling was taken");
+		three::RunResult text = run.run(`three.window.renderScale = 'half';`);
+		defer text.free();
+		test::@check(!text.ok, "a string was taken as a scale");
+		test::@check(@answer(run, `return three.window.renderScale;`) == "1",
+			"a refused scale changed the scale");
+	};
+}
+
+<*
+ Pinning a size clears the scale, and the two do not both apply.
+
+ An absolute size and a fraction of the window are two answers to one question.
+ If the pin left the fraction behind, `three.setRenderSize(null)` would come
+ back to a resolution nobody asked for — the window's pixels through a scale set
+ before a size that was meant to replace it.
+*>
+fn void pinning_a_size_clears_the_render_scale() @test
+{
+	@with_gpu_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@ok(run, `three.window.renderScale = 0.5;`);
+		@ok(run, `three.setRenderSize(320, 240);`);
+
+		test::@check(renderer.render_size_pinned, "setting a size did not pin it");
+		test::@check(@answer(run, `return three.window.renderScale;`) == "1",
+			"the pin left the scale behind");
+
+		test::@check(@answer(run, `return three.setRenderSize(null);`) == "true",
+			"unpinning did not report itself done");
+		test::@check(!renderer.render_size_pinned, "null did not give the window back");
+
+		// And the other direction: a scale takes the pin off, so a settings
+		// screen's slider does not need to know a tool call pinned a size first.
+		@ok(run, `three.setRenderSize(320, 240); three.window.renderScale = 0.5;`);
+		test::@check(!renderer.render_size_pinned, "a scale left the size pinned");
+		test::@check(renderer.render_scale == 0.5f, "the scale did not take: %s", renderer.render_scale);
+	};
+}
+
+<*
+ The arithmetic the follow runs, on its own.
+
+ Rounded to nearest rather than truncated, so a 0.5 of an odd side lands on the
+ even neighbour instead of always shrinking; never zero, because a target has to
+ have pixels; and bounded by the same 16384 `three.setRenderSize` takes, since a
+ supersampled 4K window is the one way to reach it by accident.
+*>
+fn void the_render_scale_rounds_and_bounds_a_side() @test
+{
+	test::@check(three::scale_side(2560, 0.5f) == 1280, "half of 2560");
+	test::@check(three::scale_side(1440, 0.75f) == 1080, "three quarters of 1440");
+	test::@check(three::scale_side(1281, 0.5f) == 641, "an odd side did not round to nearest");
+	test::@check(three::scale_side(2560, 0.0f) == 2560, "an unset scale moved the side");
+	test::@check(three::scale_side(2560, 1.0f) == 2560, "a scale of one moved the side");
+	test::@check(three::scale_side(1, 0.25f) == 1, "a side rounded away to nothing");
+	test::@check(three::scale_side(16384, 2.0f) == 16384, "the ceiling did not hold");
+}

@@ -16,6 +16,7 @@
 module three_tests::frame;
 
 import three;
+import three_tests::device;
 import std::core::test;
 import std::math;
 import std::time;
@@ -864,5 +865,242 @@ fn void a_callback_reads_the_previous_completed_host_frame() @test
 		defer seen.free(mem);
 		test::@check(seen == "[0,7]",
 			"the current callback sees only the prior completed host record, got '%s'", seen);
+	};
+}
+
+// ============================================================================
+// The frame that is not drawn again
+// ============================================================================
+
+<*
+ These need a device, unlike everything above: what is being asserted is that
+ `Renderer.record_scene` declined to record a pass, and the only honest way to
+ ask that is to record one. `render_offscreen(may_skip: true)` is the same
+ decision the window path makes — `Renderer.picture_key` is what both consult.
+*>
+macro @with_idle_scene(; @body(three::Renderer* renderer, three::JsRuntime* run))
+{
+	three::Renderer* renderer = device::borrow(160, 120);
+	defer device::release();
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		globalThis.boxMaterial = new three.MeshLambertMaterial({ color: 0x8090a0 });
+		globalThis.box = new three.Mesh(new three.BoxGeometry(1, 1, 1), boxMaterial);
+		scene.add(box);
+		three.camera.target.set(0, 0, 0); three.camera.orbit(30, 20, 4);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the idle scene built: %s", built.error);
+
+	// The device is shared across the whole binary, and the skip bookkeeping is
+	// the renderer's rather than the pass's — so it is put back by hand here, or
+	// a check that turned `always_render` on would decide every check after it.
+	renderer.always_render = false;
+	renderer.rendered_once = false;
+	renderer.rendered_frames = 0;
+	renderer.skipped_frames = 0;
+
+	// Two, because the first is what there is nothing to compare against.
+	@idle_frame(renderer);
+	@idle_frame(renderer);
+
+	@body(renderer, &runtime);
+}
+
+<*
+ One skippable frame, with the interface asked first — the host's own order.
+
+ `UiLayer.idle` is read-clearing and `app/loop.c3` reads it before the draw, so a
+ check that skipped it would leave cui's request standing and every frame after
+ it would look like an interface that had just changed.
+*>
+macro @idle_frame(three::Renderer* renderer)
+{
+	bool idle = renderer.ui.idle();
+	(void)idle;
+	renderer.render_offscreen(may_skip: true)!!;
+}
+
+<*
+ How many frames the renderer drew, and how many it decided were already on
+ screen, across one script and one skippable render.
+
+ The pair rather than either alone: a check that only watched the skips would
+ pass just as happily if nothing were ever drawn at all.
+*>
+macro @drawn(three::Renderer* renderer, three::JsRuntime* run, String source)
+{
+	if (source.len > 0)
+	{
+		three::RunResult result = run.run(source);
+		defer result.free();
+		test::@check(result.ok, "the change script succeeded: %s", result.error);
+	}
+	ulong before  = renderer.rendered_frames;
+	ulong skipped = renderer.skipped_frames;
+	@idle_frame(renderer);
+	test::@check(
+		renderer.rendered_frames + renderer.skipped_frames == before + skipped + 1,
+		"exactly one frame was accounted for"
+	);
+	return renderer.rendered_frames - before;
+}
+
+<*
+ A registered callback that changes nothing costs no frame.
+
+ The whole point: the loop goes on running the script sixty times a second — the
+ tick below is a real call into JavaScript — and the picture is presented again
+ rather than drawn again. `three.stats().skippedFrames` is what a script reads
+ this off.
+*>
+fn void a_callback_that_changes_nothing_is_not_drawn_again() @test
+{
+	@with_idle_scene(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		@ok(run, "globalThis.ran = 0; three.setAnimationLoop(() => { globalThis.ran++; });");
+
+		ulong drew    = renderer.rendered_frames;
+		ulong skipped = renderer.skipped_frames;
+		for (int i = 0; i < 4; i++)
+		{
+			run.tick((double)(i * 16));
+			@idle_frame(renderer);
+		}
+
+		String ran = @answer(run, "return globalThis.ran;");
+		defer ran.free(mem);
+		test::@check(ran == "4", "the callback ran on every tick, got '%s'", ran);
+		test::@check(renderer.rendered_frames == drew, "nothing was drawn again, got %d more",
+			renderer.rendered_frames - drew);
+		test::@check(renderer.skipped_frames == skipped + 4, "four frames were skipped, got %d",
+			renderer.skipped_frames - skipped);
+
+		String said = @answer(run, "return three.stats().skippedFrames > 0;");
+		defer said.free(mem);
+		test::@check(said == "true", "stats() reports the skips, got '%s'", said);
+	};
+}
+
+<*
+ Each of the five things a frame is made of costs exactly one frame when it
+ moves, and nothing on the frame after.
+
+ One check rather than five, because what is being asserted is the same sentence
+ five times and the interesting failure is a signal that is missed — which reads
+ as a zero here whichever of them it is.
+*>
+fn void every_change_that_moves_the_picture_draws_one_frame() @test
+{
+	@with_idle_scene(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		String[5] what = { "a node transform", "a light", "a material colour", "the camera", "the interface" };
+		String[5] change = {
+			"box.position.x += 1;",
+			"three.light.intensity = 3;",
+			"boxMaterial.emissive = 0xff2020;",
+			"three.camera.orbit(35, 25, 5);",
+			"three.ui.set({ type: 'label', text: 'idle' });",
+		};
+
+		foreach (i, source : change)
+		{
+			ulong moved = @drawn(renderer, run, source);
+			test::@check(moved == 1, "%s drew one frame, got %d", what[i], moved);
+
+			ulong still = @drawn(renderer, run, "");
+			test::@check(still == 0, "the frame after %s was skipped, got %d drawn", what[i], still);
+		}
+	};
+}
+
+<*
+ `three.alwaysRender` is the way out, and a screenshot never takes the shortcut
+ at all.
+
+ The two belong together because they are the same guarantee from two sides: a
+ script can say "draw anyway", and the paths that ask for a frame explicitly —
+ `three.render()`, `three.screenshot()`, a headless `--frames` batch — are never
+ asked whether they meant it.
+*>
+fn void always_render_and_an_explicit_frame_are_never_skipped() @test
+{
+	@with_idle_scene(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		// The explicit path, which is what `three.render()` and every screenshot
+		// take: `may_skip` defaults to false.
+		ulong drew = renderer.rendered_frames;
+		renderer.render_offscreen()!!;
+		renderer.render_offscreen()!!;
+		test::@check(renderer.rendered_frames == drew + 2, "an explicit render always draws, got %d",
+			renderer.rendered_frames - drew);
+
+		@ok(run, "three.alwaysRender = true;");
+		drew = renderer.rendered_frames;
+		ulong skipped = renderer.skipped_frames;
+		@idle_frame(renderer);
+		@idle_frame(renderer);
+		test::@check(renderer.rendered_frames == drew + 2, "alwaysRender drew both, got %d",
+			renderer.rendered_frames - drew);
+		test::@check(renderer.skipped_frames == skipped, "and skipped neither");
+
+		String said = @answer(run, "return three.alwaysRender;");
+		defer said.free(mem);
+		test::@check(said == "true", "the switch reads back, got '%s'", said);
+	};
+}
+
+<*
+ A material body that reads the clock goes on being drawn.
+
+ `Surface.time` is `three.clock.time`, so such a body paints a different picture
+ on every frame the world is running with nothing else in the scene moving — and
+ the fold leaves the clock out unless something asks for it, or no scene would
+ ever be still. The pair of checks is the whole rule: running, it draws; paused,
+ it does not.
+*>
+fn void a_body_that_reads_the_clock_is_drawn_until_the_clock_stops() @test
+{
+	@with_idle_scene(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		@ok(run, `
+			box.material = new three.ShaderMaterial({
+				fragment: 'float3 shade(Surface s) { return float3(sin(s.time), 0.2, 0.3); }'
+			});
+		`);
+		@idle_frame(renderer);
+		// The clock's first reading is the one it has nothing to difference
+		// against, so it moves no time — see `GameClock.advance_frame`.
+		run.tick(84);
+		@idle_frame(renderer);
+
+		ulong drew = renderer.rendered_frames;
+		for (int i = 0; i < 3; i++)
+		{
+			run.tick((double)(100 + i * 16));
+			@idle_frame(renderer);
+		}
+		test::@check(renderer.rendered_frames == drew + 3, "the clock kept it drawing, got %d",
+			renderer.rendered_frames - drew);
+
+		@ok(run, "three.clock.timeScale = 0;");
+		run.tick(500);
+		@idle_frame(renderer);
+		drew = renderer.rendered_frames;
+		ulong skipped = renderer.skipped_frames;
+		for (int i = 0; i < 3; i++)
+		{
+			run.tick((double)(600 + i * 16));
+			@idle_frame(renderer);
+		}
+		test::@check(renderer.rendered_frames == drew, "a stopped clock stops the frames, got %d more",
+			renderer.rendered_frames - drew);
+		test::@check(renderer.skipped_frames == skipped + 3, "and all three were skipped, got %d",
+			renderer.skipped_frames - skipped);
 	};
 }

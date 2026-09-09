@@ -1211,7 +1211,7 @@ fn void js_begin_material_layers(
  have become two fields.
 
  Names rather than binding numbers, because the resolution belongs on this side:
- `Material.binding_of_texture` asks the material's own reflected pipeline, which
+ `Material.binding_of_texture` asks the material's own declaration list, which
  is the only thing that actually knows.
 
  `params` is the uniform holding an `animated` layer's tint and opacity, resolved

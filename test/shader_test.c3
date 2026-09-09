@@ -163,7 +163,9 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 
 	String standard = function_body(lighting, "SharedLightTerms shared_standard_lights");
 	String area = function_body(lighting, "SharedAreaTerms shared_area_terms");
-	test::@check(standard.len > 0 && area.len > 0, "the two combined light routines are present");
+	String reference = function_body(lighting, "SharedAreaTerms shared_area_reference_terms");
+	test::@check(standard.len > 0 && area.len > 0 && reference.len > 0,
+		"the combined light routines and the numeric reference are present");
 	test::@check(
 		occurrence_count(standard, "shared_point_shadow_factor(i,light,position,receiverNormal)") == 3,
 		"each directional, area and punctual branch has one visibility lookup"
@@ -174,9 +176,21 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 		"one area visibility feeds both lobes"
 	);
 	test::@check(
-		occurrence_count(area, "for(uint y=0u;y<4u;++y)for(uint x=0u;x<4u;++x)") == 1
-			&& area.contains("terms.diffuse=") && area.contains("terms.specular="),
-		"one quadrature walk returns both area terms"
+		occurrence_count(reference, "for(uint y=0u;y<4u;++y)for(uint x=0u;x<4u;++x)") == 1
+			&& reference.contains("terms.diffuse=") && reference.contains("terms.specular="),
+		"one quadrature walk returns both reference area terms"
+	);
+	// The fit's own version of the same claim: one emitter polygon, read by both
+	// lobes, and two table taps for the pair rather than two for each.
+	test::@check(
+		occurrence_count(area, "shared_area_shape(") == 1
+			&& area.contains("terms.diffuse=shared_area_ltc_diffuse")
+			&& area.contains("terms.specular=light.color.rgb*shared_area_ltc_specular"),
+		"one emitter polygon returns both fitted area terms"
+	);
+	test::@check(
+		occurrence_count(lighting, "ltc_lut.SampleLevel") == 2,
+		"and the fit is two table reads, got %d", occurrence_count(lighting, "ltc_lut.SampleLevel")
 	);
 	test::@check(
 		lighting.contains("float shared_area_diffuse(") && lighting.contains("float3 shared_area_specular("),
@@ -473,34 +487,39 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// Nine descriptors, and every one of them is the template's own: the
-	// material's map at 0, the four maps the built-in material shades with, the
-	// ambient-occlusion depth, and the shadow atlas twice — once plain for the
-	// debug view and once through the comparison sampler. Derived, not declared
-	// — until M4 this was a literal in `MeshPipeline.init`, and it was one binding
-	// until the shadow pass claimed the second.
+	// **Six frame images in set 0, and the whole device's textures in set 1.** The
+	// five a *material* wears — its base colour and the built-in material's normal,
+	// metallic-roughness, occlusion and emissive maps — are slots of the texture
+	// array now, reached through `map_at`, so they are not descriptors of this
+	// pipeline at all. What is left in set 0 is what belongs to the frame rather
+	// than to the surface: the environment map, the ambient-occlusion depth, the
+	// shadow atlas twice (once plain for the debug view, once through the
+	// comparison sampler), the area-light fit and the lightmap atlas.
 	//
 	// **The count is checked as well as the names**, and it is the half that earns
-	// its keep — but no longer against `MATERIAL_BINDING_FIRST`, which is where the
-	// two templates stopped agreeing. `material.slang` reserves three and numbers
-	// an agent's first sampler at 3; this file reserves seven and has no agent. A
-	// binding is only ever resolved against the pipeline that declared it, so the
-	// two meanings of "3" never meet — see `NORMAL_MAP_BINDING`.
-	test::@check(mod.layout.bindings.len() == 9, "nine descriptors, got %d", mod.layout.bindings.len());
+	// its keep: a template that started declaring a material's map again would put
+	// the per-stage ceiling back, one binding at a time.
+	uint set_zero = 0;
+	foreach (binding : mod.layout.bindings) if (binding.set == 0) set_zero++;
+	test::@check(set_zero == three::MATERIAL_FRAME_SAMPLERS,
+		"%d frame descriptors in set 0, got %d", three::MATERIAL_FRAME_SAMPLERS, set_zero);
 	test::@check(
-		mod.layout.binding_of("normal_map") != null
-			&& mod.layout.binding_of("metalness_roughness_map") != null
-			&& mod.layout.binding_of("occlusion_map") != null
-			&& mod.layout.binding_of("emissive_map") != null,
-		"and the four past the reserved ones are the built-in material's maps"
+		mod.layout.binding_of("normal_map") == null
+			&& mod.layout.binding_of("metalness_roughness_map") == null
+			&& mod.layout.binding_of("occlusion_map") == null
+			&& mod.layout.binding_of("emissive_map") == null
+			&& mod.layout.binding_of("base_color_map") == null,
+		"and a material's own maps are slots rather than descriptors"
 	);
 
-	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
-	test::@check(map != null, "and one is base_color_map");
-	if (map != null)
+	three::ShaderBinding* array = mod.layout.binding_of("three_textures");
+	test::@check(array != null, "and the device-wide texture array is declared");
+	if (array != null)
 	{
-		test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
-		test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
+		test::@check(array.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
+		test::@check(array.set == three::TEXTURE_TABLE_SET && array.binding == three::TEXTURE_TABLE_BINDING,
+			"at %d,%d — got %d,%d",
+			three::TEXTURE_TABLE_SET, three::TEXTURE_TABLE_BINDING, array.set, array.binding);
 	}
 
 	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
@@ -511,6 +530,17 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		test::@check(
 			shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
 			"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
+		);
+	}
+
+	three::ShaderBinding* ltc = mod.layout.binding_of("ltc_lut");
+	test::@check(ltc != null, "and the area-light table is reserved past them");
+	if (ltc != null)
+	{
+		test::@check(
+			ltc.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+				&& ltc.set == 0 && ltc.binding == three::LTC_LUT_BINDING,
+			"a combined image sampler at 0,%d — got %d,%d", three::LTC_LUT_BINDING, ltc.set, ltc.binding
 		);
 	}
 
@@ -600,7 +630,11 @@ fn void the_draw_record_matches_the_shader() @test
 	defer mod.free();
 	test::@check(mod.ok, "the record compiles as a block: %s", mod.diagnostic);
 
-	foreach (expected : three::DRAW_RECORD_FIELDS)
+	// Only the rows `mesh.slang` declares — see `DRAW_RECORD_SHADER_FIELDS`. The
+	// tail past it is written for the templates that have not started reading it,
+	// and it is a tail, so every offset above is where it was.
+	uint declared = three::DRAW_RECORD_SHADER_FIELDS;
+	foreach (expected : three::DRAW_RECORD_FIELDS[:declared])
 	{
 		three::ShaderField* found = mod.layout.field_of(expected.name);
 		test::@check(found != null, "the record has a '%s' field", expected.name);
@@ -612,9 +646,9 @@ fn void the_draw_record_matches_the_shader() @test
 		);
 	}
 	test::@check(
-		mod.layout.push_fields.len() == three::DRAW_RECORD_FIELDS.len,
+		mod.layout.push_fields.len() == declared,
 		"and has %d fields, got %d",
-		three::DRAW_RECORD_FIELDS.len,
+		declared,
 		mod.layout.push_fields.len()
 	);
 
@@ -628,7 +662,9 @@ fn void the_draw_record_matches_the_shader() @test
 	//
 	// What stays here is the half a `$assert` genuinely cannot do: comparing this
 	// side against **Slang's** answer for the same declaration.
-	test::@check(three::DrawRecord::size == 280, "and the record is 280 bytes, got %d", three::DrawRecord::size);
+	// 280 of it is what `mesh.slang`'s `Draw` declares; the rest is the texture
+	// index row above, which nothing samples through yet.
+	test::@check(three::DrawRecord::size == 376, "and the record is 376 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
@@ -776,7 +812,7 @@ fn void storage_light_and_shadow_records_match_c3() @test
 	@check_storage_record(three::Light, "struct Light",
 		"push.direction + push.color + push.area_right + push.area_up + float4(push.meta)");
 	@check_storage_record(three::ShadowGpuView, "struct ShadowGpuView",
-		"mul(push.view_projection, push.params) + push.atlas");
+		"mul(push.view_projection, push.params) + push.atlas + push.plane_x + push.plane_y + push.plane_z");
 }
 
 fn void every_shader_declares_the_same_contract() @test
@@ -1005,13 +1041,14 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 9, "from nine reflected bindings");
-		test::@check(pipeline.shader.binding_of("base_color_map") != null, "named by the shader");
-		test::@check(pipeline.shader.binding_of("shadow_atlas") != null, "and so is the shared shadow atlas");
+		test::@check(pipeline.shader.bindings.len() == 7,
+			"from seven reflected bindings — six frame images and the texture array");
+		test::@check(pipeline.shader.binding_of("shadow_atlas") != null, "the shared shadow atlas is named");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");
+		test::@check(pipeline.shader.binding_of("three_textures") != null, "and the device-wide texture array");
 		test::@check(
-			pipeline.shader.binding_of("normal_map") != null,
-			"and the built-in material's normal map"
+			pipeline.shader.binding_of("normal_map") == null,
+			"while the built-in material's own maps are slots of that array"
 		);
 		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
 			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
@@ -1776,7 +1813,7 @@ fn void the_pipeline_cache_reads_the_disk_before_slang() @test
 		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
 			"with the shader's push size of %d, got %d",
 			three::MATERIAL_PUSH_START, pipeline.shader.push_size);
-		test::@check(pipeline.shader.binding_of("base_color_map") != null,
+		test::@check(pipeline.shader.binding_of("environment_map") != null,
 			"and the binding the shader named");
 	};
 }

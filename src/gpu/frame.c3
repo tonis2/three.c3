@@ -37,6 +37,68 @@ import std::time;
 
 const uint MAX_FRAMES_IN_FLIGHT = 2;
 
+// Where every picture key starts. FNV-1a's offset basis.
+const ulong KEY_SEED = 0xcbf29ce484222325;
+
+<*
+ FNV-1a over a run of bytes, eight at a time.
+
+ A byte at a time over the instance array is a million iterations on a large
+ scene; a word at a time is an eighth of that for the same fold. The tail is
+ taken a byte at a time, so a run that is not a multiple of eight still hashes
+ all of it.
+
+ Not cryptographic and does not need to be: a collision costs one frame that
+ looks unchanged and is not, on a scheme where the alternative — a dirty flag per
+ mutation — misses far more often.
+*>
+fn ulong hash_bytes(ulong hash, void* data, usz bytes)
+{
+	if (data == null || bytes == 0) return hash;
+	// Every buffer this is given is a device mapping or a heap array, so the
+	// branch is taken every time in practice; it is here because a misaligned
+	// pointer is a fault rather than a slow path.
+	if ((uptr)data % 8 != 0) return hash_octets(hash, data, bytes);
+
+	usz words = bytes / 8;
+	ulong* word = (ulong*)data;
+	for (usz i = 0; i < words; i++)
+	{
+		hash ^= word[i];
+		hash *= 0x100000001b3;
+	}
+	char* tail = (char*)data;
+	for (usz i = words * 8; i < bytes; i++)
+	{
+		hash ^= (ulong)tail[i];
+		hash *= 0x100000001b3;
+	}
+	return hash;
+}
+
+<*
+ The same fold a byte at a time, whatever the pointer is aligned to.
+
+ What the scalars go through, and the alignment is the reason rather than the
+ size: `&&value` is a stack temporary whose alignment is the compiler's business,
+ and a fold that read it eight bytes at a time when it happened to land on eight
+ would answer differently on the frame it did not — which is a key that moves
+ while the picture stands still.
+*>
+fn ulong hash_octets(ulong hash, void* data, usz bytes)
+{
+	char* at = (char*)data;
+	for (usz i = 0; i < bytes; i++)
+	{
+		hash ^= (ulong)at[i];
+		hash *= 0x100000001b3;
+	}
+	return hash;
+}
+
+// One FNV-1a step over a value of any width, for the scalars a key folds in.
+macro ulong @hash_value(ulong hash, value) => hash_octets(hash, &&(value), (usz)@sizeof(value));
+
 struct Frames
 {
 	vk::CommandPool pool;
@@ -194,9 +256,50 @@ struct Renderer
 	 whose useful value is `true` would be off in every one of them.
 	*>
 	bool render_size_pinned;
+
+	<*
+	 The fraction of the window's pixels the target follows at —
+	 `three.window.renderScale`.
+
+	 The other half of the same knob `render_size_pinned` is: a pin says "this
+	 many pixels whatever the window does", a scale says "this share of whatever
+	 the window is", so a resize or a fullscreen transition keeps the ratio
+	 instead of throwing it away. Only the second is a setting a game can ship,
+	 because the window's size is the player's to change.
+
+	 Zero means one, for `render_size_pinned`'s reason: a `Renderer` is built by
+	 assignment in a dozen tests and a field whose useful value is 1.0 would be
+	 an unscaled 0 in every one of them.
+	*>
+	float render_scale;
+
 	// What every render begins with. Reachable from a script as
 	// `scene.background`.
 	float[4] clear;
+
+	<*
+	 The key of the last frame actually drawn, and whether there is one.
+
+	 A frame whose key matches this one would put back exactly the picture already
+	 in `target.color`, so it is not drawn at all — see `Renderer.picture_key`.
+	*>
+	ulong rendered_key;
+	bool rendered_once;
+
+	<*
+	 Draw every frame, whatever the key says — `three.alwaysRender`.
+
+	 For a script whose picture depends on something no buffer of this frame
+	 carries: a shader reading a clock this engine does not own, an external
+	 texture written behind the asset table's back. False by default, and false is
+	 the zero value, which is what a `Renderer` built by assignment in a test gets.
+	*>
+	bool always_render;
+
+	// Frames the key said were already on screen — `stats().skippedFrames`.
+	ulong skipped_frames;
+	// Frames that were drawn — `stats().renderedFrames`.
+	ulong rendered_frames;
 }
 
 <*
@@ -340,6 +443,48 @@ fn void Renderer.free(&self)
 }
 
 <*
+ One number standing for everything this frame would put on screen.
+
+ `MeshPass.frame_key` is most of it — the bytes `prepare` uploaded. This adds
+ what lives outside the pass and still reaches the picture: the clear colour, the
+ two extents, the interface, and the post chain's own settings, whose push blocks
+ a script writes between frames and which no per-frame buffer carries.
+
+ The clock is folded in when there is a script post pass, for the reason
+ `MeshPass.reads_clock_time` states about material bodies: `p.time` comes from
+ the same reading, and a chain that animates off it draws a new picture every
+ frame with nothing else moving.
+
+ Conservative by construction: it is a fold over *content*, so anything that
+ reaches the GPU moves it. What it cannot see is a change that reaches the device
+ by some other door — that is what `always_render` is for.
+*>
+fn ulong Renderer.picture_key(&self)
+{
+	ulong key = self.pass.frame_key;
+	key = @hash_value(key, self.clear);
+	key = @hash_value(key, self.target.extent);
+	key = @hash_value(key, self.viewer.extent);
+	key = @hash_value(key, self.ui.active());
+	key = @hash_value(key, self.ui.picture_serial());
+	key = @hash_value(key, self.ui.slot_generation);
+	key = @hash_value(key, self.post.tonemap_mode.ordinal);
+	key = @hash_value(key, self.post.tonemap_exposure);
+	key = @hash_value(key, self.post.stages.len());
+	foreach (stage : self.post.stages)
+	{
+		key = hash_bytes(key, &stage.block[0], (usz)PUSH_BUDGET);
+		key = @hash_value(key, stage.textures);
+		key = @hash_value(key, stage.tap);
+		key = @hash_value(key, stage.kept);
+		key = @hash_value(key, (ulong)(uptr)stage.fragment.ptr);
+		key = @hash_value(key, stage.fragment.len);
+	}
+	if (self.post.stages.len() > 0) key = @hash_value(key, self.pass.clock.time);
+	return key;
+}
+
+<*
  A whole frame of scene, recorded into `cmd`: begin the target, draw, end the
  target.
 
@@ -373,8 +518,10 @@ fn void Renderer.free(&self)
  TRANSFER_SRC, so the validation checks in `three_tests::post` fail on it
  ("VUID-VkImageMemoryBarrier2-oldLayout-01197"). Verified by injecting a second
  `self.target.close(cmd)` here: both fail.
+
+ @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn. Only the window path passes true - a screenshot and a headless batch ask for each frame explicitly, and one that answered with the last one would be a lie.`
 *>
-fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false)
+fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false)
 {
 	// A shared test/device renderer may predate this frame path, and a resize can
 	// retire A between frames. Make the always-on HDR input and display encoder
@@ -402,6 +549,29 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// not grow a case per kind of thing that can be drawn.
 	self.pass.prepare(&self.gpu, cmd, &self.target, slot)!;
 	self.timer.mark(cmd, slot, FrameMark.PREPARE);
+
+	// Nothing that reaches the picture has moved since the last frame was drawn,
+	// so `target.color` still holds it, in the TRANSFER_SRC layout `close` left it
+	// in and the blit expects. Every mark between BEGIN and END is still recorded,
+	// because `gpu/timing.c3` requires all of them on every frame.
+	ulong key = self.picture_key();
+	if (may_skip && self.rendered_once && !self.always_render && key == self.rendered_key)
+	{
+		self.timer.mark(cmd, slot, FrameMark.SHADOW);
+		self.timer.scene_begin(cmd, slot);
+		self.timer.scene_end(cmd, slot);
+		self.timer.mark(cmd, slot, FrameMark.SCENE);
+		self.timer.mark(cmd, slot, FrameMark.POST);
+		self.skipped_frames++;
+		return;
+	}
+	self.rendered_key = key;
+	// Only the window path leaves a picture the window path may re-present. A
+	// screenshot draws the interface *into* the target where the window draws it
+	// over the blit, so a frame recorded for one is not a frame the other may
+	// stand on.
+	self.rendered_once = may_skip;
+	self.rendered_frames++;
 
 	// The shadow map, and it is a line rather than a branch. It begins and ends a
 	// rendering of its own, so it has to be here and not inside the block below;
@@ -575,12 +745,38 @@ fn void Renderer.follow_window(&self)
 
 	uint wide = self.viewer.extent.width;
 	uint high = self.viewer.extent.height;
+	// The raw drawable, before the scale: a minimised window is 0x0 and there is
+	// nothing to make a target out of, whereas 0 scaled would round up to a 1x1.
 	if (wide == 0 || high == 0) return;
+
+	wide = scale_side(wide, self.render_scale);
+	high = scale_side(high, self.render_scale);
 
 	if (catch err = self.resize_target(wide, high))
 	{
 		@advise("three: the window is %dx%d and the device would not make a target that size (%s)", wide, high, err);
 	}
+}
+
+<*
+ One side of the drawable through the render scale.
+
+ Rounded to nearest so a 0.5 of an odd width lands on the even neighbour rather
+ than always down, and held inside the same bounds `three.setRenderSize` takes,
+ since this is the other way to arrive at a target extent.
+
+ @param scale : `The fraction, or 0 for the drawable's own size.`
+ @require side > 0
+ @ensure return > 0
+*>
+fn uint scale_side(uint side, float scale)
+{
+	if (scale <= 0.0f || scale == 1.0f) return side;
+
+	double want = (double)side * (double)scale + 0.5;
+	if (want < 1.0) return 1;
+	if (want > (double)RENDER_MAX_SIDE) return (uint)RENDER_MAX_SIDE;
+	return (uint)want;
 }
 
 <*
@@ -660,7 +856,7 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 	// First and last commands in the buffer. The blits are inside the span on
 	// purpose — `gpu/timing.c3` says why.
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd, presenting: overlaid)!;
+	self.record_scene(cmd, presenting: overlaid, may_skip: true)!;
 
 	if (overlaid)
 	{
@@ -770,8 +966,10 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long*
  calling `render()` in a loop should not pay for a buffer allocation and a host
  copy each time. It exists rather than `render()` being a no-op so that a scene
  which cannot be drawn says so at the line that asked for it.
+
+ @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn - see record_scene. False for three.render(), which is an explicit ask; the offscreen half of a host driving its own loop is what passes true.`
 *>
-fn void? Renderer.render_offscreen(&self, long* wait_ns = null)
+fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = false)
 {
 	if (wait_ns != null) *wait_ns = 0;
 	uint slot       = self.frames.slot;
@@ -787,7 +985,7 @@ fn void? Renderer.render_offscreen(&self, long* wait_ns = null)
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd)!;
+	self.record_scene(cmd, may_skip: may_skip)!;
 	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;

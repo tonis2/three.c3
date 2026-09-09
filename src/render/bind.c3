@@ -34,13 +34,12 @@ module three;
 
 import vk;
 
-// One past the last binding each kind of shader can have: its template's
-// reserved bindings plus what an agent may declare on top of them. A material
-// reserves four and a post pass four — see `MATERIAL_BINDING_FIRST`.
-//
-// `mesh.slang` is not in the arithmetic and does not need to be: it declares seven
-// bindings of its own and no agent ever adds to them, so it fits under whichever
-// of the two is larger.
+// One past the last *slot* a material can name and one past the last binding a
+// post pass can declare. A material's slots are not descriptors any more — they
+// are rows of `DrawRecord.texture_index`, numbered from `MATERIAL_BINDING_FIRST`
+// so nothing above `shader/assemble.c3` had to move — but they share
+// `TextureSlots` with a post pass's real bindings, so the wider of the two is
+// what that array has to hold.
 const uint MATERIAL_BINDINGS_END = MATERIAL_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
 const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
 
@@ -56,8 +55,12 @@ const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  binding itself.
 *>
 const uint MAX_USER_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
-const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_COMPARE_BINDING + 1
-	? MAX_USER_BINDINGS : SHADOW_ATLAS_COMPARE_BINDING + 1;
+const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > LIGHTMAP_BINDING + 1
+	? MAX_USER_BINDINGS : LIGHTMAP_BINDING + 1;
+
+// `TextureSlots` and the draw record's index row are indexed by the same number,
+// so the row has to be at least as wide as the slots.
+$assert MAX_SAMPLED_BINDINGS <= DRAW_TEXTURE_INDICES : "DrawRecord.texture_index is narrower than TextureSlots";
 
 <*
  The image writes for one draw, gathered before any of them is pushed.
@@ -122,6 +125,9 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
 {
 	foreach (binding : pipeline.shader.bindings)
 	{
+		// Set 1 is the device-wide texture array, which is bound whole and is not
+		// pushed per draw.
+		if (binding.set != 0) continue;
 		if (binding.binding < first) continue;
 		if (binding.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
 		bool supplied = false;
@@ -139,11 +145,17 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
 <*
  Which binding a sampler name means, resolved through the *reflected* layout.
 
+ **A post pass's question now.** A material's images stopped being descriptors
+ when they moved into the device-wide texture array, so
+ `Material.binding_of_texture` reads its slots out of the declaration list
+ instead; this is what is left, and a post pass's samplers are still bindings of
+ its own set.
+
  The name is looked up in what Slang said the module contains rather than in
  anything this side remembers, so a shader and the thing holding its textures
  cannot disagree about which sampler is which. It is also why nothing above
- `shader/assemble.c3` spells a binding number: a script writes `noise_map`, and
- this is where that becomes a `1`.
+ `shader/assemble.c3` spells a binding number: a script writes `grade_lut`, and
+ this is where that becomes a `4`.
 
  Zero means no, and can, because zero is never a legal answer: binding 0 is the
  template's own `base_color_map` or `prev`, reached through `material.map` and
@@ -164,9 +176,8 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
 	if (pipeline == null) return 0;
 	ShaderBinding* found = pipeline.shader.binding_of(name);
 	if (found == null) return 0;
+	if (found.set != 0) return 0;
 	if (found.binding < first) return 0;
-	if (first == MATERIAL_BINDING_FIRST
-		&& (found.binding == SHADOW_ATLAS_BINDING || found.binding == SHADOW_ATLAS_COMPARE_BINDING)) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
 	return found.binding;
 }
@@ -190,7 +201,7 @@ fn bool pipeline_declares_binding(MeshPipeline* pipeline, uint binding)
 	if (pipeline == null) return false;
 	foreach (declared : pipeline.shader.bindings)
 	{
-		if (declared.binding != binding) continue;
+		if (declared.set != 0 || declared.binding != binding) continue;
 		return declared.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	}
 	return false;

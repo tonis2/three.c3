@@ -477,24 +477,45 @@ size. Either way, read the size back on a later frame rather than on the next li
 A size the device will not allocate throws, and the old target is still there and still being drawn.
 A run with no host loop never performs a queued one. Sizes are 1 to 16384 a side.
 
+Pinning a size clears `three.window.renderScale`, and setting a scale gives the follow back. The two
+are answers to one question — how many pixels — and a game wants the scale: a pinned number is wrong
+the moment the player drags the window or presses the fullscreen key.
+
 ## three.configure(options)
 
-What a game declares about itself, at the top of `main.js`: `{ title, fullscreen, maxFps, saveDir }`.
-Every key is optional and anything left out is left alone.
+What a game declares about itself, at the top of `main.js`:
+`{ title, fullscreen, maxFps, renderScale, saveDir }`. Every key is optional and anything left out is
+left alone.
 
 ```js
-three.configure({ title: 'Wumpa Quest', fullscreen: false, maxFps: 60, saveDir: 'wumpa-quest' });
+three.configure({ title: 'Wumpa Quest', fullscreen: false, maxFps: 60, renderScale: 1, saveDir: 'wumpa-quest' });
 ```
 
 There are no command-line flags for these — a player never sees a command line, and a settings screen
-has to change the same things at runtime — so `title`, `fullscreen` and `maxFps` are live properties
-on `three.window` as well, and this is the one call that sets them before the first frame.
+has to change the same things at runtime — so `title`, `fullscreen`, `maxFps` and `renderScale` are
+live properties on `three.window` as well, and this is the one call that sets them before the first
+frame.
 
 `saveDir` is boot-only and has no property beside it, because moving it mid-run would strand
 everything already written. It is a folder name and not a path; a separator in it is refused.
 
-Returns `{ title, fullscreen, maxFps, saveDir }` as they stand after the call, so a boot log can print
-one accurate line. Under `--headless` the window half is remembered and does nothing.
+Returns `{ title, fullscreen, maxFps, renderScale, saveDir }` as they stand after the call, so a boot
+log can print one accurate line. Under `--headless` the window half is remembered and does nothing.
+
+A settings screen is the three of them together — `renderScale` halves the pixels, `maxFps` halves the
+frames, and both are read back from `three.window` so the sliders open where the game actually is:
+
+```js
+const settings = three.save.read('settings') ?? { renderScale: 1, maxFps: 60, fullscreen: false };
+three.configure(settings);
+
+function applyGraphics(next) {
+	three.window.renderScale = next.renderScale;   // 0.5 is a quarter of the pixels
+	three.window.maxFps = next.maxFps;             // null for the display's own rate
+	three.window.fullscreen = next.fullscreen;
+	three.save.write('settings', next);
+}
+```
 
 ## three.save
 
@@ -524,7 +545,8 @@ run, and `list()` is `[]` before a folder has even been named, so a load menu ne
 
 ## three.window
 
-The window: `width`, `height`, `scale`, `resize(width, height)`, `title`, `fullscreen` and `maxFps`.
+The window: `width`, `height`, `scale`, `resize(width, height)`, `title`, `fullscreen`, `maxFps` and
+`renderScale`.
 
 `width` and `height` are device pixels, read off the drawable so they stay current through a live
 resize drag; `scale` is device pixels per logical point — 1.0 on an ordinary display, 2.0 on a retina
@@ -542,6 +564,19 @@ next frame. Null, 0 and Infinity all lift the cap; anything else has to be a num
 1000. A settings screen wants it beside `three.setRenderSize`: one halves the pixels, the other halves
 the frames. Under `--headless` it is remembered, and the server loop paces its ticks by it so a
 callback sees the same rate either way.
+
+`renderScale` is the share of the window's device pixels the picture is drawn at — 0.25 to 2.0, and 1
+by default. It is the other half of `maxFps` and the first thing a settings screen reaches for: one
+halves the frames, this halves the pixels, and on this engine's Evil Forest scene 0.75 and 0.5 are
+worth about a third and about half of what the frame costs the card. Unlike `three.setRenderSize` it
+is a ratio rather than a resolution, so a window drag, a fullscreen key or a move to a display of
+another density all keep it — the target follows the window at `scale x` its pixels, which is the one
+of the two a game can ship. Setting it gives the follow back if a size had been pinned, and
+`three.setRenderSize(width, height)` clears it in return; `null` and 1 both mean full resolution, and
+anything outside the range throws. The interface is laid out in the target's pixels, so it scales
+with the picture and is upscaled along with it — a tool window that wants a sharp menu bar over a
+cheap picture should leave this at 1. Under `--headless` there is no window to take a share of: it is
+remembered and changes nothing.
 
 `fullscreen` is a request in both directions: macOS animates into its own space over about half a
 second, a Wayland compositor answers with a configure some frames later, and an X11 window manager
@@ -1895,6 +1930,9 @@ Area diffuse and GGX specular illumination use deterministic 4×4 numerical inte
 with samples outside an ellipse discarded. This is an approximation of the extended emitter,
 not a point-light substitution or exact Blender rendering.
 
+Each light carries its own shadow settings — `three.lights[i].shadow` — over the registry's
+`three.lights.shadow`.
+
 `add` returns a handle with a stable identity: removing an earlier light does not redirect
 a retained handle to another lamp. `remove(index)` or `remove(handle)` closes the packed
 list's gap; numeric indices themselves are not stable. Light zero cannot be removed.
@@ -1905,6 +1943,244 @@ distance slices. Directional lights are evaluated globally. Each cluster holds 6
 indices; overflow switches that cluster to an all-light reference loop, never silently dropping
 illumination. See `stats().clusterBytes` and `stats().clusterOverflow`.
 
+## three.lights.shadow
+
+The shadow settings every local light takes unless it says otherwise. `enabled` and an explicit
+`size` are the two that matter; `bias` and `intensity` apply to all of them. An explicit size is
+required before enabling.
+
+```js
+three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1, maxLocal: 4 };
+```
+
+`maxLocal` is how many local lights may hold shadow views at once, 4 by default. The rest still
+light the scene and simply have no map to look into — a local shadow lookup is a per-pixel cost,
+and a frame with ten of them is paying for the ones whose edges nobody can see.
+
+Which lights keep theirs is a ranking by **how much shadow a light can put on screen**, not by
+where it stands: its irradiance at the point the camera is looking at, `intensity ×
+window(distance, range) / distance²`, with the same range window the shaders use — so a light
+whose reach ends short of the shot scores nothing however near it stands, and one dimmed towards
+black gives its tiles up. An area light's power is divided by pi the way the shader's own
+`shared_area_shape` divides it, which is what lets a disk of 600 W and a lantern of 3 W be
+compared at all: the lantern beside the camera loses to the area light that is actually casting
+the yard's shadows. The colour's luminance is in it. A light whose own `shadow.enabled = true`
+was set outranks every light that took the default, because that is the script saying which
+shadows it came for.
+
+The ranking is held rather than redone every frame, so nothing blinks: a script's writes land on
+the next frame, and movement of the camera's focus or of a shadowed light re-ranks only after
+about three metres and one second. Lights that lose their shadow release their views —
+`stats().shadowViews` is the count.
+
+## three.lights[i].shadow
+
+One light's own shadow, over `three.lights.shadow`.
+
+```js
+three.lights[3].shadow = false;                        // lights the scene, casts nothing
+three.lights[3].shadow = true;                         // casts, whatever the registry says
+three.lights[3].shadow = { enabled: true, size: 1024 };
+three.lights[3].shadow = null;                         // back to the registry default
+```
+
+`enabled` and `size` read back as what is in force rather than as what was written, so a light
+that never says anything answers with the registry's. `resident` is read-only and says whether
+the light is holding atlas tiles this frame, which is the half `maxLocal` decides — a light can
+be `enabled` and not resident.
+
+The settings live on the light, so they travel with it through a scene switch and survive the
+packed list's reordering. Light zero is the sun and is refused here: its map is fitted rather
+than tiled, and `three.light.shadow` is where it is set.
+
+## three.lights[i].baked
+
+Whether this light's direct diffuse belongs in the static light cache. `false` by default.
+
+```js
+three.lights[3].baked = true;
+```
+
+**A baked light is still a light.** The flag says the cache *may* carry it; it is skipped
+only where there is a lightmap tile actually holding it. A dynamic receiver, a mesh whose uvs
+cannot carry a tile, and every receiver before the first `three.lights.bake()` all shade it in
+real time. So setting this and never baking changes no pixel, and setting it back to `false`
+puts the light back in the loop everywhere — the atlas is ignored the moment the set of baked
+lights stops matching the set the atlas was baked from.
+
+Moving a baked light is a different matter and does not drop the atlas: the tiles inside its
+reach are marked dirty and re-baked over the next frames. See `three.lights.bake`.
+
+What a baked light loses on the surfaces it was baked into is its **specular highlight**: a
+lightmap holds diffuse and a highlight is a fact about where the camera is. Soft fills are
+diffuse-dominant, which is what makes the trade worth taking; a light whose highlight is the
+point of it should not be baked.
+
+The flag lives in the light's own `meta.w` beside its shadow settings, so it travels with the
+registry through a scene switch and neither setting clears the other.
+
+## three.lights.bake
+
+Renders every baked light onto every eligible static receiver into one atlas, so the per-pixel
+loop for those lights becomes one texture read.
+
+```js
+for (const l of three.lights) l.baked = true;
+const { receivers, skipped, texels, bytes, ms } = three.lights.bake();
+```
+
+A receiver is eligible when **`mesh.static = true`** and its own `TEXCOORD_0` is a layout
+rather than a tiling. Three conditions, measured once when the geometry uploads and cached on
+the mesh:
+
+- it has a `TEXCOORD_0` at all;
+- every uv is inside `[0, 1]` (a layout that runs outside it is tiling, and two pieces of
+  surface would share texels);
+- the uvs do not overlap themselves — the summed area of the triangles in uv against the area
+  of the region they actually cover, rasterised, must be at most 1.05.
+
+That is the whole contract, and it is a contract rather than a list: a mesh unwrapped by hand
+in Blender and re-exported joins the bake the moment its uvs pass. `skipped` counts the static
+receivers that do not, and those keep the full real-time loop for every light, baked ones
+included — **nothing ever goes dark**.
+
+Each *copy* gets its own tile, not each mesh: two copies of one crate stand in different light.
+They stay one draw call.
+
+One more refusal, and it is about the material rather than the mesh: a `ShaderMaterial` that
+declares **every** texture slot it may have has no sampler binding left for the lightmap —
+sixteen sampled images per stage is all a portable device offers — so its draws stay real time
+for every light and are counted in `skipped`. It is the same trade that turns the
+ambient-occlusion depth and the area-light table off for such a material.
+
+Options and answer:
+
+```js
+three.lights.bake({ texelsPerMetre: 8, maxBytes: 64 * 1024 * 1024, budgetMs: 4 });
+// -> { receivers, skipped, texels, bytes, ms, dirty, loaded }
+three.lights.bake({ load: true, save: true });   // load one if it fits, else bake and write it
+```
+
+`texelsPerMetre` is the density on the surface, 8 by default. `maxBytes` is the atlas ceiling,
+64 MB by default; tiles are scaled down together until the atlas that holds them fits. The
+atlas is `RGBA16F`, eight bytes a texel — a lightmap is a colour attachment first and a sampled
+image second, and a shared-exponent format is not required to be renderable. `budgetMs` sets
+`three.lights.bake.budgetMs`, below.
+
+`load` reads a saved atlas first and bakes only if there is none that fits this scene; `save`
+writes one afterwards. Either may be `true` for the default path or a path of its own —
+`three.lights.saveBake` and `three.lights.loadBake` are the same two verbs on their own.
+
+**Call it after the first frame.** It reads the shadow atlas as that frame left it, so a light
+whose shadow was not resident bakes without one — raise `three.lights.shadow.maxLocal` first in
+a scene with more baked lights than the four that hold shadows by default.
+
+The bake runs the mesh through `mesh.slang`'s own uv-space variant rather than through each
+material's body, because a lightmap holds light and no material body moves a light. What that
+gives up is a `vertex:` body's displacement and a `shade` body's `discard`: the bake sees the
+mesh as the file holds it.
+
+Area lights are integrated numerically in the bake whatever the frame is using, so the cached
+answer is the higher-quality one.
+
+Re-callable — a second bake replaces the first, repacking the atlas from nothing.
+
+### What makes a tile stale
+
+Between bakes the tiles are kept up to date rather than left. Anything that changes the light
+on a baked surface marks the tiles it reaches dirty, and those are re-baked over the following
+frames:
+
+- **a baked light moving** — its position, direction, range, colour, intensity, area extents,
+  or its own shadow settings. Every tile inside the light's reach goes dirty, at both the place
+  it left and the place it arrived at;
+- **a static receiver moving** — its own tile, plus every tile inside the reach of any baked
+  light that reaches it. That second half is deliberately blunt: the thing that changed is what
+  the receiver *shadows*, and there is no cheap exact answer to what that is;
+- **a static caster with no tile of its own moving** — the same rule. A mesh whose uvs cannot
+  carry a tile still casts into the bake;
+- **a static receiver's material changing** — because the material decides whether the surface
+  casts a shadow at all. Its *colour* does not matter and never marks anything: a tile holds
+  light, not lit colour, so albedo, roughness and metalness are not in it;
+- **a static receiver being added, removed, re-parented, hidden, or joining or leaving
+  `mesh.static`** — every tile, because there is no node left to measure the change from.
+
+Changing the *set* of lights marked `baked` is the one thing that does not re-bake: the atlas
+stops being read at all until the next `three.lights.bake()`, which is what makes
+`light.baked = false` restore the real-time picture byte for byte.
+
+**A dirty tile is still displayed while it waits.** Stale light is nearer to right than none,
+and dropping the tile until it caught up would make a drag flicker between the cache and the
+real-time loop.
+
+```js
+three.lights.bake.budgetMs = 4;      // how much re-bake work a frame may do, 4 ms by default
+three.stats().lightmapDirty;         // tiles still waiting
+```
+
+The catch-up runs at the top of each frame and stops when the budget is spent, always doing at
+least one tile. The batch size finds its own level — halved when a batch overran, doubled while
+there is room — so a device that bakes slowly does fewer tiles a frame rather than blowing the
+budget. On the Evil Forest scene, moving one lantern of range 19 m by 2 m dirties 482 of 2653
+tiles and settles in 58 frames at the default budget, against 1.9 s for a bake from nothing.
+
+It also waits one frame before starting: a bake reads the shadow atlas as the last frame left
+it, so re-baking in the same breath as the change would cache the shadow of where the light
+used to stand. That wait is capped at three frames, so a drag that never pauses still gets its
+tiles back.
+
+`stats().lightmapReceivers`, `stats().lightmapSkipped` and `stats().lightmapBytes` report what
+the last bake covered, and `stats().lightmapDirty` how much of it is currently stale.
+
+## three.lights.saveBake
+
+Writes the atlas and its tile table into the assets directory, so a shipped game loads its bake
+instead of making one on boot.
+
+```js
+three.lights.bake();
+three.lights.saveBake();                    // -> { path, tiles, dirty, bytes, ms }
+three.lights.saveBake('levels/forest.lightmap');
+```
+
+The default path is `bake.lightmap`. The sandbox is `three.writeText`'s: a path that climbs out
+of the assets directory is refused, and a folder that is not there yet is made.
+
+The format is the engine's own — a header, one record per tile, then the tiles' texels packed
+one after another. `.ktx2` is what this project writes for textures and it is the wrong
+container here: it holds block-compressed colour where a lightmap is `RGBA16F`, and it has
+nowhere to put the tile table. Only the texels a tile actually covers are written, not the whole
+square, which on the Evil Forest scene is 9.0 MB rather than the atlas's 32.
+
+A record names its receiver by **node name, mesh index and copy index** — the copy index counts
+nodes with the same name and mesh in scene order, so two hundred crates out of one file each
+find their own tile. Beside that it holds the tile's rectangle, its texel density, and a fold
+over the node's world matrix. The header holds the atlas side, the format, the set of baked
+lights the atlas is a sum over, and a hash over the whole payload.
+
+## three.lights.loadBake
+
+Reads one back, and answers `null` when there is none that fits.
+
+```js
+const loaded = three.lights.loadBake();     // -> { tiles, dirty, bytes, ms } or null
+if (!loaded) three.lights.bake();
+```
+
+`null` rather than a throw for every way it can decline — no file yet, a file damaged or from
+another build, a bake of a different set of baked lights, a bake of a different set of receivers
+— because the caller's answer to all of them is the same: bake it now. `three.lights.bake({
+load: true })` is that whole sentence.
+
+`dirty` is how many of the tiles it loaded belong to a receiver whose world matrix has moved
+since the save. Those keep their rectangles and re-bake over the following frames under
+`bake.budgetMs`, so a level where one crate was nudged pays for one crate. The rest are used as
+they are — the loaded atlas is the baked atlas, texel for texel.
+
+On the Evil Forest scene, with all ten local lights baked: **about 50 ms to load, against 1.9 s
+to bake**, from a 9.0 MB file, with the frame it produces identical to the baked one pixel for
+pixel.
+
 ## three.shadows.budget
 
 One shadow manager serves every light type. Directional views, the six views of a point light,
@@ -1912,12 +2188,16 @@ spot views and representative area views occupy tiles in a shared rectangular de
 A lazy static-cache atlas uses the same allocation and rendering path.
 
 `three.light.shadow` still controls the primary directional fit and quality.
-`three.lights.shadow` controls the requested tile quality for the other lights:
+`three.lights.shadow` controls the requested tile quality for the other lights, and
+`three.lights[i].shadow` is where one of them disagrees:
 
 ```js
-three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1 };
+three.lights.shadow = { enabled: true, size: 512, bias: 0, intensity: 1, maxLocal: 4 };
 three.shadows.budget = { maxViews: 64, maxUpdates: 32 };
 ```
+
+The budget below is a resource ceiling. `maxLocal` is the policy above it: it decides which
+lights are candidates at all, and the budget then decides how many of those fit.
 
 An explicit local size is required before enabling local shadows. The point-light setting is
 now a compatibility spelling for the shared manager, not a cube-array allocation.
@@ -2116,10 +2396,9 @@ stops both costs while retaining the allocation for a later toggle. `stats().occ
 
 Opaque and alpha-tested geometry enters the depth prepass; blended geometry and debug lines do not. A
 `ShaderMaterial` with a custom vertex body neither contributes nor receives screen occlusion, because this depth
-pass cannot reproduce its displaced geometry. Use authored geometry when its silhouette must participate. A
-`ShaderMaterial` using all twelve of its own texture slots keeps that
-capacity and omits screen occlusion, because Vulkan's portable fragment-stage minimum has room for only sixteen
-samplers including the renderer's reserved images.
+pass cannot reproduce its displaced geometry. Use authored geometry when its silhouette must participate.
+A material's own images cost the fragment stage no sampler, so how many a stack declares no longer
+decides whether it receives screen occlusion.
 
 This is a screen-space approximation: off-screen and hidden geometry cannot occlude a surface. Partial
 scene viewports currently bypass it; the requested settings are retained for the next full-frame viewport.
@@ -2636,6 +2915,32 @@ Like the post chain it belongs to the renderer rather than to the scene: `new th
 
 ```js
 three.depthPrepass = false;
+```
+
+## three.alwaysRender
+
+Draw every frame, even one that would put back exactly the picture already on screen. `false` by default.
+
+The renderer folds everything a frame uploads — the frame block, the lights, the shadow views, the instance
+array, the draw records, the material tables, the poses — into one key, and when the key has not moved since the
+last frame it drew, it presents the image it already has instead of drawing it again. The animation callback
+still runs; what is skipped is the shadow pass, the depth prepass, the scene pass and the post chain. That is
+what keeps a paused game, a menu or an idle editor at the desktop's idle power. `stats().skippedFrames` and
+`stats().renderedFrames` are the pair that says how often it happened.
+
+A frame is drawn whenever anything the fold can see has changed: a node moved, a light or the camera moved, a
+material colour or a shader uniform was written, a texture was replaced, the window or the render size changed,
+or the interface asked for a frame. `three.clock.time` is folded in only when something reads it — a material
+body that reads `s.time` or `v.time`, or any `three.setPost()` pass — so a shader that animates off the clock
+goes on being drawn every frame, and a scene where nothing samples it does not. A uniform a script writes every
+frame is not the clock: it moves the key because the value moved, so a material animated from JavaScript stops
+being redrawn the moment the script stops writing it.
+
+Turn this on for a picture that changes through a door the fold cannot see. A headless `--frames` batch and
+every screenshot always draw, whatever this is set to: each of those asks for a frame explicitly.
+
+```js
+three.alwaysRender = true;
 ```
 
 ## the handle three.setPost() and three.addPass() answer with

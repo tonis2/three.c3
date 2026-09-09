@@ -210,6 +210,56 @@ function lightAt(index, stable = true) {
 			const l = H.lightGet(index);
 			H.lightSet(index, l[0], l[1], l[2], l[3], l[4], l[5], +v, l[7]);
 		},
+
+		// This light's own shadow, over `three.lights.shadow`.
+		//
+		// The registry's settings are the default and this is where one
+		// light disagrees: `light.shadow = false` takes its shadow away
+		// and leaves its light, `= true` gives it one where the registry
+		// has none, `= { enabled, size }` says both, and `= null` puts it
+		// back to taking whatever the registry says.
+		//
+		// `enabled` and `size` read back as what is in force, not as what
+		// was written — a light that never says anything answers with the
+		// registry's. `resident` is whether it is actually holding atlas
+		// tiles this frame, which is the half `maxLocal` decides.
+		get shadow() {
+			const at = index;
+			return {
+				get enabled() { return H.lightShadowGet(at)[2] !== 0; },
+				set enabled(v) { H.lightShadowSet(at, v ? 1 : 2, H.lightShadowGet(at)[1]); },
+				get size() { return H.lightShadowGet(at)[3]; },
+				set size(v) { H.lightShadowSet(at, H.lightShadowGet(at)[0], +v); },
+				get resident() { return H.lightShadowGet(at)[4] !== 0; },
+			};
+		},
+		// Whether this light's direct diffuse belongs in the lightmap —
+		// `three.lights.bake()`. False by default.
+		//
+		// **A baked light is still a light.** The flag says the cache *may*
+		// carry it, and it is skipped only where there is a tile holding it:
+		// a dynamic receiver, a mesh whose uvs cannot carry one, and every
+		// receiver before the first bake all shade it in real time. So
+		// setting this and never baking changes no pixel, and setting it
+		// back to false puts the light in the loop everywhere.
+		//
+		// What a baked light loses is its highlight on the surfaces it was
+		// baked into: a lightmap holds diffuse and a highlight is a fact
+		// about where the camera is.
+		get baked() { return H.lightBakedGet(index); },
+		set baked(v) { H.lightBakedSet(index, !!v); },
+
+		set shadow(v) {
+			if (v == null) { H.lightShadowSet(index, 0, 0); return; }
+			const [mode, size] = H.lightShadowGet(index);
+			if (typeof v === 'boolean') { H.lightShadowSet(index, v ? 1 : 2, size); return; }
+			if (typeof v !== 'object') {
+				throw new TypeError('light.shadow takes true, false, null, or an object with enabled or size');
+			}
+			H.lightShadowSet(index,
+				'enabled' in v ? (v.enabled ? 1 : 2) : mode,
+				'size' in v ? +v.size : size);
+		},
 	};
 }
 
@@ -498,23 +548,41 @@ const lights = {
 		return {
 			get enabled() { return H.pointShadowGet()[0] !== 0; },
 			set enabled(v) {
-				const [,s,b,i] = H.pointShadowGet();
+				const [,s,b,i,m] = H.pointShadowGet();
 				if (v && !s) throw new RangeError('set three.lights.shadow.size before enabling point shadows');
-				H.pointShadowSet(v ? 1 : 0, s, b, i);
+				H.pointShadowSet(v ? 1 : 0, s, b, i, m);
 			},
 			get size() { return H.pointShadowGet()[1]; },
-			set size(v) { const [e,,b,i] = H.pointShadowGet(); H.pointShadowSet(e, +v, b, i); },
+			set size(v) { const [e,,b,i,m] = H.pointShadowGet(); H.pointShadowSet(e, +v, b, i, m); },
 			get bias() { return H.pointShadowGet()[2]; },
-			set bias(v) { const [e,s,,i] = H.pointShadowGet(); H.pointShadowSet(e, s, +v, i); },
+			set bias(v) { const [e,s,,i,m] = H.pointShadowGet(); H.pointShadowSet(e, s, +v, i, m); },
 			get intensity() { return H.pointShadowGet()[3]; },
-			set intensity(v) { const [e,s,b] = H.pointShadowGet(); H.pointShadowSet(e, s, b, +v); },
+			set intensity(v) { const [e,s,b,,m] = H.pointShadowGet(); H.pointShadowSet(e, s, b, +v, m); },
+
+			// How many local lights may hold shadows at once, 4 by default.
+			// The rest still light the scene and simply have no map to look
+			// into — a local shadow lookup is a per-pixel cost and a frame
+			// with ten of them is paying for nine it cannot see the edges of.
+			//
+			// Which four is a ranking, not a scene's order: the distance from
+			// the camera to the light plus the light's range, smallest first,
+			// so the nearest lights win and a wide soft fill loses before a
+			// lantern beside you. A light whose own `shadow.enabled = true`
+			// was set outranks every light that took the default. The answer
+			// is held for about a second and redone when the camera or a
+			// shadowed light has moved a few metres, so nothing blinks.
+			get maxLocal() { return H.pointShadowGet()[4]; },
+			set maxLocal(v) {
+				const [e,s,b,i] = H.pointShadowGet();
+				H.pointShadowSet(e, s, b, i, +v);
+			},
 		};
 	},
 	set shadow(v) {
-		const [e,s,b,i] = H.pointShadowGet();
+		const [e,s,b,i,m] = H.pointShadowGet();
 		if (typeof v === 'boolean' || v == null) {
 			if (v && !s) throw new RangeError('three.lights.shadow = true needs an explicit size first');
-			H.pointShadowSet(v ? 1 : 0, s, b, i); return;
+			H.pointShadowSet(v ? 1 : 0, s, b, i, m); return;
 		}
 		if (typeof v !== 'object') throw new TypeError('three.lights.shadow takes true, false, or an object');
 		const nextSize = 'size' in v ? +v.size : s;
@@ -522,7 +590,71 @@ const lights = {
 		if (nextEnabled && !(nextSize > 0)) throw new RangeError('enabling point shadows needs an explicit size');
 		H.pointShadowSet(nextEnabled ? 1 : 0,
 			nextSize, 'bias' in v ? +v.bias : b,
-			'intensity' in v ? +v.intensity : i);
+			'intensity' in v ? +v.intensity : i,
+			'maxLocal' in v ? +v.maxLocal : m);
+	},
+
+	// Renders every baked light onto every eligible static receiver, into one
+	// atlas, and answers `{ receivers, skipped, texels, bytes, ms }`.
+	//
+	// A receiver is eligible when it is `mesh.static = true` and its own
+	// TEXCOORD_0 is a layout rather than a tiling — inside [0,1] and not
+	// overlapping itself. `skipped` counts the static receivers that are not,
+	// and those keep the real-time loop for every light, baked ones included.
+	//
+	// `texelsPerMetre` is the density, 8 by default, and `maxBytes` the atlas
+	// ceiling, 64 MB — tiles are scaled down together until they fit.
+	//
+	// Call it **after the first frame**: it reads the shadow atlas as that
+	// frame left it, so a light whose shadow was not resident bakes without
+	// one. Raise `three.lights.shadow.maxLocal` first in a scene with more
+	// baked lights than the four that hold shadows by default.
+	//
+	// Re-callable: a second bake replaces the first. Moving a baked light or a
+	// static receiver afterwards marks the tiles it reaches dirty, and those
+	// are re-baked over the following frames inside `bake.budgetMs`.
+	//
+	// `load: true` reads a saved atlas first and bakes only if there is none
+	// that fits; `save: true` writes one afterwards. Either may be a path.
+	bake(options = null) {
+		const o = options || {};
+		if (typeof o !== 'object') throw new TypeError('three.lights.bake takes an options object');
+		if (o.load) {
+			const at = typeof o.load === 'string' ? o.load : '';
+			const loaded = H.lightsLoadBake(at);
+			if (loaded) {
+				const [receivers, dirty, bytes, ms] = loaded;
+				return { receivers, skipped: 0, texels: 0, bytes, ms, dirty, loaded: true };
+			}
+		}
+		const [receivers, skipped, texels, bytes, ms] = H.lightsBake(
+			'texelsPerMetre' in o ? +o.texelsPerMetre : 0,
+			'maxBytes' in o ? +o.maxBytes : 0,
+			'budgetMs' in o ? +o.budgetMs : 0);
+		const answer = { receivers, skipped, texels, bytes, ms, dirty: 0, loaded: false };
+		if (o.save && receivers > 0) {
+			answer.saved = lights.saveBake(typeof o.save === 'string' ? o.save : undefined);
+		}
+		return answer;
+	},
+
+	// Writes the atlas and its tile table into the assets directory, so a
+	// shipped game loads it instead of baking on boot. Answers
+	// `{ path, tiles, dirty, bytes, ms }`.
+	saveBake(path) {
+		const [tiles, dirty, bytes, ms, where] = H.lightsSaveBake(path == null ? '' : String(path));
+		return { path: where, tiles, dirty, bytes, ms };
+	},
+
+	// Reads one back, and answers null when there is none that fits this scene
+	// — no file, a bake of other lights, or a bake of other receivers. `dirty`
+	// is how many of the tiles it loaded belong to a receiver that has moved
+	// since; those re-bake over the following frames.
+	loadBake(path) {
+		const loaded = H.lightsLoadBake(path == null ? '' : String(path));
+		if (!loaded) return null;
+		const [tiles, dirty, bytes, ms] = loaded;
+		return { tiles, dirty, bytes, ms };
 	},
 
 	// The registry safety ceiling, and the number `add` refuses past.
@@ -605,6 +737,17 @@ const lights = {
 		for (let i = 0; i < H.lightCount(); i++) yield lights[i];
 	},
 };
+
+// How much re-bake work a frame may do to catch up with the tiles a moved
+// light or a moved receiver made stale, 4 ms by default. It hangs off the
+// verb because it is the verb's own pacing and not a property of the lights:
+// `three.lights.bake.budgetMs = 12` makes an editor drag settle in a third of
+// the frames and costs those frames twelve milliseconds each.
+Object.defineProperty(lights.bake, 'budgetMs', {
+	get() { return H.lightsBakeBudget(0); },
+	set(v) { H.lightsBakeBudget(+v); },
+	enumerable: true,
+});
 
 const SHADOW_BUDGET_LIMITS = {
 	maxViews: [1, 64], maxTexels: [65536, 67108864], maxBytes: [1048576, 1073741824],
@@ -1090,7 +1233,43 @@ const windowSurface = {
 	// halves the pixels, the other halves the frames.
 	get maxFps() { const fps = H.windowMaxFpsGet(); return fps > 0 ? fps : null; },
 	set maxFps(fps) { setMaxFps(fps); },
+
+	// The share of the window's pixels the picture is drawn at, 0.25 to 2.0.
+	//
+	//   three.window.renderScale = 0.75;   // three quarters of a side
+	//   three.window.renderScale = 1;      // native again
+	//
+	// The other half of maxFps, and the one a settings screen reaches for
+	// first: one halves the frames, this halves the pixels. Unlike
+	// three.setRenderSize it is a RATIO, so a window drag, a fullscreen
+	// key or a move to another display keeps it — the target follows the
+	// window at scale x its device pixels rather than pinning a number
+	// that the next resize makes wrong.
+	//
+	// Setting it gives the follow back if three.setRenderSize had pinned a
+	// size, and three.setRenderSize(width, height) clears it in return.
+	// null and 1 both mean full resolution.
+	//
+	// The interface is laid out in the TARGET's pixels, so it scales with
+	// the picture and is upscaled along with it. That is what a render
+	// scale means for a game; a tool window that wants a sharp menu bar
+	// over a cheap picture should leave this at 1.
+	//
+	// Under --headless there is no window to take a share of: it is
+	// remembered and changes nothing.
+	get renderScale() { return H.renderScaleGet(); },
+	set renderScale(scale) { setRenderScale(scale); },
 };
+
+// null, undefined and 1 all mean full resolution; anything else has to be a
+// finite number, and the host bounds it to 0.25 .. 2.0.
+function setRenderScale(scale) {
+	if (scale === null || scale === undefined) return H.renderScaleSet(1);
+	if (typeof scale !== 'number' || !Number.isFinite(scale)) {
+		throw new TypeError('three.window.renderScale wants a fraction between 0.25 and 2, or null for full resolution');
+	}
+	return H.renderScaleSet(scale);
+}
 
 // null, undefined, 0 and Infinity all mean "no cap"; anything else has to be
 // a finite positive number, and the host bounds it.
@@ -2329,6 +2508,17 @@ export const three = {
 	get depthPrepass() { return H.depthPrepassGet() !== 0; },
 	set depthPrepass(v) { H.depthPrepassSet(v ? 1 : 0); },
 
+	// Draw every frame, even one that would put back exactly the picture
+	// already on screen.
+	//
+	// Off by default. The renderer folds everything a frame uploads into one
+	// key and re-presents the last image when the key has not moved, which is
+	// what keeps a paused game, a menu or an idle editor at the desktop's
+	// power. Turn this on for a picture that changes through a door the fold
+	// cannot see. `stats().skippedFrames` counts the frames it saved.
+	get alwaysRender() { return H.alwaysRenderGet() !== 0; },
+	set alwaysRender(v) { H.alwaysRenderSet(v ? 1 : 0); },
+
 	// The shaders that run over the finished frame.
 	//
 	// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`
@@ -2712,14 +2902,15 @@ export const three = {
 	//     title: 'Wumpa Run',
 	//     fullscreen: false,
 	//     maxFps: 60,
+	//     renderScale: 1,
 	//     saveDir: 'wumpa-run',
 	//   });
 	//
 	// Every key is optional and anything left out is left alone. There are
 	// no command-line flags for these: a player never sees a command line,
 	// and a settings screen has to change the same things at runtime — so
-	// `title`, `fullscreen` and `maxFps` are live properties on
-	// `three.window` as well, and this is the one call that sets them
+	// `title`, `fullscreen`, `maxFps` and `renderScale` are live properties
+	// on `three.window` as well, and this is the one call that sets them
 	// before the first frame.
 	//
 	// `saveDir` is boot-only and has no property beside it, deliberately:
@@ -2728,20 +2919,23 @@ export const three = {
 	// answers with where the folder actually is, which is also
 	// `three.save.path`.
 	//
-	// Returns { title, fullscreen, maxFps, saveDir } as they stand after the
-	// call, so a boot log can print one line and be accurate.
+	// Returns { title, fullscreen, maxFps, renderScale, saveDir } as they
+	// stand after the call, so a boot log can print one line and be
+	// accurate.
 	configure(options = {}) {
 		if (options === null || typeof options !== 'object') {
-			throw new TypeError('three.configure({ title, fullscreen, maxFps, saveDir }) wants an object');
+			throw new TypeError('three.configure({ title, fullscreen, maxFps, renderScale, saveDir }) wants an object');
 		}
 		if (options.title !== undefined) H.windowTitleSet(String(options.title));
 		if (options.fullscreen !== undefined) H.windowFullscreenSet(!!options.fullscreen);
 		if (options.maxFps !== undefined) setMaxFps(options.maxFps);
+		if (options.renderScale !== undefined) setRenderScale(options.renderScale);
 		if (options.saveDir !== undefined) H.saveDirSet(String(options.saveDir));
 		return {
 			title: H.windowTitleGet(),
 			fullscreen: H.windowFullscreenGet(),
 			maxFps: windowSurface.maxFps,
+			renderScale: windowSurface.renderScale,
 			saveDir: H.saveDirGet(),
 		};
 	},

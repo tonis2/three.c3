@@ -186,8 +186,11 @@ fn void warm_uploads(Slot* slot) @private
 	three::RunResult result = warm.run(`
 		const scene = new three.Scene();
 		scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), new three.MeshBasicMaterial({ color: 0xffffff })));
+		const ground = new three.Mesh(new three.PlaneGeometry(12, 12));
+		ground.rotation.x = -Math.PI / 2; ground.static = true; scene.add(ground);
 		three.lights.add({ position: [2, 2, 2], range: 8, intensity: 1 });
 		three.lights.shadow = { enabled: true, size: 512 };
+		three.light.shadow = true;
 		return 1;
 	`);
 	defer result.free();
@@ -225,6 +228,21 @@ fn void warm_uploads(Slot* slot) @private
 *>
 fn void reserve_point_shadow_pages(three::Renderer* renderer)
 {
+	reserve_shadow_pages(renderer, 512, 42);
+}
+
+<*
+ The same for the sun: its atlas and static twin at `SHADOW_DEFAULT_SIZE` are
+ two 16 MB images, and a test that first enables the sun's shadow after other
+ tests have fragmented the warmed pages would otherwise own the page they need.
+*>
+fn void reserve_sun_shadow_pages(three::Renderer* renderer)
+{
+	reserve_shadow_pages(renderer, three::SHADOW_DEFAULT_SIZE, 1);
+}
+
+fn void reserve_shadow_pages(three::Renderer* renderer, uint side, uint layers) @private
+{
 	HeapAlloc tracked = mem;
 	mem = real_heap;
 	defer mem = tracked;
@@ -234,8 +252,9 @@ fn void reserve_point_shadow_pages(three::Renderer* renderer)
 	{
 		vk::Image reserve = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D)
 			.setFormat(vk::findDepthFormat(features: FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
-				| FORMAT_FEATURE_SAMPLED_IMAGE_BIT, device: renderer.gpu.pdevice))
-			.setExtent({ .width = 512, .height = 512, .depth = 1 }).setMipLevels(1).setArrayLayers(42)
+				| FORMAT_FEATURE_SAMPLED_IMAGE_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT,
+				device: renderer.gpu.pdevice))
+			.setExtent({ .width = side, .height = side, .depth = 1 }).setMipLevels(1).setArrayLayers(layers)
 			.setSamples(SAMPLE_COUNT_1_BIT).setTiling(IMAGE_TILING_OPTIMAL)
 			.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
 			.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(renderer.gpu.handle)!!;

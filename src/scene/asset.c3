@@ -324,6 +324,28 @@ struct GpuMesh
 	GpuMaterial material;
 	collision::Aabb3 bounds;
 
+	<*
+	 Whether this mesh's own TEXCOORD_0 can carry a lightmap tile.
+
+	 Three questions, measured once when the geometry is uploaded and never again:
+	 the mesh has uvs, they stay inside [0,1], and they do not overlap themselves —
+	 the summed area of the triangles in uv against the area of the region they
+	 actually cover, rasterised. Over 1.05 is two pieces of surface sharing texels,
+	 which is exactly what a trim sheet and a tiled ground do on purpose and what a
+	 light map cannot survive.
+
+	 It is the contract rather than a list: a mesh unwrapped in Blender and
+	 re-exported becomes eligible the moment its uvs pass, with nothing here to
+	 update. `three.lights.bake()` is the only reader.
+	*>
+	bool lightmap_eligible;
+	// The two areas that measurement produced, kept because the tile size needs
+	// them: metres of surface per unit of uv is `sqrt(local_area / uv_area)`, and
+	// a texel density in metres becomes a tile size from that. Zero on a mesh that
+	// was never measured.
+	float lightmap_uv_area;
+	float lightmap_local_area;
+
 	// Picking, in mesh-local space. The tree holds raw pointers into the two arrays
 	// beside it, so all three live and die together.
 	Vec3[] hull_positions;
@@ -919,6 +941,12 @@ struct Assets
 	Texture white;
 	bool has_white;
 
+	// Bumped whenever a texture's contents or its slot changed. Nothing about a
+	// texture appears in the buffers a frame uploads — a re-decoded image keeps
+	// its index — so this is what tells `Renderer.picture_key` the picture may
+	// have moved without anything else saying so.
+	uint revision;
+
 	// How many times encoded image bytes have been handed to the decoder, over the
 	// life of this table. Kept because `ImageMemo` is otherwise invisible: texture
 	// counts, draw calls and pixels are all identical with the memo and without it,
@@ -1136,6 +1164,37 @@ fn usz Assets.texture_bytes(&self)
 			// texture fourfold. `image_size` also rounds up to whole blocks, so
 			// the small levels — where a block costs the same 16 bytes however
 			// few texels are left in it — are counted as the device holds them.
+			total += (usz)format.image_size(
+				level_extent(shared.texture.width, level),
+				level_extent(shared.texture.height, level)
+			);
+		}
+	}
+	return total;
+}
+
+<*
+ How much of `texture_bytes` is block-compressed, so the caller can subtract.
+
+ A KTX2 arrives as BC7 blocks and stays that way; a PNG or a JPEG is decoded and
+ held as RGBA8, which is four times the bytes and four times the bandwidth for
+ the same picture. `textureBytes` alone cannot tell those apart, and the answer
+ decides whether there is anything to do about a texture budget — an
+ uncompressed share worth megabytes is fixed in the exporter, not here.
+
+ The same sum over the same list as `texture_bytes`, with the RGBA8 textures
+ skipped, so the two cannot disagree about a texture's levels.
+*>
+fn usz Assets.texture_compressed_bytes(&self)
+{
+	usz total = 0;
+	foreach (&shared : self.textures)
+	{
+		if (!shared.alive) continue;
+		TextureFormat format = shared.texture.format;
+		if (!format.is_block()) continue;
+		for (uint level = 0; level < shared.texture.levels; level++)
+		{
 			total += (usz)format.image_size(
 				level_extent(shared.texture.width, level),
 				level_extent(shared.texture.height, level)
@@ -1685,8 +1744,15 @@ fn void Assets.release_texture(&self, Gpu* gpu, int index)
 	// dead slot inspectable: an image handle still sitting here would mean the
 	// destroy did not happen, and a test can say so. Deliberately not zeroed
 	// here as well — doing that would hide the one bug worth catching.
-	if (gpu != null) shared.texture.free(gpu);
+	if (gpu != null)
+	{
+		// Back to white before the image goes, so a material still carrying this
+		// index samples the fallback rather than a destroyed view.
+		gpu.texture_table.release(gpu, (uint)index);
+		shared.texture.free(gpu);
+	}
 	shared.alive = false;
+	self.revision++;
 	self.free_textures.push((uint)index);
 }
 
@@ -3266,6 +3332,10 @@ fn GpuMesh? Assets.upload_primitive(
 	read_morph_targets(gpu, stream, primitive, &out)!;
 
 	out.build_bvh(positions.array_view(), indices.array_view());
+	// Beside the tree for its reason: the uvs, the positions and the indices are
+	// all in hand exactly here and nowhere later. `GpuMesh.lightmap_eligible` is
+	// what it leaves behind.
+	if (out.has_uvs) out.measure_lightmap(uvs.array_view(), positions.array_view(), indices.array_view());
 
 	// The material, if the primitive names one.
 	sz? material_index = primitive.attributes.get("material");
@@ -3335,6 +3405,128 @@ fn void GpuMesh.build_bvh(&self, Vec3[] positions, uint[] indices)
 	}
 
 	self.bvh = collision::create_indexed_tri_bvh(self.hull_positions.ptr, self.hull_triangles.ptr, (sz)triangle_count);
+}
+
+// Over this the uvs overlap themselves and a light map baked into them would put
+// two pieces of surface in one texel. 1.0 is a perfect layout; the slack is for
+// the rasterised union being a texel generous at every island edge.
+const float LIGHTMAP_MAX_MULTIPLICITY = 1.05f;
+// Outside [0, 1] the layout tiles, which is the same collision seen from the
+// other side. The slack is a float32 uv that was authored at exactly 1.
+const float LIGHTMAP_UV_SLACK = 0.002f;
+
+<*
+ Measures whether this mesh's uvs could hold a light map, and how much surface
+ they carry.
+
+ The overlap test is a rasterised union: the triangles are drawn into a grid over
+ the uv bounding box at about sixteen cells a triangle, and the covered cells are
+ the area the layout really occupies. Summed triangle area over that is how many
+ times the layout uses each piece of itself — 1 for an unwrap, 2 for a mirrored
+ half, and a large number for a ground whose uv is a repeating tile.
+
+ A grid rather than an exact overlap test because exact is a polygon
+ intersection per pair, and this has to run over every mesh of a file at load.
+ The grid is sized by the mesh's own triangle count, so the whole of a 800 000
+ triangle scene costs about thirteen million cells rather than one big image per
+ mesh.
+*>
+fn void GpuMesh.measure_lightmap(&self, Vec2[] uvs, Vec3[] positions, uint[] indices)
+{
+	self.lightmap_eligible = false;
+	self.lightmap_uv_area = 0;
+	self.lightmap_local_area = 0;
+	usz triangles = indices.len / 3;
+	if (triangles == 0 || uvs.len != positions.len || uvs.len == 0) return;
+
+	float min_u = uvs[0].x;
+	float max_u = uvs[0].x;
+	float min_v = uvs[0].y;
+	float max_v = uvs[0].y;
+	foreach (uv : uvs)
+	{
+		if (uv.x < min_u) min_u = uv.x;
+		if (uv.x > max_u) max_u = uv.x;
+		if (uv.y < min_v) min_v = uv.y;
+		if (uv.y > max_v) max_v = uv.y;
+	}
+	bool tiled = min_u < -LIGHTMAP_UV_SLACK || max_u > 1 + LIGHTMAP_UV_SLACK
+		|| min_v < -LIGHTMAP_UV_SLACK || max_v > 1 + LIGHTMAP_UV_SLACK;
+
+	double uv_area = 0;
+	double local_area = 0;
+	for (usz t = 0; t < triangles; t++)
+	{
+		uint ia = indices[t * 3];
+		uint ib = indices[t * 3 + 1];
+		uint ic = indices[t * 3 + 2];
+		if (ia >= uvs.len || ib >= uvs.len || ic >= uvs.len) return;
+		Vec2 a = uvs[ia];
+		Vec2 b = uvs[ib];
+		Vec2 c = uvs[ic];
+		uv_area += (double)math::abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) * 0.5;
+		Vec3 pa = positions[ia];
+		Vec3 pb = positions[ib];
+		Vec3 pc = positions[ic];
+		local_area += (double)(pb - pa).cross(pc - pa).length() * 0.5;
+	}
+	self.lightmap_uv_area = (float)uv_area;
+	self.lightmap_local_area = (float)local_area;
+	if (tiled || uv_area <= 0) return;
+
+	float span_u = math::max(max_u - min_u, 1e-9f);
+	float span_v = math::max(max_v - min_v, 1e-9f);
+	uint resolution = (uint)math::sqrt((double)triangles * 16.0);
+	if (resolution < 128) resolution = 128;
+	if (resolution > 2048) resolution = 2048;
+
+	char[] covered = mem::new_array(char, (sz)resolution * (sz)resolution);
+	defer mem::free(covered);
+
+	float scale_x = (float)resolution / span_u;
+	float scale_y = (float)resolution / span_v;
+	for (usz t = 0; t < triangles; t++)
+	{
+		Vec2 a = uvs[indices[t * 3]];
+		Vec2 b = uvs[indices[t * 3 + 1]];
+		Vec2 c = uvs[indices[t * 3 + 2]];
+		float ax = (a.x - min_u) * scale_x;
+		float ay = (a.y - min_v) * scale_y;
+		float bx = (b.x - min_u) * scale_x;
+		float by = (b.y - min_v) * scale_y;
+		float cx = (c.x - min_u) * scale_x;
+		float cy = (c.y - min_v) * scale_y;
+		float det = (by - ay) * (cx - ax) - (bx - ax) * (cy - ay);
+		if (math::abs(det) < 1e-12f) continue;
+		int x0 = (int)math::floor(math::min(ax, math::min(bx, cx)));
+		int x1 = (int)math::ceil(math::max(ax, math::max(bx, cx)));
+		int y0 = (int)math::floor(math::min(ay, math::min(by, cy)));
+		int y1 = (int)math::ceil(math::max(ay, math::max(by, cy)));
+		if (x0 < 0) x0 = 0;
+		if (y0 < 0) y0 = 0;
+		if (x1 > (int)resolution) x1 = (int)resolution;
+		if (y1 > (int)resolution) y1 = (int)resolution;
+		for (int y = y0; y < y1; y++)
+		{
+			for (int x = x0; x < x1; x++)
+			{
+				float px = (float)x + 0.5f;
+				float py = (float)y + 0.5f;
+				float w0 = ((by - ay) * (px - ax) - (bx - ax) * (py - ay)) / det;
+				float w1 = ((cy - ay) * (px - ax) - (cx - ax) * (py - ay)) / -det;
+				if (w0 < 0 || w1 < 0 || w0 + w1 > 1) continue;
+				covered[(sz)y * (sz)resolution + (sz)x] = 1;
+			}
+		}
+	}
+
+	sz cells = 0;
+	foreach (cell : covered) if (cell != 0) cells++;
+	if (cells == 0) return;
+
+	double cell_area = ((double)span_u / resolution) * ((double)span_v / resolution);
+	double union_area = (double)cells * cell_area;
+	self.lightmap_eligible = uv_area / union_area <= (double)LIGHTMAP_MAX_MULTIPLICITY;
 }
 
 <*
@@ -4326,7 +4518,7 @@ fn int? Assets.claim_texture(
 	}
 
 	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips, nearest)!;
-	return self.install_texture(uploaded);
+	return self.install_texture(gpu, uploaded);
 }
 
 <*
@@ -4337,17 +4529,25 @@ fn int? Assets.claim_texture(
  claim paths, because where a texture lands has nothing to do with how it was
  encoded.
 *>
-fn int Assets.install_texture(&self, Texture uploaded)
+fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded)
 {
+	self.revision++;
+	uint index;
 	if (self.free_textures.len() > 0)
 	{
-		uint index = self.free_textures.pop()!!;
+		index = self.free_textures.pop()!!;
 		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true };
-		return (int)index;
+	}
+	else
+	{
+		self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
+		index = (uint)self.textures.len() - 1;
 	}
 
-	self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
-	return (int)self.textures.len() - 1;
+	// The slot the table already gave it is the bindless index too, so there is no
+	// second free list and no second lifetime to keep in step.
+	if (gpu != null) gpu.texture_table.write(gpu, index, uploaded.descriptor());
+	return (int)index;
 }
 
 <*
@@ -4390,7 +4590,7 @@ fn int? Assets.claim_texture_levels(&self, Gpu* gpu, BlockImage blocks, bool nea
 		blocks.format,
 		nearest
 	)!;
-	return self.install_texture(uploaded);
+	return self.install_texture(gpu, uploaded);
 }
 
 <*
@@ -4630,6 +4830,7 @@ fn void? Assets.ensure_white(&self, Gpu* gpu)
 
 	self.white = gpu.create_white_texture()!;
 	self.has_white = true;
+	gpu.texture_table.set_fallback(gpu, self.white.descriptor());
 }
 
 <*
@@ -4641,6 +4842,26 @@ fn void? Assets.ensure_white(&self, Gpu* gpu)
  thesis is that a thousand instances are one draw — that is not a cost worth
  caching to avoid.
 *>
+// Slots of the device-wide texture array holding a live image, and how many the
+// array holds. Both zero where there is no array.
+fn uint Assets.texture_slots(&self) => self.gpu == null ? 0 : self.gpu.texture_table.used;
+// Where "no texture" points in the device-wide array — the reserved white slot.
+fn uint Assets.texture_fallback_slot(&self) => self.gpu == null ? 0 : self.gpu.texture_table.fallback_slot();
+fn uint Assets.texture_slot_capacity(&self) => self.gpu == null ? 0 : self.gpu.texture_table.capacity;
+
+<*
+ Binds the device-wide texture array for one pipeline layout.
+
+ Here rather than on the pass for `Assets.gpu`'s stated reason: the registry owns
+ the indices and is the one thing at a record site that always has the device.
+ A no-op with no device and on a device without the table.
+*>
+fn void Assets.bind_texture_table(&self, vk::CommandBuffer cmd, vk::PipelineLayout layout)
+{
+	if (self.gpu == null) return;
+	self.gpu.texture_table.bind(cmd, layout);
+}
+
 fn vk::DescriptorImageInfo Texture.descriptor(&self)
 {
 	return {

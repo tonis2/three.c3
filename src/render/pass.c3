@@ -329,6 +329,20 @@ struct MeshPass
 	ShadowMap shadows;
 	PointShadowMap point_shadows;
 	AmbientOcclusion ambient_occlusion;
+	// The area-light fit, uploaded once on the first prepared frame — see
+	// `render/ltc.c3`.
+	LtcTable ltc;
+	// The static light cache — `three.lights.bake()`. No image and no pipeline
+	// until a script asks for one; `render/lightmap.c3` is the whole of it.
+	Lightmap lightmap;
+	<*
+	 Integrate area lights numerically instead of through the fit.
+
+	 The reference the fit is measured against, and the answer the bake wants: it
+	 is the sixteen-sample loop the shader still carries, chosen per frame rather
+	 than per compile so one build can render both.
+	*>
+	bool area_reference;
 	// The opaque and cut-out buckets drawn depth-only before the scene pass, so
 	// the lighting runs once per pixel. `render/prepass.c3` is the whole of it.
 	DepthPrepass prepass;
@@ -369,6 +383,20 @@ struct MeshPass
 	// Where this frame's deformed vertices are, or 0 when no soft body drew —
 	// `write_soft_vertices`.
 	ulong soft_address;
+
+	<*
+	 Everything `prepare` wrote for the GPU this frame, folded into one number.
+
+	 Rebuilt from nothing at the top of `prepare` and mixed at each write site, so
+	 the fold covers exactly the bytes the frame uploads — the frame block, the
+	 lights, the shadow views, the instance array, the draw records, the material
+	 tables and the poses — rather than a list of dirty flags somebody has to keep
+	 in step with them. `Renderer.picture_key` adds what lives outside the pass.
+
+	 A picture cannot change without one of those bytes changing, which is what
+	 lets a frame identical to the last one be skipped.
+	*>
+	ulong frame_key;
 	// False when `prepare` found nothing to draw, which is what `record` returns on
 	// rather than repeating the emptiness checks.
 	bool prepared;
@@ -951,6 +979,9 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
 {
 	self.prepared = false;
+	// From nothing, every frame: the fold below has to describe this frame's
+	// uploads and nothing carried over from the last one.
+	self.frame_key = KEY_SEED;
 	if (!self.ready) return;
 
 	// Before the draw list is built, so a material whose last node died in the same
@@ -958,7 +989,16 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// it needs to be. Costs nothing unless something is pending.
 	self.collect_materials(gpu);
 
+	// Before the shadow manager, because a re-bake reads the shadow atlas as the
+	// last frame left it and the packed view table has to still describe those
+	// texels — see `MeshPass.update_lightmap`.
+	self.update_lightmap(gpu);
+
 	self.resolve_view_rect(target.extent);
+	if (catch self.ltc.ensure(gpu))
+	{
+		io::eprintn("three: the area-light table could not be uploaded — area lights are integrated numerically");
+	}
 	self.ambient_occlusion.live = false;
 	if (self.ambient_occlusion.enabled && !self.scene_rect_partial)
 	{
@@ -1025,6 +1065,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// derived from the size it was actually created at; and it needs the world
 	// bounds, which `update_world_matrices` above has just made current.
 	self.prepare_shadow_manager(gpu, aspect)!;
+	// Before the draw list, because the draw list copies each node's tile into its
+	// instance and this is what says whether the tiles mean anything this frame.
+	self.refresh_lightmap();
 
 	// Where the coalescing loop puts the copies. It writes them into this slot's
 	// mapped buffer directly — `Scene.build_draw_list` used to fill a
@@ -1069,6 +1112,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		self.shadows.draws = 0;
 		self.prepass.live = false;
 		self.prepass.draws = 0;
+		// The sky still draws, so the key still has to move when it or the camera
+		// does — `record` says why `record_sky` is above the `prepared` guard.
+		self.frame_key = @hash_value(self.frame_key, view_projection);
+		self.frame_key = @hash_value(self.frame_key, self.scene.look.sky);
+		self.frame_key = @hash_value(self.frame_key, self.assets.revision);
 		return;
 	}
 
@@ -1078,7 +1126,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	self.record_clusters(gpu, cmd, slot, light_address, view_projection)!;
 	FrameBlock frame = {
 		.view_projection = view_projection,
-		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time, 0 },
+		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time,
+			self.ltc.live && !self.area_reference ? 1.0f : 0.0f },
 		.world = self.lighting.world,
 		.live_poses = live_address,
 		.morph_weights = morph_address,
@@ -1140,6 +1189,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// static and how many are not, and neither number exists until the buckets do.
 	self.plan_shadow(gpu);
 	self.plan_prepass(gpu, target);
+
+	// Last, so the two plans above are in it.
+	self.fold_frame_key(slot, &frame);
 
 	self.prepared = true;
 }
@@ -1237,6 +1289,38 @@ fn bool MeshPass.scene_has_cutouts(&self)
 fn void MeshPass.plan_shadow(&self, Gpu* gpu)
 {
 	self.plan_shadow_manager(gpu);
+}
+
+<*
+ One draw's row of texture-array slots, one per binding.
+
+ The same choice `record` used to make for binding 0 — the material's own map
+ wins over the mesh's — and `TextureSlots` for everything above it. A binding
+ nothing filled gets the reserved white slot, so a shader never tests the row.
+
+ A free function rather than a method because three passes write a record: the
+ scene, the material bake and the lightmap bake, and only the first has a
+ `MeshPass` in hand.
+
+ @param material : `Null for a pass that shades no material — every slot is then the fallback.`
+ @param mesh : `Null where there is no mesh image to fall back to.`
+*>
+fn uint[DRAW_TEXTURE_INDICES] texture_index_row(Assets* assets, Material* material, GpuMesh* mesh)
+{
+	uint fallback = assets.texture_fallback_slot();
+	uint[DRAW_TEXTURE_INDICES] row;
+	for (uint i = 0; i < DRAW_TEXTURE_INDICES; i++) row[i] = fallback;
+	if (material == null) return row;
+
+	int base = material.texture == NO_TEXTURE ? (mesh == null ? NO_TEXTURE : mesh.texture) : material.texture;
+	if (assets.texture_alive(base)) row[0] = (uint)base;
+
+	for (uint binding = 1; binding < DRAW_TEXTURE_INDICES; binding++)
+	{
+		int slot = material.textures.at(binding);
+		if (assets.texture_alive(slot)) row[binding] = (uint)slot;
+	}
+	return row;
 }
 
 <*
@@ -1366,11 +1450,39 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.uv_variant_count = material.uv_variant_count,
 			.uv_variants = material.uv_variants,
 			.emissive = material.emissive_value(),
+			.texture_index = texture_index_row(&self.assets, material, mesh),
 		};
 
 		self.draw_indices.push(recorded);
 		recorded++;
 	}
+
+	// From `base_color` on, skipping the nine buffer addresses at the head. Six of
+	// them name a mesh, which `Bucket` already says; the other three name a slice
+	// of a per-frame buffer whose address alternates with the frame slot, so a key
+	// that read them would differ on every second frame of a still picture. What
+	// they point *at* is folded in by the writers, and which slice by
+	// `posed_offsets`, `soft_offsets` and `Instance.pose`.
+	usz head = (usz)((char*)&records[0].base_color - (char*)&records[0]);
+	for (uint i = 0; i < recorded; i++)
+	{
+		self.frame_key = hash_bytes(self.frame_key, &records[i].base_color, DrawRecord::size - head);
+	}
+	self.frame_key = hash_bytes(
+		self.frame_key,
+		self.draw_indices.entries,
+		(usz)(self.draw_indices.len() * uint::size)
+	);
+	self.frame_key = hash_bytes(
+		self.frame_key,
+		self.posed_offsets.entries,
+		(usz)(self.posed_offsets.len() * uint::size)
+	);
+	self.frame_key = hash_bytes(
+		self.frame_key,
+		self.soft_offsets.entries,
+		(usz)(self.soft_offsets.len() * uint::size)
+	);
 }
 
 <*
@@ -1438,6 +1550,10 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		if (pipeline.handle != bound)
 		{
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			// Beside the pipeline bind, because set 0 differs per shader and a set
+			// binding survives only while the layouts stay compatible up to its own
+			// number. A no-op on a device without the table.
+			self.assets.bind_texture_table(cmd, pipeline.layout);
 			bound = pipeline.handle;
 		}
 
@@ -1456,29 +1572,14 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		vk::cmdSetDepthWriteEnable(cmd, (!prepassed && pipeline.state.depth_write) ? vk::TRUE : vk::FALSE);
 		vk::cmdSetDepthCompareOp(cmd, prepassed ? COMPARE_OP_EQUAL : COMPARE_OP_LESS_OR_EQUAL);
 
-		// Pushed, not bound. There is no descriptor set anywhere in this project:
-		// the image and sampler are specified inline against this pipeline's own
-		// layout, so a material's shader gets its texture through its own layout
-		// rather than through one baked at load time against a different pipeline.
-		// 
-		// The material's own texture wins over the mesh's. `material.map` is the
-		// explicit statement and the mesh's image is what a file happened to bring,
-		// so a script that sets one and gets the other would be overruled by an
-		// asset it did not write. This costs nothing to decide here: the descriptor
-		// is already written per bucket, and a bucket is `(asset, mesh, material)` —
-		// so two nodes over one mesh with different maps are already two buckets.
-		Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
-			: self.assets.texture_at(material.texture);
-
-		// Binding 0 by hand and everything above it from the shader's own reflection
-		// — `render/bind.c3` has the argument, and the short version is that only
-		// this line knows binding 0 is "the material's map or the mesh's image". A
-		// body that declared `noise_map` gets it at whatever index the assembler
-		// generated, resolved by name, with white in any sampler the script left
-		// empty.
+		// Pushed, not bound, and only the images the *frame* owns. A material's own
+		// maps — its base colour and everything a body declared — are slots of the
+		// device-wide texture array, written into this bucket's record by
+		// `texture_indices_of` and reached in the shader through `map_at`. What is
+		// left here is the seven the template reserves, which are the same images
+		// for every draw in the frame.
 		SampledBindings samplers;
-		samplers.add(0, sampled.descriptor());
-		// Binding 1, the other reserved one, and asked for by index rather than
+		// Binding 1, the first reserved one, and asked for by index rather than
 		// assumed to be there: Slang may drop a sampler the linked program never
 		// reads, and pushing a write for a binding the layout does not declare is a
 		// validation error. Both templates read it today, so the answer is yes
@@ -1525,7 +1626,19 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
 				self.shadow_manager.sample_static, self.shadows.live || self.point_shadows.live));
 		}
-		samplers.collect(pipeline, &material.textures, &self.assets, MATERIAL_BINDING_FIRST);
+		if (pipeline_declares_binding(pipeline, LTC_LUT_BINDING))
+		{
+			samplers.add(LTC_LUT_BINDING, self.ltc.live
+				? self.ltc.descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
+		{
+			// The shared white image until a bake has run, and unread then: a copy
+			// with no tile carries a zero size, which the vertex stage turns into the
+			// flag that stops the fragment stage sampling at all.
+			samplers.add(LIGHTMAP_BINDING, self.lightmap.live
+				? self.lightmap.descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
+		}
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
@@ -1692,20 +1805,13 @@ fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* targ
 		if (pipeline.handle != bound)
 		{
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			// Beside the pipeline bind, because set 0 differs per shader and a set
+			// binding survives only while the layouts stay compatible up to its own
+			// number. A no-op on a device without the table.
+			self.assets.bind_texture_table(cmd, pipeline.layout);
 			bound = pipeline.handle;
 		}
 		vk::cmdSetCullMode(cmd, material.cull);
-
-		if (cutout)
-		{
-			// The same image `record` samples, chosen the same way — the material's
-			// own map wins over the mesh's — or the two passes cut different shapes.
-			Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
-				: self.assets.texture_at(material.texture);
-			SampledBindings samplers;
-			samplers.add(0, sampled.descriptor());
-			samplers.push(cmd, pipeline);
-		}
 
 		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, self.frame_view_projection);
 	}
@@ -1823,21 +1929,11 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		if (pipeline.handle != bound)
 		{
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			// Beside the pipeline bind, because set 0 differs per shader and a set
+			// binding survives only while the layouts stay compatible up to its own
+			// number. A no-op on a device without the table.
+			self.assets.bind_texture_table(cmd, pipeline.layout);
 			bound = pipeline.handle;
-		}
-
-		if (cutout)
-		{
-			// Binding 0 by hand and nothing above it, which is `record`'s rule cut
-			// down to the one image this pass has any use for: the material's own map
-			// wins over the mesh's, for the reason `record` gives at length. Pushed
-			// after the bind because a pipeline bind is what a push descriptor is
-			// specified against.
-			Texture* sampled = material.texture == NO_TEXTURE ? self.assets.texture_for(mesh)
-				: self.assets.texture_at(material.texture);
-			SampledBindings samplers;
-			samplers.add(0, sampled.descriptor());
-			samplers.push(cmd, pipeline);
 		}
 
 		// The four cells of `Bucket.static_first`, read back out. `tail` is the
@@ -1940,6 +2036,78 @@ fn uint MeshPass.draw_casters(
 	return 1;
 }
 
+<*
+ Whether anything on screen draws a different picture merely because the clock
+ moved.
+
+ `FrameBlock.lighting.z` is `three.clock.time`, so folding the clock in
+ unconditionally would mean no frame is ever the same as the last one while the
+ world is running. It is folded in only when a material body reads `s.time` or `v.time`.
+ `Renderer.picture_key` asks the same question of the post chain.
+*>
+fn bool MeshPass.reads_clock_time(&self)
+{
+	foreach (&material : self.materials)
+	{
+		if (material.alive && material.reads_time) return true;
+	}
+	return false;
+}
+
+<*
+ Folds what `prepare` decided, but did not upload, into `frame_key`.
+
+ The uploads mix themselves in at each write site. What is left is the frame
+ block (with the clock masked out — see `reads_clock_time`), the instance array
+ and the buckets it is grouped by, the material table as the record loop reads
+ it, the sky, and the handful of booleans that decide which passes run at all.
+*>
+fn void MeshPass.fold_frame_key(&self, uint slot, FrameBlock* frame)
+{
+	// A copy with the clock and the six buffer addresses taken out. The addresses
+	// alternate with the frame slot on a picture that is standing still, and all
+	// the shader reads off them is whether they are there at all.
+	FrameBlock timeless = *frame;
+	timeless.lighting[2] = 0;
+	timeless.live_poses = frame.live_poses != 0 ? 1 : 0;
+	timeless.lights = frame.lights != 0 ? 1 : 0;
+	timeless.morph_weights = frame.morph_weights != 0 ? 1 : 0;
+	timeless.shadow_views = frame.shadow_views != 0 ? 1 : 0;
+	timeless.cluster_counts = frame.cluster_counts != 0 ? 1 : 0;
+	timeless.cluster_indices = frame.cluster_indices != 0 ? 1 : 0;
+	ulong key = hash_bytes(self.frame_key, &timeless, FrameBlock::size);
+	if (self.reads_clock_time()) key = @hash_value(key, self.clock.time);
+
+	key = hash_bytes(
+		key,
+		self.instance_buffers[slot].data(),
+		(usz)(self.scene.draws.len() * Instance::size)
+	);
+	key = hash_bytes(key, self.scene.buckets.entries, (usz)(self.scene.buckets.len() * Bucket::size));
+	key = hash_bytes(key, self.materials.entries, (usz)(self.materials.len() * Material::size));
+	key = @hash_value(key, self.scene.look.sky);
+	key = @hash_value(key, self.assets.revision);
+	key = @hash_value(key, self.scene_rect);
+	// Which passes this frame has. Every one of them changes the picture and none
+	// of them is in a buffer.
+	key = @hash_value(key, self.shadows.live);
+	key = @hash_value(key, self.shadows.draws);
+	key = @hash_value(key, self.prepass.live);
+	key = @hash_value(key, self.prepass.draws);
+	key = @hash_value(key, self.ambient_occlusion.live);
+	key = @hash_value(key, self.point_shadows.live);
+	// A shadow view the atlas could not fit this frame is one still owing an
+	// update, so the next frame has work whatever else it looks like.
+	key = @hash_value(key, self.shadow_manager.deferred);
+	// A repacked atlas is a different image under the same views.
+	key = @hash_value(key, self.shadow_manager.atlas.generation);
+	// A re-baked lightmap tile is a different picture out of the same buffers, and
+	// the instance array carries the rectangle rather than what is inside it.
+	key = @hash_value(key, self.lightmap.revision);
+
+	self.frame_key = key;
+}
+
 fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* frame)
 {
 	if (self.frame_blocks[slot].buffer == null)
@@ -1963,12 +2131,19 @@ fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
 		self.light_capacity[slot] = capacity;
 	}
 	self.light_buffers[slot].upload(&self.lighting.lights[0], needed * Light::size);
+	self.frame_key = hash_bytes(self.frame_key, &self.lighting.lights[0], (usz)(needed * Light::size));
 	return self.light_buffers[slot].address;
 }
 
 fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot)
 {
-	return self.write_shadow_manager(gpu, slot)!;
+	ulong address = self.write_shadow_manager(gpu, slot)!;
+	self.frame_key = hash_bytes(
+		self.frame_key,
+		&self.shadow_view_set.views[0],
+		(usz)(self.shadow_view_set.count * ShadowView::size)
+	);
+	return address;
 }
 
 fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot, ulong lights, Matrix4f vp)
@@ -2161,6 +2336,7 @@ fn void? MeshPass.write_tables(&self, Gpu* gpu, uint slot)
 		if (!material.alive || material.table.len == 0) continue;
 		mem::copy(&into[material.table_offset], material.table.ptr, material.table.len);
 	}
+	self.frame_key = hash_bytes(self.frame_key, into, (usz)wanted);
 	self.table_address = self.table_buffers[slot].address;
 }
 
@@ -2308,6 +2484,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 		at += (uint)entry.matrices.len();
 	}
 
+	self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * Matrix4f::size));
 	return self.pose_buffers[slot].address;
 }
 
@@ -2377,6 +2554,7 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 		at += (uint)entry.weights.len();
 	}
 
+	self.frame_key = hash_bytes(self.frame_key, weights, (usz)((sz)at * float::size));
 	return self.morph_buffers[slot].address;
 }
 
@@ -2470,6 +2648,7 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 		}
 	}
 
+	self.frame_key = hash_bytes(self.frame_key, vertices, (usz)(needed * Vec3::size));
 	return self.soft_buffers[slot].address;
 }
 
@@ -2649,6 +2828,10 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 	// it is: the pipeline is kept until the pass is freed, the way the ordinary
 	// shadow pipeline is.
 	stats.shadow_cutout = self.shadows.cutout_ready;
+	stats.lightmap_receivers = self.lightmap.last.receivers;
+	stats.lightmap_skipped = self.lightmap.last.skipped;
+	stats.lightmap_bytes = self.lightmap.live ? self.lightmap.bytes() : 0;
+	stats.lightmap_dirty = self.lightmap.live ? self.lightmap.dirty : 0;
 	// For the same reason, and it is a fact about right now rather than about last
 	// frame: the count is maintained at the two ends of a material's life rather
 	// than swept for here.
@@ -2738,6 +2921,10 @@ fn uint? MeshPass.create_material(
 				// Nothing here can know what shape a body cuts, so a body that cuts one
 				// is left out of the depth prepass — see `MeshPass.prepassed`.
 				.fragment_discards = fragment.contains("discard"),
+				// `.time` rather than `time`: what makes a body clock-driven is
+				// `s.time` or `v.time`, and a uniform a script happens to have named
+				// `time` is a value the material table already reports moving.
+				.reads_time = fragment.contains(".time") || vertex.contains(".time"),
 				// Copied only when there is one, so a material without a vertex body
 				// carries a zero slice rather than a pointer into static memory that
 				// `Material.free` would hand to the allocator.
@@ -3501,6 +3688,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.point_shadows.free(gpu);
 	self.shadow_manager.atlas.free(gpu);
 	self.ambient_occlusion.free(gpu);
+	self.ltc.free(gpu);
+	self.lightmap.free(gpu);
 	self.prepass.free(gpu);
 	self.posed_offsets.free();
 	self.soft_offsets.free();

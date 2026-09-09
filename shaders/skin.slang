@@ -53,6 +53,10 @@ struct Instance
     // that does not morph. **Last, like the C3 struct** — the field order here is
     // a wire format, not a preference.
     uint morph;
+    // Unread here and declared anyway: the array is indexed by SV_InstanceID and
+    // the stride is the struct's size, so a field this pass ignores still has to
+    // be in it. `mesh.slang` is what reads it.
+    float4 lightmap;
 };
 
 // Byte for byte what `mesh.slang` and `gpu/pipeline.c3` declare. One thread

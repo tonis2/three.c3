@@ -295,6 +295,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		set_full_viewport(cmd, self.target.extent, false);
 
 		vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+		self.gpu.texture_table.bind(cmd, pipeline.layout);
 		// Both sides, whatever the material's own is. A triangle's winding in uv
 		// space has nothing to do with which way it faces in the world, so culling
 		// here would drop whichever half of a layout happened to be mirrored.
@@ -304,14 +305,10 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		vk::cmdSetDepthWriteEnable(cmd, vk::FALSE);
 		vk::cmdSetDepthCompareOp(cmd, COMPARE_OP_LESS_OR_EQUAL);
 
-		// The frame's own rule for binding 0: the material's map beats the mesh's
-		// image, because a script that set one and got the other would be overruled
-		// by an asset it did not write.
-		Texture* sampled = material.texture == NO_TEXTURE ? self.pass.assets.texture_for(mesh)
-			: self.pass.assets.texture_at(material.texture);
-
+		// The material's own images are slots of the device-wide array and are in
+		// this bake's own draw record — see `texture_index_row` above. What is left
+		// here is the frame's images, which a bake mostly does not have.
 		SampledBindings samplers;
-		samplers.add(0, sampled.descriptor());
 		// Asked rather than assumed, and the answer is normally *no*: under
 		// `THREE_BAKE` nothing reads `shadow_map`, so Slang drops it and pushing a
 		// write for a binding the layout does not declare would be a validation
@@ -333,7 +330,21 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
 				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
 		}
-		samplers.collect(pipeline, &material.textures, &self.pass.assets, MATERIAL_BINDING_FIRST);
+		// Normally dropped by the linker: the bake defines `THREE_BAKE`, which is
+		// what makes the area integration numeric and leaves nothing reading the
+		// table. Here for the compile that keeps it, and the frame block's
+		// `lighting.w` is zero either way.
+		if (pipeline_declares_binding(pipeline, LTC_LUT_BINDING))
+		{
+			samplers.add(LTC_LUT_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		// Dropped by the linker for `ltc_lut`'s reason — under `THREE_BAKE` nothing
+		// shades, so nothing reads a lightmap either. Here for the compile that keeps
+		// it, and the instance's own tile is zero-sized either way.
+		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
+		{
+			samplers.add(LIGHTMAP_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
@@ -448,6 +459,9 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 		.skin_stride = 0,
 		.uv_transform = material.uv_transform_or_identity(),
 		.surface = material.surface(),
+		// The same images the frame would sample, by slot — a bake that read the
+		// fallback would export a white surface.
+		.texture_index = texture_index_row(&self.pass.assets, material, mesh),
 	};
 	self.draw.upload(&record, DrawRecord::size);
 

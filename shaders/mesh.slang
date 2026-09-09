@@ -82,6 +82,13 @@ struct Instance
     // unmorphed mesh carries. Per instance for `pose`'s reason: two faces built
     // from one head mesh wear different expressions and stay one draw call.
     uint morph;
+
+    // Where this copy's lightmap tile is: xy the atlas uv of its corner, zw its
+    // size. **zw zero is "this copy has no tile"**, which is every copy of every
+    // scene until `three.lights.bake()` has run and is what makes the lightmap a
+    // per-copy property rather than a bucket one — two copies of one mesh light
+    // differently and still draw in one call. `render/lightmap.c3` writes it.
+    float4 lightmap;
 };
 
 // One registry light. The frame carries a pointer to the variable-length table.
@@ -102,6 +109,12 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    // Frame constants for the receiver-plane gradient: row i of the cofactor of
+    // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
+    // inverse-transpose times the projection's w row in w.
+    float4 plane_x;
+    float4 plane_y;
+    float4 plane_z;
 };
 
 struct FrameBlock
@@ -367,6 +380,12 @@ struct Draw
     // lighting it, and a black surface can glow. Zero on every material nobody set
     // one on, which is the value the record already holds.
     float4 emissive;
+    // One slot of the device-wide texture array per binding — see `Map` and
+    // `map_at` in `surface.slang`. Indexed by what used to be the descriptor
+    // binding, so a material's maps kept their numbers when they left the
+    // per-draw descriptor set. Every slot nothing filled holds the array's
+    // reserved 1x1 white.
+    uint texture_index[24];
 };
 
 struct PushData
@@ -447,10 +466,12 @@ static const uint FLAG_COLORS_ARE_MASK             = 1024u;
 static const uint POSE_LIVE = 0x80000000u;
 static const uint POSE_MASK = 0x7fffffffu;
 
-// Always bound, always valid. With no material texture the binding carries a
-// 1x1 opaque white image, so there is one pipeline and one descriptor layout
-// rather than a permutation per material.
-[vk::binding(0, 0)] Sampler2D base_color_map;
+// The material's own maps are **not** bindings any more. Each is a slot of the
+// device-wide texture array, named here by the number it used to be bound at and
+// reached through `map_at` — see `Map` in `surface.slang`. A slot nothing filled
+// holds the array's 1x1 opaque white, so there is still one pipeline and one
+// descriptor layout rather than a permutation per material.
+static const uint SLOT_BASE_COLOR = 0u;
 
 // **Binding 1 is the shadow map, in every shader that shades a surface.** It is
 // reserved the way `base_color_map` is — declared by the template rather than by
@@ -471,10 +492,26 @@ static const uint POSE_MASK = 0x7fffffffu;
 // comparisons filtered in hardware. `shadow_atlas` above stays for the debug
 // view, which wants the depth itself.
 [vk::binding(18, 0)] Sampler2DShadow shadow_atlas_compare;
+// The linearly-transformed-cosine table for area lights: one 64x128 image
+// holding the fitted inverse transform and the GGX norm/Fresnel split. See
+// `lighting.slang`; `FrameBlock.lighting.w` says whether it is bound. Absent
+// where the numeric integration is the answer, so a material at the sampler
+// limit still fits a portable device.
+#if !defined(THREE_AREA_REFERENCE) && !defined(THREE_BAKE)
+[vk::binding(19, 0)] Sampler2D ltc_lut;
+#endif
+// The baked static light cache. One image for the whole scene; a copy's tile is
+// `Instance.lightmap` and `render/lightmap.c3` fills it.
+[vk::binding(20, 0)] Sampler2D lightmap_atlas;
+#ifndef THREE_NO_AO
 [vk::binding(4, 0)] Sampler2D ambient_occlusion_depth;
+#endif
 
 float crevice_occlusion(float3 position, float3 normal)
 {
+#ifdef THREE_NO_AO
+    return 1.0;
+#else
     float4 settings = push.frame[0].ambient_occlusion;
     if (settings.x <= 0.0) return 1.0;
     float4 clip = mul(push.frame[0].view_projection, float4(position, 1.0));
@@ -505,6 +542,7 @@ float crevice_occlusion(float3 position, float3 normal)
         blocked += step(settings.z, dot(normalize(normal), delta)) * (1.0 - distance / settings.y);
     }
     return 1.0 - settings.x * blocked / 12.0;
+#endif
 }
 
 // **Binding 2 is the environment map, in every shader that shades a surface.**
@@ -544,22 +582,22 @@ float crevice_occlusion(float3 position, float3 normal)
 // bends every value: a normal that means "no tilt" arrives leaning, and a
 // roughness of 0.5 arrives at 0.21. `js/prelude/texture.js` is where a script
 // says so, and the glTF importer already does.
-[vk::binding(5, 0)] Sampler2D normal_map;
+static const uint SLOT_NORMAL = 5u;
 // glTF's packing, and the reason this is one image rather than two: **green is
 // roughness and blue is metalness**, which is what `pbrMetallicRoughness` in
 // glTF 2.0 defines and what every exporter writes. Red is unused here and is
 // where the specification allows an occlusion map to be packed alongside; this
 // renderer keeps occlusion in its own binding so the two can come from different
 // files.
-[vk::binding(6, 0)] Sampler2D metalness_roughness_map;
+static const uint SLOT_METALNESS_ROUGHNESS = 6u;
 // Ambient occlusion, red channel, glTF's `occlusionTexture`. What it multiplies
 // is in `fragmentMain` and is the whole of why it is worth having a term rather
 // than folding it into albedo.
-[vk::binding(7, 0)] Sampler2D occlusion_map;
+static const uint SLOT_OCCLUSION = 7u;
 // glTF's `emissiveTexture`, multiplied by `Draw.emissive` and added after the
 // shading. **A picture and not data** — it is the colour of the light this
 // surface gives off — so it uploads sRGB, unlike the three above it.
-[vk::binding(8, 0)] Sampler2D emissive_map;
+static const uint SLOT_EMISSIVE = 8u;
 
 // The four influences of one vertex against one palette, summed into the matrix
 // that poses it.
@@ -672,6 +710,10 @@ struct VertexOutput
     // every draw, paid whether or not the mesh has the attribute, because a
     // varying is part of the pipeline rather than of the draw.
     float4 vertex_color : COLOR1;
+    // This copy's place in the lightmap atlas: xy the atlas uv of this fragment,
+    // z 1 where there is a tile and 0 where there is not. Affine in the mesh's own
+    // uv, so interpolating it here is exact rather than a shortcut.
+    float3 lightmap : TEXCOORD4;
     float4 sv_position : SV_Position;
 };
 
@@ -765,6 +807,20 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 
     output.uv = float2(0.0, 0.0);
     if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[vid];
+
+    // The mesh's own TEXCOORD_0, before `variant_uv` moves it — the coordinate the
+    // bake rasterised in, and so the only one that indexes the tile.
+    output.lightmap = float3(
+        instance.lightmap.xy + output.uv * instance.lightmap.zw,
+        instance.lightmap.z > 0.0 ? 1.0 : 0.0
+    );
+#ifdef THREE_LIGHTMAP_BAKE
+    // The bake rasterises in uv space: a texel of the tile is a point of the
+    // surface, and the world position and normal cross into the fragment stage
+    // exactly as they would in a frame. The viewport is what puts the square in
+    // this copy's tile — see `render/lightmap.c3`.
+    output.sv_position = float4(output.uv * 2.0 - 1.0, 0.0, 1.0);
+#endif
     // This copy's own uv, before the fragment stage's repeat and offset —
     // `variant_uv` in `surface.slang`, and `plan.md` §27 for why a per-copy uv is
     // what a row of one shape needs to stop reading as a row of one picture.
@@ -882,6 +938,12 @@ static float3 g_position = float3(0.0, 0.0, 0.0);
 static float3 g_receiver_normal = float3(0.0, 1.0, 0.0);
 static float4 g_screen_position = float4(0.0);
 static float g_crevice = 1.0;
+// This fragment's baked light, read once out of the atlas, and whether there was
+// a tile to read it from. Zero and false on every dynamic receiver and on every
+// mesh whose uvs could not carry a tile, which is what keeps a baked light shaded
+// in real time wherever it was never baked.
+static float3 g_lightmap = float3(0.0);
+static bool g_lightmapped = false;
 //@lighting
 
 uint fragment_cluster()
@@ -957,6 +1019,7 @@ float3 lambert(float3 normal, float occlusion)
     {
         Light light = push.frame[0].lights[i];
         if (light.meta.z != 0u) continue;
+        if (g_lightmapped && shared_light_is_baked(light)) continue;
         float reach;
         float3 to_light = light_toward(light.direction, g_position, reach);
         float n_dot_l = max(dot(normal, to_light), 0.0) * reach;
@@ -973,6 +1036,7 @@ float3 lambert(float3 normal, float occlusion)
     {
         uint i = overflow ? k : push.frame[0].cluster_indices[cluster * push.frame[0].cluster_grid.w + k];
         Light light = push.frame[0].lights[i];
+        if (g_lightmapped && shared_light_is_baked(light)) continue;
         // Nothing is sampled for a light already at zero: the shadow only scales
         // what the light delivers, and an area emitter out of range delivers none.
         if (light.meta.z == 2u || light.meta.z == 3u) { float area = area_diffuse(light,g_position,normal); if (area <= 0.0) continue; direct += light.color.rgb*area*point_shadow_factor(i,light,g_position,normal); continue; }
@@ -985,6 +1049,10 @@ float3 lambert(float3 normal, float occlusion)
         n_dot_l *= point_shadow_factor(i, light, g_position, normal);
         direct += light.color.rgb * light.color.w * n_dot_l;
     }
+    // The tile carries exactly the terms the loops above skipped, so adding it
+    // here rather than at the end is what makes a baked light and a real-time one
+    // the same picture.
+    direct += g_lightmap;
     float ambient_visibility = occlusion * g_crevice;
     return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
 }
@@ -1039,6 +1107,9 @@ float3 specular_light(float3 normal, float3 position, float3 albedo, float rough
     {
         Light light = push.frame[0].lights[i];
         if (light.meta.z != 0u && !cluster_contains(i)) continue;
+        // A lightmap holds diffuse and nothing else, so a baked light's highlight
+        // is dropped rather than moved. `docs/functions.md` says so out loud.
+        if (g_lightmapped && shared_light_is_baked(light)) continue;
         if (light.meta.z == 2u || light.meta.z == 3u) { float3 area = area_specular_term(light,position,normal,view,f0,f90,a2,k,n_dot_v); if (dot(area, float3(1.0)) <= 0.0) continue; sum += area*point_shadow_factor(i,light,position,normal); continue; }
         float reach;
         float3 to_light = light_toward(light.direction, position, reach);
@@ -1196,10 +1267,39 @@ bool debug_view(float3 position, float3 normal, out float3 answer)
 // is the vertex stage's output as well as this stage's input, and a system value
 // the rasteriser produces has no meaning there. `material.slang` declares it the
 // same way, for the same reason.
+#ifdef THREE_LIGHTMAP_BAKE
+// The bake's whole fragment stage: the direct diffuse of the baked lights at this
+// point of the surface, and nothing else. No albedo, because a tile is light
+// rather than colour; no specular, because a highlight is a fact about where the
+// camera is; no material body, because none of them changes where a light is.
+//
+// A body that displaces its vertices or discards part of its quad therefore bakes
+// as the mesh the file holds — `docs/functions.md` says so.
+[shader("fragment")]
+float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
+{
+    // The interpolated normal for both the shading and the shadow lookup. The
+    // frame offsets its shadow sample along the *face* normal instead, from the
+    // derivatives of the world position — measured on the reference scene the two
+    // answer the same thing here, and a uv-space derivative is degenerate on a
+    // triangle with no area in uv, which is a NaN this cannot afford.
+    float3 normal = normalize(input.normal);
+    return float4(shared_baked_diffuse(push.frame, normal, normal, input.world), 1.0);
+}
+#else
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV_Target
 {
     g_screen_position = input.sv_position;
+    // The tile, read once. `Instance.lightmap` is zero-sized on every copy that has
+    // no tile, which the vertex stage turned into a zero here.
+    // **Front faces only.** A double-sided surface is shaded with its normal turned
+    // toward the eye, so a leaf card lit from one side and seen from the other is a
+    // different answer at the same point of the same triangle — and the tile holds
+    // the one the bake rasterised, which is the front. A back face falls back to
+    // the whole real-time loop, which is right rather than merely safe.
+    g_lightmapped = front_facing && input.lightmap.z > 0.5;
+    if (g_lightmapped) g_lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
     // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
     // 0]` works with no material at all — which is the point of it being here
     // rather than only in `material.slang`. White is the identity and is what
@@ -1262,6 +1362,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
         // ones a plain `Sample` takes.
         bool scattered = (draw.flags & FLAG_STOCHASTIC) != 0;
 
+        Map base_color_map = map_at(SLOT_BASE_COLOR);
         float4 base = scattered ? stochastic_sample(base_color_map, uv) : base_color_map.Sample(uv);
 
         // **`material.alphaTest`, and the whole of it in the colour pass.** The
@@ -1282,6 +1383,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
 
         if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
         {
+            Map normal_map = map_at(SLOT_NORMAL);
             float3 texel = scattered
                 ? stochastic_sample(normal_map, uv).rgb
                 : normal_map.Sample(uv).rgb;
@@ -1301,6 +1403,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
         // says.
         if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
         {
+            Map metalness_roughness_map = map_at(SLOT_METALNESS_ROUGHNESS);
             float2 pair = scattered
                 ? stochastic_sample(metalness_roughness_map, uv).gb
                 : metalness_roughness_map.Sample(uv).gb;
@@ -1310,6 +1413,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
 
         if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
         {
+            Map occlusion_map = map_at(SLOT_OCCLUSION);
             occlusion = scattered
                 ? stochastic_sample(occlusion_map, uv).r
                 : occlusion_map.Sample(uv).r;
@@ -1323,6 +1427,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
         // colour beside it takes white.
         if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
         {
+            Map emissive_map = map_at(SLOT_EMISSIVE);
             emissive *= scattered
                 ? srgb_to_linear(stochastic_sample(emissive_map, uv).rgb)
                 : srgb_to_linear(emissive_map.Sample(uv).rgb);
@@ -1363,11 +1468,11 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // crevice lights it.
     SharedLightTerms direct = shared_standard_lights(
         push.frame, g_screen_position, normal, g_receiver_normal, input.world, albedo,
-        surface.x, surface.y, surface.z, g_shadow
+        surface.x, surface.y, surface.z, g_shadow, g_lightmapped
     );
     float ambient_visibility = occlusion * g_crevice;
     float3 diffuse = push.frame[0].lighting.x * ambient_visibility
-        + (1.0 - push.frame[0].lighting.x) * direct.diffuse
+        + (1.0 - push.frame[0].lighting.x) * (direct.diffuse + g_lightmap)
         + push.frame[0].world.rgb * ambient_visibility;
     return float4(
         albedo * diffuse * (1.0 - surface.y)
@@ -1386,3 +1491,4 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
             * ((draw.flags & FLAG_COLORS_ARE_MASK) != 0 ? 1.0 : input.vertex_color.a)
     );
 }
+#endif

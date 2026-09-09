@@ -964,6 +964,17 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 	// and that is what a script wants: a click goes through the box helper onto
 	// the thing it is drawn around.
 	if (!lines) mesh.build_bvh(geometry.positions.array_view(), geometry.indices.array_view());
+	// Beside the tree because it wants the same three arrays and the same one
+	// moment they are all in hand. A generated shape's uv is nearly always a plain
+	// unwrap, so most of them come out eligible.
+	if (!lines && mesh.has_uvs)
+	{
+		mesh.measure_lightmap(
+			geometry.uvs.array_view(),
+			geometry.positions.array_view(),
+			geometry.indices.array_view()
+		);
+	}
 
 	// A generated shape has no file to go back to, so it is uploaded at the moment
 	// it is built and says so — `ensure_uploaded` would have nothing to read from
