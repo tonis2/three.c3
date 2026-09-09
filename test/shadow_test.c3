@@ -1243,6 +1243,11 @@ fn void the_pass_is_charged_to_its_own_phase() @test
 		test::@check(on.ok, "the pass turned on: %s", on.error);
 
 		renderer.render_offscreen()!!;
+		for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+		{
+			renderer.pass.shadow_view_set.views[at].live_valid = false;
+			renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
+		}
 		renderer.render_offscreen()!!;
 		three::FrameTiming lit = renderer.timing();
 
@@ -1545,7 +1550,7 @@ fn void a_static_village_is_rasterised_once() @test
 }
 
 <*
- A mover is drawn over the cached map, and it does not split the bucket it is in.
+ A mover is drawn over the cached map once, and it does not split the bucket it is in.
 
  **Two claims, and the second is the promise the flag comes with.** The two boxes
  share one geometry and one material, so they are one bucket; one of them is
@@ -1558,7 +1563,7 @@ fn void a_static_village_is_rasterised_once() @test
  The first claim is the arithmetic of the split pass: the cached rebuild covers
  both buckets, because both hold something static, and the movers' pass covers
  one, because only the box bucket holds anything that moves. On the frame after,
- the rebuild is gone and the cart's single draw is all that is left.
+ the complete live tile is unchanged and no shadow draw is left.
 
  **The picture is unchanged again**, which for this plan is the harder version of
  the same claim: the copy, the load and the movers drawn over the top have to
@@ -1619,8 +1624,8 @@ fn void a_mover_is_drawn_over_the_cached_map() @test
 		`);
 		defer held.free();
 		test::@check(
-			held.value == `"2,1,0"`,
-			"and the frame after draws the cart alone: %s", held.value
+			held.value == `"2,0,0"`,
+			"and the unchanged cart reuses its complete live tile: %s", held.value
 		);
 
 		image::Image cached = renderer.capture()!!;

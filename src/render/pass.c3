@@ -247,6 +247,13 @@ struct MeshPass
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] cluster_indices;
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] cluster_overflow;
 	uint cluster_overflow_last;
+	// Binning depends on bounds and the camera. Each slot keeps its result
+	// until either changes; the slot fence has been waited before it is reused.
+	ulong[MAX_FRAMES_IN_FLIGHT] cluster_keys;
+	bool[MAX_FRAMES_IN_FLIGHT] cluster_cached;
+	// Kept beside the test oracle so cluster regressions can distinguish a reused
+	// list from a dispatch that happened to produce the same picture.
+	uint cluster_dispatches;
 	// Test oracle: bypass lists and shade every local light.
 	bool cluster_bruteforce;
 	SkinPipeline cluster_pipeline;
@@ -2152,10 +2159,12 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	if (self.cluster_counts[slot].buffer == null)
 	{
 		self.cluster_counts[slot] = gpu.create_device_storage(CLUSTER_COUNT * uint::size)!;
+		self.cluster_cached[slot] = false;
 	}
 	if (self.cluster_indices[slot].buffer == null)
 	{
 		self.cluster_indices[slot] = gpu.create_device_storage(CLUSTER_COUNT * CLUSTER_LIGHT_CAPACITY * uint::size)!;
+		self.cluster_cached[slot] = false;
 	}
 	if (self.cluster_overflow[slot].buffer == null)
 	{
@@ -2165,6 +2174,42 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	if (self.cluster_overflow[slot].data() != null)
 	{
 		self.cluster_overflow_last = *(uint*)self.cluster_overflow[slot].data();
+	}
+	ulong key = hash_bytes(0, &vp, Matrix4f::size);
+	Vec3 eye = self.camera.eye();
+	key = @hash_value(key, eye);
+	key = @hash_value(key, self.camera.near_plane);
+	key = @hash_value(key, self.camera.far_plane);
+	key = @hash_value(key, self.lighting.count);
+	for (uint i = 1; i < self.lighting.count; i++)
+	{
+		Light* light = &self.lighting.lights[i];
+		// The compute shader bins a sphere from position and range. Finite area
+		// lights expand it by their two authored axes; colour, identity and all
+		// shadow policy metadata only affect shading after the list is read.
+		key = @hash_value(key, light.direction);
+		key = @hash_value(key, light.meta[2]);
+		if (light.meta[2] == 2 || light.meta[2] == 3)
+		{
+			key = @hash_value(key, light.area_right);
+			key = @hash_value(key, light.area_up);
+		}
+	}
+	if (self.cluster_cached[slot] && self.cluster_keys[slot] == key)
+	{
+		// The producer may be an older submission. Submission order puts it before
+		// this barrier, and the slot fence makes the buffers safe to retain.
+		vk::MemoryBarrier2 cached_barrier = {
+			.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
+			.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+			.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+			.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
+		};
+		vk::DependencyInfo cached_dependency = { .sType = STRUCTURE_TYPE_DEPENDENCY_INFO,
+			.memoryBarrierCount = 1, .pMemoryBarriers = &cached_barrier };
+		vk::cmdPipelineBarrier2(cmd, &cached_dependency);
+		return;
 	}
 	self.cluster_overflow[slot].upload(&zero, uint::size);
 	if (!self.cluster_pipeline.ready)
@@ -2187,6 +2232,9 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	vk::cmdPushConstants(cmd, self.cluster_pipeline.layout, SHADER_STAGE_COMPUTE_BIT, 0,
 		self.cluster_pipeline.shader.push_size, &push);
 	vk::cmdDispatch(cmd, (CLUSTER_COUNT + 63) / 64, 1, 1);
+	self.cluster_keys[slot] = key;
+	self.cluster_cached[slot] = true;
+	self.cluster_dispatches++;
 	vk::MemoryBarrier2 barrier = {
 		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
 		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -3663,6 +3711,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.cluster_counts[i].buffer != null) self.cluster_counts[i].free();
 		if (self.cluster_indices[i].buffer != null) self.cluster_indices[i].free();
 		if (self.cluster_overflow[i].buffer != null) self.cluster_overflow[i].free();
+		self.cluster_cached[i] = false;
+		self.cluster_keys[i] = 0;
 		self.light_capacity[i] = 0;
 		if (self.instance_buffers[i].buffer != null) self.instance_buffers[i].free();
 		self.instance_capacity[i] = 0;

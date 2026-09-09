@@ -208,6 +208,10 @@ struct ShadowView
 	// Whether that complete live tile includes a dynamic overlay. When the last
 	// caster leaves this view, one cache copy is needed to erase its old depth.
 	bool live_dynamic;
+	// The rigid dynamic casters composited into the live tile. Deformed casters
+	// stay on the per-frame path because their vertex data lives outside Instance.
+	ulong dynamic_signature;
+	bool dynamic_valid;
 	bool live;
 	bool wanted;
 }
@@ -409,6 +413,7 @@ fn void ShadowView.invalidate(&self, uint signature, uint revision)
 	self.static_revision = revision;
 	self.static_valid = false;
 	self.live_valid = false;
+	self.dynamic_valid = false;
 }
 
 <*
