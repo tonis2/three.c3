@@ -274,6 +274,57 @@ fn void cluster_overflow_falls_back_instead_of_dropping_lights() @test
 	test::@check(renderer.pass.stats().cluster_overflow > 0, "overflow is explicit in stats");
 }
 
+fn void unchanged_cluster_inputs_are_reused_per_frame_slot() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	points(renderer, 12, false);
+
+	// Populate both frames in flight, then revisit both slots with only values
+	// consumed by fragment shading changed.
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	uint populated = renderer.pass.cluster_dispatches;
+	renderer.pass.lighting.lights[1].color[0] *= 2;
+	renderer.pass.lighting.lights[1].meta[3] ^= 0x10000;
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.cluster_dispatches == populated,
+		"colour and shadow metadata reuse both slots' cluster lists");
+}
+
+fn void cluster_bounds_type_and_camera_changes_invalidate_each_slot() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	points(renderer, 12, false);
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	uint dispatches = renderer.pass.cluster_dispatches;
+
+	renderer.pass.lighting.lights[1].direction[3] += 1;
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.cluster_dispatches == dispatches + 2,
+		"changed light bounds invalidate both frame slots");
+	dispatches += 2;
+
+	renderer.pass.lighting.lights[1].meta[2] = 2;
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.cluster_dispatches == dispatches + 2,
+		"changed light type invalidates both frame slots");
+	dispatches += 2;
+
+	renderer.pass.camera.yaw += 3;
+	renderer.capture()!!.free();
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.cluster_dispatches == dispatches + 2,
+		"changed camera invalidates both frame slots");
+}
+
 fn uint centre_green(image::Image* shot)
 {
 	sz at = ((sz)(shot.height / 2) * shot.width + shot.width / 2) * shot.bytes_per_pixel();
@@ -557,7 +608,8 @@ fn void a_deferred_combined_view_keeps_its_last_complete_depth() @test
 		floor.rotation.x = -Math.PI / 2; floor.static = true; scene.add(floor);
 		const wall = new three.Mesh(new three.BoxGeometry(2, 2, 2));
 		wall.position.y = 1; wall.static = true; scene.add(wall);
-		scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+		globalThis.deferredMover = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+		scene.add(deferredMover);
 		three.light.set([.2, 1, .1], .2);
 		three.lights.add({ position: [3, 3, 2], range: 12, intensity: 20 });
 		three.light.shadow = { enabled: true, size: 1024, follow: false, distance: 20 };
@@ -571,6 +623,7 @@ fn void a_deferred_combined_view_keeps_its_last_complete_depth() @test
 
 	three::RunResult limited = runtime.run(`
 		three.light.direction = [.6, 1, .2];
+		deferredMover.position.x = .5;
 		three.shadows.budget = { maxUpdates: 64, maxUpdateTexels: 2097152 };
 	`);
 	defer limited.free();
@@ -665,10 +718,10 @@ fn void dynamic_shadow_overlays_only_refresh_views_the_caster_reaches() @test
 	three::SceneStats stats = renderer.pass.stats();
 	test::@check(stats.shadow_views == 8,
 		"the directional, point and area lights keep all eight resident views");
-	test::@check(stats.shadow_updates == 3,
-		"only the sun, area view and reached point face submit dynamic overlays");
-	test::@check(stats.shadow_update_texels == 3 * 256 * 256,
-		"update texels count the three rasterized overlays only");
+	test::@check(stats.shadow_updates == 0,
+		"an unchanged rigid caster keeps every dynamic overlay cached");
+	test::@check(stats.shadow_update_texels == 0,
+		"cached dynamic overlays submit no raster work");
 
 	uint point_id = renderer.pass.lighting.lights[1].meta[0];
 	uint point_scheduled = 0;
@@ -680,13 +733,14 @@ fn void dynamic_shadow_overlays_only_refresh_views_the_caster_reaches() @test
 		if (renderer.pass.shadow_manager.scheduled[at]) point_scheduled++;
 		if (view.live_valid) point_cached++;
 	}
-	test::@check(point_scheduled == 1, "the caster reaches one point-light cube face");
+	test::@check(point_scheduled == 0, "the reached point-light face remains cached");
 	test::@check(point_cached == 6, "the other five point faces retain complete cached depth");
 
 	three::RunResult moved = runtime.run(`shadowMover.position.x=-7`);
 	defer moved.free();
 	test::@check(moved.ok, "the caster moved between point faces: %s", moved.error);
-	renderer.capture()!!.free();
+	image::Image partial = renderer.capture()!!;
+	defer partial.free();
 	stats = renderer.pass.stats();
 	test::@check(stats.shadow_updates == 4,
 		"the exited point face adds one cache cleanup to three overlays");
@@ -706,6 +760,83 @@ fn void dynamic_shadow_overlays_only_refresh_views_the_caster_reaches() @test
 	}
 	test::@check(point_scheduled == 2 && point_overlaid == 1 && point_cleared == 1,
 		"the entered face is overlaid and the exited face is restored from static depth");
+	test::@check(renderer.pass.shadow_manager.copied_texels > 0
+		&& renderer.pass.shadow_manager.copied_texels < 4 * 256 * 256,
+		"the combined update restores bounded rectangles: %d texels",
+		renderer.pass.shadow_manager.copied_texels);
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		if (!renderer.pass.shadow_view_set.views[at].live) continue;
+		renderer.pass.shadow_view_set.views[at].live_valid = false;
+		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
+	}
+	image::Image full = renderer.capture()!!;
+	defer full.free();
+	test::@check(max_rgb_difference(&partial, &full) == 0,
+		"bounded static-atlas copies match a forced full-tile rebuild");
+}
+
+fn void all_dynamic_shadow_tiles_reuse_rigid_casters_and_clear_departures() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene=new three.Scene();
+		globalThis.fullCacheFloor=new three.Mesh(new three.PlaneGeometry(16,16));
+		fullCacheFloor.rotation.x=-Math.PI/2;scene.add(fullCacheFloor);
+		globalThis.fullCacheMaterial=new three.ShaderMaterial({
+			uniforms:{level:.2},
+			fragment:'float3 shade(Surface s){return float3(level,level,level);}'
+		});
+		globalThis.fullCacheBox=new three.Mesh(new three.BoxGeometry(1,1,1),fullCacheMaterial);
+		fullCacheBox.position.set(0,1,0);scene.add(fullCacheBox);
+		three.camera.target.set(0,0,0);three.camera.orbit(35,18,12);
+		three.light.intensity=0;
+		three.lights.shadow={enabled:true,size:256,maxLocal:1};
+		three.lights.add({position:[0,4,0],range:12,intensity:20});
+	`);
+	defer built.free();
+	test::@check(built.ok, "the all-dynamic cache scene built: %s", built.error);
+	renderer.capture()!!.free();
+	image::Image dim = renderer.capture()!!;
+	test::@check(renderer.pass.stats().shadow_updates == 0,
+		"unchanged rigid casters reuse every full-map tile");
+	three::RunResult shaded = runtime.run(`fullCacheMaterial.uniforms.level=.9`);
+	defer shaded.free();
+	test::@check(shaded.ok, "the opaque fragment uniform changed: %s", shaded.error);
+	image::Image bright = renderer.capture()!!;
+	defer dim.free();
+	defer bright.free();
+	test::@check(renderer.pass.stats().shadow_updates == 0,
+		"an opaque fragment-only uniform does not invalidate cached depth");
+	test::@check(max_rgb_difference(&dim, &bright) > 0,
+		"the fragment-only uniform still changes the rendered surface");
+
+	three::RunResult moved = runtime.run(`fullCacheBox.position.x=30`);
+	defer moved.free();
+	test::@check(moved.ok, "the rigid caster left the scene: %s", moved.error);
+	image::Image partial = renderer.capture()!!;
+	defer partial.free();
+	test::@check(renderer.pass.stats().shadow_updates > 0,
+		"a caster leaving cached views clears their old depth");
+	usz updated = 0;
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		if (!renderer.pass.shadow_manager.scheduled[at]) continue;
+		three::ShadowRect rect = renderer.pass.shadow_manager.update_rects[at];
+		updated += (usz)rect.width * rect.height;
+		renderer.pass.shadow_view_set.views[at].live_valid = false;
+		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
+	}
+	test::@check(updated > 0 && updated < 6 * 256 * 256,
+		"the departure updates bounded rectangles instead of six whole faces: %d", updated);
+	image::Image full = renderer.capture()!!;
+	defer full.free();
+	test::@check(max_rgb_difference(&partial, &full) == 0,
+		"a bounded departure update is pixel-identical to a forced full-tile render");
 }
 
 fn void mixed_shadow_cache_stays_admitted_under_a_tight_byte_budget() @test

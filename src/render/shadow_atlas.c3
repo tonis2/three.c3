@@ -5,6 +5,7 @@ import vk;
 faultdef SHADOW_ATLAS_BUDGET;
 
 struct ShadowTile { uint x; uint y; uint size; }
+struct ShadowRect { uint x; uint y; uint width; uint height; }
 
 struct ShadowAtlas
 {
@@ -183,12 +184,17 @@ fn void ShadowAtlas.begin_static(&self, vk::CommandBuffer cmd, bool discard = fa
 
 fn void ShadowAtlas.begin_tile(&self, vk::CommandBuffer cmd, ShadowTile tile, bool clear)
 {
+	self.begin_tile_rect(cmd, tile, { tile.x, tile.y, tile.size, tile.size }, clear);
+}
+
+fn void ShadowAtlas.begin_tile_rect(&self, vk::CommandBuffer cmd, ShadowTile tile, ShadowRect rect, bool clear)
+{
 	vk::ImageView target = self.static_target ? self.static_view : self.view;
 	vk::RenderingAttachmentInfo depth = vk::renderingAttachmentInfo().setImageView(target)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(clear ? ATTACHMENT_LOAD_OP_CLEAR : ATTACHMENT_LOAD_OP_LOAD)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE).setClearValue({ .depthStencil = { 1.0, 0 } });
-	vk::Rect2D area = { .offset = { (int)tile.x, (int)tile.y }, .extent = { tile.size, tile.size } };
+	vk::Rect2D area = { .offset = { (int)rect.x, (int)rect.y }, .extent = { rect.width, rect.height } };
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea(area).setLayerCount(1).setDepthAttachment(&depth);
 	vk::cmdBeginRendering(cmd, &rendering);
 	vk::Viewport viewport = { .x = (float)tile.x, .y = (float)(tile.y + tile.size),
@@ -210,7 +216,7 @@ fn void ShadowAtlas.end_live(&self, vk::CommandBuffer cmd) { self.finish_image(c
 fn void ShadowAtlas.end_static(&self, vk::CommandBuffer cmd) { self.finish_image(cmd, self.static_image); self.static_initialized = true; }
 
 // Leaves the live atlas in attachment layout for dynamic LOAD overlays.
-fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowTile[] tiles)
+fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowRect[] tiles)
 {
 	if (tiles.len == 0) return;
 	self.static_target = false;
@@ -232,7 +238,7 @@ fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowTile[] tiles
 	{
 		vk::ImageCopy region = { .srcSubresource = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .layerCount = 1 },
 			.srcOffset = { (int)tile.x, (int)tile.y, 0 }, .dstSubresource = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .layerCount = 1 },
-			.dstOffset = { (int)tile.x, (int)tile.y, 0 }, .extent = { tile.size, tile.size, 1 } };
+			.dstOffset = { (int)tile.x, (int)tile.y, 0 }, .extent = { tile.width, tile.height, 1 } };
 		vk::cmdCopyImage(cmd, self.static_image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			self.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 	}

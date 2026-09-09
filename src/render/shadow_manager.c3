@@ -14,6 +14,8 @@ struct ShadowManager
 	uint[SHADOW_MAX_VIEWS] light_indices;
 	uint[SHADOW_MAX_VIEWS] gpu_indices;
 	uint plan;
+	uint previous_plan;
+	bool plan_valid;
 	bool sample_static;
 	uint scene_id;
 	uint rejected;
@@ -21,6 +23,11 @@ struct ShadowManager
 	uint frame_slot;
 	bool[SHADOW_MAX_VIEWS] scheduled;
 	bool[SHADOW_MAX_VIEWS] overlay;
+	ulong[SHADOW_MAX_VIEWS] dynamic_signatures;
+	ShadowRect[SHADOW_MAX_VIEWS] dynamic_rects;
+	ShadowRect[SHADOW_MAX_VIEWS] update_rects;
+	ShadowRect[SHADOW_MAX_VIEWS] cached_dynamic_rects;
+	usz copied_texels;
 	uint updates;
 	usz update_texels;
 	uint deferred;
@@ -479,10 +486,84 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 	return false;
 }
 
-fn bool MeshPass.dynamic_shadow_reaches(&self, ShadowView* view, Light* light)
+fn ShadowRect shadow_full_rect(ShadowTile tile) => { tile.x, tile.y, tile.size, tile.size };
+
+fn ShadowRect shadow_rect_union(ShadowRect a, ShadowRect b)
+{
+	if (a.width == 0 || a.height == 0) return b;
+	if (b.width == 0 || b.height == 0) return a;
+	uint x = math::min(a.x, b.x);
+	uint y = math::min(a.y, b.y);
+	uint right = math::max(a.x + a.width, b.x + b.width);
+	uint bottom = math::max(a.y + a.height, b.y + b.height);
+	return { x, y, right - x, bottom - y };
+}
+
+// Conservative atlas rectangle of rigid copies. A corner behind the projection
+// plane makes the clipped shape unbounded in ndc, so that case takes the tile.
+fn bool MeshPass.shadow_range_rect(&self, GpuMesh* mesh, Material* material, Bucket bucket,
+	uint offset, uint count, ShadowView* view, ShadowTile tile, ShadowRect* into)
+{
+	if (count == 0) return true;
+	collision::Aabb3 local = mesh.bounds;
+	for (uint n = 0; n < count; n++)
+	{
+		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
+		collision::Aabb3 box = local.transform_matrix(copy.model);
+		if (material.bounds > 0)
+		{
+			float margin = material.bounds;
+			box = { .min = box.min - { margin, margin, margin },
+				.max = box.max + { margin, margin, margin } };
+		}
+		float min_x = 1.0f;
+		float min_y = 1.0f;
+		float max_x = -1.0f;
+		float max_y = -1.0f;
+		for (uint corner = 0; corner < 8; corner++)
+		{
+			Vec3 p = {
+				(corner & 1) != 0 ? box.max.x : box.min.x,
+				(corner & 2) != 0 ? box.max.y : box.min.y,
+				(corner & 4) != 0 ? box.max.z : box.min.z,
+			};
+			float[<4>] clip = view.view_projection * (float[<4>]){ p.x, p.y, p.z, 1 };
+			if (clip[3] <= 0) { *into = shadow_full_rect(tile); return false; }
+			float x = clip[0] / clip[3];
+			float y = clip[1] / clip[3];
+			min_x = math::min(min_x, x); max_x = math::max(max_x, x);
+			min_y = math::min(min_y, y); max_y = math::max(max_y, y);
+		}
+		min_x = math::clamp(min_x, -1.0f, 1.0f); max_x = math::clamp(max_x, -1.0f, 1.0f);
+		min_y = math::clamp(min_y, -1.0f, 1.0f); max_y = math::clamp(max_y, -1.0f, 1.0f);
+		int left = (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - 2;
+		int right = (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + 2;
+		int top = (int)math::floor((double)((-0.5f * max_y + 0.5f) * tile.size)) - 2;
+		int bottom = (int)math::ceil((double)((-0.5f * min_y + 0.5f) * tile.size)) + 2;
+		left = math::clamp(left, 0, (int)tile.size); right = math::clamp(right, 0, (int)tile.size);
+		top = math::clamp(top, 0, (int)tile.size); bottom = math::clamp(bottom, 0, (int)tile.size);
+		if (right > left && bottom > top)
+		{
+			ShadowRect rect = { tile.x + (uint)left, tile.y + (uint)top,
+				(uint)(right - left), (uint)(bottom - top) };
+			*into = shadow_rect_union(*into, rect);
+		}
+	}
+	return true;
+}
+
+// Hashes the rigid dynamic casters that reach a view. Skins, morphs, soft
+// bodies and custom vertex programs are volatile because their final vertices
+// do not live in Instance.
+fn bool MeshPass.dynamic_shadow_state(&self, ShadowView* view, Light* light,
+	bool all_casters, ShadowTile tile, ulong* signature, bool* deforming, ShadowRect* rect)
 {
 	Frustum frustum = frustum_of(view.view_projection);
 	Light* point = view.key.kind == ShadowViewKind.POINT ? light : null;
+	ulong hash = @hash_value(KEY_SEED, self.assets.revision);
+	bool found = false;
+	*deforming = false;
+	*rect = { };
 	foreach (i, bucket : self.scene.buckets)
 	{
 		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
@@ -491,13 +572,48 @@ fn bool MeshPass.dynamic_shadow_reaches(&self, ShadowView* view, Light* light)
 		Material* material = self.material(bucket.material);
 		if (mesh == null || material == null || !self.casts_shadow(material)) continue;
 		uint tail = bucket.static_first + bucket.static_count;
-		if (self.shadow_range_reaches(mesh, material, bucket, 0, bucket.static_first, &frustum, point)
-			|| self.shadow_range_reaches(mesh, material, bucket, tail, bucket.count - tail, &frustum, point))
+		uint head_count = all_casters ? bucket.count : bucket.static_first;
+		uint tail_count = all_casters ? 0 : bucket.count - tail;
+		bool head = self.shadow_range_reaches(mesh, material, bucket, 0, head_count, &frustum, point);
+		bool end = self.shadow_range_reaches(mesh, material, bucket, tail, tail_count, &frustum, point);
+		if (!head && !end) continue;
+		found = true;
+		if (mesh.has_skin || mesh.morph_targets > 0 || bucket.node != NO_NODE || material.vertex.len > 0)
 		{
-			return true;
+			*deforming = true;
+			*rect = shadow_full_rect(tile);
 		}
+		else
+		{
+			if (head) self.shadow_range_rect(mesh, material, bucket, 0, head_count, view, tile, rect);
+			if (end) self.shadow_range_rect(mesh, material, bucket, tail, tail_count, view, tile, rect);
+		}
+		hash = @hash_value(hash, bucket.asset);
+		hash = @hash_value(hash, bucket.mesh);
+		hash = @hash_value(hash, bucket.material);
+		// Opaque materials contribute no data to the depth shader. In particular,
+		// animated shading uniforms must not invalidate an unchanged silhouette.
+		if (material.alpha_test > 0)
+		{
+			hash = @hash_value(hash, material.alpha_test);
+			hash = @hash_value(hash, material.texture);
+			hash = @hash_value(hash, mesh.texture);
+			hash = @hash_value(hash, material.opacity());
+			hash = @hash_value(hash, mesh.base_color[3]);
+			for (uint k = 0; k < 4; k++) hash = @hash_value(hash, material.uv_transform[k]);
+			hash = @hash_value(hash, material.uv_variant_count);
+			for (uint row = 0; row < material.uv_variant_count; row++)
+			{
+				hash = @hash_value(hash, material.uv_variants[row]);
+			}
+		}
+		if (head) hash = hash_bytes(hash, &self.shadow_instances[bucket.first],
+			(usz)(head_count * Instance::size));
+		if (end) hash = hash_bytes(hash, &self.shadow_instances[bucket.first + tail],
+			(usz)(tail_count * Instance::size));
 	}
-	return false;
+	*signature = hash;
+	return found;
 }
 
 fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
@@ -645,6 +761,16 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 		else { manager.plan = movers == 0 ? SHADOW_PLAN_STATIC : SHADOW_PLAN_COMBINED; }
 	}
 	manager.sample_static = manager.plan == SHADOW_PLAN_STATIC;
+	if (!manager.plan_valid || manager.previous_plan != manager.plan)
+	{
+		for (uint at = 0; at < entries.count; at++)
+		{
+			entries.views[at].live_valid = false;
+			entries.views[at].dynamic_valid = false;
+		}
+		manager.previous_plan = manager.plan;
+		manager.plan_valid = true;
+	}
 	uint signature = self.point_shadow_signature();
 	if (manager.caster_signature != signature)
 	{
@@ -657,13 +783,16 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	}
 	self.shadows.plan = manager.plan; self.shadows.sample_static = manager.sample_static;
 	self.point_shadows.plan = manager.plan; self.point_shadows.sample_static = manager.sample_static;
-	manager.updates = 0; manager.update_texels = 0; manager.deferred = 0;
+	manager.updates = 0; manager.update_texels = 0; manager.deferred = 0; manager.copied_texels = 0;
 	ShadowGpuView* uploaded = self.shadow_view_buffers[manager.frame_slot].buffer != null
 		? (ShadowGpuView*)self.shadow_view_buffers[manager.frame_slot].data() : null;
 	for (uint at = 0; at < entries.count; at++)
 	{
 		manager.scheduled[at] = false;
 		manager.overlay[at] = false;
+		manager.dynamic_signatures[at] = 0;
+		manager.dynamic_rects[at] = { };
+		manager.update_rects[at] = { };
 	}
 	for (uint packed = 0; packed < entries.active; packed++)
 	{
@@ -671,19 +800,31 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 		{
 			ShadowView* view = &entries.views[at];
 			if (!view.live || manager.gpu_indices[at] != packed) continue;
-			if (manager.plan == SHADOW_PLAN_FULL)
-			{
-				view.static_valid = false;
-				view.live_valid = false;
-			}
 			bool static_work = manager.plan != SHADOW_PLAN_FULL && !view.static_valid;
-			bool overlay = manager.plan == SHADOW_PLAN_COMBINED
-				&& self.dynamic_shadow_reaches(view, &self.lighting.lights[manager.light_indices[at]]);
+			ulong dynamic_signature = 0;
+			bool deforming = false;
+			ShadowRect dynamic_rect;
+			bool overlay = manager.plan != SHADOW_PLAN_STATIC
+				&& self.dynamic_shadow_state(view, &self.lighting.lights[manager.light_indices[at]],
+					manager.plan == SHADOW_PLAN_FULL, manager.tiles[at], &dynamic_signature, &deforming,
+					&dynamic_rect);
+			bool dynamic_changed = deforming || !view.dynamic_valid
+				|| view.dynamic_signature != dynamic_signature;
+			bool dynamic_work = overlay && dynamic_changed;
 			bool copy = manager.plan == SHADOW_PLAN_COMBINED
-				&& (static_work || overlay || !view.live_valid || view.live_dynamic);
+				&& (static_work || dynamic_work || !view.live_valid || view.live_dynamic != overlay);
 			manager.overlay[at] = overlay;
-			uint passes = manager.plan == SHADOW_PLAN_FULL ? 1u
-				: (static_work ? 1u : 0u) + (overlay ? 1u : 0u);
+			manager.dynamic_signatures[at] = dynamic_signature;
+			manager.dynamic_rects[at] = dynamic_rect;
+			manager.update_rects[at] = static_work || !view.live_valid
+				? shadow_full_rect(manager.tiles[at])
+				: shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
+			if (manager.update_rects[at].width == 0 || manager.update_rects[at].height == 0)
+			{
+				manager.update_rects[at] = shadow_full_rect(manager.tiles[at]);
+			}
+			uint passes = manager.plan == SHADOW_PLAN_FULL ? (dynamic_changed || !view.live_valid ? 1u : 0u)
+				: (static_work ? 1u : 0u) + (overlay && (static_work || dynamic_work || !view.live_valid) ? 1u : 0u);
 			bool work = passes > 0 || copy;
 			usz texels = (usz)view.size * view.size * passes;
 			bool fits = !work || (manager.updates < entries.budget.max_updates
@@ -739,9 +880,17 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		if (begun) manager.atlas.end_static(cmd);
 	}
 	if (manager.plan == SHADOW_PLAN_STATIC) return;
-	ShadowTile[SHADOW_MAX_VIEWS] copies;
+	ShadowRect[SHADOW_MAX_VIEWS] copies;
 	uint count = 0;
-	for (uint at = 0; at < entries.count; at++) if (entries.views[at].live && manager.scheduled[at]) copies[count++] = manager.tiles[at];
+	for (uint at = 0; at < entries.count; at++)
+	{
+		if (!entries.views[at].live || !manager.scheduled[at]) continue;
+		copies[count++] = manager.update_rects[at];
+		if (manager.plan == SHADOW_PLAN_COMBINED)
+		{
+			manager.copied_texels += (usz)manager.update_rects[at].width * manager.update_rects[at].height;
+		}
+	}
 	if (count == 0)
 	{
 		if (!manager.atlas.initialized) { manager.atlas.begin_live(cmd, false); manager.atlas.end_live(cmd); }
@@ -757,9 +906,12 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		{
 			view.live_valid = true;
 			view.live_dynamic = false;
+			view.dynamic_valid = true;
+			view.dynamic_signature = manager.dynamic_signatures[at];
+			manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
 			continue;
 		}
-		manager.atlas.begin_tile(cmd, manager.tiles[at], manager.plan == SHADOW_PLAN_FULL);
+		manager.atlas.begin_tile_rect(cmd, manager.tiles[at], manager.update_rects[at], manager.plan == SHADOW_PLAN_FULL);
 		uint i = manager.light_indices[at]; Light* light = &self.lighting.lights[i];
 		uint draws = self.record_casters(cmd, manager.plan == SHADOW_PLAN_FULL ? CASTERS_ALL : CASTERS_DYNAMIC,
 			view.view_projection, shadow_kind(*light) == ShadowViewKind.POINT ? light : null, view.key.part);
@@ -768,6 +920,12 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		vk::cmdEndRendering(cmd);
 		view.live_valid = true;
 		view.live_dynamic = manager.plan == SHADOW_PLAN_COMBINED;
+		if (manager.plan != SHADOW_PLAN_STATIC)
+		{
+			view.dynamic_valid = true;
+			view.dynamic_signature = manager.dynamic_signatures[at];
+			manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
+		}
 	}
 	manager.atlas.end_live(cmd);
 }

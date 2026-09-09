@@ -392,6 +392,27 @@ float shadow_view_factor_filtered(uint index, float3 position, float3 normal, fl
     // a local light's perspective is more ndc depth than a crate is tall, so the
     // contact shadows go with it.
     const float2 quad[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };
+    if(filter_radius<=1.0)
+    {
+        const float2 adjacent[4] = { float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0) };
+        float2 texelPosition=local/view.params.x-0.5;
+        float2 fraction=frac(texelPosition);
+        float2 base=floor(texelPosition);
+        float samples[4];
+        [unroll] for(int i=0;i<4;i++)
+        {
+            float2 tapLocal=clamp((base+adjacent[i]+0.5)*view.params.x,
+                view.params.x*0.5,1.0-view.params.x*0.5);
+            float2 tapNdc=(tapLocal-local)*float2(2.0,-2.0);
+            float reference=ndc.z+dot(depthGradient,tapNdc)-view.params.y;
+            samples[i]=shadow_atlas_compare.SampleCmpLevelZero(
+                clamp(tapLocal*view.atlas.xy+view.atlas.zw,lo,hi),reference);
+        }
+        float lit=lerp(lerp(samples[0],samples[1],fraction.x),
+            lerp(samples[2],samples[3],fraction.x),fraction.y);
+        return lerp(1.0,lit,view.params.w);
+    }
+
     float spread = filter_radius > 1.0 ? filter_radius * 0.6 : 1.0;
     float lit = 0.0;
     for (int i = 0; i < 4; i++)

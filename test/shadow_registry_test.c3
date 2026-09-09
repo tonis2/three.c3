@@ -34,6 +34,7 @@ fn void changing_resolution_invalidates_only_that_cached_view() @test
 	uint b = views.admit(key(2), 16);
 	views.views[a].static_valid = true;
 	views.views[b].static_valid = true;
+	views.views[a].dynamic_valid = true;
 
 	views.reset();
 	views.want_light(1, three::ShadowViewKind.DIRECTIONAL);
@@ -74,7 +75,7 @@ fn void projection_or_scene_changes_invalidate_per_view() @test
 	views.views[b].static_valid = true;
 
 	views.views[a].invalidate(112, 3);
-	test::@check(!views.views[a].static_valid && views.views[b].static_valid,
+	test::@check(!views.views[a].static_valid && !views.views[a].dynamic_valid && views.views[b].static_valid,
 		"one light projection change does not flush another light");
 	views.views[a].static_valid = true;
 	views.views[a].invalidate(112, 4);
