@@ -536,10 +536,13 @@ fn bool MeshPass.shadow_range_rect(&self, GpuMesh* mesh, Material* material, Buc
 		}
 		min_x = math::clamp(min_x, -1.0f, 1.0f); max_x = math::clamp(max_x, -1.0f, 1.0f);
 		min_y = math::clamp(min_y, -1.0f, 1.0f); max_y = math::clamp(max_y, -1.0f, 1.0f);
-		int left = (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - 2;
-		int right = (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + 2;
-		int top = (int)math::floor((double)((-0.5f * max_y + 0.5f) * tile.size)) - 2;
-		int bottom = (int)math::ceil((double)((-0.5f * min_y + 0.5f) * tile.size)) + 2;
+		// Include the widest area-light filter so its penumbra never escapes the
+		// dynamic comparison gate or the atlas rectangle refreshed beneath it.
+		const int FILTER_MARGIN = 7;
+		int left = (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - FILTER_MARGIN;
+		int right = (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + FILTER_MARGIN;
+		int top = (int)math::floor((double)((-0.5f * max_y + 0.5f) * tile.size)) - FILTER_MARGIN;
+		int bottom = (int)math::ceil((double)((-0.5f * min_y + 0.5f) * tile.size)) + FILTER_MARGIN;
 		left = math::clamp(left, 0, (int)tile.size); right = math::clamp(right, 0, (int)tile.size);
 		top = math::clamp(top, 0, (int)tile.size); bottom = math::clamp(bottom, 0, (int)tile.size);
 		if (right > left && bottom > top)
@@ -767,6 +770,7 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 		{
 			entries.views[at].live_valid = false;
 			entries.views[at].dynamic_valid = false;
+			manager.cached_dynamic_rects[at] = { };
 		}
 		manager.previous_plan = manager.plan;
 		manager.plan_valid = true;
@@ -816,18 +820,6 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 			manager.overlay[at] = overlay;
 			manager.dynamic_signatures[at] = dynamic_signature;
 			manager.dynamic_rects[at] = dynamic_rect;
-			if (uploaded != null && overlay)
-			{
-				ShadowTile tile = manager.tiles[at];
-				ShadowRect footprint = shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
-				float inv = 1.0f / (float)tile.size;
-				uploaded[packed].dynamic_rect = {
-					(float)(footprint.x - tile.x) * inv,
-					(float)(footprint.y - tile.y) * inv,
-					(float)(footprint.x + footprint.width - tile.x) * inv,
-					(float)(footprint.y + footprint.height - tile.y) * inv,
-				};
-			}
 			manager.update_rects[at] = static_work || !view.live_valid
 				? shadow_full_rect(manager.tiles[at])
 				: shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
@@ -849,8 +841,39 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				{
 					uploaded[packed].params[3] = 0;
 				}
+				else if (uploaded != null && manager.plan == SHADOW_PLAN_COMBINED
+					&& view.static_valid && view.live_valid)
+				{
+					ShadowTile tile = manager.tiles[at];
+					ShadowRect footprint = manager.cached_dynamic_rects[at];
+					if (footprint.width > 0 && footprint.height > 0)
+					{
+						float inv = 1.0f / (float)tile.size;
+						uploaded[packed].dynamic_rect = {
+							(float)(footprint.x - tile.x) * inv,
+							(float)(footprint.y - tile.y) * inv,
+							(float)(footprint.x + footprint.width - tile.x) * inv,
+							(float)(footprint.y + footprint.height - tile.y) * inv,
+						};
+					}
+				}
 				manager.deferred++;
 				continue;
+			}
+			// A scheduled combined update completes before the colour pass reads
+			// this frame block, so its freshly coherent pair may be used immediately.
+			bool coherent = (view.static_valid && view.live_valid) || work;
+			if (uploaded != null && overlay && manager.plan == SHADOW_PLAN_COMBINED && coherent)
+			{
+				ShadowTile tile = manager.tiles[at];
+				ShadowRect footprint = shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
+				float inv = 1.0f / (float)tile.size;
+				uploaded[packed].dynamic_rect = {
+					(float)(footprint.x - tile.x) * inv,
+					(float)(footprint.y - tile.y) * inv,
+					(float)(footprint.x + footprint.width - tile.x) * inv,
+					(float)(footprint.y + footprint.height - tile.y) * inv,
+				};
 			}
 			manager.scheduled[at] = work;
 			if (work) manager.updates++;
@@ -936,7 +959,10 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		{
 			view.dynamic_valid = true;
 			view.dynamic_signature = manager.dynamic_signatures[at];
-			manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
+			if (manager.plan == SHADOW_PLAN_COMBINED)
+			{
+				manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
+			}
 		}
 	}
 	manager.atlas.end_live(cmd);

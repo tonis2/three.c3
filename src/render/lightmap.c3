@@ -36,9 +36,8 @@
  maps match the frame. Arbitrary shader bodies and displaced geometry remain in
  the real-time path because the cache cannot infer what their output means.
 
- Area lights are integrated numerically here whatever the frame does — the define
- turns on `THREE_AREA_REFERENCE` — because a bake is one texel per surface point
- and not a per-frame budget.
+ Area-light diffuse uses the same view-independent polygon approximation here and
+ in the live frame. The numeric reference remains available for diagnostics.
 
  ## Seams
 
@@ -58,15 +57,14 @@
  invalidate their affected tiles as well, because their blended normal and
  parallax result can change the cached diffuse. `MeshPass.update_lightmap`
  re-bakes dirty tiles a few at a time under a millisecond budget; a dirty tile
- uses real-time lighting until it is current. A moving caster's current shadow
- footprint makes the same per-fragment fallback, leaving the unaffected part of
- a large ground cached. Specular always stays live. The one thing that drops the
- atlas is the set of baked lights changing, which is a different picture rather
- than an old one.
+ uses real-time lighting until it is current. Inside a moving caster's shadow
+ footprint, the static-to-combined visibility change adjusts the cached diffuse.
+ Specular always stays live. The one thing that drops the atlas is the set of
+ baked lights changing, which is a different picture rather than an old one.
 
  ## Persistence
 
- `MeshPass.save_lightmap` writes version 3 of the atlas and its tile table beside
+ `MeshPass.save_lightmap` writes version 4 of the atlas and its tile table beside
  the assets as `LIGHTMAP_MAGIC`: a header, one record per tile naming the
  receiver by node
  name, mesh index and copy index, and the tiles' texels packed one after another
@@ -249,11 +247,22 @@ fn bool LightmapReach.covers(&self, collision::Aabb3 box)
 // Whether two lights differ in a way a lightmap tile would show. `meta.y` is the
 // shadow view index and churns every frame; everything else counts, the shadow
 // settings in `meta.w` included — a light that gained a shadow map casts one.
+// The baked bit itself changes atlas eligibility, not the texels already in it.
 fn bool lights_differ(Light a, Light b)
 {
 	return a.direction != b.direction || a.color != b.color
 		|| a.area_right != b.area_right || a.area_up != b.area_up
-		|| a.meta[0] != b.meta[0] || a.meta[2] != b.meta[2] || a.meta[3] != b.meta[3];
+		|| a.meta[0] != b.meta[0] || a.meta[2] != b.meta[2]
+		|| (a.meta[3] & ~LIGHT_BAKED) != (b.meta[3] & ~LIGHT_BAKED);
+}
+
+fn bool Lightmap.tracks_light(&self, Light light)
+{
+	foreach (baked : self.baked_lights)
+	{
+		if (baked.meta[0] == light.meta[0]) return light_is_baked(baked);
+	}
+	return false;
 }
 
 // What `three.lights.bake()` was asked for.
@@ -317,6 +326,9 @@ struct Lightmap
 	// The one invalidation that drops the atlas rather than re-baking part of it,
 	// because the light set changing is a different picture and not a stale one.
 	uint signature;
+	// The light state represented by the atlas. Kept while a baked flag is
+	// temporarily off so movement during that interval still dirties its tiles.
+	List{Light} baked_lights;
 
 	<*
 	 The packing, kept for the life of the atlas.
@@ -399,6 +411,23 @@ fn void MeshPass.refresh_lightmap(&self)
 		&& self.baked_light_signature() == self.lightmap.signature;
 }
 
+// Called after shadow planning, when the current update state is finally known.
+fn void MeshPass.finalize_lightmap(&self)
+{
+	if (self.scene == null || !self.scene.lightmap_live) return;
+	bool live = self.shadow_manager.plan != SHADOW_PLAN_FULL
+		|| (!self.shadows.live && !self.point_shadows.live);
+	if (live) return;
+	self.scene.lightmap_live = false;
+	foreach (bucket : self.scene.buckets)
+	{
+		for (uint i = 0; i < bucket.count; i++)
+		{
+			self.shadow_instances[bucket.first + i].lightmap = { 0, 0, 0, 0 };
+		}
+	}
+}
+
 <*
  What a write to the lighting registry does to the tiles.
 
@@ -422,10 +451,18 @@ fn void MeshPass.note_lighting_change(&self, Lighting next)
 	{
 		bool was_baked = i < self.lighting.count && light_is_baked(self.lighting.lights[i]);
 		bool now_baked = i < next.count && light_is_baked(next.lights[i]);
-		if (!was_baked && !now_baked) continue;
-		if (was_baked && now_baked && !lights_differ(self.lighting.lights[i], next.lights[i])) continue;
-		if (was_baked) map.push_reach(light_reach(self.lighting.lights[i]));
-		if (now_baked) map.push_reach(light_reach(next.lights[i]));
+		bool tracked_was = i < self.lighting.count && map.tracks_light(self.lighting.lights[i]);
+		bool tracked_now = i < next.count && map.tracks_light(next.lights[i]);
+		bool tracked = tracked_was || tracked_now;
+		if (!was_baked && !now_baked && !tracked) continue;
+		if (i < self.lighting.count && i < next.count
+			&& self.lighting.lights[i].meta[0] == next.lights[i].meta[0]
+			&& !lights_differ(self.lighting.lights[i], next.lights[i])) continue;
+		if ((was_baked || tracked_was) && i < self.lighting.count)
+		{
+			map.push_reach(light_reach(self.lighting.lights[i]));
+		}
+		if ((now_baked || tracked_now) && i < next.count) map.push_reach(light_reach(next.lights[i]));
 		moved = true;
 	}
 	if (moved) self.scene.lightmap_changes++;
@@ -747,6 +784,7 @@ fn void Lightmap.free(&self, Gpu* gpu)
 	foreach (&entry : self.material_pipelines) if (entry.ready) entry.pipeline.free(gpu);
 	if (self.material_pipelines.allocator != null) self.material_pipelines.free();
 	if (self.tiles.allocator != null) self.tiles.free();
+	if (self.baked_lights.allocator != null) self.baked_lights.free();
 	LightmapResult last = self.last;
 	*self = { };
 	self.last = last;
@@ -803,8 +841,8 @@ fn void? Lightmap.ensure_pipeline(&self, Gpu* gpu)
 		variant.tinit(source.len + 128);
 		// `#line 1` after the defines so a Slang diagnostic still names the line the
 		// file has. `THREE_NO_AO` drops a sampler that reads the camera's depth
-		// buffer, which a bake does not have; `THREE_AREA_REFERENCE` keeps the
-		// numeric integration whatever the frame is using.
+		// buffer, which a bake does not have. `THREE_AREA_REFERENCE` keeps numeric
+		// specular helpers available; lightmap diffuse still uses the live polygon.
 		variant.append_string("#define THREE_LIGHTMAP_BAKE 1\n#define THREE_NO_AO 1\n");
 		variant.append_string("#define THREE_AREA_REFERENCE 1\n#line 1\n");
 		variant.append_string(source);
@@ -1158,6 +1196,9 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	map.adopt(tiles.array_view(), self.scene.id, density * scale);
 	map.live = true;
 	map.signature = self.baked_light_signature();
+	if (map.baked_lights.allocator == null) map.baked_lights.init(mem, self.lighting.count);
+	map.baked_lights.clear();
+	for (uint i = 0; i < self.lighting.count; i++) map.baked_lights.push(self.lighting.lights[i]);
 	map.seen = self.scene.lightmap_changes;
 	Vec3 baked_eye = self.camera.eye();
 	Matrix4f baked_view_projection = self.camera.view_projection(self.aspect);
@@ -1424,13 +1465,20 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		{
 			if (declared.set != 0) continue;
 			if (declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-			if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING) continue;
+			if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
+				|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
 			samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
 		}
 		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
 		{
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
 				true, self.shadow_manager.atlas.static_initialized));
+		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
+				self.shadow_manager.atlas.compare_descriptor(
+					true, self.shadow_manager.atlas.static_initialized));
 		}
 		samplers.push(cmd, pipeline);
 
@@ -1480,12 +1528,19 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			foreach (declared : selected.shader.bindings)
 			{
 				if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-				if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING) continue;
+				if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
+					|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
 				selected_samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
 			}
 			if (pipeline_declares_binding(selected, SHADOW_ATLAS_COMPARE_BINDING))
 			{
 				selected_samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
+					self.shadow_manager.atlas.compare_descriptor(
+						true, self.shadow_manager.atlas.static_initialized));
+			}
+			if (pipeline_declares_binding(selected, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
+			{
+				selected_samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
 					self.shadow_manager.atlas.compare_descriptor(
 						true, self.shadow_manager.atlas.static_initialized));
 			}
@@ -1599,7 +1654,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 3;
+const uint LIGHTMAP_FILE_VERSION = 4;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1985,6 +2040,9 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	map.live = true;
 	map.revision++;
 	map.signature = header.signature;
+	if (map.baked_lights.allocator == null) map.baked_lights.init(mem, self.lighting.count);
+	map.baked_lights.clear();
+	for (uint i = 0; i < self.lighting.count; i++) map.baked_lights.push(self.lighting.lights[i]);
 	map.camera_signature = header.camera_signature;
 	map.dirty = dirty;
 	map.seen = self.scene.lightmap_changes;

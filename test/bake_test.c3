@@ -230,6 +230,68 @@ fn void a_baked_light_lights_a_receiver_as_it_did_in_real_time() @test
 }
 
 <*
+ Area-light diffuse takes the same path on both sides of the cache.
+
+ The emitter is wide and close to the plane, where four midpoint samples differ
+ most from the polygon form factor. There are no shadows or other direct lights,
+ so agreement at the centre measures the area integral rather than atlas edges.
+*>
+fn void a_baked_area_light_keeps_the_live_diffuse_energy() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			three.scene = scene;
+			three.light.intensity = 0;
+			three.light.ambient = 0;
+			three.light.world = [0, 0, 0];
+			three.lights.shadow.enabled = false;
+			const plane = new three.Mesh(new three.PlaneGeometry(6, 6),
+				new three.MeshLambertMaterial({ color: 0xffffff }));
+			plane.rotation.x = -Math.PI / 2;
+			plane.static = true;
+			scene.add(plane);
+			globalThis.area = three.lights.add({ shape: 'rectangle', position: [0, 1.2, 0],
+				right: [1, 0, 0], up: [0, 0, -1], width: 4.5, height: 4.5,
+				range: 20, color: 0xffffff, intensity: 5 });
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 70, 7);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the close area-light scene built: %s", built.error);
+
+		image::Image live = renderer.capture()!!;
+		defer live.free();
+		three::RunResult baked = run.run(
+			`area.baked = true; return three.lights.bake({ texelsPerMetre: 128 }).receivers;`
+		);
+		defer baked.free();
+		test::@check(baked.value == "1", "the area-lit plane was baked: %s", baked.value);
+		test::@check(renderer.pass.scene.lightmap_live, "the scene is reading its lightmap");
+		bool tiled = false;
+		foreach (&node : renderer.pass.scene.nodes)
+		{
+			if (node.lightmap[2] > 0 && node.lightmap[3] > 0) { tiled = true; break; }
+		}
+		test::@check(tiled, "a receiver carries a non-empty atlas tile");
+
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		uint live_centre = luma_at(&live, W / 2, H / 2);
+		uint cached_centre = luma_at(&cached, W / 2, H / 2);
+		uint drift = live_centre > cached_centre
+			? live_centre - cached_centre : cached_centre - live_centre;
+		test::@check(live_centre > 30, "the centre is directly area-lit, got %d", live_centre);
+		test::@check(
+			drift <= 1,
+			"the area-lit centre keeps its diffuse energy when baked: %d against %d",
+			live_centre, cached_centre
+		);
+	};
+}
+
+<*
  The two receivers the cache cannot reach are lit exactly as they were.
 
  Byte for byte, which is stronger than the check above and is the half that says
@@ -385,6 +447,38 @@ fn void moving_a_baked_light_dirties_the_tiles_it_reaches() @test
 }
 
 <*
+ A light remains part of the atlas while its baked flag is temporarily off.
+ Moving it during that interval must still stale the old tile when it returns.
+*>
+fn void moving_a_temporarily_unbaked_light_dirties_its_old_tiles() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		image::Image warm = renderer.capture()!!;
+		warm.free();
+		three::RunResult baked = run.run(
+			`point.baked = true; disk.baked = true;
+			 return three.lights.bake({ texelsPerMetre: 32 }).receivers;`);
+		defer baked.free();
+		test::@check(baked.value == "1", "the plane was baked: %s", baked.value);
+
+		three::RunResult moved = run.run(
+			`point.baked = false; point.position = [-1.4, 2, 0.6]; point.baked = true; return 1;`);
+		defer moved.free();
+		test::@check(moved.ok, "the disabled light moved and returned: %s", moved.error);
+		image::Image waiting = renderer.capture()!!;
+		waiting.free();
+		three::RunResult pending = run.run(`return three.stats().lightmapDirty;`);
+		defer pending.free();
+		test::@check(pending.value == "1",
+			"the atlas remembered the temporarily disabled light, dirty %s", pending.value);
+	};
+}
+
+<*
  A static receiver that moves dirties its own tile, and so does one that has none.
 
  The box's uvs overlap and it holds no tile at all, so moving it can only be seen
@@ -460,19 +554,33 @@ fn void a_dynamic_caster_shadow_survives_on_a_baked_ground() @test
 		three::RunResult built = run.run(SCENE);
 		defer built.free();
 		test::@check(built.ok, "the scene built: %s", built.error);
-		image::Image warm = renderer.capture()!!; warm.free();
+		image::Image live_before = renderer.capture()!!;
+		defer live_before.free();
 		three::RunResult baked = run.run(
 			`point.baked = true; disk.baked = true;
 			 globalThis.dyn = three.scene.children[2];
 			 return three.lights.bake({ texelsPerMetre: 32 }).receivers;`);
 		defer baked.free();
 		test::@check(baked.value == "1", "the ground was baked: %s", baked.value);
+		image::Image cached_before = renderer.capture()!!;
+		defer cached_before.free();
 
 		three::RunResult moved = run.run(`dyn.position.set(0, 0.5, 0); return dyn.static;`);
 		defer moved.free();
 		test::@check(moved.value == "false", "the moving caster stayed dynamic: %s", moved.value);
 		image::Image cached = renderer.capture()!!;
 		defer cached.free();
+		test::@check(renderer.pass.scene.lightmap_live,
+			"a scheduled moving shadow keeps the lightmap live");
+		bool tile_live = false;
+		foreach (bucket : renderer.pass.scene.buckets)
+		{
+			for (uint i = 0; i < bucket.count; i++)
+			{
+				if (renderer.pass.shadow_instances[bucket.first + i].lightmap[2] > 0) tile_live = true;
+			}
+		}
+		test::@check(tile_live, "and the update frame retains a lightmapped instance");
 		three::RunResult live_mode = run.run(`point.baked = false; disk.baked = false; return 1;`);
 		defer live_mode.free();
 		image::Image live = renderer.capture()!!;
@@ -480,6 +588,100 @@ fn void a_dynamic_caster_shadow_survives_on_a_baked_ground() @test
 		test::@check(worst_channel(&cached, &live) <= 64,
 			"the dynamic shadow remains the live one over cached ground, worst %d",
 			worst_channel(&cached, &live));
+
+		uint unchanged_worst = 0;
+		uint shadow_pixels = 0;
+		uint shadow_misses = 0;
+		for (uint y = 0; y < H; y++)
+		{
+			for (uint x = 0; x < W; x++)
+			{
+				char[3] live_a = pixel_at(&live_before, x, y);
+				char[3] live_b = pixel_at(&live, x, y);
+				char[3] cache_a = pixel_at(&cached_before, x, y);
+				char[3] cache_b = pixel_at(&cached, x, y);
+				bool same = true;
+				uint cache_delta = 0;
+				for (uint channel = 0; channel < 3; channel++)
+				{
+					uint live_delta = live_a[channel] > live_b[channel]
+						? (uint)(live_a[channel] - live_b[channel])
+						: (uint)(live_b[channel] - live_a[channel]);
+					if (live_delta > 1) same = false;
+					uint delta = cache_a[channel] > cache_b[channel]
+						? (uint)(cache_a[channel] - cache_b[channel])
+						: (uint)(cache_b[channel] - cache_a[channel]);
+					cache_delta = math::max(cache_delta, delta);
+				}
+				if (same) unchanged_worst = math::max(unchanged_worst, cache_delta);
+
+				uint live_old = (uint)live_a[0] + (uint)live_a[1] + (uint)live_a[2];
+				uint live_new = (uint)live_b[0] + (uint)live_b[1] + (uint)live_b[2];
+				if (live_old <= live_new + 24) continue;
+				shadow_pixels++;
+				uint cache_old = (uint)cache_a[0] + (uint)cache_a[1] + (uint)cache_a[2];
+				uint cache_new = (uint)cache_b[0] + (uint)cache_b[1] + (uint)cache_b[2];
+				if (cache_old <= cache_new + 8) shadow_misses++;
+			}
+		}
+		test::@check(unchanged_worst <= 2,
+			"lit pixels unchanged in the live scene stay cached without a moving rectangle, worst %d",
+			unchanged_worst);
+		test::@check(shadow_pixels > 0 && shadow_misses * 8 < shadow_pixels,
+			"the moved caster darkens cached ground: %d shadow pixels, %d misses",
+			shadow_pixels, shadow_misses);
+
+		three::RunResult rebaked = run.run(
+			`point.baked = true; disk.baked = true; dyn.position.set(-1.5, 0.5, 0); return 1;`);
+		defer rebaked.free();
+		test::@check(rebaked.ok, "the caster returned: %s", rebaked.error);
+		image::Image returned = renderer.capture()!!;
+		defer returned.free();
+		image::Image returned_next = renderer.capture()!!;
+		defer returned_next.free();
+		three::RunResult returned_live_mode = run.run(
+			`point.baked = false; disk.baked = false; return 1;`);
+		defer returned_live_mode.free();
+		image::Image returned_live = renderer.capture()!!;
+		defer returned_live.free();
+		uint returned_next_worst = 0;
+		uint returned_worst = 0;
+		for (uint y = 0; y < H; y++)
+		{
+			for (uint x = 0; x < W; x++)
+			{
+				char[3] live_a = pixel_at(&live_before, x, y);
+				char[3] live_b = pixel_at(&returned_live, x, y);
+				char[3] cache_a = pixel_at(&cached_before, x, y);
+				char[3] cache_b = pixel_at(&returned, x, y);
+				char[3] cache_c = pixel_at(&returned_next, x, y);
+				bool same = true;
+				for (uint channel = 0; channel < 3; channel++)
+				{
+					uint live_delta = live_a[channel] > live_b[channel]
+						? (uint)(live_a[channel] - live_b[channel])
+						: (uint)(live_b[channel] - live_a[channel]);
+					if (live_delta > 1) same = false;
+				}
+				if (!same) continue;
+				for (uint channel = 0; channel < 3; channel++)
+				{
+					uint delta = cache_a[channel] > cache_b[channel]
+						? (uint)(cache_a[channel] - cache_b[channel])
+						: (uint)(cache_b[channel] - cache_a[channel]);
+					returned_worst = math::max(returned_worst, delta);
+					uint next_delta = cache_a[channel] > cache_c[channel]
+						? (uint)(cache_a[channel] - cache_c[channel])
+						: (uint)(cache_c[channel] - cache_a[channel]);
+					returned_next_worst = math::max(returned_next_worst, next_delta);
+				}
+			}
+		}
+		test::@check(returned_worst <= 2,
+			"returning the caster restores unchanged cached pixels immediately, worst %d",
+			returned_worst);
+		test::@check(returned_next_worst <= 2,
+			"the restored cache remains correct on the next frame, worst %d", returned_next_worst);
 	};
 }
 

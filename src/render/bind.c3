@@ -55,8 +55,8 @@ const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  binding itself.
 *>
 const uint MAX_USER_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
-const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > LIGHTMAP_BINDING + 1
-	? MAX_USER_BINDINGS : LIGHTMAP_BINDING + 1;
+const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_STATIC_COMPARE_BINDING + 1
+    ? MAX_USER_BINDINGS : SHADOW_ATLAS_STATIC_COMPARE_BINDING + 1;
 
 // `TextureSlots` and the draw record's index row are indexed by the same number,
 // so the row has to be at least as wide as the slots.

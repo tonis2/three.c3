@@ -144,14 +144,16 @@ const uint LTC_LUT_BINDING = 19;
 // The baked static light cache, one atlas for the whole scene, sampled through
 // `Instance.lightmap`. Reserved on the same terms as the three above.
 const uint LIGHTMAP_BINDING = 20;
+const uint SHADOW_ATLAS_STATIC_COMPARE_BINDING = 21;
 
 <*
  How many descriptors a material declares in its own set, whatever a body asks
  for.
 
- Six, and all six belong to the *frame* rather than to the surface:
+ Seven, and all seven belong to the *frame* rather than to the surface:
  `environment_map` (2), `ambient_occlusion_depth` (4), `shadow_atlas` (17),
- `shadow_atlas_compare` (18), `ltc_lut` (19) and `lightmap_atlas` (20). Every
+ `shadow_atlas_compare` (18), `ltc_lut` (19), `lightmap_atlas` (20), and the
+ static shadow comparison atlas (21). Every
  image a material wears — `material.map` and everything a body declared — is a
  slot of the device-wide array at set 1 and costs this nothing, which is what
  removed the per-stage ceiling and the shedding that used to work around it.
@@ -164,7 +166,7 @@ const uint LIGHTMAP_BINDING = 20;
  stays there however large a stack gets — which is the whole claim, and what
  `three_tests::occlusion` walks nine maps to nineteen to hold down.
 *>
-const uint MATERIAL_FRAME_SAMPLERS = 6;
+const uint MATERIAL_FRAME_SAMPLERS = 7;
 
 <*
  Where the built-in material's other four maps are bound, in `mesh.slang` and

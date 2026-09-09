@@ -297,7 +297,7 @@ fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	// Six frame images in set 0 and the device-wide texture array in set 1 — the
+	// Seven frame images in set 0 and the device-wide texture array in set 1 — the
 	// same shape `mesh.slang` declares. `material.map` is not among them: it is a
 	// slot of that array like every other image a material wears.
 	uint set_zero = 0;
@@ -1603,7 +1603,7 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
 		"with the push block it always had, got %d", mod.layout.push_size);
 	test::@check(
-		mod.layout.bindings.len() == 7,
+		mod.layout.bindings.len() == 8,
 		"and the template's own bindings, got %d", mod.layout.bindings.len()
 	);
 }

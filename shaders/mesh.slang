@@ -496,6 +496,7 @@ static const uint SLOT_BASE_COLOR = 0u;
 // comparisons filtered in hardware. `shadow_atlas` above stays for the debug
 // view, which wants the depth itself.
 [vk::binding(18, 0)] Sampler2DShadow shadow_atlas_compare;
+[vk::binding(21, 0)] Sampler2DShadow shadow_atlas_static_compare;
 // The linearly-transformed-cosine table for area lights: one 64x128 image
 // holding the fitted inverse transform and the GGX norm/Fresnel split. See
 // `lighting.slang`; `FrameBlock.lighting.w` says whether it is bound. Absent
@@ -1058,7 +1059,8 @@ float3 lambert(float3 normal, float occlusion)
     // The tile carries exactly the terms the loops above skipped, so adding it
     // here rather than at the end is what makes a baked light and a real-time one
     // the same picture.
-    direct += g_lightmap;
+    if(g_lightmapped)direct+=max(g_lightmap
+        +shared_baked_dynamic_delta(push.frame,normal,g_receiver_normal,g_position),float3(0.0));
     float ambient_visibility = occlusion * g_crevice;
     return ambient * ambient_visibility + (1.0 - ambient) * direct + push.frame[0].world.rgb * ambient_visibility;
 }
@@ -1315,8 +1317,7 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     // different answer at the same point of the same triangle — and the tile holds
     // the one the bake rasterised, which is the front. A back face falls back to
     // the whole real-time loop, which is right rather than merely safe.
-    g_lightmapped = front_facing && input.lightmap.z > 0.5
-        && !shared_baked_dynamic_shadow(push.frame, input.world);
+    g_lightmapped = front_facing && input.lightmap.z > 0.5;
     if (g_lightmapped) g_lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
     // The instance's colour multiplies the material's, so `mesh.color = [1, 0,
     // 0]` works with no material at all — which is the point of it being here
@@ -1490,7 +1491,10 @@ float4 fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace) : SV
     );
     float ambient_visibility = occlusion * g_crevice;
     float3 diffuse = push.frame[0].lighting.x * ambient_visibility
-        + (1.0 - push.frame[0].lighting.x) * (direct.diffuse + g_lightmap)
+        + (1.0 - push.frame[0].lighting.x) * (direct.diffuse
+            + (g_lightmapped ? max(g_lightmap
+                + shared_baked_dynamic_delta(push.frame,normal,g_receiver_normal,g_position),float3(0.0))
+                : float3(0.0)))
         + push.frame[0].world.rgb * ambient_visibility;
     return float4(
         albedo * diffuse * (1.0 - surface.y)

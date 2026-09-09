@@ -330,6 +330,11 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
 				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
 		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
+				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
+		}
 		// Normally dropped by the linker: the bake defines `THREE_BAKE`, which is
 		// what makes the area integration numeric and leaves nothing reading the
 		// table. Here for the compile that keeps it, and the frame block's
