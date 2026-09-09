@@ -275,15 +275,15 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 }
 
 <*
- A material declares the one descriptor the mesh pass does, and no more.
+ A material declares the frame's images and the texture array, and no more.
 
- The material template is a second copy of `mesh.slang`'s binding, and a copy is
+ The material template is a second copy of `mesh.slang`'s bindings, and a copy is
  exactly the thing that drifts. A material that declared a different set layout
  would build a different pipeline layout, which is a validation error at best —
  and `plan.md` §7 is direct that reflection getting this wrong "produces a black
  screen, not an error".
 *>
-fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
+fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
@@ -297,19 +297,22 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	// The template's reserved samplers and nothing else, the same ones
-	// `mesh.slang` declares. `MATERIAL_BINDING_FIRST` rather than a literal,
-	// because the claim is "a material reserves exactly what the mesh pass
-	// reserves" and that constant is the other half of it.
-	test::@check(
-		mod.layout.bindings.len() == 5,
-		"five template descriptors, got %d", mod.layout.bindings.len()
-	);
-	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
-	test::@check(map != null, "and one is base_color_map");
+	// Six frame images in set 0 and the device-wide texture array in set 1 — the
+	// same shape `mesh.slang` declares. `material.map` is not among them: it is a
+	// slot of that array like every other image a material wears.
+	uint set_zero = 0;
+	foreach (binding : mod.layout.bindings) if (binding.set == 0) set_zero++;
+	test::@check(set_zero == three::MATERIAL_FRAME_SAMPLERS,
+		"%d frame descriptors in set 0, got %d", three::MATERIAL_FRAME_SAMPLERS, set_zero);
+	test::@check(mod.layout.binding_of("base_color_map") == null,
+		"and the material's own map is a slot rather than a descriptor");
+	three::ShaderBinding* map = mod.layout.binding_of("three_textures");
+	test::@check(map != null, "and the texture array is declared");
 	if (map == null) return;
 	test::@check(map.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
-	test::@check(map.set == 0 && map.binding == 0, "at 0,0 — got %d,%d", map.set, map.binding);
+	test::@check(map.set == three::TEXTURE_TABLE_SET && map.binding == three::TEXTURE_TABLE_BINDING,
+		"at %d,%d — got %d,%d",
+		three::TEXTURE_TABLE_SET, three::TEXTURE_TABLE_BINDING, map.set, map.binding);
 
 	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
 	test::@check(shadow != null, "and the shared shadow atlas is present");
@@ -327,6 +330,16 @@ fn void the_material_declares_the_same_one_descriptor_the_mesh_pass_does() @test
 			&& compare.set == 0 && compare.binding == three::SHADOW_ATLAS_COMPARE_BINDING,
 		"a combined image sampler at 0,%d — got %d,%d",
 		three::SHADOW_ATLAS_COMPARE_BINDING, compare.set, compare.binding
+	);
+
+	three::ShaderBinding* ltc = mod.layout.binding_of("ltc_lut");
+	test::@check(ltc != null, "and so is the area-light table");
+	if (ltc == null) return;
+	test::@check(
+		ltc.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+			&& ltc.set == 0 && ltc.binding == three::LTC_LUT_BINDING,
+		"a combined image sampler at 0,%d — got %d,%d",
+		three::LTC_LUT_BINDING, ltc.set, ltc.binding
 	);
 }
 
@@ -1220,47 +1233,44 @@ float3 shade(Surface s)
 }`;
 
 <*
- A declared texture is a combined image sampler at binding 1, and the body can
- read it by the name it was given.
+ A declared texture is a slot of the device-wide array, and the body reads it by
+ the name it was given.
 
  The headline of the feature, and the two halves matter separately. That it
- *compiles* is the assembler putting a declaration where the marker was; that it
- reflects as `COMBINED_IMAGE_SAMPLER` is what `MeshPipeline.init` will hand
- `vkCreateDescriptorSetLayout` — and a `Sampler2D` that came back as
- `SAMPLED_IMAGE` is a black screen with no validation message, which is the
- failure `shader/reflect.c3`'s header spends its longest paragraph on.
+ *compiles* is the assembler putting a `static const Map` where the marker was;
+ that it costs the pipeline **no descriptor** is what removed the per-stage
+ sampler ceiling — a stack of nineteen maps declares exactly what a stack of none
+ declares.
 
- **Proved by injection.** Emitting `Texture2D` instead of `Sampler2D` in
- `assemble_shader` compiles and reflects at the right index — only the type check
- below catches it.
+ A global and not a `#define`, which is worth a check of its own: a macro rewrites
+ every occurrence of the name, and a body that declared a texture called `t1` used
+ to rewrite `surface.slang`'s own tangent-frame local into a sampler.
 *>
-fn void a_declared_texture_is_a_binding_the_body_can_sample() @test
+fn void a_declared_texture_is_a_slot_the_body_can_sample() @test
 {
 	three::MaterialTexture[3] textures = { { "noise_map" }, { "ramp_map" }, { "mask_map" } };
 
 	String source = three::material_source(SAMPLING_BODY, {}, mem, textures[..])!!;
 	defer source.free(mem);
 
+	test::@check(source.contains("static const Map noise_map = { 5u };"), "the first is a slot at 5");
+	test::@check(!source.contains("#define noise_map"), "and a declaration rather than a macro");
+
 	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 8,
-		"five template samplers and three user samplers, got %d", mod.layout.bindings.len());
+	uint set_zero = 0;
+	foreach (binding : mod.layout.bindings) if (binding.set == 0) set_zero++;
+	test::@check(set_zero == three::MATERIAL_FRAME_SAMPLERS,
+		"three declared textures still cost the pipeline nothing: %d descriptors in set 0", set_zero);
+	test::@check(
+		mod.layout.binding_of("noise_map") == null && mod.layout.binding_of("ramp_map") == null
+			&& mod.layout.binding_of("mask_map") == null,
+		"and none of them is a descriptor"
+	);
 
-	three::ShaderBinding* noise = mod.layout.binding_of("noise_map");
-	test::@check(noise != null, "the first is there by name");
-	if (noise == null) return;
-	test::@check(noise.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		"as a combined image sampler, got %d", (uint)noise.type);
-	test::@check(noise.set == 0 && noise.binding == three::MATERIAL_BINDING_FIRST,
-		"at 0,%d — got %d,%d", three::MATERIAL_BINDING_FIRST, noise.set, noise.binding);
-	test::@check(noise.count == 1, "one descriptor, not an array: %d", noise.count);
-
-	// The reserved bindings are still the template's own and are untouched by any
-	// of this — a declared texture is numbered *past* them and never into them.
-	three::ShaderBinding* map = mod.layout.binding_of("base_color_map");
-	test::@check(map != null && map.binding == 0, "and the base colour map is still binding 0");
+	// The frame's own images are untouched by any of this.
 	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
 	test::@check(
 		shadow != null && shadow.binding == three::SHADOW_ATLAS_BINDING,
@@ -1300,31 +1310,44 @@ fn void binding_indices_follow_the_declaration_order() @test
 	// Spelled against `MATERIAL_BINDING_FIRST` rather than as literals, because the
 	// claim here is about *order* and not about where the run starts — and the
 	// start has moved once already, when the shadow map claimed binding 1.
+	//
+	// Read out of the generated text rather than out of reflection: a slot is a
+	// `static const Map` and there is nothing in the module for reflection to
+	// report about it. `Material.binding_of_texture` reads the same order back off
+	// the declaration list, which is what a script's `setTexture(name, ...)` goes
+	// through.
 	uint lowest = three::MATERIAL_BINDING_FIRST;
 	uint highest = lowest + 2;
 
-	test::@check(a.layout.binding_of("noise_map").binding == lowest, "declared first, bound at %d", lowest);
-	test::@check(a.layout.binding_of("mask_map").binding == highest, "declared last, bound at %d", highest);
-
-	test::@check(b.layout.binding_of("mask_map").binding == lowest, "and the other way round it is %d", lowest);
-	test::@check(b.layout.binding_of("noise_map").binding == highest, "with the other at %d", highest);
+	@pool()
+	{
+		test::@check(first.contains(string::tformat("static const Map noise_map = { %du };", lowest)),
+			"declared first, at slot %d", lowest);
+		test::@check(first.contains(string::tformat("static const Map mask_map = { %du };", highest)),
+			"declared last, at slot %d", highest);
+		test::@check(second.contains(string::tformat("static const Map mask_map = { %du };", lowest)),
+			"and the other way round it is %d", lowest);
+		test::@check(second.contains(string::tformat("static const Map noise_map = { %du };", highest)),
+			"with the other at %d", highest);
+	};
 }
 
 <*
- A texture the body declares and never samples still reflects.
+ A texture the body declares and never samples is still a slot.
 
- **This is a test of Slang rather than of three.c3**, and it is here because the
- whole `textures:` path depends on the answer. Every name a script passes is
- resolved back through the compiled module's reflection, so a Slang that dropped
- unused parameters would turn `textures: { noise_map }` on a body that has not
- started sampling it yet into "this material's shader has no sampler called
- noise_map" — a message about a name that is right there in the source.
+ **This used to be a test of Slang rather than of three.c3**: every name a script
+ passed was resolved back through the compiled module's reflection, and a Slang
+ that dropped unused parameters would have turned `textures: { noise_map }` on a
+ body that has not started sampling it yet into "this material's shader has no
+ sampler called noise_map" — a message about a name that is right there in the
+ source.
 
- It holds today. If a Slang upgrade changes it, this fails and says so, and the
- fix is a decision (accept the name silently, or refuse it with the reason) that
- should be made deliberately rather than discovered.
+ It is no longer Slang's answer to give. A declared texture is a `static const
+ Map` the assembler writes and `Material.binding_of_texture` resolves out of the
+ declaration list, so an unsampled one behaves exactly like a sampled one whatever
+ the optimiser does with it.
 *>
-fn void a_texture_the_body_never_samples_still_reflects() @test
+fn void a_texture_the_body_never_samples_is_still_a_slot() @test
 {
 	three::MaterialTexture[1] textures = { { "unused_map" } };
 
@@ -1333,12 +1356,13 @@ fn void a_texture_the_body_never_samples_still_reflects() @test
 	)!!;
 	defer source.free(mem);
 
+	test::@check(source.contains("static const Map unused_map = { 5u };"),
+		"a declared-but-unsampled texture still has its slot in the generated source");
+
 	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
-
-	test::@check(mod.layout.binding_of("unused_map") != null,
-		"a declared-but-unsampled texture is still in the reflected layout — see this test's note if it is not");
+	test::@check(mod.layout.binding_of("unused_map") == null, "and is not a descriptor");
 }
 
 <*
@@ -1490,11 +1514,14 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 		)!!;
 		defer source.free(mem);
 		test::@check(source.len > 0, "and the limit itself is allowed");
-		test::@check(source.contains("#define THREE_NO_AO 1"),
-			"a twelve-texture material keeps its portable sampler layout");
+		// A stack at the ceiling costs the fragment stage nothing: its images are
+		// slots of the device-wide array, so what it declares is the template's own
+		// reserved samplers and no more. `three_tests::occlusion` counts them.
+		test::@check(source.contains(string::tformat("static const Map t%d_map = {", LIMIT - 1)),
+			"the last declared texture is a slot rather than a binding: %s", source);
 		three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 		defer mod.free();
-		test::@check(mod.ok, "and compiles without the AO sampler: %s", mod.diagnostic);
+		test::@check(mod.ok, "and compiles at the ceiling: %s", mod.diagnostic);
 	};
 }
 
@@ -1576,7 +1603,7 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
 		"with the push block it always had, got %d", mod.layout.push_size);
 	test::@check(
-		mod.layout.bindings.len() == 5,
+		mod.layout.bindings.len() == 7,
 		"and the template's own bindings, got %d", mod.layout.bindings.len()
 	);
 }

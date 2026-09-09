@@ -173,6 +173,7 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
 	if (!self.assets.texture_alive(sky.background)) return;
 
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.sky_pipeline.handle);
+	self.assets.bind_texture_table(cmd, self.sky_pipeline.layout);
 	// None, for the reason `SKY_STATE` gives. Set here rather than left to the
 	// bucket loop below it: the first bucket sets its own material's mode, so
 	// this cannot be inherited in either direction.

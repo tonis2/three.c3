@@ -898,3 +898,151 @@ fn void an_empty_phase_costs_a_zero_and_not_the_reading() @test
 		test::@check(t.post < 0.01, "an unposted frame spent %f of %f ms in the post chain", t.post, t.total);
 	};
 }
+
+// ============================================================================
+// The device-wide texture array
+//
+// `TextureTable` — one descriptor array every pipeline layout carries as set 1.
+// Nothing samples through it yet, so what is checked here is the bookkeeping:
+// what the device offers, which slot is which, and that a disposed texture's
+// slot stops naming a destroyed image.
+// ============================================================================
+
+// A tiny distinct image, so two claims are two uploads rather than one dedup.
+fn image::Image swatch(char r) @local
+{
+	char[] pixels = mem::new_array(char, 4);
+	pixels[0] = r;
+	pixels[1] = 0x20;
+	pixels[2] = 0x40;
+	pixels[3] = 255;
+	return { .width = 1, .height = 1, .bit_depth = 8, .format = image::PixelFormat.RGBA, .pixels = pixels, .allocator = mem };
+}
+
+<*
+ What this card offers, and the one slot the table keeps for itself.
+
+ The capacity is the smallest of the four update-after-bind counts capped at
+ `TEXTURE_TABLE_MAX`, and the last slot is the white fallback — which is what
+ makes "no texture here" an index like any other rather than a test in every
+ shader.
+*>
+fn void the_texture_table_reserves_a_white_fallback_slot() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
+
+	test::@check(gpu.limits.bindless, "this device reports no descriptor indexing, so the table is untested here");
+	if (!gpu.limits.bindless) return;
+
+	three::TextureTable* table = &gpu.texture_table;
+	test::@check(table.ready, "the device offers descriptor indexing and the table was not built");
+	test::@check(table.capacity == gpu.limits.texture_table_size(),
+		"table capacity %d against the limit's %d", table.capacity, gpu.limits.texture_table_size());
+	test::@check(table.capacity <= three::TEXTURE_TABLE_MAX, "capacity %d over the cap", table.capacity);
+	test::@check(table.fallback_slot() == table.capacity - 1, "the fallback is not the last slot");
+	test::@check(table.usable() == table.capacity - 1, "the registry may hand out the fallback's slot");
+	test::@check(table.has_fallback, "the fallback slot was never filled with the white image");
+}
+
+<*
+ A texture's registry slot is its index in the array, and a disposed one goes
+ back to white.
+
+ The reuse is the half that matters for correctness: `Assets` hands a freed slot
+ to the next upload, so the table has to be written again on the way in and
+ pointed at the fallback on the way out. A slot that kept its old descriptor
+ would be a destroyed `VkImageView` a stale index could still reach.
+*>
+fn void a_disposed_texture_gives_its_table_slot_back() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
+	if (!gpu.texture_table.ready) return;
+
+	three::Assets* assets = &renderer.pass.assets;
+	assets.ensure_white(gpu)!!;
+	uint before = gpu.texture_table.used;
+
+	image::Image one = swatch(0x11);
+	defer one.free();
+	int first = assets.claim_texture(gpu, one)!!;
+	test::@check(gpu.texture_table.used == before + 1,
+		"an uploaded texture did not take a table slot: %d then %d", before, gpu.texture_table.used);
+	test::@check((uint)first < gpu.texture_table.usable(), "slot %d is the fallback's or past the array", first);
+
+	gpu.wait_idle();
+	assets.release_texture(gpu, first);
+	test::@check(gpu.texture_table.used == before,
+		"a disposed texture kept its table slot: %d, was %d", gpu.texture_table.used, before);
+
+	// The same slot comes back, which is what makes the write on the way in
+	// necessary rather than an optimisation.
+	image::Image two = swatch(0x22);
+	defer two.free();
+	int second = assets.claim_texture(gpu, two)!!;
+	test::@check(second == first, "the freed slot was not reused: %d then %d", first, second);
+	test::@check(gpu.texture_table.used == before + 1, "the reused slot was not counted");
+
+	gpu.wait_idle();
+	assets.release_texture(gpu, second);
+}
+
+<*
+ A device without the features builds no table, and nothing else notices.
+
+ The flag is forced rather than found, because every card this runs on has
+ descriptor indexing — and the path that has to keep working is the one on the
+ card that does not.
+*>
+fn void bindless_off_leaves_the_table_unbuilt() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
+
+	three::GpuLimits without = gpu.limits;
+	without.bindless = false;
+	test::@check(without.texture_table_size() == 0, "a device with no descriptor indexing still sized an array");
+
+	three::Gpu bare = { .handle = gpu.handle, .limits = without };
+	three::TextureTable off;
+	off.init(&bare)!!;
+	test::@check(!off.ready, "the table was built on a device that cannot have one");
+	test::@check(off.capacity == 0 && off.usable() == 0 && off.fallback_slot() == 0,
+		"an unbuilt table answered with slots");
+
+	// Every door is a no-op rather than a fault, which is what lets the registry
+	// call them unconditionally.
+	off.write(gpu, 0, (vk::DescriptorImageInfo){ });
+	off.release(gpu, 0);
+	off.set_fallback(gpu, (vk::DescriptorImageInfo){ });
+	test::@check(off.used == 0 && !off.has_fallback, "an unbuilt table recorded a write");
+	off.free(gpu);
+}
+
+<*
+ Every pipeline built on this device carries the table's set, and the layer says
+ nothing about it.
+
+ A set no shader statically uses need not be bound at all, so the picture cannot
+ depend on this — which is exactly why it is worth a check of its own: a wrong
+ layout here would be silent until the first shader read set 1.
+*>
+fn void a_scene_records_with_the_texture_table_set_and_no_validation_error() @test
+{
+	three::Renderer* renderer = device::borrow(W, H, validate: true);
+	defer device::release();
+	three::Gpu* gpu = &renderer.gpu;
+	if (!gpu.validation) return;
+
+	gpu.begin_capture();
+	image::Image shot = renderer.capture()!!;
+	defer shot.free();
+	String errors = gpu.sink.errors.str_view();
+	test::@check(errors.len == 0, "recording a frame with the table set complained: %s", errors);
+	gpu.end_capture();
+	test::@check(gpu.texture_table.ready, "the table was not built on a device that offers it");
+}

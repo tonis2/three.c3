@@ -153,6 +153,29 @@ enum ShadowViewKind : char
 const uint SHADOW_VIEW_NONE = uint::max;
 const uint SHADOW_MAX_VIEWS = 64;
 
+<*
+ `three.lights[i].shadow`, packed into the light's own free `meta.w`.
+
+ Low sixteen bits an explicit tile size, the next two whether the light
+ overrides `three.lights.shadow.enabled`. Zero is "take the default", which is
+ what every light added or imported carries — so the per-light settings travel
+ with the registry through a scene switch and cost no second array to keep in
+ step with it. Bit 18 is `light.baked` and is the one bit of `meta.w` a shader reads.
+*>
+const uint LIGHT_SHADOW_DEFAULT = 0;
+const uint LIGHT_SHADOW_ON      = 1;
+const uint LIGHT_SHADOW_OFF     = 2;
+
+fn uint light_shadow_mode(Light light) @inline => (light.meta[3] >> 16) & 3;
+fn uint light_shadow_size(Light light) @inline => light.meta[3] & 0xffff;
+fn uint light_shadow_pack(uint mode, uint size) @inline => ((mode & 3) << 16) | (size & 0xffff);
+
+// `light.baked` — this light's direct diffuse is in the lightmap, so a
+// lightmapped receiver skips it. Bit 18 of the same field, above the shadow
+// mode, and the one bit of `meta.w` a shader reads.
+const uint LIGHT_BAKED = 1u << 18;
+fn bool light_is_baked(Light light) @inline => (light.meta[3] & LIGHT_BAKED) != 0;
+
 struct ShadowViewKey
 {
 	// Stable light identity, never its position in the packed lighting array.
@@ -196,6 +219,65 @@ struct ShadowGpuView
 	Matrix4f view_projection;
 	float[4] atlas;
 	float[4] params;
+	// Receiver-plane constants, filled by `shadow_gpu_view`. See it for what the
+	// twelve floats are and what the shader does with them.
+	float[4] plane_x;
+	float[4] plane_y;
+	float[4] plane_z;
+}
+
+<*
+ One packed view, with the receiver-plane constants derived from its projection.
+
+ The shadow filter needs the receiver plane's slope in ndc, which is the ndc
+ Jacobian's cofactor applied to the normal. Write `A` for the projection's
+ upper-left 3x3 and `c` for its w row; the Jacobian is `(A - ndc c^T)/w`, and a
+ rank-one update of an inverse turns its cofactor into
+ `cof(A)n * (1 - ndc.v) + v * (ndc . cof(A)n)`, over `w^2`, with `v = A^-T c`.
+ Both are frame constants, so twelve floats here replace three cross products and
+ a Jacobian per light per pixel.
+
+ Rows of `cof(A)` go in the xyz of the three, `v` in their w. Doubles here
+ because a cofactor is a difference of products; a singular `A` writes zeros,
+ which the shader's grazing-angle guard reads as no slope.
+*>
+fn ShadowGpuView shadow_gpu_view(Matrix4f projection, float[4] atlas, float[4] params)
+{
+	// The shader indexes `vp[row][col]`, and the matrix is column-major.
+	double[3][3] a;
+	double[3] c;
+	for (uint col = 0; col < 3; col++)
+	{
+		for (uint row = 0; row < 3; row++) a[row][col] = (double)projection.m[col * 4 + row];
+		c[col] = (double)projection.m[col * 4 + 3];
+	}
+	double[3][3] cofactor;
+	for (uint row = 0; row < 3; row++)
+	{
+		for (uint col = 0; col < 3; col++)
+		{
+			uint r0 = (row + 1) % 3;
+			uint r1 = (row + 2) % 3;
+			uint c0 = (col + 1) % 3;
+			uint c1 = (col + 2) % 3;
+			cofactor[row][col] = a[r0][c0] * a[r1][c1] - a[r0][c1] * a[r1][c0];
+		}
+	}
+	double determinant = a[0][0] * cofactor[0][0] + a[0][1] * cofactor[0][1] + a[0][2] * cofactor[0][2];
+	ShadowGpuView packed = { .view_projection = projection, .atlas = atlas, .params = params };
+	if (math::abs(determinant) < 1e-30) return packed;
+	double inverse = 1.0 / determinant;
+	packed.plane_x = plane_row(cofactor[0], c, inverse);
+	packed.plane_y = plane_row(cofactor[1], c, inverse);
+	packed.plane_z = plane_row(cofactor[2], c, inverse);
+	return packed;
+}
+
+// One row of `cof(A)`, with that row of `A^-T c` in w.
+fn float[4] plane_row(double[3] cofactor, double[3] w_row, double inverse) @local
+{
+	double v = cofactor[0] * w_row[0] + cofactor[1] * w_row[1] + cofactor[2] * w_row[2];
+	return { (float)cofactor[0], (float)cofactor[1], (float)cofactor[2], (float)(v * inverse) };
 }
 
 struct ShadowBudget
@@ -426,7 +508,20 @@ struct PointShadowSettings
 	uint size;
 	float bias;
 	float intensity;
+	<*
+	 How many local lights may hold shadow views at once — `three.lights.shadow.maxLocal`.
+
+	 The rest still light the scene; they simply have no map to look into. 0 means
+	 "unset" and reads as `DEFAULT_LOCAL_SHADOWS`, so a look that predates this
+	 field is a look with the default rather than one with no local shadows.
+	*>
+	uint max_local;
 }
+
+// How many local lights keep shadows when nothing says otherwise. Four, because
+// the per-pixel cost of a local shadow lookup is what a busy scene runs out of
+// first and four near ones is what a frame reads as shadowed.
+const uint DEFAULT_LOCAL_SHADOWS = 4;
 
 // Zero-resolution work is opt-in. `size` is retained while disabled so toggling
 // does not reinterpret the requested quality.
@@ -435,6 +530,7 @@ const PointShadowSettings DEFAULT_POINT_SHADOW = {
 	.size = 0,
 	.bias = 0.0,
 	.intensity = 1.0,
+	.max_local = DEFAULT_LOCAL_SHADOWS,
 };
 
 // Compatibility state for the point-shadow scripting API. ShadowAtlas owns the

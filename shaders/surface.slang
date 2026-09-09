@@ -18,6 +18,60 @@
 // template wraps it back up — which is also why `mesh.slang` can call it at all,
 // since a mesh has no `Surface` and never will.
 
+// ---------------------------------------------------------------------------
+// The device-wide texture array
+//
+// **Every image a material wears lives in one descriptor array**, owned by the
+// texture registry and bound once as set 1 — `src/gpu/texture_table.c3`. A
+// material carries indices into it in its own draw record rather than a
+// descriptor set of its own, which is what removes the per-stage sampler ceiling
+// that used to cap a stack at twelve maps.
+//
+// `Map` is what a name in a body means now. It is a `uint` and four methods, so
+// a body still writes `noise_map.Sample(uv)` and still hands the name to
+// `stochastic_sample(image, uv)` by parameter — which is why this is a struct and
+// not a macro per spelling.
+//
+// `NonUniformResourceIndex` is inside the methods rather than at the call sites.
+// Two lanes of one quad may be shading two different materials, so the index is
+// not uniform across the wave, and a body reading a map inside a branch that
+// differs between lanes must not have to know that.
+// ---------------------------------------------------------------------------
+[vk::binding(0, 1)] Sampler2D three_textures[];
+
+struct Map
+{
+    // **Which row of `Draw.texture_index`, not the array index itself.** The row
+    // is what a material's own maps are named by — the number each used to be
+    // bound at — and it is a compile-time constant, so the assembler can write a
+    // declared texture as `static const Map noise_map = { 7u };`. A global
+    // declaration is the point: a macro would rewrite every occurrence of the
+    // name, including a local of the same name somewhere in the template, and a
+    // body's name has to shadow rather than substitute.
+    uint at;
+
+    // The array index. A slot nothing filled holds the reserved 1x1 white, so
+    // there is nothing here to test for.
+    uint slot() { return push.draw[0].texture_index[at]; }
+
+    float4 Sample(float2 uv) { return three_textures[NonUniformResourceIndex(slot())].Sample(uv); }
+    float4 SampleGrad(float2 uv, float2 gx, float2 gy)
+    {
+        return three_textures[NonUniformResourceIndex(slot())].SampleGrad(uv, gx, gy);
+    }
+    float4 SampleLevel(float2 uv, float lod)
+    {
+        return three_textures[NonUniformResourceIndex(slot())].SampleLevel(uv, lod);
+    }
+    float4 SampleBias(float2 uv, float bias)
+    {
+        return three_textures[NonUniformResourceIndex(slot())].SampleBias(uv, bias);
+    }
+};
+
+// The template's own maps, by the row each used to be bound at.
+Map map_at(uint at) { Map m; m.at = at; return m; }
+
 // A tangent-space normal map applied to a surface that carries no tangents.
 //
 // **The meshes here have positions, normals and uvs and nothing else.** There is
@@ -199,7 +253,7 @@ void triangle_cell(
 //
 // A flat image comes back exactly as it was, whatever the offsets do, because
 // the weights sum to one. That is the property the test pins.
-float4 stochastic_sample(Sampler2D image, float2 uv)
+float4 stochastic_sample(Map image, float2 uv)
 {
     float3 weights;
     float2 a;
@@ -261,7 +315,7 @@ float3 triplanar_weights(float3 normal, float sharpness)
 // The `frac` on u is not optional either, even for a whole image: it costs
 // nothing where the sampler already repeats, and it is what makes the v window
 // mean a band rather than a stripe of one row of tiles.
-float4 triplanar_tap(Sampler2D image, float2 uv, float2 band)
+float4 triplanar_tap(Map image, float2 uv, float2 band)
 {
     float2 scale = float2(1.0, band.x);
     float2 dx = ddx(uv) * scale;
@@ -282,7 +336,7 @@ void triplanar_uv(float3 position, float scale, out float2 uv_x, out float2 uv_y
 // One image, projected three ways and blended — a colour, an ORM, a mask,
 // anything whose channels are values rather than directions.
 float4 triplanar_sample(
-    Sampler2D image, float3 position, float3 normal, float scale, float sharpness, float2 band
+    Map image, float3 position, float3 normal, float scale, float sharpness, float2 band
 )
 {
     float3 w = triplanar_weights(normal, sharpness);
@@ -298,7 +352,7 @@ float4 triplanar_sample(
 
 // The whole image rather than a band of one, which is every material that is not
 // wearing a sheet.
-float4 triplanar_sample(Sampler2D image, float3 position, float3 normal, float scale, float sharpness)
+float4 triplanar_sample(Map image, float3 position, float3 normal, float scale, float sharpness)
 {
     return triplanar_sample(image, position, normal, scale, sharpness, float2(1.0, 0.0));
 }
@@ -314,7 +368,7 @@ float4 triplanar_sample(Sampler2D image, float3 position, float3 normal, float s
 //
 // The map has to be loaded `LinearSRGBColorSpace`, for `mapped_normal`'s reason.
 float3 triplanar_normal(
-    Sampler2D image, float3 position, float3 normal, float scale, float sharpness, float2 band
+    Map image, float3 position, float3 normal, float scale, float sharpness, float2 band
 )
 {
     float3 n = normalize(normal);
@@ -336,7 +390,7 @@ float3 triplanar_normal(
 }
 
 // The whole image rather than a band of one.
-float3 triplanar_normal(Sampler2D image, float3 position, float3 normal, float scale, float sharpness)
+float3 triplanar_normal(Map image, float3 position, float3 normal, float scale, float sharpness)
 {
     return triplanar_normal(image, position, normal, scale, sharpness, float2(1.0, 0.0));
 }

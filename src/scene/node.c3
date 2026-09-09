@@ -224,6 +224,23 @@ struct Node
 	*>
 	bool static_caster;
 
+	<*
+	 This node's tile in the lightmap atlas: xy its corner in atlas uv, zw its
+	 size, and zw zero for a node with no tile.
+
+	 Written by `three.lights.bake()` and copied into the instance every frame.
+	 Zero on a node whose mesh's uvs cannot carry a tile, on a node that is not
+	 static, and on every node in a scene that has never baked — all of which are
+	 the same thing to the shader, which shades every light in real time there.
+	*>
+	float[4] lightmap;
+
+	// Whether this copy's tile still describes the world, and whether the change
+	// that made it stale has been spread to the receivers around it yet.
+	// `Scene.dirty_lightmap` sets both; `render/lightmap.c3` clears them.
+	bool lightmap_dirty;
+	bool lightmap_seed;
+
 	// `visible` is this node's own flag; `world_visible` is it AND every
 	// ancestor's, resolved in the same walk that builds the world matrices.
 	// Three.js hides a whole subtree by hiding its root, and a flat scan of the

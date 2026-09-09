@@ -356,10 +356,12 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 		// One sample of the shared mask for the whole stack, read by channel — at the
 		// mesh's own uv rather than the material's, and parallax-shifted in that uv,
 		// because the fixture's base carries a height map and relief moves everything
-		// on the surface rather than one image on it.
+		// on the surface rather than one image on it. The shift is the surface's own,
+		// solved once and divided by `material.repeat` to reach the mesh's uv, rather
+		// than a second solve of the same frame.
 		test::@check(
-			answer.contains("float2 muv = parallax_uv(s, s.mesh_uv, bh, 0.05);"),
-			"the relief is solved in the mesh's uv too: %s",
+			answer.contains("float2 muv = parallax_step(s.mesh_uv, parallax_mesh_shift(pshift), bh, 0.05);"),
+			"the relief reaches the mesh's uv without a second solve: %s",
 			answer
 		);
 		test::@check(answer.contains("float4 mask = layer_mask.Sample(muv);"), "the mask is sampled once: %s", answer);
@@ -391,7 +393,12 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 			answer
 		);
 		test::@check(
-			answer.contains("float2 puv = parallax_uv(s, s.uv, bh, 0.05);"),
+			answer.contains("float2 pshift = parallax_shift(s, ddx(s.uv), ddy(s.uv), 0.05);"),
+			"the frame is solved once for the whole stack: %s",
+			answer
+		);
+		test::@check(
+			answer.contains("float2 puv = parallax_step(s.uv, pshift, bh, 0.05);"),
 			"the base relief moves the uv: %s",
 			answer
 		);
@@ -976,13 +983,13 @@ fn void the_terrain_the_budget_was_raised_for_builds_whole() @test
  A stack past the ceiling gives up maps in the stated order instead of the surface.
 
  **The order is the whole of the check**, because any shedding rule fits — what
- makes this one right is which maps survive. Four layers each carrying a map, a
+ makes this one right is which maps survive. Six layers each carrying a map, a
  normal, a metallic-roughness and a height, over a base normal, a base height and a
- shared mask, is nineteen samplers against twelve: seven have to go. Every layer's
- height goes first, then metallic-roughness from the bottom of the stack up, and
- the base height is still there at the end — so the top layer keeps the pair it
- varies per texel while the bottom three lose it, and no layer keeps relief while
- another has lost it.
+ shared mask, is twenty-seven samplers against nineteen: eight have to go. Every
+ layer's height goes first, then metallic-roughness from the bottom of the stack
+ up, and the base height is still there at the end — so the top layers keep the
+ pair they vary per texel while the bottom two lose it, and no layer keeps relief
+ while another has lost it.
 *>
 fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 {
@@ -999,7 +1006,7 @@ fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 			});
 			const mat = new three.LayeredMaterial({
 				name: "terrain", mask: tex, normal: tex, height: tex, bump: { distance: 0.05 },
-				layers: [layer(0), layer(1), layer(2), layer(3)],
+				layers: [layer(0), layer(1), layer(2), layer(3), layer(4), layer(5)],
 			});
 			console.warn = was;
 			const names = mat.layers.map((l) => Object.keys(l.toJSON().samplers).sort().join("+"));
@@ -1013,11 +1020,12 @@ fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 		`)!!;
 		defer answer.free(mem);
 
-		test::@check(answer.contains(`"samplers":12`), "the stack is shed until it fits: %s", answer);
-		// Every layer lost its height; the top one kept the metallic-roughness the
-		// three under it gave up.
+		test::@check(answer.contains(`"samplers":19`), "the stack is shed until it fits: %s", answer);
+		// Every layer lost its height; the top four kept the metallic-roughness the
+		// two under them gave up.
 		test::@check(
-			answer.contains(`"names":["map+normal","map+normal","map+normal","map+metallicRoughness+normal"]`),
+			answer.contains(`"names":["map+normal","map+normal","map+metallicRoughness+normal",`
+				`"map+metallicRoughness+normal","map+metallicRoughness+normal","map+metallicRoughness+normal"]`),
 			"heights first, then metallic-roughness from the bottom up: %s",
 			answer
 		);
@@ -1025,7 +1033,7 @@ fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 		test::@check(answer.contains(`"warnings":1`), "one warning for the whole stack: %s", answer);
 		test::@check(answer.contains(`terrain`), "naming the material: %s", answer);
 		test::@check(answer.contains(`L0': height`), "and every map it gave up: %s", answer);
-		test::@check(answer.contains(`L2': metallicRoughness`), "including the second kind: %s", answer);
+		test::@check(answer.contains(`L1': metallicRoughness`), "including the second kind: %s", answer);
 	};
 }
 
@@ -1442,7 +1450,7 @@ fn void a_layer_states_its_own_surface_and_its_own_relief() @test
 		// sampled outside that tiling would be relief at the wrong frequency.
 		test::@check(answer.contains("float2 uv0 = s.uv;"), "the layer's uv is a variable: %s", answer);
 		test::@check(
-			answer.contains("uv0 = parallax_uv(s, uv0, layer0_height.Sample(uv0).r, 0.02);"),
+			answer.contains("uv0 = parallax_step(uv0, pshift, layer0_height.Sample(uv0).r, 0.02);"),
 			"which its height map then moves, by strength times distance: %s",
 			answer
 		);

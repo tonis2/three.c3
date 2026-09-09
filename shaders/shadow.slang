@@ -59,6 +59,10 @@ struct Instance
     // unmorphed mesh carries. Per instance for `pose`'s reason: two faces built
     // from one head mesh wear different expressions and stay one draw call.
     uint morph;
+    // Unread here and declared anyway: the array is indexed by SV_InstanceID and
+    // the stride is the struct's size, so a field this pass ignores still has to
+    // be in it. `mesh.slang` is what reads it.
+    float4 lightmap;
 };
 
 // Byte for byte what `mesh.slang`, `material.slang` and `gpu/pipeline.c3`
@@ -82,6 +86,12 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    // Frame constants for the receiver-plane gradient: row i of the cofactor of
+    // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
+    // inverse-transpose times the projection's w row in w.
+    float4 plane_x;
+    float4 plane_y;
+    float4 plane_z;
 };
 
 struct FrameBlock
@@ -196,6 +206,10 @@ struct Draw
     // lighting it, and a black surface can glow. Zero on every material nobody set
     // one on, which is the value the record already holds.
     float4 emissive;
+    // One slot of the device-wide texture array per binding — the same row
+    // `mesh.slang` declares, and a copy for the reason every other declaration
+    // here is one.
+    uint texture_index[24];
 };
 
 // The mesh contract exactly, and nothing appended: there are no material
@@ -361,11 +375,24 @@ float4 posed_clip(uint vid, uint iid)
 // texture tap per fragment of them — charged only to the materials that set
 // `alphaTest`, and to nothing else in the scene.
 
-// The material's base colour map, and the only sampler this pass ever declares.
-// Binding 0, which is `mesh.slang`'s number for the same image and is written by
-// hand in `MeshPass.record_casters` for `render/bind.c3`'s reason: only the pass
-// knows what this image is.
-[vk::binding(0, 0)] Sampler2D base_color_map;
+// The material's base colour map, and the only image this pass ever reads. It is
+// a slot of the device-wide texture array — set 1, bound once for the device by
+// `TextureTable` — reached by the number it used to be bound at. A copy of
+// `surface.slang`'s three declarations, for the reason every other declaration
+// here is one: this shader is compiled on its own and shares no text with the
+// templates.
+static const uint SLOT_BASE_COLOR = 0u;
+
+[vk::binding(0, 1)] Sampler2D three_textures[];
+
+struct Map
+{
+    uint at;
+    uint slot() { return push.draw[0].texture_index[at]; }
+    float4 Sample(float2 uv) { return three_textures[NonUniformResourceIndex(slot())].Sample(uv); }
+};
+
+Map map_at(uint at) { Map m; m.at = at; return m; }
 
 // Byte for byte what `surface.slang` declares, and a copy for the reason every
 // other declaration in this file is one: this shader is compiled on its own and
@@ -436,7 +463,7 @@ void fragmentMain(VertexOutput input)
     // *colour*, and a blend of three alphas cuts a shape that is in none of the
     // three. `plan.md` §27 is where the two features meet, and this is the side
     // of it that has an answer.
-    if (base_color_map.Sample(uv).a * draw.base_color.a < draw.surface.w) discard;
+    if (map_at(SLOT_BASE_COLOR).Sample(uv).a * draw.base_color.a < draw.surface.w) discard;
 }
 
 #else

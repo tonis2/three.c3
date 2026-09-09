@@ -291,6 +291,10 @@ struct Material
 	// because `MeshPass.prepassed` asks it per bucket per frame and the body can be
 	// kilobytes.
 	bool fragment_discards;
+	// Whether either body reads `s.time` / `v.time`. Such a material draws a
+	// different picture on every frame the clock moves, with nothing else changing
+	// — so it is what keeps the idle-frame skip from freezing it.
+	bool reads_time;
 	<*
 	 What the body was assembled *from*: the uniform and sampler declarations, with
 	 their names owned here.
@@ -782,16 +786,37 @@ fn void TextureSlots.set(&self, uint binding, int texture)
 }
 
 <*
- Which binding a sampler name means, through this material's own pipeline.
+ Which slot of the device-wide texture array a sampler name means.
 
- One line, because the resolution itself is `sampler_binding_of` in
- `render/bind.c3` — shared with the post pass, which asks the identical question
- of a pipeline that is not a material's. Zero means no.
+ **Asked of the declaration list rather than of the reflected layout**, which is
+ where this moved when a material's images stopped being descriptor bindings.
+ `assemble.c3` writes one `#define <name> map_at(K)` per declared texture, in
+ declaration order from `MATERIAL_BINDING_FIRST` — and a macro leaves nothing in
+ the module for reflection to find, so the list the assembler was handed is the
+ only record of what K was. It is the same list, kept for the bake, and the same
+ order the assembler read it in, so the two cannot disagree.
+
+ One consequence worth stating: a texture a body declared and never sampled now
+ resolves, where reflection used to drop it and this answered zero. A script that
+ sets an image on a sampler its body ignores gets silence instead of a sentence —
+ which is the better half of the trade, since the other case the sentence covered
+ was a typo, and a typo is still a name this list does not hold.
+
+ Zero means no, and can, because slot 0 is `material.map` and is reached through
+ `MeshPass.set_material_map` rather than by name.
+
+ A post pass is unchanged: its samplers are still bindings of its own set, and
+ `sampler_binding_of` in `render/bind.c3` still reads them out of reflection.
 *>
-fn uint Material.binding_of_texture(
-	&self,
-	String name
-) => sampler_binding_of(self.pipeline, name, MATERIAL_BINDING_FIRST);
+fn uint Material.binding_of_texture(&self, String name)
+{
+	foreach (i, texture : self.declared_textures)
+	{
+		if (texture.name != name) continue;
+		return MATERIAL_BINDING_FIRST + (uint)i;
+	}
+	return 0;
+}
 
 <*
  Points a uniform at new values.

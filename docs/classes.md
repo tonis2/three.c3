@@ -604,9 +604,10 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
 Each uniform is readable in the body by its own name; a uniform written as an array of arrays is a
 table column, read as `name[s.variant]`.
 
-`textures` is the same idea for images: `{ noise_map: tex }` declares a Sampler2D called `noise_map`
-the body samples by that name, up to twelve. You never write a binding number — the shader is generated
-with the bindings in it and the host resolves each name through the compiled module's own reflection.
+`textures` is the same idea for images: `{ noise_map: tex }` declares an image called `noise_map`
+the body samples by that name, up to nineteen. You never write a binding number — every image on the
+device lives in one array and a material carries indices into it, so a declared texture costs the
+pipeline no descriptor at all and the count is bounded by the draw record rather than by the card.
 Sample with any uv you like, which is the point: `s.uv + float2(t, 0)` scrolls, `s.uv * 4` tiles,
 `float2(k, 0.5)` reads a gradient as a lookup table. A sampler left null reads 1x1 opaque white.
 
@@ -837,10 +838,11 @@ promotes its `tint` and `opacity` to a uniform you can write every frame —
 `mat.layers[2].opacity = 0.25`. That costs 16 of the material's 104 uniform bytes, so at most six
 layers may be animated; the rest cost the push block nothing.
 
-The real ceiling is samplers: twelve, counting one per layer `map`, `normal`, `emissive`, `height`,
+The real ceiling is samplers: nineteen, counting one per layer `map`, `normal`, `emissive`, `height`,
 `metallicRoughness` and own `mask`, plus one each for the shared mask and for the base `normal`,
 `height`, `metalnessRoughnessMap`, `aoMap` and `emissiveMap`. The base `map` does not count — it is
-binding 0, which every material has. `{ enabled: false }` drops a layer and its samplers entirely.
+the material's own image, which every material has. `{ enabled: false }` drops a layer and its
+samplers entirely.
 
 **A stack over that ceiling sheds maps rather than refusing to build.** Refusing costs the whole
 surface — a terrain draws as one flat colour instead of three materials — to save a map whose absence
@@ -897,6 +899,9 @@ stack with no layers left in it takes the same door.
   `layers[i].opacity` read and write the ones declared animated
 - `name` — what a shed-map warning calls this material, and nothing else reads it
 - `fragment` — the generated Slang — read-only, and the thing to look at first
+- `stats` — what this stack costs, counted while the source was written:
+  `{ layers, samplers, parallaxSolves, taps, sampleGradTaps }`. `taps` is texture reads per pixel,
+  worst case, and is the number to compare between stacks — `three.stats()` cannot see a material
 - `uniforms, textures` — the ShaderMaterial proxies, under the generated names
 - `map, side, transparent, blending, opacity, roughness, metalness, reflectance, alphaTest, emissive,
   emissiveIntensity, repeat, offset, uvVariants, stochastic, alive` — as ShaderMaterial. The
@@ -1229,7 +1234,7 @@ exported from Blender with painted layers needs and the flag it needs is this on
 `{ layers: true }`, because a stack is one of the file's materials. The core material lends the stack
 its normal map, its occlusion, emissive and metallic-roughness maps, its emissive colour, its `side`,
 its alpha mode and its two surface numbers — everything it has. One stack per glTF material is built
-however many meshes wear it. A stack over the twelve-sampler ceiling sheds its per-layer relief with a
+however many meshes wear it. A stack over the nineteen-sampler ceiling sheds its per-layer relief with a
 warning rather than refusing; one that still will not build warns naming the mesh and leaves that one
 mesh on its plain material.
 

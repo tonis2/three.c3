@@ -23,6 +23,19 @@
 - `vertices` — Likewise.
 - `textures` — Unique images on the device, deduplicated by content across every loaded file.
 - `textureBytes` — What those cost.
+- `textureCompressedBytes` — How much of that is block-compressed, so `textureBytes` minus this is
+  the uncompressed share. A KTX2 map arrives as BC7 blocks and stays that way; a PNG or a JPEG is
+  decoded and held as RGBA8, which is four times the bytes and four times the sampling bandwidth for
+  the same picture. Both numbers count the whole mip chain. An uncompressed share worth megabytes is
+  a fact about the exporter rather than about the engine — the fix is to write the maps as KTX2, not
+  to change anything here. The Evil Forest file reads 99.3 MB with 99.3 MB compressed: every map in
+  it is BC7 already.
+- `textureSlots` — How many slots of the device-wide texture array hold a live image, and
+  `textureSlotCapacity` how many it has. Every image on the device sits in one descriptor array that
+  every shader shares, so a material carries indices into it rather than descriptor sets of its own —
+  which is what removed the per-material sampler ceiling. `textureSlots` tracks `textures`; the
+  capacity is what the card offers, capped at 16384. Both read 0 on a device without descriptor
+  indexing, where the array is not built and the old per-draw path runs instead.
 - `geometryBytes` — Every vertex stream and index buffer on the device, plus the positions and
   triangle indices kept resident on the CPU for the pick tree. Both halves, because a few hundred
   thousand vertices is tens of megabytes on each side. Falls to zero across a full unload.
@@ -42,8 +55,19 @@
   fixed-stride index lists are included, even when few lights are present.
 - `clusterOverflow` — Local-light references that exceeded cluster capacity in the most recently
   completed frame slot. Overflow clusters use the all-light loop, preserving illumination at extra cost.
-- `shadowViews` — Resident atlas tiles, including six per admitted point light.
+- `shadowViews` — Resident atlas tiles, including six per admitted point light. `three.lights.shadow.maxLocal` and each light's own `shadow` decide which local lights are counted here.
 - `shadowRejected` — Lights denied shadow residency by the view, texel or atlas limits.
+- `lightmapReceivers` — Copies holding a lightmap tile after the last `three.lights.bake()`.
+- `lightmapSkipped` — Static receivers the bake refused a tile: no `TEXCOORD_0`, uvs outside
+  `[0, 1]`, uvs that overlap themselves, or a `ShaderMaterial` holding every texture slot it
+  may declare, which leaves no sampler binding for the atlas. These keep the real-time loop for every light,
+  baked ones included, so the gap between the two numbers is what a bake actually covers.
+- `lightmapBytes` — The lightmap atlas, `RGBA16F` at eight bytes a texel, or 0 with no bake.
+  Those three are the last bake's numbers.
+- `lightmapDirty` — Tiles a moved light or a moved receiver has made stale and the catch-up has
+  not re-baked yet. They are still displayed while they wait, so this is a number about how far
+  behind the cache is rather than about anything missing from the picture. It falls to zero over
+  the frames after a change, a few tiles a frame inside `three.lights.bake.budgetMs`.
 - `shadowUpdates` — Views refreshed this frame. An unaffected complete cached view costs no update;
   a cache copy that clears an old dynamic overlay counts once.
 - `shadowUpdateTexels` — Total rasterized shadow texels this frame. Rebuilding static depth and
@@ -123,3 +147,9 @@
   lighting three times over. With `three.depthPrepass` on it should sit near 1 — the prepass's own
   cut-out fragments are not in here, and `prepassDraws` is what says the prepass ran. Same "which
   frame" rules as `gpuMs`, and 0 on a device without `pipelineStatisticsQuery`.
+- `skippedFrames` — Frames the renderer found identical to the one already on screen and presented
+  again instead of drawing — see `three.alwaysRender`. A running total over the process, so the number
+  worth reading is how fast it moves: a paused game should add one per frame and a moving one none.
+  Always 0 with `three.alwaysRender` on, and 0 for a headless batch or a screenshot, which always draw.
+- `renderedFrames` — Frames that were drawn, the other half of `skippedFrames`. The two together are
+  every frame the window path recorded.

@@ -17,6 +17,12 @@ float shared_spot_reach(Light light,float3 toward)
     return smoothstep(light.area_right.w,light.area_up.w,dot(normalize(light.area_right.xyz),-toward));
 }
 
+// `Light.meta.w` bit 18 — `light.baked`. A lightmapped receiver has this light's
+// direct diffuse in its tile already and must not add it a second time; every
+// other receiver shades it in real time as though it were never baked.
+static const uint LIGHT_BAKED = 0x40000u;
+bool shared_light_is_baked(Light light) { return (light.meta.w & LIGHT_BAKED) != 0u; }
+
 // The range window, and zero wherever the integral cannot be anything else: the
 // point is behind the emitter plane, or the whole emitter is behind the surface.
 // Every sample shares the sign of `dot(emitter,-l)`, and the extent bound is the
@@ -30,7 +36,19 @@ float shared_area_window(Light light,float3 position,float3 normal,float3 right,
     return saturate(1.0-cd*cd*cd*cd);
 }
 
-float shared_area_diffuse(Light light,float3 position,float3 normal)
+struct SharedAreaTerms
+{
+    float diffuse;
+    float3 specular;
+};
+
+// The bake rasterises one texel per surface point and is not a real-time budget,
+// so it keeps the numeric integration whatever the frame says.
+#if defined(THREE_BAKE) && !defined(THREE_AREA_REFERENCE)
+#define THREE_AREA_REFERENCE 1
+#endif
+
+float shared_area_reference_diffuse(Light light,float3 position,float3 normal)
 {
     float3 right=normalize(light.area_right.xyz),up=normalize(light.area_up.xyz);
     float3 emitter=-normalize(cross(right,up));float sum=0.0;uint samples=0u;
@@ -42,15 +60,7 @@ float shared_area_diffuse(Light light,float3 position,float3 normal)
     return light.color.w*sum*window*window/(3.14159265*3.14159265*max(samples,1u));
 }
 
-struct SharedAreaTerms
-{
-    float diffuse;
-    float3 specular;
-};
-
-// Both lobes for built-in shading. Custom lambert and specular calls keep the
-// single-lobe helpers above and below, so they only calculate what was asked for.
-SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
+SharedAreaTerms shared_area_reference_terms(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
 {
     float3 right=normalize(light.area_right.xyz),up=normalize(light.area_up.xyz),emitter=-normalize(cross(right,up));
     float diffuse=0.0;float3 specular=0.0;uint samples=0u;
@@ -68,15 +78,7 @@ SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,floa
     return terms;
 }
 
-bool shared_cluster_contains(FrameBlock* frame,uint cluster,uint lightIndex)
-{
-    uint packed=frame[0].cluster_grid.w==0u?0x80000000u:frame[0].cluster_counts[cluster];
-    if((packed&0x80000000u)!=0u)return true;
-    for(uint k=0u;k<packed;++k)if(frame[0].cluster_indices[cluster*frame[0].cluster_grid.w+k]==lightIndex)return true;
-    return false;
-}
-
-float3 shared_area_specular(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
+float3 shared_area_reference_specular(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
 {
     float3 right=normalize(light.area_right.xyz),up=normalize(light.area_up.xyz),emitter=-normalize(cross(right,up)),sum=0.0;uint samples=0u;
     float window=shared_area_window(light,position,normal,right,up,emitter);if(window<=0.0)return float3(0.0);
@@ -86,6 +88,203 @@ float3 shared_area_specular(Light light,float3 position,float3 normal,float3 vie
         float den=nh*nh*(a2-1.0)+1.0,D=a2/(3.14159265*den*den),G=(nl/(nl*(1.0-k)+k))*(nv/(nv*(1.0-k)+k));float3 F=f0+(float3(f90)-f0)*pow(1.0-vh,5.0);
         sum+=el/d2*D*G*F/(4.0*nv);}
     return light.color.rgb*light.color.w*sum*window*window/(3.14159265*max(samples,1u));
+}
+
+#ifndef THREE_AREA_REFERENCE
+
+// Linearly transformed cosines — Heitz et al. 2016.
+//
+// A polygon lit by a cosine distribution has a closed-form integral; a polygon
+// lit by GGX does not. The fit says the GGX lobe at one roughness and one view
+// angle is a cosine seen through a linear map, so the integral becomes:
+// transform the polygon's corners by the fitted inverse, then take the cosine
+// integral of the shape that comes out. Two texture reads replace the loop above.
+//
+// `ltc_lut` is one 64x128 image: rows 0-63 are the fitted inverse (four numbers
+// of a five-entry sparse matrix, the middle one normalised to 1), rows 64-127
+// the two halves of the GGX directional albedo that a Schlick Fresnel splits
+// into. The column is perceptual roughness and the row is sqrt(1 - N.V), which
+// is the published parameterisation. `src/render/ltc.c3` uploads it and
+// `FrameBlock.lighting.w` says whether it is there — zero falls back to the
+// numeric integration above, which is what the bake and the reference use.
+static const float LTC_LUT_SCALE = 63.0 / 64.0;
+static const float LTC_LUT_BIAS  = 0.5 / 64.0;
+
+// The vector form factor of one edge: `cross(v1,v2)` scaled by the angle between
+// them over its sine. The rational approximation is Hill's and is exact enough
+// that no version of this ever used `acos`.
+float3 shared_ltc_edge(float3 v1,float3 v2)
+{
+    float x=dot(v1,v2),y=abs(x);
+    float a=0.8543985+(0.4965155+0.0145206*y)*y;
+    float b=3.4175940+(4.1616724+y)*y;
+    float v=a/b;
+    float theta_sintheta=x>0.0?v:0.5*rsqrt(max(1.0-x*x,1e-7))-v;
+    return cross(v1,v2)*theta_sintheta;
+}
+
+// The horizon-clipped cosine integral, as a fraction of a full hemisphere.
+// Hill's sphere approximation rather than a real polygon clip: the vector form
+// factor already carries the whole geometry, and reading it as a sphere of the
+// same solid angle costs a length where clipping costs five vertices and a
+// branch per edge.
+float shared_ltc_clipped(float3 f,float3 axis)
+{
+    float l=length(f);
+    return max((l*l+dot(f,axis))/(l+1.0),0.0);
+}
+
+// The emitter as a polygon of directions from the shading point, plus the shared
+// scale both lobes end up multiplied by. `scale` is zero when the range window
+// or either early-out has already answered.
+//
+// Six corners always: a rectangle repeats its last one, which makes the two
+// extra edges zero-length and lets every loop below unroll against constant
+// indices. A disk is a hexagon of the same area — the emitter's shape stops
+// being visible in the result long before six corners do, and a corner costs a
+// normalise and an edge.
+struct SharedAreaShape
+{
+    float3 corner[6];
+    float scale;
+};
+
+SharedAreaShape shared_area_shape(Light light,float3 position,float3 normal)
+{
+    SharedAreaShape shape;
+    shape.scale=0.0;
+    float3 right=normalize(light.area_right.xyz),up=normalize(light.area_up.xyz);
+    float3 emitter=-normalize(cross(right,up));
+    float window=shared_area_window(light,position,normal,right,up,emitter);
+    [unroll] for(uint i=0u;i<6u;++i)shape.corner[i]=float3(0.0,0.0,1.0);
+    if(window<=0.0)return shape;
+
+    float3 centre=light.direction.xyz-position;
+    float3 r=right*light.area_right.w,u=up*light.area_up.w;
+    float area;
+    if(light.meta.z==3u)
+    {
+        // 1.0996 is the circumradius that gives a hexagon the ellipse's own area.
+        const float grow=1.0996;
+        const float3 cosines=float3(1.0,0.5,-0.5);
+        const float3 sines=float3(0.0,0.86602540,0.86602540);
+        shape.corner[0]=centre+(r*cosines.x+u*sines.x)*grow;
+        shape.corner[1]=centre+(r*cosines.y+u*sines.y)*grow;
+        shape.corner[2]=centre+(r*cosines.z+u*sines.z)*grow;
+        shape.corner[3]=centre-(r*cosines.x+u*sines.x)*grow;
+        shape.corner[4]=centre-(r*cosines.y+u*sines.y)*grow;
+        shape.corner[5]=centre-(r*cosines.z+u*sines.z)*grow;
+        area=3.14159265*light.area_right.w*light.area_up.w;
+    }
+    else
+    {
+        // Wound so the form factor comes out positive on the side the emitter
+        // faces; the window above has already answered for the other side.
+        shape.corner[0]=centre-r-u;
+        shape.corner[1]=centre+r-u;
+        shape.corner[2]=centre+r+u;
+        shape.corner[3]=centre-r+u;
+        shape.corner[4]=shape.corner[3];
+        shape.corner[5]=shape.corner[3];
+        area=4.0*light.area_right.w*light.area_up.w;
+    }
+    [unroll] for(uint i=0u;i<6u;++i)shape.corner[i]=normalize(shape.corner[i]);
+    // The numeric integration above averages its samples over the emitter and
+    // divides by pi twice; a form factor is already that integral over the area,
+    // so the same brightness comes out of one division by the area and one pi.
+    shape.scale=light.color.w*window*window/(3.14159265*max(area,1e-6));
+    return shape;
+}
+
+float shared_area_ltc_diffuse(SharedAreaShape shape,float3 normal)
+{
+    float3 sum=float3(0.0);
+    [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(shape.corner[i],shape.corner[i==5u?0u:i+1u]);
+    return shape.scale*shared_ltc_clipped(sum,normal);
+}
+
+float3 shared_area_ltc_specular(SharedAreaShape shape,float3 normal,float3 view,float3 f0,float f90,float alpha,float nv)
+{
+    // The fit's own frame: x along the view's tangential part, z the normal.
+    float3 tangential=view-normal*dot(view,normal);
+    float len2=dot(tangential,tangential);
+    float3 t1=len2>1e-8?tangential*rsqrt(len2)
+        :normalize(abs(normal.z)<0.999?cross(normal,float3(0.0,0.0,1.0)):float3(1.0,0.0,0.0));
+    float3 t2=cross(normal,t1);
+
+    float2 uv=float2(sqrt(alpha),sqrt(saturate(1.0-nv)))*LTC_LUT_SCALE+LTC_LUT_BIAS;
+    float4 m=ltc_lut.SampleLevel(float2(uv.x,uv.y*0.5),0.0);
+    float4 norm=ltc_lut.SampleLevel(float2(uv.x,0.5+uv.y*0.5),0.0);
+
+    // The three rows of the fitted inverse already multiplied by the frame, so a
+    // corner is three dot products rather than a change of basis and a matrix.
+    float3 row0=m.x*t1+m.y*normal;
+    float3 row2=m.z*t1+m.w*normal;
+
+    float3 local[6];
+    [unroll] for(uint i=0u;i<6u;++i)
+    {
+        float3 c=shape.corner[i];
+        local[i]=normalize(float3(dot(row0,c),dot(t2,c),dot(row2,c)));
+    }
+    float3 sum=float3(0.0);
+    [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(local[i],local[i==5u?0u:i+1u]);
+    float form=shared_ltc_clipped(sum,float3(0.0,0.0,1.0));
+    float3 fresnel=f0*norm.x+(float3(f90)-f0)*norm.y;
+    return shape.scale*form*fresnel;
+}
+
+#endif
+
+float shared_area_diffuse(Light light,float3 position,float3 normal)
+{
+#ifdef THREE_AREA_REFERENCE
+    return shared_area_reference_diffuse(light,position,normal);
+#else
+    if(push.frame[0].lighting.w<=0.0)return shared_area_reference_diffuse(light,position,normal);
+    SharedAreaShape shape=shared_area_shape(light,position,normal);
+    if(shape.scale<=0.0)return 0.0;
+    return shared_area_ltc_diffuse(shape,normal);
+#endif
+}
+
+float3 shared_area_specular(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
+{
+#ifdef THREE_AREA_REFERENCE
+    return shared_area_reference_specular(light,position,normal,view,f0,f90,a2,k,nv);
+#else
+    if(push.frame[0].lighting.w<=0.0)return shared_area_reference_specular(light,position,normal,view,f0,f90,a2,k,nv);
+    SharedAreaShape shape=shared_area_shape(light,position,normal);
+    if(shape.scale<=0.0)return float3(0.0);
+    // `k` is half the GGX alpha at every caller, which is the axis the fit is
+    // tabulated against.
+    return light.color.rgb*shared_area_ltc_specular(shape,normal,view,f0,f90,k*2.0,nv);
+#endif
+}
+
+// Both lobes for built-in shading. Custom lambert and specular calls keep the
+// single-lobe helpers above and below, so they only calculate what was asked for.
+SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,float3 view,float3 f0,float f90,float a2,float k,float nv)
+{
+#ifdef THREE_AREA_REFERENCE
+    return shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
+#else
+    if(push.frame[0].lighting.w<=0.0)return shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
+    SharedAreaTerms terms;terms.diffuse=0.0;terms.specular=float3(0.0);
+    SharedAreaShape shape=shared_area_shape(light,position,normal);
+    if(shape.scale<=0.0)return terms;
+    terms.diffuse=shared_area_ltc_diffuse(shape,normal);
+    terms.specular=light.color.rgb*shared_area_ltc_specular(shape,normal,view,f0,f90,k*2.0,nv);
+    return terms;
+#endif
+}
+
+bool shared_cluster_contains(FrameBlock* frame,uint cluster,uint lightIndex)
+{
+    uint packed=frame[0].cluster_grid.w==0u?0x80000000u:frame[0].cluster_counts[cluster];
+    if((packed&0x80000000u)!=0u)return true;
+    for(uint k=0u;k<packed;++k)if(frame[0].cluster_indices[cluster*frame[0].cluster_grid.w+k]==lightIndex)return true;
+    return false;
 }
 
 // How much of the light reaches this point: 1 fully lit, 0 fully shadowed.
@@ -130,9 +329,9 @@ float shadow_view_factor_filtered(uint index, float3 position, float3 normal, fl
     if (index == 0xffffffffu) return 1.0;
     ShadowGpuView view = push.frame[0].shadow_views[index];
     if (view.params.w <= 0.0) return 1.0;
-    // The projection's four columns, read rather than multiplied for: a `mul` by
-    // a basis vector *is* a column, the normal offset is one add on the clip
-    // position, and the receiver plane below is solved from the same three.
+    // The projection's four columns, read rather than multiplied: a `mul` by a
+    // basis vector *is* a column, and the normal offset is one add on the clip
+    // position.
     float4x4 vp = view.view_projection;
     float4 cx = float4(vp[0][0], vp[1][0], vp[2][0], vp[3][0]);
     float4 cy = float4(vp[0][1], vp[1][1], vp[2][1], vp[3][1]);
@@ -163,44 +362,47 @@ float shadow_view_factor_filtered(uint index, float3 position, float3 normal, fl
     float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
     if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
     float2 step = view.params.x * view.atlas.xy;
-    float2 uv = local * view.atlas.xy + view.atlas.zw;
-    // Half a texel in from the tile, so a bilinear tap never reaches a
-    // neighbouring view's depth.
+    // Half a texel in from the tile, so a tap never reaches a neighbouring
+    // view's depth.
     float2 lo = view.atlas.zw + step * 0.5;
     float2 hi = view.atlas.zw + view.atlas.xy - step * 0.5;
     // The receiver plane's depth slope in ndc, so the depth of this same plane is
     // known at every tap without fragment derivatives inside a light-dependent
-    // branch. The projection's derivative here has the three columns above for
-    // its own columns; its cofactor carries the receiver normal into ndc, and a
-    // plane's slope is minus that normal's xy over its z. Algebraically the same
-    // number the two projected tangents used to solve for, and the same guard.
+    // branch. The ndc Jacobian is a rank-one update of the projection's 3x3, so
+    // its cofactor applied to the normal — the normal carried into ndc, whose xy
+    // over z is minus the slope — falls out of the view's frame constants: the
+    // cofactor rows in `plane_*.xyz` and the inverse-transposed w row in their w.
+    //
+    // Read here rather than out of `view` above, so the three loads sit after
+    // the early-outs instead of ahead of them; that is worth more than the maths.
+    // `planeNdc` is the ndc normal times `clip.w` squared, which the slope
+    // divides out and only the grazing-angle guard has to put back.
     float invW = 1.0 / clip.w;
-    float3 jx = (cx.xyz - ndc * cx.w) * invW;
-    float3 jy = (cy.xyz - ndc * cy.w) * invW;
-    float3 jz = (cz.xyz - ndc * cz.w) * invW;
-    float3 planeNdc = cross(jy, jz) * normal.x + cross(jz, jx) * normal.y + cross(jx, jy) * normal.z;
-    float2 depthGradient = abs(planeNdc.z) > 1e-8 ? -planeNdc.xy / planeNdc.z : float2(0.0);
-    // A tap's four texels sit half a texel either side of the point the plane is
-    // read at, so the plane may drop this much under one of them. Without the
-    // slack the receiver shadows itself.
-    float texelNdc = view.params.x * 2.0;
-    float slope = 0.5 * (abs(depthGradient.x) + abs(depthGradient.y)) * texelNdc;
-    // Four taps of the comparison sampler, each one four texel comparisons
-    // weighted in the texture unit: a texel out covers what the nine manual taps
-    // covered, and the wide case keeps the disc of the sixteen.
+    float4 planeX = push.frame[0].shadow_views[index].plane_x;
+    float4 planeY = push.frame[0].shadow_views[index].plane_y;
+    float4 planeZ = push.frame[0].shadow_views[index].plane_z;
+    float3 planeW = float3(planeX.w, planeY.w, planeZ.w);
+    float3 planeN = float3(dot(planeX.xyz, normal), dot(planeY.xyz, normal), dot(planeZ.xyz, normal));
+    float3 planeNdc = planeN * (1.0 - dot(ndc, planeW)) + planeW * dot(ndc, planeN);
+    float2 depthGradient = abs(planeNdc.z) * (invW * invW) > 1e-8 ? -planeNdc.xy / planeNdc.z : float2(0.0);
+    // Four taps of the comparison sampler, each landed on a texel centre so the
+    // hardware weighs one texel and the plane depth above is the exact depth of
+    // that texel. A tap left between texels weighs four depths against one
+    // reference and needs half a texel of the plane's drop as slack — which under
+    // a local light's perspective is more ndc depth than a crate is tall, so the
+    // contact shadows go with it.
     const float2 quad[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };
     float spread = filter_radius > 1.0 ? filter_radius * 0.6 : 1.0;
     float lit = 0.0;
     for (int i = 0; i < 4; i++)
     {
         float2 tap = quad[i] * spread;
-        // Clamped as the sample below is, then snapped to the middle of the four
-        // texels that tap weighs, so `slope` bounds the plane error at each.
-        float2 tapLocal = clamp(local + tap * view.params.x, view.params.x * 0.5, 1.0 - view.params.x * 0.5);
-        float2 footprint = (floor(tapLocal / view.params.x - 0.5) + 1.0) * view.params.x;
-        float2 tapNdc = (footprint - local) * float2(2.0, -2.0);
-        float reference = ndc.z + dot(depthGradient, tapNdc) - view.params.y - slope;
-        lit += shadow_atlas_compare.SampleCmpLevelZero(clamp(uv + tap * step, lo, hi), reference);
+        float2 tapLocal = clamp((floor(local / view.params.x + tap) + 0.5) * view.params.x,
+            view.params.x * 0.5, 1.0 - view.params.x * 0.5);
+        float2 tapNdc = (tapLocal - local) * float2(2.0, -2.0);
+        float reference = ndc.z + dot(depthGradient, tapNdc) - view.params.y;
+        lit += shadow_atlas_compare.SampleCmpLevelZero(
+            clamp(tapLocal * view.atlas.xy + view.atlas.zw, lo, hi), reference);
     }
     return lerp(1.0, lit * 0.25, view.params.w);
 }
@@ -251,7 +453,7 @@ float3 shared_punctual_specular(float3 normal,float3 view,float3 toward,float nl
 
 // Standard shading walks every contributing light once. Visibility is a local
 // value so diffuse and specular share it without a per-light temporary array.
-SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 receiverNormal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility)
+SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,float3 normal,float3 receiverNormal,float3 position,float3 albedo,float roughness,float metalness,float reflectance,float sunVisibility,bool skipBaked)
 {
     float3 view=normalize(frame[0].camera.xyz-position);
     float3 f0=lerp(float3(0.16*reflectance*reflectance),albedo,metalness);
@@ -262,6 +464,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
     for(uint i=0u;i<count;++i)
     {
         Light light=frame[0].lights[i];if(light.meta.z!=0u)continue;
+        if(skipBaked&&shared_light_is_baked(light))continue;
         float reach;float3 toward=light_toward(light.direction,position,reach);
         float nl=max(dot(normal,toward),0.0);if(nl*reach<=0.0)continue;
         float visibility=i==0u?sunVisibility:shared_point_shadow_factor(i,light,position,receiverNormal);
@@ -276,6 +479,7 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
     {
         uint i=overflow?kLocal:frame[0].cluster_indices[cluster*frame[0].cluster_grid.w+kLocal];
         Light light=frame[0].lights[i];
+        if(skipBaked&&shared_light_is_baked(light))continue;
         if(light.meta.z==2u||light.meta.z==3u)
         {
             SharedAreaTerms area=shared_area_terms(light,position,normal,view,f0,f90,a2,k,nv);
@@ -295,4 +499,34 @@ SharedLightTerms shared_standard_lights(FrameBlock* frame,float4 screenPosition,
         terms.specular+=energy*shared_punctual_specular(normal,view,toward,nl,f0,f90,a2,k,nv);
     }
     return terms;
+}
+
+// What one lightmap texel holds: the direct diffuse of every baked light, times
+// its shadow, with no albedo and no specular in it. Term for term the diffuse
+// half of `shared_standard_lights` restricted to the baked lights, which is what
+// makes adding the tile back and shading in real time the same picture.
+//
+// Every light rather than the fragment's cluster: a bake has no camera and so no
+// cluster grid to index.
+float3 shared_baked_diffuse(FrameBlock* frame,float3 normal,float3 receiverNormal,float3 position)
+{
+    float3 sum=float3(0.0);
+    uint count=(uint)frame[0].lighting.y;
+    for(uint i=0u;i<count;++i)
+    {
+        Light light=frame[0].lights[i];
+        if(!shared_light_is_baked(light))continue;
+        if(light.meta.z==2u||light.meta.z==3u)
+        {
+            float area=shared_area_diffuse(light,position,normal);
+            if(area<=0.0)continue;
+            sum+=light.color.rgb*area*shared_point_shadow_factor(i,light,position,receiverNormal);
+            continue;
+        }
+        float reach;float3 toward=light_toward(light.direction,position,reach);
+        if(light.meta.z==4u)reach*=shared_spot_reach(light,toward);
+        float nl=max(dot(normal,toward),0.0);if(nl*reach<=0.0)continue;
+        sum+=light.color.rgb*light.color.w*reach*nl*shared_point_shadow_factor(i,light,position,receiverNormal);
+    }
+    return sum;
 }

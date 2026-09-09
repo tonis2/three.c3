@@ -79,10 +79,15 @@ const String IDENTITY_DISPLACE @private = "void displace(inout Vertex v) { }";
 
  Nothing outside this file chooses a binding index. The declaration order the
  caller passed is the binding order, generated here from whichever base the front
- door passed, read back by reflection and resolved by *name* everywhere above —
- which makes inserting a texture at the front of the list a non-event. A script
- that could write `[vk::binding(3, 0)]` itself could collide with the reserved
- names.
+ door passed, and resolved by *name* everywhere above — which makes inserting a
+ texture at the front of the list a non-event. A script that could write
+ `[vk::binding(3, 0)]` itself could collide with the reserved names.
+
+ **For a material these are no longer Vulkan bindings** but rows of
+ `DrawRecord.texture_index`, and the number is read back off the material's own
+ declaration list rather than out of reflection — a `static const Map` leaves
+ nothing in the module to reflect. The number is the same either way, which is why
+ nothing above had to move. A post pass's samplers are still bindings.
 *>
 const uint MATERIAL_BINDING_FIRST = 5;
 
@@ -132,6 +137,34 @@ const uint SHADOW_ATLAS_BINDING = 17;
 // because one combined image sampler is either a comparison sampler or not, and
 // the debug view still wants the raw depth.
 const uint SHADOW_ATLAS_COMPARE_BINDING = 18;
+// The linearly transformed cosine table for area lights, uploaded once by
+// `render/ltc.c3` and never per scene. Reserved on the same terms as the two
+// above: a number rather than a name, so a material cannot claim it.
+const uint LTC_LUT_BINDING = 19;
+// The baked static light cache, one atlas for the whole scene, sampled through
+// `Instance.lightmap`. Reserved on the same terms as the three above.
+const uint LIGHTMAP_BINDING = 20;
+
+<*
+ How many descriptors a material declares in its own set, whatever a body asks
+ for.
+
+ Six, and all six belong to the *frame* rather than to the surface:
+ `environment_map` (2), `ambient_occlusion_depth` (4), `shadow_atlas` (17),
+ `shadow_atlas_compare` (18), `ltc_lut` (19) and `lightmap_atlas` (20). Every
+ image a material wears — `material.map` and everything a body declared — is a
+ slot of the device-wide array at set 1 and costs this nothing, which is what
+ removed the per-stage ceiling and the shedding that used to work around it.
+
+ `shadow_atlas` is in here rather than dropped because the template reads it:
+ `shadow_debug_depth` wants the raw depth, which the comparison sampler at 18
+ cannot give, and `debug_view` calls it in every linked material.
+
+ Well inside the sixteen sampled images a conformant device must offer, and it
+ stays there however large a stack gets — which is the whole claim, and what
+ `three_tests::occlusion` walks nine maps to nineteen to hold down.
+*>
+const uint MATERIAL_FRAME_SAMPLERS = 6;
 
 <*
  Where the built-in material's other four maps are bound, in `mesh.slang` and
@@ -390,8 +423,12 @@ fn String? assemble_shader(
 			}
 			if (marker == MARKER_FEATURES)
 			{
-				if (template_name == MATERIAL_TEMPLATE
-					&& (textures.len == MATERIAL_TEXTURE_LIMIT || vertex.len > 0))
+				// A vertex body and nothing else. The three sheds that used to make
+				// room for a material's own samplers have nothing left to make room
+				// for: a material's images are slots of the device-wide array, so the
+				// fragment stage declares `MATERIAL_FRAME_SAMPLERS` whatever a stack
+				// asked for.
+				if (template_name == MATERIAL_TEMPLATE && vertex.len > 0)
 				{
 					out.append_string("#define THREE_NO_AO 1");
 					out.append_char('\n');
@@ -562,7 +599,22 @@ fn String? assemble_shader(
 				// names for both.
 				foreach (i, texture : textures)
 				{
-					out.appendf("[vk::binding(%d, 0)] Sampler2D %s;", binding_first + (uint)i, texture.name)!!;
+					// A material's images live in the device-wide array and are named by
+					// the row each used to be bound at. Still a declaration and not a
+					// `#define`, for the reason this file's header gives about uniforms
+					// from the other side: a macro rewrites the name *everywhere*,
+					// including a local of the same name in the template — a body that
+					// declared a texture called `t1` used to rewrite `surface.slang`'s
+					// own tangent-frame local. A global is shadowed by a local instead.
+					// A post pass still has samplers of its own.
+					if (template_name == MATERIAL_TEMPLATE)
+					{
+						out.appendf("static const Map %s = { %du };", texture.name, binding_first + (uint)i)!!;
+					}
+					else
+					{
+						out.appendf("[vk::binding(%d, 0)] Sampler2D %s;", binding_first + (uint)i, texture.name)!!;
+					}
 					out.append_char('\n');
 					physical++;
 				}

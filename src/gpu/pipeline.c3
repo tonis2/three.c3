@@ -227,7 +227,9 @@ struct Light
 	float[4] area_right;
 	float[4] area_up;
 	// x stable registry id, y shadow-view index, z kind, w flags.
-	// Kind 0 is directional, 1 point, 2 rectangle and 3 disk.
+	// Kind 0 is directional, 1 point, 2 rectangle and 3 disk. In w the low 16 bits
+	// are the requested shadow size, bits 16-17 the shadow mode and bit 18
+	// `light.baked` — see `render/shadow.c3`.
 	uint[4] meta;
 }
 
@@ -455,6 +457,11 @@ const uint UV_VARIANTS = 8;
  Slang's own array stride for `Draw` is not part of the wire format the way the
  field offsets are.
 *>
+// How many bindings a draw carries a texture index for. Covers every binding
+// either template can declare (`MAX_SAMPLED_BINDINGS`) with room over it, so
+// raising `MATERIAL_TEXTURE_LIMIT` does not move the wire format.
+const uint DRAW_TEXTURE_INDICES = 24;
+
 struct DrawRecord
 {
 	ulong positions;
@@ -523,9 +530,25 @@ struct DrawRecord
 	// 
 	// Here for `surface`'s reason: a glowing lamp, a screen and a rune are wearing
 	// the built-in material far more often than a ShaderMaterial, and only a
-	// ShaderMaterial has uniforms to put a colour in. Last in the record because
-	// appending costs nothing that moves — every offset above it is where it was.
+	// ShaderMaterial has uniforms to put a colour in.
 	float[4] emissive;
+	<*
+	 One slot of the device-wide texture array per binding — see `TextureTable`.
+
+	 **Indexed by the binding itself**, exactly as `TextureSlots` is and for the
+	 same argument: a binding is the same number to everybody, so nothing has to
+	 carry a base around and no call site can pass the wrong one. Binding 0 is the
+	 material's map or the mesh's, and 5..16 are whatever the body declared.
+
+	 A `uint` each rather than u16 pairs. The row is per *bucket* — 788 of them in
+	 the Evil Forest against 3406 instances — so this is 76 KB a frame, and the
+	 shader that will read it is doing `NonUniformResourceIndex` on the value
+	 anyway; a shift and a mask in front of that buys nothing and caps the array.
+
+	 Every entry a material did not fill is the white fallback's own slot, so a
+	 shader never tests for "no texture". Nothing samples through this yet.
+	*>
+	uint[DRAW_TEXTURE_INDICES] texture_index;
 }
 
 struct MeshPush
@@ -632,10 +655,10 @@ $assert @layout_matches(
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
-$assert DrawRecord::size == 280 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert DrawRecord::size == 376 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 400 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 80 : "Light no longer matches shaders/mesh.slang";
-$assert Instance::size == 164 : "Instance no longer matches shaders/mesh.slang";
+$assert Instance::size == 180 : "Instance no longer matches shaders/mesh.slang";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
 $assert MorphDelta::size == 24 : "MorphDelta no longer matches shaders/mesh.slang";
 
@@ -770,7 +793,13 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "uv_variant_count", 132, 4 },
 	{ "uv_variants", 136, 128 },
 	{ "emissive", 264, 16 },
+	{ "texture_index", 280, 96 },
 };
+
+// How many of those `shaders/mesh.slang` declares in its own `struct Draw`. All
+// of them, since the templates read the texture row; the constant stays as the
+// one place a row written ahead of the shaders would be excused.
+const uint DRAW_RECORD_SHADER_FIELDS = DRAW_RECORD_FIELDS.len;
 
 <*
  The whole of the post pass's push contract: one `float4` and nothing else.
@@ -1128,9 +1157,12 @@ fn void? MeshPipeline.build_layouts(
 	check_entry_points(mod, entries)!;
 	check_push_block(&mod.layout, fields)!;
 
-	if (mod.layout.set_count > 1)
+	// Set 0 is this pass's own, and set 1 — when a shader declares it — is
+	// `TextureTable`'s, which is created once for the device and is not this
+	// pipeline's to build. Anything past those two is a set nothing would bind.
+	if (mod.layout.set_count > TEXTURE_TABLE_SET + 1)
 	{
-		@advise("shader: %d descriptor sets declared and this pass creates one", mod.layout.set_count);
+		@advise("shader: %d descriptor sets declared and this pass has two", mod.layout.set_count);
 		return SHADER_TOO_MANY_SETS~;
 	}
 
@@ -1142,6 +1174,11 @@ fn void? MeshPipeline.build_layouts(
 		bindings.tinit(4);
 		foreach (binding : mod.layout.bindings)
 		{
+			// The texture array's own set is built by `TextureTable` and is the same
+			// object on every pipeline; building a second layout for it here would
+			// make each pipeline's set 1 a different layout and the one bound set
+			// incompatible with all of them.
+			if (binding.set != 0) continue;
 			if (binding.type == DESCRIPTOR_TYPE_UNBINDABLE)
 			{
 				@advise("shader: cannot bind '%s' — no Vulkan descriptor type for it", binding.name);
@@ -1183,7 +1220,15 @@ fn void? MeshPipeline.build_layouts(
 		.size = mod.layout.push_size,
 	};
 
-	self.layout = vk::pipelineLayoutCreateInfo().setSetLayouts({ self.descriptor_layout })
+	// The material's own set first, because every template numbers its bindings
+	// into set 0 and reflection would have to be renumbered otherwise. The texture
+	// table goes on the end as set 1, on every layout that samples anything, so a
+	// shader that starts reading it needs no new pipeline plumbing. Nothing
+	// declares it yet, and a set no shader statically uses need not even be bound.
+	vk::DescriptorSetLayout[2] sets = { self.descriptor_layout, gpu.texture_table.layout };
+	uint set_count = gpu.texture_table.ready ? 2 : 1;
+
+	self.layout = vk::pipelineLayoutCreateInfo().setSetLayouts(sets[:set_count])
 		.setPushConstantRanges({ push_range })
 		.build(gpu.handle)!;
 }
@@ -1467,9 +1512,10 @@ fn MeshPipeline? MeshPipeline.init(
  @param color_format : `What this pass writes — POST_CHAIN_FORMAT for a chain pass, target.color_format for the tonemap. Dynamic rendering checks it against the attachment, so a wrong one is a validation error rather than a wrong colour.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
 *>
-fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::Format color_format)
+fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::Format color_format,
+	PushFieldLayout[] contract = POST_PUSH_FIELDS[..])
 {
-	self.build_layouts(gpu, mod, POST_PUSH_FIELDS[..])!;
+	self.build_layouts(gpu, mod, contract)!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);

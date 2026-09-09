@@ -89,6 +89,23 @@ struct GpuLimits
 	uint max_per_stage_samplers;
 	uint max_per_stage_sampled_images;
 	uint max_push_descriptors;
+	<*
+	 Whether this device can hold one array of every texture in the scene: a
+	 runtime-sized descriptor array, partially bound, written after the set is
+	 bound and indexed by a value that differs between lanes.
+
+	 All five features together, because four of them alone build nothing.
+	 `TextureTable` is the only reader and the old per-material push descriptors
+	 stay the path when this is false.
+	*>
+	bool bindless;
+	// What an update-after-bind set may hold, per stage and per set. A combined
+	// image sampler spends one of each pair, so `TextureTable` takes the smallest
+	// of the four.
+	uint max_update_after_bind_sampled_images;
+	uint max_update_after_bind_samplers;
+	uint max_set_update_after_bind_sampled_images;
+	uint max_set_update_after_bind_samplers;
 	// Nanoseconds per timestamp tick. Meaningless unless `timestamps` is true — a
 	// device that cannot write a timestamp may report anything here.
 	float timestamp_period;
@@ -205,6 +222,9 @@ struct Gpu
 	// On the device for the same reason the queue is, and a stronger one: its
 	// validity *is* the device's `pipelineCacheUUID`.
 	DriverCache driver_cache;
+	// Every uploaded texture, at the slot `Assets` gave it. Empty and unbuilt on a
+	// device without descriptor indexing — see `TextureTable`.
+	TextureTable texture_table;
 }
 
 <*
@@ -526,9 +546,16 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES,
 	};
+	// The update-after-bind counts, on the same terms: core in 1.2, and a device
+	// that has never heard of the struct leaves the zeros it was initialised with
+	// — which reads as "no room", which is the right answer.
+	vk::PhysicalDeviceVulkan12Properties v12_properties = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+		.pNext = &push_descriptor,
+	};
 	vk::PhysicalDeviceProperties2 properties2 = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-		.pNext = &push_descriptor,
+		.pNext = &v12_properties,
 	};
 	vk::getPhysicalDeviceProperties2(self.pdevice, &properties2);
 	vk::PhysicalDeviceProperties properties = properties2.properties;
@@ -581,6 +608,17 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 			// `hostQueryReset` — this cannot disagree with what was asked for. False on
 			// a 1.3 device because the struct was never chained there.
 		.dynamic_rendering_local_read = has_1_4 && v14.dynamicRenderingLocalRead == vk::TRUE,
+		// Read off the same `v12` that goes to `deviceCreateInfo`, so what is
+		// reported here is what the device will have enabled.
+		.bindless = v12.shaderSampledImageArrayNonUniformIndexing == vk::TRUE
+			&& v12.descriptorBindingPartiallyBound == vk::TRUE
+			&& v12.descriptorBindingSampledImageUpdateAfterBind == vk::TRUE
+			&& v12.runtimeDescriptorArray == vk::TRUE
+			&& v12.descriptorBindingVariableDescriptorCount == vk::TRUE,
+		.max_update_after_bind_sampled_images = v12_properties.maxPerStageDescriptorUpdateAfterBindSampledImages,
+		.max_update_after_bind_samplers = v12_properties.maxPerStageDescriptorUpdateAfterBindSamplers,
+		.max_set_update_after_bind_sampled_images = v12_properties.maxDescriptorSetUpdateAfterBindSampledImages,
+		.max_set_update_after_bind_samplers = v12_properties.maxDescriptorSetUpdateAfterBindSamplers,
 		.device_name = properties.deviceName,
 	};
 
@@ -614,6 +652,11 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.flags = MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
 	};
 	self.allocator.init()!;
+
+	// Last, because it wants the device and the limits and nothing else. A device
+	// without the features leaves it unbuilt and every pipeline layout below is
+	// built without it.
+	self.texture_table.init(self)!;
 
 	return *self;
 }
@@ -777,6 +820,15 @@ fn void Gpu.report(&self)
 	io::printfn("  timestamps           %s", self.limits.timestamps);
 	io::printfn("  timestampPeriod      %f", self.limits.timestamp_period);
 	io::printfn("  pipelineStatistics   %s", self.limits.pipeline_statistics);
+	io::printfn("  bindless             %s", self.limits.bindless);
+	io::printfn(
+		"  updateAfterBind      %d/%d (sampledImages) / %d/%d (samplers), per stage / per set",
+		self.limits.max_update_after_bind_sampled_images,
+		self.limits.max_set_update_after_bind_sampled_images,
+		self.limits.max_update_after_bind_samplers,
+		self.limits.max_set_update_after_bind_samplers
+	);
+	io::printfn("  textureTableSize     %d", self.limits.texture_table_size());
 }
 
 <*
@@ -811,6 +863,7 @@ fn void Gpu.free(&self)
 		// here keeps a process that exits mid-queue from leaking whatever the last
 		// two frames gave back.
 		self.drain_deletions();
+		self.texture_table.free(self);
 		// Then the driver's cache, in that order: a pipeline retired above may be
 		// the only reason there is anything new to write, and reading the blob back
 		// out of a cache whose device is idle is the one moment nothing can be

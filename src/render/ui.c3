@@ -928,6 +928,9 @@ struct UiLayer
 	// that redraws itself from a frame system already has the one loop it needs.
 	uint slot_generation;
 
+	// How many times cui has asked for a frame — see `UiLayer.picture_serial`.
+	uint frame_serial;
+
 	// The snapshot being built, between `begin_tree` and `commit_tree`. Separate
 	// from the live one so a tree that fails halfway leaves the interface exactly
 	// as it was — a panel that half-disappeared because a colour was malformed is
@@ -3139,7 +3142,23 @@ fn bool UiLayer.idle(&self)
 	if (self.ui == null) return true;
 	bool wanted = self.ui.frame_requested;
 	self.ui.frame_requested = false;
+	if (wanted) self.frame_serial++;
 	return !wanted;
+}
+
+<*
+ The same answer as `idle`, kept rather than consumed.
+
+ `idle` is read-clearing and the host reads it before the frame is drawn, so by
+ the time `Renderer.picture_key` runs the flag is already gone. This is the
+ running count of how many times it has been set, which a key can compare against
+ the last one it saw. It clears nothing, and it counts a request nobody has
+ consumed so that a host which never calls `idle` still sees the interface move.
+*>
+fn uint UiLayer.picture_serial(&self)
+{
+	if (self.ui != null && self.ui.frame_requested) self.frame_serial++;
+	return self.frame_serial;
 }
 
 <*

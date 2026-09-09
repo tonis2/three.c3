@@ -160,6 +160,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "renderSize", &js_render_size, 0);
 	self.bind(host, "renderResize", &js_render_resize, 2);
 	self.bind(host, "renderFollowWindow", &js_render_follow_window, 0);
+	self.bind(host, "renderScaleGet", &js_render_scale_get, 0);
+	self.bind(host, "renderScaleSet", &js_render_scale_set, 1);
 	self.bind(host, "backgroundGet", &js_background_get, 1);
 	self.bind(host, "backgroundSet", &js_background_set, 4);
 	self.bind(host, "skyGet", &js_sky_get, 1);
@@ -181,6 +183,14 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightSet", &js_light_set, 8);
 	self.bind(host, "lightAdd", &js_light_add, 17);
 	self.bind(host, "lightRemove", &js_light_remove, 1);
+	self.bind(host, "lightShadowGet", &js_light_shadow_get, 1);
+	self.bind(host, "lightShadowSet", &js_light_shadow_set, 3);
+	self.bind(host, "lightBakedGet", &js_light_baked_get, 1);
+	self.bind(host, "lightBakedSet", &js_light_baked_set, 2);
+	self.bind(host, "lightsBake", &js_lights_bake, 3);
+	self.bind(host, "lightsBakeBudget", &js_lights_bake_budget, 1);
+	self.bind(host, "lightsSaveBake", &js_lights_save_bake, 1);
+	self.bind(host, "lightsLoadBake", &js_lights_load_bake, 1);
 	self.bind(host, "ambientGet", &js_ambient_get, 0);
 	self.bind(host, "ambientSet", &js_ambient_set, 1);
 	self.bind(host, "worldGet", &js_world_get, 0);
@@ -188,13 +198,15 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "shadowGet", &js_shadow_get, 0);
 	self.bind(host, "shadowSet", &js_shadow_set, 6);
 	self.bind(host, "pointShadowGet", &js_point_shadow_get, 0);
-	self.bind(host, "pointShadowSet", &js_point_shadow_set, 4);
+	self.bind(host, "pointShadowSet", &js_point_shadow_set, 5);
 	self.bind(host, "shadowBudgetGet", &js_shadow_budget_get, 0);
 	self.bind(host, "shadowBudgetSet", &js_shadow_budget_set, 5);
 	self.bind(host, "occlusionGet", &js_occlusion_get, 0);
 	self.bind(host, "occlusionSet", &js_occlusion_set, 4);
 	self.bind(host, "depthPrepassGet", &js_depth_prepass_get, 0);
 	self.bind(host, "depthPrepassSet", &js_depth_prepass_set, 1);
+	self.bind(host, "alwaysRenderGet", &js_always_render_get, 0);
+	self.bind(host, "alwaysRenderSet", &js_always_render_set, 1);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -693,6 +705,9 @@ fn void JsRuntime.activate_scene(&self, Scene* target)
 *>
 fn void JsRuntime.set_lighting(&self, Lighting lighting)
 {
+	// Before the assignment, because it needs both readings of a light that moved
+	// — see `MeshPass.note_lighting_change`.
+	self.pass.note_lighting_change(lighting);
 	self.pass.lighting = lighting;
 	if (self.pass.scene != null) self.pass.scene.look.lighting = lighting;
 }
@@ -749,6 +764,30 @@ fn void js_occlusion_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qj
 		.bias = arg_float(&js, argc, args, 3),
 	};
 	self.set_ambient_occlusion(s);
+}
+
+<*
+ `alwaysRenderGet()` — whether every frame is drawn regardless, as 1 or 0.
+*>
+fn void js_always_render_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value(self.renderer != null && self.renderer.always_render ? 1 : 0);
+}
+
+<*
+ `alwaysRenderSet(on)` — draw every frame even when nothing about the picture
+ changed.
+
+ A property of the renderer rather than of the scene, like the post chain and the
+ depth prepass: a new `three.Scene()` does not put it back.
+*>
+fn void js_always_render_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	bool on         = arg_float(&js, argc, args, 0) != 0;
+	if (self.renderer != null) self.renderer.always_render = on;
 }
 
 <*
@@ -1849,6 +1888,18 @@ fn void js_stats(
 	js.set_property(object, "vertices", qjs::int_value((int)stats.vertices));
 	js.set_property(object, "textures", qjs::int_value((int)stats.textures));
 	js.set_property(object, "textureBytes", qjs::number_value((double)stats.texture_bytes));
+	// The share of those bytes that is BC7 blocks. The difference is the RGBA8
+	// share, which is four times the bandwidth the same picture would cost
+	// compressed — a number about the exporter rather than about the engine.
+	js.set_property(
+		object,
+		"textureCompressedBytes",
+		qjs::number_value((double)stats.texture_compressed_bytes)
+	);
+	// The device-wide texture array: slots holding a live image, and how many it
+	// holds. Both 0 on a device without descriptor indexing.
+	js.set_property(object, "textureSlots", qjs::int_value((int)stats.texture_slots));
+	js.set_property(object, "textureSlotCapacity", qjs::int_value((int)stats.texture_slot_capacity));
 	// Beside `assets` and not beside `nodes`, because it is the same kind of number
 	// as `assets` and `materials`: something a script has to hand back. See
 	// `SceneStats.scenes`.
@@ -1900,6 +1951,13 @@ fn void js_stats(
 	// until the first frame a `material.alphaTest` caster is drawn, and true from
 	// then on: it reports a pipeline that exists, not one that was used this frame.
 	js.set_property(object, "shadowCutout", qjs::bool_value(stats.shadow_cutout));
+	// What the last `three.lights.bake()` covered, and what it did not — a static
+	// receiver whose uvs cannot carry a tile is counted rather than dropped
+	// silently, because that is the number that explains a bake with no effect.
+	js.set_property(object, "lightmapReceivers", qjs::int_value((int)stats.lightmap_receivers));
+	js.set_property(object, "lightmapSkipped", qjs::int_value((int)stats.lightmap_skipped));
+	js.set_property(object, "lightmapBytes", qjs::number_value((double)stats.lightmap_bytes));
+	js.set_property(object, "lightmapDirty", qjs::int_value((int)stats.lightmap_dirty));
 	// The frame's sweeps, as one nested object — the only nested one here, because
 	// the four are ratios of each other and a script printing a frame breakdown
 	// should not have to know which of thirty flat keys belong together. See
@@ -1922,6 +1980,13 @@ fn void js_stats(
 	// 0 rather than dropping the key.
 	js.set_property(object, "fragmentsShaded",
 		qjs::number_value(self.renderer != null ? (double)self.renderer.fragments_shaded() : 0.0));
+	// Frames the renderer decided were already on screen and did not draw again,
+	// and the frames it did draw. The pair, because either alone is unreadable:
+	// what a script wants to know is the ratio.
+	js.set_property(object, "skippedFrames",
+		qjs::number_value(self.renderer != null ? (double)self.renderer.skipped_frames : 0.0));
+	js.set_property(object, "renderedFrames",
+		qjs::number_value(self.renderer != null ? (double)self.renderer.rendered_frames : 0.0));
 	*out = object;
 }
 
@@ -2175,6 +2240,10 @@ fn void js_render_resize(
 	// between still following the window, and a drag inside that window would
 	// arrive after the pin and be honoured.
 	self.renderer.render_size_pinned = true;
+	// And the scale goes with it: an absolute size and a fraction of the window
+	// are two answers to the same question, and leaving the fraction behind would
+	// make `three.setRenderSize(null)` come back to a resolution nobody asked for.
+	self.renderer.render_scale = 0.0f;
 
 	if (self.in_frame)
 	{
@@ -2224,6 +2293,92 @@ fn void js_render_follow_window(
 	self.renderer.render_size_pinned = false;
 	self.render_width_wanted = 0;
 	self.render_height_wanted = 0;
+	*out = qjs::bool_value(true);
+}
+
+// What `three.window.renderScale` may be set to. A quarter of the pixels a side
+// is the bottom of what any game ships as a slider, and 2.0 is supersampling —
+// past either the picture is not a render scale any more, it is a different
+// intent that `three.setRenderSize` already spells.
+const double RENDER_SCALE_MIN = 0.25;
+const double RENDER_SCALE_MAX = 2.0;
+
+<*
+ `renderScaleGet()` — the fraction of the window the target follows at.
+
+ One rather than zero when nothing has set it, so a script reads the identity
+ and never has to know that the field's default is spelled as "unset".
+*>
+fn void js_render_scale_get(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	float scale = self.renderer == null ? 0.0f : self.renderer.render_scale;
+	*out = qjs::number_value(scale > 0.0f ? (double)scale : 1.0);
+}
+
+<*
+ `renderScaleSet(scale)` — follow the window at a fraction of its pixels.
+
+ The setting a game ships. `three.setRenderSize` pins a resolution, which a
+ player's next window drag or fullscreen key makes wrong; this keeps the ratio
+ across every one of them, because it is applied where the follow already is.
+
+ So it unpins, and it drops a queued pin along with it, for
+ `renderFollowWindow`'s reason: a size asked for from inside a frame and then
+ replaced by a scale would land a frame later and pin what the scale just
+ unpinned.
+
+ Applied on the call when there is no frame on the stack, so a boot script or a
+ tool call gets the size it asked for in the very next screenshot; inside a
+ frame the per-frame reconcile at the top of `Renderer.frame` picks it up, which
+ is between frames and therefore safe. Under `--headless` there is no window to
+ take a share of, and it is remembered and does nothing.
+*>
+fn void js_render_scale_set(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	double scale = arg_number(&js, argc, args, 0);
+	if (scale < RENDER_SCALE_MIN || scale > RENDER_SCALE_MAX)
+	{
+		*out = js.raise(
+			string::tformat(
+				"three.window.renderScale wants a fraction between %s and %s, or null for full resolution; got %s",
+				RENDER_SCALE_MIN,
+				RENDER_SCALE_MAX,
+				scale
+			)
+		);
+		return;
+	}
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("there is no render target without a GPU device, so there is nothing to scale");
+		return;
+	}
+
+	self.renderer.render_scale = (float)scale;
+	self.renderer.render_size_pinned = false;
+	self.render_width_wanted = 0;
+	self.render_height_wanted = 0;
+	if (!self.in_frame) self.renderer.follow_window();
+
 	*out = qjs::bool_value(true);
 }
 
@@ -3065,6 +3220,244 @@ fn void js_light_remove(
 }
 
 <*
+ `lightShadowGet(index)` — one light's shadow, as
+ `[mode, size, enabled, effectiveSize, resident]`.
+
+ `mode` is 0 when the light takes `three.lights.shadow` and 1 or 2 when it says
+ for itself; `size` is its own tile size, 0 when it takes the registry's. The
+ last three are what that comes out as this frame, so `api.js` answers
+ `light.shadow.enabled` in one crossing.
+*>
+fn void js_light_shadow_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
+	Light light = self.pass.lighting.lights[index];
+	uint mode = light_shadow_mode(light);
+	uint size = light_shadow_size(light);
+	uint effective = size > 0 ? size : self.pass.point_shadows.size;
+	bool enabled = index > 0 && mode != LIGHT_SHADOW_OFF
+		&& (mode == LIGHT_SHADOW_ON || self.pass.point_shadows.enabled) && effective > 0;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value((double)mode));
+	js.set_index(list, 1, qjs::number_value((double)size));
+	js.set_index(list, 2, qjs::number_value(enabled ? 1.0 : 0.0));
+	js.set_index(list, 3, qjs::number_value((double)(enabled ? effective : 0)));
+	js.set_index(list, 4, qjs::number_value(light.meta[1] != SHADOW_VIEW_NONE ? 1.0 : 0.0));
+	*out = list;
+}
+
+<*
+ `lightShadowSet(index, mode, size)` — one light's own shadow settings.
+
+ They live in the light's free `meta.w`, so they travel with the registry
+ through a scene switch. Light zero is the sun and is refused: its map is fitted
+ rather than tiled, and `three.light.shadow` is where it is set.
+*>
+fn void js_light_shadow_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
+	if (index == 0)
+	{
+		*out = js.raise(
+			"three.lights[0] is the sun and its shadow is fitted rather than tiled — set three.light.shadow"
+		);
+		return;
+	}
+	uint mode = (uint)math::clamp(arg_int(&js, argc, args, 1), 0, 2);
+	float requested = arg_float(&js, argc, args, 2);
+	uint wanted = requested > 0.0f
+		? (uint)math::clamp(requested, (float)SHADOW_MIN_SIZE, (float)POINT_SHADOW_MAX_SIZE) : 0;
+	uint rounded = wanted > 0 ? SHADOW_MIN_SIZE : 0;
+	while (rounded > 0 && rounded * 2 <= wanted) rounded *= 2;
+	if (mode == LIGHT_SHADOW_ON && rounded == 0 && self.pass.point_shadows.size == 0)
+	{
+		*out = js.raise(
+			"enabling a light's shadow needs a size — set light.shadow = { enabled: true, size } or three.lights.shadow.size first"
+		);
+		return;
+	}
+	Lighting lighting = self.pass.lighting;
+	// `light.baked` lives in the same field and is preserved: the two settings are
+	// unrelated and a script that touched one must not clear the other.
+	uint baked = lighting.lights[index].meta[3] & LIGHT_BAKED;
+	lighting.lights[index].meta[3] = light_shadow_pack(mode, rounded) | baked;
+	self.set_lighting(lighting);
+}
+
+<*
+ `lightBakedGet(index)` and `lightBakedSet(index, value)` — `light.baked`.
+
+ A light nothing has baked yet behaves exactly as an unbaked one: the flag says
+ the lightmap *may* carry this light, and a receiver with no tile shades it in
+ real time regardless. So setting it before `three.lights.bake()` changes no
+ pixel, and clearing it afterwards puts the light back in the loop everywhere.
+*>
+fn void js_light_baked_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
+	*out = qjs::bool_value(light_is_baked(self.pass.lighting.lights[index]));
+}
+
+fn void js_light_baked_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	uint index = arg_light(self, &js, argc, args, 0, 0, out);
+	if (index == MAX_LIGHTS) return;
+	Lighting lighting = self.pass.lighting;
+	uint field = lighting.lights[index].meta[3] & ~LIGHT_BAKED;
+	if (arg_truth(&js, argc, args, 1)) field |= LIGHT_BAKED;
+	lighting.lights[index].meta[3] = field;
+	self.set_lighting(lighting);
+}
+
+<*
+ `lightsBake(texelsPerMetre, maxBytes)` — the bake itself, as
+ `[receivers, skipped, texels, bytes, ms]`.
+
+ Synchronous, and it reads the shadow atlas as the last frame left it — a light
+ whose shadow was not resident bakes without one. A scene with no eligible
+ receiver answers with five zeros rather than raising: nothing eligible is a
+ property of the file's uvs, not a mistake in the call.
+*>
+fn void js_lights_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	LightmapOptions options = DEFAULT_LIGHTMAP_OPTIONS;
+	float density = arg_float(&js, argc, args, 0);
+	if (density > 0) options.texels_per_metre = math::clamp(density, 0.05f, 512.0f);
+	double bytes = arg_number(&js, argc, args, 1);
+	if (bytes > 0) options.max_bytes = (usz)math::clamp(bytes, 65536.0, 2048.0 * 1024.0 * 1024.0);
+	// Only when the call said so: `bake.budgetMs` is the standing setting and a
+	// bake with no options must not put it back to the default.
+	float budget = arg_float(&js, argc, args, 2);
+	if (budget > 0)
+	{
+		options.budget_ms = math::clamp(budget, 0.1f, 1000.0f);
+		self.pass.lightmap.budget_ms = options.budget_ms;
+	}
+
+	LightmapResult answer = { };
+	if (try baked = self.pass.bake_lightmaps(options)) answer = baked;
+	qjs::Value list = js.array();
+	js.set_index(list, 0, qjs::number_value((double)answer.receivers));
+	js.set_index(list, 1, qjs::number_value((double)answer.skipped));
+	js.set_index(list, 2, qjs::number_value((double)answer.texels));
+	js.set_index(list, 3, qjs::number_value((double)answer.bytes));
+	js.set_index(list, 4, qjs::number_value(answer.ms));
+	*out = list;
+}
+
+<*
+ `lightsBakeBudget(ms)` — how much re-bake work a frame may do, read and written.
+
+ A number at or below zero reads the budget without changing it, which is what
+ the getter passes.
+*>
+fn void js_lights_bake_budget(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	float wanted = arg_float(&js, argc, args, 0);
+	if (wanted > 0) self.pass.lightmap.budget_ms = math::clamp(wanted, 0.1f, 1000.0f);
+	float budget = self.pass.lightmap.budget_ms;
+	*out = qjs::number_value((double)(budget > 0 ? budget : LIGHTMAP_BUDGET_MS));
+}
+
+<*
+ `lightsSaveBake(path)` — the atlas and its tile table, into the assets directory.
+
+ `three.writeText`'s door, so a path that climbs out of the assets directory is
+ refused with the sentence every other writing verb uses. Answers
+ `[tiles, dirty, bytes, ms]`.
+*>
+fn void js_lights_save_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 0, tmem);
+		if (asked.len == 0) asked = LIGHTMAP_DEFAULT_PATH;
+		String? writing = self.open_for_write(&js, asked, "three.lights.saveBake", tmem, out);
+		if (catch writing) return;
+		LightmapFileResult? saved = self.pass.save_lightmap(writing);
+		if (catch err = saved)
+		{
+			*out = js.raise(
+				string::tformat(
+					"three.lights.saveBake could not write %s: %s — call three.lights.bake() first",
+					self.blame(asked, writing), err
+				)
+			);
+			return;
+		}
+		qjs::Value list = js.array();
+		js.set_index(list, 0, qjs::number_value((double)saved.tiles));
+		js.set_index(list, 1, qjs::number_value((double)saved.dirty));
+		js.set_index(list, 2, qjs::number_value((double)saved.bytes));
+		js.set_index(list, 3, qjs::number_value(saved.ms));
+		js.set_index(list, 4, js.string(writing));
+		*out = list;
+	};
+}
+
+<*
+ `lightsLoadBake(path)` — a saved atlas back onto the device, or null.
+
+ Null rather than a raise for every way it can decline: no file yet, a file of
+ another scene's lights, a file of another set of receivers. All three are the
+ ordinary first run of a game that saves its bake, and the caller's answer to all
+ three is the same — bake it now.
+*>
+fn void js_lights_load_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
+	qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	@pool()
+	{
+		String asked = arg_text(&js, argc, args, 0, tmem);
+		if (asked.len == 0) asked = LIGHTMAP_DEFAULT_PATH;
+		String? opening = self.resolve_asset(asked, tmem);
+		if (catch opening)
+		{
+			*out = qjs::null_value();
+			return;
+		}
+		LightmapFileResult? loaded = self.pass.load_lightmap(opening);
+		if (catch loaded)
+		{
+			*out = qjs::null_value();
+			return;
+		}
+		qjs::Value list = js.array();
+		js.set_index(list, 0, qjs::number_value((double)loaded.tiles));
+		js.set_index(list, 1, qjs::number_value((double)loaded.dirty));
+		js.set_index(list, 2, qjs::number_value((double)loaded.bytes));
+		js.set_index(list, 3, qjs::number_value(loaded.ms));
+		*out = list;
+	};
+}
+
+<*
  One light off the argument list, or a raise on `out`.
 
  Shared by `lightSet` and `lightAdd` because the only difference between them is
@@ -3272,6 +3665,8 @@ fn void js_point_shadow_get(
 	js.set_index(list, 1, qjs::number_value((double)settings.size));
 	js.set_index(list, 2, qjs::number_value((double)settings.bias));
 	js.set_index(list, 3, qjs::number_value((double)settings.intensity));
+	js.set_index(list, 4, qjs::number_value((double)(settings.max_local > 0
+		? settings.max_local : DEFAULT_LOCAL_SHADOWS)));
 	*out = list;
 }
 
@@ -3296,6 +3691,11 @@ fn void js_point_shadow_set(
 	float bias = arg_float(&js, argc, args, 2);
 	settings.bias = bias > 0.0f ? bias : 0.0f;
 	settings.intensity = math::clamp(arg_float(&js, argc, args, 3), 0.0f, 1.0f);
+	// How many local lights may hold shadows at once. Absent leaves the scene's.
+	settings.max_local = argc > 4
+		? (uint)math::clamp(arg_int(&js, argc, args, 4), 1, (int)MAX_LIGHTS)
+		: self.pass.point_shadows.max_local;
+	if (settings.max_local == 0) settings.max_local = DEFAULT_LOCAL_SHADOWS;
 	self.set_point_shadow(settings);
 }
 

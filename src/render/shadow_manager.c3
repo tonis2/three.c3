@@ -32,8 +32,33 @@ struct ShadowManager
 	usz request_texels;
 	usz request_bytes;
 	bool request_static;
+	usz request_local_texels;
 	uint atlas_generation;
+	// Which local lights hold shadows, by packed slot, and what that was decided
+	// from — see `evaluate_shadow_policy`.
+	bool[MAX_LIGHTS] policy_keep;
+	uint policy_signature;
+	uint policy_places;
+	Vec3 policy_focus;
+	double policy_ms;
+	bool policy_valid;
+	// The table the last frame uploaded, kept so a bake can read the atlas the
+	// same way that frame did — the bake runs outside a frame and has no slot's
+	// buffer to point at.
+	ShadowGpuView[SHADOW_MAX_VIEWS] packed;
+	uint packed_count;
 }
+
+// How far the camera's focus or a shadowed light moves before the residency
+// ranking is worth redoing, and how long the last answer is held whatever moves.
+const float SHADOW_POLICY_MOVE = 3.0f;
+const double SHADOW_POLICY_HOLD_MS = 1000.0;
+
+// A local directional light stands nowhere and lights everything, so it ranks
+// above any placed light; `shadow.enabled = true` ranks above both and keeps its
+// own order inside that tier.
+const float SHADOW_POLICY_EVERYWHERE = 1e10f;
+const float SHADOW_POLICY_EXPLICIT = 1e12f;
 
 fn ShadowViewKind shadow_kind(Light light)
 {
@@ -49,18 +74,159 @@ fn ShadowViewKind shadow_kind(Light light)
 fn uint shadow_identity(Light light, uint index) => index == 0 || light.meta[0] != 0
 	? light.meta[0] : (0x80000000u | index);
 
+<*
+ The tile size one local light asks for, and 0 when it casts no shadow.
+
+ `three.lights[i].shadow` overrides either half of `three.lights.shadow`: a
+ light may turn its own shadow off while the rest keep theirs, or on while the
+ registry default is off, and may name a size of its own.
+*>
+fn uint MeshPass.local_shadow_request(&self, uint index)
+{
+	if (index == 0 || index >= self.lighting.count) return 0;
+	Light light = self.lighting.lights[index];
+	uint mode = light_shadow_mode(light);
+	if (mode == LIGHT_SHADOW_OFF) return 0;
+	if (mode != LIGHT_SHADOW_ON && !self.point_shadows.enabled) return 0;
+	uint size = light_shadow_size(light);
+	return size > 0 ? size : self.point_shadows.size;
+}
+
+// What the atlas actually gives that light this frame, after the residency
+// policy and after the atlas has been fitted to the budget.
+fn uint MeshPass.local_shadow_tile(&self, uint index)
+{
+	if (!self.point_shadows.live || !self.shadow_manager.policy_keep[index]) return 0;
+	uint request = self.local_shadow_request(index);
+	return request == 0 ? 0 : math::min(request, self.point_shadows.created);
+}
+
+// The window the shaders put on a light's inverse-square falloff, as they use
+// it — squared. `light_toward` in `surface.slang` and `shared_area_window`.
+fn float shadow_light_window(float distance, float range)
+{
+	if (range <= 0) return 1.0f;
+	float t = distance / range;
+	float edge = math::clamp(1.0f - t * t * t * t, 0.0f, 1.0f);
+	return edge * edge;
+}
+
+// What one light is worth per unit of colour, its luminance times its intensity.
+fn float shadow_light_power(Light light) => light.color[3]
+	* (0.2126f * light.color[0] + 0.7152f * light.color[1] + 0.0722f * light.color[2]);
+
+<*
+ How a local light ranks for a shadow when more of them want one than
+ `three.lights.shadow.maxLocal` allows. Higher keeps its shadow.
+
+ The rank is how much shadow the light can put on screen, not where it stands:
+ its irradiance at the point the camera is looking at — `power * window(distance,
+ range) / max(distance^2, 1)` with the shaders' own range window, so a light
+ whose reach ends short of the shot scores nothing however near it is. An area
+ light divides by pi, which is what `shared_area_shape` does to its power, so a
+ disk of 600 W and a lantern of 3 W are one number. The colour is in the power,
+ so a light dimmed to near-black gives its tiles up.
+
+ A light whose script set `shadow.enabled = true` outranks every light that took
+ the registry default, because that is the script saying which shadows it came
+ for. Lights that all score nothing keep the scene's own order, which the
+ importer leaves nearest the shot first.
+*>
+fn float MeshPass.shadow_policy_rank(&self, uint index)
+{
+	Light light = self.lighting.lights[index];
+	float reach = light.direction[3];
+	float rank = SHADOW_POLICY_EVERYWHERE;
+	if (reach > 0)
+	{
+		Vec3 position = { light.direction[0], light.direction[1], light.direction[2] };
+		Vec3 offset = position - self.camera.target;
+		float square = offset.dot(offset);
+		float lit = shadow_light_window(math::sqrt(square), reach);
+		uint kind = light.meta[2];
+		if (kind == 2 || kind == 3) lit /= (float)math::PI;
+		rank = shadow_light_power(light) * lit / math::max(square, 1.0f);
+	}
+	return light_shadow_mode(light) == LIGHT_SHADOW_ON ? (rank + 1.0f) * SHADOW_POLICY_EXPLICIT : rank;
+}
+
+<*
+ Which local lights keep shadows this frame.
+
+ Not recomputed every frame, because a ranking that changes with the camera is
+ a shadow that blinks: the answer is held until something a script did changes
+ it, and otherwise until the camera's focus or a shadowed light has moved
+ `SHADOW_POLICY_MOVE` metres *and* `SHADOW_POLICY_HOLD_MS` has passed. Anything
+ a script writes — a light's own setting, `maxLocal`, the registry default —
+ lands on the next frame rather than a second later.
+*>
+fn void MeshPass.evaluate_shadow_policy(&self)
+{
+	ShadowManager* manager = &self.shadow_manager;
+	uint signature = 2166136261u;
+	uint places = 2166136261u;
+	for (uint i = 0; i < self.lighting.count; i++)
+	{
+		Light light = self.lighting.lights[i];
+		uint request = self.local_shadow_request(i);
+		// The range and the power are in the ranking, and both quantized — by
+		// metres and by quarter-octaves — so animating one does not re-rank
+		// every frame.
+		uint reach = (uint)(int)math::floor(light.direction[3] / SHADOW_POLICY_MOVE);
+		uint power = (uint)(int)math::floor(
+			(float)math::log2((double)math::max(shadow_light_power(light), 1e-6f)) * 4.0f);
+		uint[6] fields = { light.meta[0], light.meta[2], light.meta[3], request, reach, power };
+		foreach (value : fields) signature = (signature ^ value) * 16777619u;
+		if (request == 0) continue;
+		for (uint k = 0; k < 3; k++)
+		{
+			int cell = (int)math::floor(light.direction[k] / SHADOW_POLICY_MOVE);
+			places = (places ^ (uint)cell) * 16777619u;
+		}
+	}
+	signature = (signature ^ self.lighting.count) * 16777619u;
+	signature = (signature ^ self.point_shadows.max_local) * 16777619u;
+	Vec3 focus = self.camera.target;
+	bool changed = !manager.policy_valid || manager.policy_signature != signature;
+	bool moved = (focus - manager.policy_focus).length() > SHADOW_POLICY_MOVE
+		|| manager.policy_places != places;
+	// The hold only binds a clock that is running: a headless frame that never
+	// ticks one would otherwise never re-rank at all.
+	double now = self.clock.last_wall_ms;
+	bool held = now > manager.policy_ms && now - manager.policy_ms < SHADOW_POLICY_HOLD_MS;
+	if (!changed && (!moved || held)) return;
+	manager.policy_signature = signature;
+	manager.policy_places = places;
+	manager.policy_focus = focus;
+	manager.policy_ms = now;
+	manager.policy_valid = true;
+	uint limit = self.point_shadows.max_local > 0 ? self.point_shadows.max_local : DEFAULT_LOCAL_SHADOWS;
+	for (uint i = 0; i < MAX_LIGHTS; i++) manager.policy_keep[i] = false;
+	for (uint kept = 0; kept < limit; kept++)
+	{
+		uint best = MAX_LIGHTS;
+		float best_rank = -1.0f;
+		for (uint i = 1; i < self.lighting.count; i++)
+		{
+			if (manager.policy_keep[i] || self.local_shadow_request(i) == 0) continue;
+			float rank = self.shadow_policy_rank(i);
+			if (rank > best_rank) { best_rank = rank; best = i; }
+		}
+		if (best == MAX_LIGHTS) break;
+		manager.policy_keep[best] = true;
+	}
+}
+
 fn float MeshPass.shadow_importance(&self, uint index)
 {
 	if (index == 0) return float::max;
 	Light light = self.lighting.lights[index];
-	if (light.meta[2] == 0) return 1e20f;
-	Vec3 position = { light.direction[0], light.direction[1], light.direction[2] };
-	Vec3 distance = position - self.camera.eye();
-	float score = light.direction[3] * light.direction[3] / math::max(distance.length_sq(), 1.0f);
+	float rank = self.shadow_policy_rank(index);
 	uint at = self.shadow_view_set.find({ shadow_identity(light, index), 0, shadow_kind(light) });
 	// Keep a small preference for resident entries to avoid threshold churn.
-	if (at != SHADOW_VIEW_NONE && self.shadow_view_set.views[at].static_valid) score *= 1.15f;
-	return score;
+	if (at != SHADOW_VIEW_NONE && self.shadow_view_set.views[at].static_valid) rank *= 1.25f;
+	// The frame's sort takes the largest first, and the brightest light ranks highest.
+	return rank;
 }
 
 fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
@@ -71,18 +237,29 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 	ShadowManager* manager = &self.shadow_manager;
 	manager.atlas.ensure_compare(gpu)!;
 	if (entries.budget.max_views == 0) entries.budget = DEFAULT_SHADOW_BUDGET;
+	self.evaluate_shadow_policy();
 	uint sun_size = self.shadows.enabled ? self.shadows.size : 0;
-	uint local_size = self.point_shadows.enabled ? self.point_shadows.size : 0;
+	// The cap every resident local tile is clamped to: the largest one asked for.
+	uint local_size = 0;
+	for (uint i = 1; i < self.lighting.count; i++)
+	{
+		if (manager.policy_keep[i]) local_size = math::max(local_size, self.local_shadow_request(i));
+	}
 	uint view_limit = math::min(entries.budget.max_views, SHADOW_MAX_VIEWS);
 	uint views = sun_size > 0 && view_limit > 0 ? 1 : 0;
 	usz texels = views > 0 ? (usz)sun_size * sun_size : 0;
+	usz local_texels = 0;
 	for (uint i = 1; i < self.lighting.count && local_size > 0; i++)
 	{
+		if (!manager.policy_keep[i]) continue;
+		uint request = math::min(self.local_shadow_request(i), local_size);
+		if (request == 0) continue;
 		uint parts = shadow_view_parts(shadow_kind(self.lighting.lights[i]));
-		usz light_texels = (usz)local_size * local_size * parts;
+		usz light_texels = (usz)request * request * parts;
 		if (views + parts > view_limit || texels + light_texels > entries.budget.max_texels) continue;
 		views += parts;
 		texels += light_texels;
+		local_texels += light_texels;
 	}
 	if (views == 0) return;
 	uint requested_sun = sun_size;
@@ -90,6 +267,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 	bool want_static = self.scene.static_nodes > 0;
 	bool reuse = manager.atlas.image != null && manager.request_sun == requested_sun
 		&& manager.request_local == requested_local && manager.request_views == views
+		&& manager.request_local_texels == local_texels
 		&& manager.request_texels == entries.budget.max_texels
 		&& manager.request_bytes == entries.budget.max_bytes && manager.request_static == want_static;
 	uint width = manager.atlas.width;
@@ -155,6 +333,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 		manager.request_sun = requested_sun;
 		manager.request_local = requested_local;
 		manager.request_views = views;
+		manager.request_local_texels = local_texels;
 		manager.request_texels = entries.budget.max_texels;
 		manager.request_bytes = entries.budget.max_bytes;
 		manager.request_static = want_static;
@@ -345,6 +524,7 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 	}
 	entries.reset(); manager.rejected = 0;
 	uint[MAX_LIGHTS] selected;
+	uint[MAX_LIGHTS] selected_size;
 	uint selected_count = 0;
 	uint parts_used = 0;
 	for (uint ranked = 0; ranked < self.lighting.count; ranked++)
@@ -352,18 +532,18 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 		uint i = order[ranked];
 		Light* light = &self.lighting.lights[i];
 		light.meta[1] = SHADOW_VIEW_NONE;
-		bool enabled = i == 0 ? self.shadows.live : self.point_shadows.live;
-		if (!enabled) continue;
+		uint size = i == 0 ? (self.shadows.live ? self.shadows.created : 0) : self.local_shadow_tile(i);
+		if (size == 0) continue;
 		uint parts = shadow_view_parts(shadow_kind(*light));
 		if (parts_used + parts > entries.budget.max_views) { manager.rejected++; continue; }
+		selected_size[selected_count] = size;
 		selected[selected_count++] = i; parts_used += parts;
 		entries.want_light(shadow_identity(*light, i), shadow_kind(*light));
 	}
 	for (uint s = 0; s < selected_count; s++)
 	{
 		uint i = selected[s]; Light light = self.lighting.lights[i];
-		uint size = i == 0 ? self.shadows.created : self.point_shadows.created;
-		entries.admit_light(shadow_identity(light, i), shadow_kind(light), size);
+		entries.admit_light(shadow_identity(light, i), shadow_kind(light), selected_size[s]);
 	}
 	for (uint at = 0; at < entries.count; at++)
 	{
@@ -400,7 +580,7 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 				1.0f / tile.size, self.point_shadows.bias, -LOCAL_SHADOW_NORMAL_OFFSET_TEXELS,
 				self.point_shadows.intensity };
 			manager.light_indices[at] = i; manager.gpu_indices[at] = count;
-			packed[count++] = { view.view_projection, view.atlas, view.params };
+			packed[count++] = shadow_gpu_view(view.view_projection, view.atlas, view.params);
 		}
 		if (!placed)
 		{
@@ -419,6 +599,8 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 		}
 		else { light.meta[1] = first; }
 	}
+	manager.packed_count = count;
+	for (uint i = 0; i < count; i++) manager.packed[i] = packed[i];
 	if (count == 0) return 0;
 	sz bytes = count * ShadowGpuView::size;
 	if (self.shadow_view_buffers[slot].buffer == null || self.shadow_view_buffers[slot].size < bytes)

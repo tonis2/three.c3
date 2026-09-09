@@ -54,11 +54,13 @@ const H = globalThis.__three;
 // If they drift, the host still refuses. That is the floor under this, the same
 // way `cull_for_side` is the floor under `Material._checkSide`.
 //
-// Twelve is three plus twelve against a guaranteed sixteen per-stage samplers —
-// the arithmetic is in `MATERIAL_TEXTURE_LIMIT`'s header and not repeated here.
-// What belongs here is what a stack does when twelve is still not enough, which
-// is `SHEDDING`.
-const TEXTURE_LIMIT = 12;
+// Nineteen is what the draw record's index row holds past `map` — the arithmetic
+// is in `MATERIAL_TEXTURE_LIMIT`'s header and not repeated here. It was twelve
+// against a guaranteed sixteen per-stage samplers; a material's images are slots
+// of one device-wide array now, so what bounds a stack is the row and not the
+// device. What belongs here is what a stack does when nineteen is still not
+// enough, which is `SHEDDING`.
+const TEXTURE_LIMIT = 19;
 const UNIFORM_BUDGET = 104;
 
 // A `float4` per animated layer — tint in rgb, opacity in a. Six of them fit and
@@ -490,10 +492,32 @@ function windowGradients(layer, surface, i) {
 // mean two places that have to agree about which images a stack actually uses,
 // and a binding the layout declares and the draw never writes is undefined
 // behaviour no validation layer reports.
+//
+// `stats` rides along: how many samplers the stack spends, how many parallax
+// solves it does and how many taps a pixel can cost, which is the only way to
+// read the price of a stack without disassembling it. `mat.stats` is where it
+// surfaces.
 function emit(base, layers) {
 	const textures = {};
 	const uniforms = {};
 	const body = [];
+	const stats = { layers: layers.length, samplers: 0, parallaxSolves: 0, taps: 0, sampleGradTaps: 0 };
+
+	// **Every texture read this body makes is written here and nowhere else.**
+	// What a sampler is spelled like — `name.Sample(uv)` today, an index into one
+	// device-wide array tomorrow — is one decision, and a generated body that
+	// named samplers in eleven places would be eleven edits to move. It is also
+	// where the tap count comes from, which is the number that describes what a
+	// stack costs a pixel.
+	//
+	// `grads` is `[gx, gy]` for a read whose uv the hardware cannot differentiate
+	// for itself — a `frac` seam, or a uv only part of the quad computed.
+	function read(name, at, grads) {
+		stats.taps++;
+		if (grads === undefined) return `${name}.Sample(${at})`;
+		stats.sampleGradTaps++;
+		return `${name}.SampleGrad(${at}, ${grads[0]}, ${grads[1]})`;
+	}
 
 	// Cleared rather than added to, because `emit` runs more than once on the same
 	// layers: a stack over the sampler budget is shed and emitted again, and a
@@ -561,23 +585,40 @@ function emit(base, layers) {
 	// Whether anything reads a mask, so that the second parallax below is emitted
 	// only for a stack that has one.
 	const anyMask = shared || layers.some(l => l.maskTexture !== null);
+	// **One solve for the whole surface.** How far a metre of relief moves this
+	// pixel is a property of the surface and the view, so it is the same answer
+	// for the base height and for every layer that carries one; only the height
+	// and the depth change, and those are a multiply-add each (`parallax_step`).
+	// The deepest relief on the stack is what the fade is measured against — see
+	// `parallax_shift` — because a layer with more relief than the base must not
+	// be faded out by the base's.
+	const reliefs = [];
+	if (base.height !== null && base.depth !== 0) reliefs.push(Math.abs(base.depth));
+	for (const l of layers) if (l.height !== null && l.depth !== 0) reliefs.push(Math.abs(l.depth));
+	const deepest = reliefs.length === 0 ? 0 : Math.max(...reliefs);
+	if (deepest !== 0) {
+		stats.parallaxSolves++;
+		body.push(
+			`    float2 pshift = parallax_shift(s, ddx(s.uv), ddy(s.uv), `
+			+ `${num(deepest, 'LayeredMaterial: bump')});`
+		);
+	}
 	if (base.height !== null && base.depth !== 0) {
 		textures.base_height_map = base.height;
 		body.push(
-			`    float bh = base_height_map.Sample(s.uv).r;`
+			`    float bh = ${read('base_height_map', 's.uv')}.r;`
 		);
 		body.push(
-			`    float2 puv = parallax_uv(s, s.uv, bh, `
+			`    float2 puv = parallax_step(s.uv, pshift, bh, `
 			+ `${num(base.depth, 'LayeredMaterial: bump')});`
 		);
-		// The same relief, solved in the mesh's own uv. One height and one depth,
-		// so it is the same physical displacement — `parallax_uv` works the world
-		// size of a uv unit out from the derivatives of whichever uv it is handed,
-		// so the two answers agree about where the surface moved to and disagree
-		// only about which coordinates say so.
+		// The same relief, in the mesh's own uv. One height and one depth, so it is
+		// the same physical displacement — `material.repeat` is the only thing
+		// between the two coordinate systems, which is what `parallax_mesh_shift`
+		// divides out.
 		if (anyMask) {
 			body.push(
-				`    float2 muv = parallax_uv(s, s.mesh_uv, bh, `
+				`    float2 muv = parallax_step(s.mesh_uv, parallax_mesh_shift(pshift), bh, `
 				+ `${num(base.depth, 'LayeredMaterial: bump')});`
 			);
 			mask_uv = 'muv';
@@ -593,6 +634,11 @@ function emit(base, layers) {
 	// colour, already assembled by the template. So the bottom of the stack costs
 	// nothing here and a `LayeredMaterial` with no layers at all shades exactly as
 	// a MeshLambertMaterial does.
+	// One for `base_color_map`, whether the template sampled it into `s.albedo`
+	// or this body reads it again at the moved uv. `base_albedo` is the template's
+	// own line and reads binding 0, which is why it is counted here and not read
+	// through the accessor above.
+	stats.taps++;
 	body.push(`    float3 c = ${albedo};`);
 
 	// The core material's other three maps.
@@ -614,7 +660,7 @@ function emit(base, layers) {
 	// writing to it — so the copy this body holds is its own.
 	if (base.emissive !== null) {
 		textures.base_emissive_map = base.emissive;
-		body.push(`    s.emissive *= base_emissive_map.Sample(${surface}).rgb;`);
+		body.push(`    s.emissive *= ${read('base_emissive_map', surface)}.rgb;`);
 	}
 	// 1 where the file has no occlusion map, which is the value the three shorter
 	// `standard` overloads hand in — so a stack without one generates exactly the
@@ -622,7 +668,7 @@ function emit(base, layers) {
 	let ao = '1.0';
 	if (base.ao !== null) {
 		textures.base_ao_map = base.ao;
-		body.push(`    float ao = base_ao_map.Sample(${surface}).r;`);
+		body.push(`    float ao = ${read('base_ao_map', surface)}.r;`);
 		ao = 'ao';
 	}
 	if (anyEmissive) body.push('    float3 e = float3(0.0, 0.0, 0.0);');
@@ -634,7 +680,7 @@ function emit(base, layers) {
 	if (anySurface) {
 		if (base.metallicRoughness !== null) {
 			textures.base_surface_map = base.metallicRoughness;
-			body.push(`    float2 bmr = base_surface_map.Sample(${surface}).gb;`);
+			body.push(`    float2 bmr = ${read('base_surface_map', surface)}.gb;`);
 			body.push('    float rough = s.roughness * bmr.x;');
 			body.push('    float metal = s.metalness * bmr.y;');
 		} else {
@@ -649,12 +695,12 @@ function emit(base, layers) {
 		// whole stack rather than one per layer.
 		if (base.normal !== null) {
 			textures.base_normal_map = base.normal;
-			body.push(`    float3 nt = base_normal_map.Sample(${surface}).rgb;`);
+			body.push(`    float3 nt = ${read('base_normal_map', surface)}.rgb;`);
 		} else {
 			body.push('    float3 nt = float3(0.5, 0.5, 1.0);');
 		}
 	}
-	if (shared) body.push(`    float4 mask = layer_mask.Sample(${mask_uv});`);
+	if (shared) body.push(`    float4 mask = ${read('layer_mask', mask_uv)};`);
 
 	for (const layer of layers) {
 		const i = layer.at;
@@ -662,9 +708,8 @@ function emit(base, layers) {
 		// One tap of one of this layer's images. A windowed layer samples with the
 		// unwrapped gradients and every other layer samples the ordinary way, so
 		// nothing already written changes shape.
-		const tap = layer.uvWindow
-			? (name, at) => `${name}.SampleGrad(${at}, gx${i}, gy${i})`
-			: (name, at) => `${name}.Sample(${at})`;
+		const grad = layer.uvWindow;
+		const tap = (name, at) => read(name, at, grad ? [`gx${i}`, `gy${i}`] : undefined);
 		body.push('');
 		body.push(`    // ${layer.label}${layer.blend === 'mix' ? '' : `, ${layer.blend}`}`);
 
@@ -701,7 +746,7 @@ function emit(base, layers) {
 		// The gradients a window samples with, declared once for the layer and
 		// before anything reads them. Nothing is emitted for a layer that has no
 		// window, which is every layer written before this existed.
-		if (layer.uvWindow) body.push(...windowGradients(layer, surface, i));
+		if (grad) body.push(...windowGradients(layer, surface, i));
 
 		// The weight. A layer with no mask at all is visible everywhere, which is
 		// the extension's own default and is what a full-coverage tint or a
@@ -725,7 +770,7 @@ function emit(base, layers) {
 			const name = `layer${i}_mask`;
 			textures[name] = layer.maskTexture;
 			layer.samplers.mask = name;
-			w = `${name}.Sample(${mask_uv}).${layer.channel}`;
+			w = `${read(name, mask_uv)}.${layer.channel}`;
 		} else if (layer.channel !== null) {
 			w = `mask.${layer.channel}`;
 		}
@@ -754,15 +799,17 @@ function emit(base, layers) {
 			textures[name] = layer.height;
 			layer.samplers.height = name;
 			body.push(`    float2 uv${i} = ${uv};`);
-			// The windowed form takes the unwrapped gradients too: `parallax_uv`
-			// works out the world size of a uv unit from the derivatives, and a
-			// `frac` seam would tell it a texel is the width of the screen.
+			// The surface's own shift, in this layer's uv. A layer that tiles four
+			// times crosses four times as much of its image for the same metre of
+			// relief, which is the whole of the conversion — and a `frac` does not
+			// change it, so a windowed layer takes the same line.
+			const [su, sv] = layer.uvScale;
+			const shift = su !== 1 || sv !== 1
+				? `pshift * float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`
+				: 'pshift';
 			body.push(
-				layer.uvWindow
-					? `    uv${i} = parallax_uv(s, uv${i}, gx${i}, gy${i}, `
-						+ `${tap(name, `uv${i}`)}.r, ${num(layer.depth, `${layer.label}: bump`)});`
-					: `    uv${i} = parallax_uv(s, uv${i}, ${name}.Sample(uv${i}).r, `
-						+ `${num(layer.depth, `${layer.label}: bump`)});`
+				`    uv${i} = parallax_step(uv${i}, ${shift}, `
+				+ `${tap(name, `uv${i}`)}.r, ${num(layer.depth, `${layer.label}: bump`)});`
 			);
 			uv = `uv${i}`;
 		}
@@ -876,7 +923,8 @@ function emit(base, layers) {
 	body.push(anyEmissive ? `    return ${shaded} + e;` : `    return ${shaded};`);
 	body.push('}');
 
-	return { fragment: body.join('\n'), textures, uniforms };
+	stats.samplers = Object.keys(textures).length;
+	return { fragment: body.join('\n'), textures, uniforms, stats };
 }
 
 // What a stack gives up, in order, when it wants more samplers than a material
@@ -1116,14 +1164,14 @@ export class LayeredMaterial extends ShaderMaterial {
 			);
 		}
 
-		let { fragment, textures, uniforms } = emit(base, layers);
+		let { fragment, textures, uniforms, stats } = emit(base, layers);
 		const wanted = Object.keys(textures).length;
 		const shed = [];
 		for (const step of shedding(base, layers)) {
 			if (Object.keys(textures).length <= TEXTURE_LIMIT) break;
 			step.drop();
 			shed.push(step.what);
-			({ fragment, textures, uniforms } = emit(base, layers));
+			({ fragment, textures, uniforms, stats } = emit(base, layers));
 		}
 		const count = Object.keys(textures).length;
 		if (count > TEXTURE_LIMIT) {
@@ -1170,6 +1218,11 @@ export class LayeredMaterial extends ShaderMaterial {
 		// that takes one — because it is the only one that can decide, on its own,
 		// to draw less than it was asked for. The warning above is what it is for.
 		this.name = name;
+		// What this stack costs, counted while the source was written: how many
+		// samplers it spends, how many parallax solves it does, and how many taps
+		// a pixel can ask for. There is no other way to read the price of a stack
+		// without disassembling it, and `three.stats()` cannot see a material.
+		this.stats = stats;
 		this._layers = layers;
 		this.layers = layers.map(l => new LayerView(this, l));
 
