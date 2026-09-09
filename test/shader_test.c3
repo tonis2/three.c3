@@ -185,9 +185,9 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 	// lobes, and two table taps for the pair rather than two for each.
 	test::@check(
 		occurrence_count(area, "shared_area_shape(") == 1
-			&& area.contains("terms.diffuse=shared_area_ltc_diffuse")
+			&& area.contains("terms.diffuse=shared_area_polygon_diffuse")
 			&& area.contains("terms.specular=light.color.rgb*shared_area_ltc_specular"),
-		"one emitter polygon returns both fitted area terms"
+		"one emitter polygon returns diffuse and fitted specular terms"
 	);
 	test::@check(
 		occurrence_count(lighting, "ltc_lut.SampleLevel") == 2,
@@ -504,14 +504,14 @@ fn void the_mesh_push_block_matches_the_struct() @test
 		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
 	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
 
-	// **Six frame images in set 0, and the whole device's textures in set 1.** The
+	// **Seven frame images in set 0, and the whole device's textures in set 1.** The
 	// five a *material* wears — its base colour and the built-in material's normal,
 	// metallic-roughness, occlusion and emissive maps — are slots of the texture
 	// array now, reached through `map_at`, so they are not descriptors of this
 	// pipeline at all. What is left in set 0 is what belongs to the frame rather
 	// than to the surface: the environment map, the ambient-occlusion depth, the
-	// shadow atlas twice (once plain for the debug view, once through the
-	// comparison sampler), the area-light fit and the lightmap atlas.
+	// shadow atlas three times (plain depth, combined comparison and static
+	// comparison), the area-light fit and the lightmap atlas.
 	//
 	// **The count is checked as well as the names**, and it is the half that earns
 	// its keep: a template that started declaring a material's map again would put
@@ -1058,8 +1058,8 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
-		test::@check(pipeline.shader.bindings.len() == 7,
-			"from seven reflected bindings — six frame images and the texture array");
+		test::@check(pipeline.shader.bindings.len() == 8,
+			"from eight reflected bindings — seven frame images and the texture array");
 		test::@check(pipeline.shader.binding_of("shadow_atlas") != null, "the shared shadow atlas is named");
 		test::@check(pipeline.shader.binding_of("environment_map") != null, "and the environment map");
 		test::@check(pipeline.shader.binding_of("three_textures") != null, "and the device-wide texture array");

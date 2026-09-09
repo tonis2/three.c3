@@ -1208,6 +1208,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// list: which shape the shadow pass takes follows from how many casters are
 	// static and how many are not, and neither number exists until the buckets do.
 	self.plan_shadow(gpu);
+	self.finalize_lightmap();
 	self.plan_prepass(gpu, target);
 
 	// Last, so the two plans above are in it.
@@ -1647,6 +1648,12 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		{
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
 				self.shadow_manager.sample_static, self.shadows.live || self.point_shadows.live));
+		}
+		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
+		{
+			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
+				self.shadow_manager.atlas.compare_descriptor(true,
+					self.shadows.live || self.point_shadows.live));
 		}
 		if (pipeline_declares_binding(pipeline, LTC_LUT_BINDING))
 		{

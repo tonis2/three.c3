@@ -720,6 +720,7 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 	global = @hash_value(global, self.ambient_occlusion.radius);
 	global = @hash_value(global, self.ambient_occlusion.bias);
 	global = @hash_value(global, self.lightmap.revision);
+	global = @hash_value(global, self.scene != null && self.scene.lightmap_live);
 	cache.begin(target.extent, global);
 	if (self.scene == null) return cache.finish();
 

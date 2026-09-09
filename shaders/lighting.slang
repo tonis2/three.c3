@@ -23,32 +23,6 @@ float shared_spot_reach(Light light,float3 toward)
 static const uint LIGHT_BAKED = 0x40000u;
 bool shared_light_is_baked(Light light) { return (light.meta.w & LIGHT_BAKED) != 0u; }
 
-// A cached diffuse texel contains the static shadow result. Inside a moving
-// caster's current light-space footprint the fragment uses the live light loop
-// instead, so that cached illumination can never paint over its shadow.
-bool shared_baked_dynamic_shadow(FrameBlock* frame, float3 position)
-{
-    uint count=(uint)frame[0].lighting.y;
-    for(uint i=0u;i<count;++i)
-    {
-        Light light=frame[0].lights[i];
-        if(!shared_light_is_baked(light)||light.meta.y==0xffffffffu)continue;
-        uint parts=light.meta.z==1u?6u:1u;
-        for(uint part=0u;part<parts;++part)
-        {
-            ShadowGpuView view=frame[0].shadow_views[light.meta.y+part];
-            float4 rect=view.dynamic_rect;
-            if(rect.z<=rect.x||rect.w<=rect.y)continue;
-            float4 clip=mul(view.view_projection,float4(position,1.0));
-            if(clip.w<=0.0)continue;
-            float2 ndc=clip.xy/clip.w;
-            float2 uv=float2(0.5+0.5*ndc.x,0.5-0.5*ndc.y);
-            if(all(uv>=rect.xy)&&all(uv<=rect.zw))return true;
-        }
-    }
-    return false;
-}
-
 // The range window, and zero wherever the integral cannot be anything else: the
 // point is behind the emitter plane, or the whole emitter is behind the surface.
 // Every sample shares the sign of `dot(emitter,-l)`, and the extent bound is the
@@ -68,8 +42,8 @@ struct SharedAreaTerms
     float3 specular;
 };
 
-// The bake rasterises one texel per surface point and is not a real-time budget,
-// so it keeps the numeric integration whatever the frame says.
+// Material export keeps the numeric path as a standalone reference. Lightmap
+// baking selects the view-independent polygon diffuse below instead.
 #if defined(THREE_BAKE) && !defined(THREE_AREA_REFERENCE)
 #define THREE_AREA_REFERENCE 1
 #endif
@@ -116,8 +90,6 @@ float3 shared_area_reference_specular(Light light,float3 position,float3 normal,
     return light.color.rgb*light.color.w*sum*window*window/(3.14159265*max(samples,1u));
 }
 
-#ifndef THREE_AREA_REFERENCE
-
 // Linearly transformed cosines — Heitz et al. 2016.
 //
 // A polygon lit by a cosine distribution has a closed-form integral; a polygon
@@ -131,8 +103,8 @@ float3 shared_area_reference_specular(Light light,float3 position,float3 normal,
 // the two halves of the GGX directional albedo that a Schlick Fresnel splits
 // into. The column is perceptual roughness and the row is sqrt(1 - N.V), which
 // is the published parameterisation. `src/render/ltc.c3` uploads it and
-// `FrameBlock.lighting.w` says whether it is there — zero falls back to the
-// numeric integration above, which is what the bake and the reference use.
+// `FrameBlock.lighting.w` says whether it is there — zero falls back to numeric
+// specular integration while diffuse keeps the same polygon integral.
 static const float LTC_LUT_SCALE = 63.0 / 64.0;
 static const float LTC_LUT_BIAS  = 0.5 / 64.0;
 
@@ -215,20 +187,23 @@ SharedAreaShape shared_area_shape(Light light,float3 position,float3 normal)
         area=4.0*light.area_right.w*light.area_up.w;
     }
     [unroll] for(uint i=0u;i<6u;++i)shape.corner[i]=normalize(shape.corner[i]);
-    // The numeric integration above averages its samples over the emitter and
-    // divides by pi twice; a form factor is already that integral over the area,
-    // so the same brightness comes out of one division by the area and one pi.
+    // Convert the polygon form factor back to the emitter's power-per-area scale.
+    // The horizon term below is an approximation, so parity comes from sharing
+    // this path rather than claiming identity with the numeric reference.
     shape.scale=light.color.w*window*window/(3.14159265*max(area,1e-6));
     return shape;
 }
 
-float shared_area_ltc_diffuse(SharedAreaShape shape,float3 normal)
+// Diffuse is the polygon's cosine form factor. It is view independent and does
+// not use the LTC fit texture; only the specular lobe needs that approximation.
+float shared_area_polygon_diffuse(SharedAreaShape shape,float3 normal)
 {
     float3 sum=float3(0.0);
     [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(shape.corner[i],shape.corner[i==5u?0u:i+1u]);
     return shape.scale*shared_ltc_clipped(sum,normal);
 }
 
+#ifndef THREE_AREA_REFERENCE
 struct SharedAreaLtcContext
 {
     // The fit's own frame: x along the view's tangential part, z the normal.
@@ -278,13 +253,12 @@ float3 shared_area_ltc_specular(SharedAreaShape shape,SharedAreaLtcContext conte
 
 float shared_area_diffuse(Light light,float3 position,float3 normal)
 {
-#ifdef THREE_AREA_REFERENCE
+#if defined(THREE_AREA_REFERENCE) && !defined(THREE_LIGHTMAP_BAKE)
     return shared_area_reference_diffuse(light,position,normal);
 #else
-    if(push.frame[0].lighting.w<=0.0)return shared_area_reference_diffuse(light,position,normal);
     SharedAreaShape shape=shared_area_shape(light,position,normal);
     if(shape.scale<=0.0)return 0.0;
-    return shared_area_ltc_diffuse(shape,normal);
+    return shared_area_polygon_diffuse(shape,normal);
 #endif
 }
 
@@ -310,12 +284,17 @@ SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,floa
 #ifdef THREE_AREA_REFERENCE
     return shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
 #else
-    if(push.frame[0].lighting.w<=0.0)return shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
     SharedAreaTerms terms;terms.diffuse=0.0;terms.specular=float3(0.0);
     SharedAreaShape shape=shared_area_shape(light,position,normal);
     if(shape.scale<=0.0)return terms;
+    if(push.frame[0].lighting.w<=0.0)
+    {
+        terms=shared_area_reference_terms(light,position,normal,view,f0,f90,a2,k,nv);
+        terms.diffuse=shared_area_polygon_diffuse(shape,normal);
+        return terms;
+    }
     SharedAreaLtcContext context=shared_area_ltc_context(normal,view,f0,f90,k*2.0,nv);
-    terms.diffuse=shared_area_ltc_diffuse(shape,normal);
+    terms.diffuse=shared_area_polygon_diffuse(shape,normal);
     terms.specular=light.color.rgb*shared_area_ltc_specular(shape,context);
     return terms;
 #endif
@@ -325,7 +304,7 @@ SharedAreaTerms shared_area_terms(Light light,float3 position,float3 normal,floa
 SharedAreaTerms shared_area_terms_cached(Light light,SharedAreaShape shape,float3 normal,SharedAreaLtcContext context,bool diffuse)
 {
     SharedAreaTerms terms;terms.diffuse=0.0;terms.specular=float3(0.0);
-    if(diffuse)terms.diffuse=shared_area_ltc_diffuse(shape,normal);
+    if(diffuse)terms.diffuse=shared_area_polygon_diffuse(shape,normal);
     terms.specular=light.color.rgb*shared_area_ltc_specular(shape,context);
     return terms;
 }
@@ -376,7 +355,15 @@ bool shared_cluster_contains(FrameBlock* frame,uint cluster,uint lightIndex)
 // one a script can set. Zero by default: the normal offset does the work, and a
 // depth bias large enough to matter on its own is a shadow visibly detached from
 // its caster.
-float shadow_view_factor_filtered(uint index, float3 position, float3 normal, float filter_radius)
+float shared_shadow_compare(bool cached,float2 uv,float reference)
+{
+    return cached
+        ? shadow_atlas_static_compare.SampleCmpLevelZero(uv,reference)
+        : shadow_atlas_compare.SampleCmpLevelZero(uv,reference);
+}
+
+float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, float filter_radius,
+    bool cached)
 {
     if (index == 0xffffffffu) return 1.0;
     ShadowGpuView view = push.frame[0].shadow_views[index];
@@ -457,7 +444,7 @@ float shadow_view_factor_filtered(uint index, float3 position, float3 normal, fl
                 view.params.x*0.5,1.0-view.params.x*0.5);
             float2 tapNdc=(tapLocal-local)*float2(2.0,-2.0);
             float reference=ndc.z+dot(depthGradient,tapNdc)-view.params.y;
-            samples[i]=shadow_atlas_compare.SampleCmpLevelZero(
+            samples[i]=shared_shadow_compare(cached,
                 clamp(tapLocal*view.atlas.xy+view.atlas.zw,lo,hi),reference);
         }
         float lit=lerp(lerp(samples[0],samples[1],fraction.x),
@@ -474,13 +461,18 @@ float shadow_view_factor_filtered(uint index, float3 position, float3 normal, fl
             view.params.x * 0.5, 1.0 - view.params.x * 0.5);
         float2 tapNdc = (tapLocal - local) * float2(2.0, -2.0);
         float reference = ndc.z + dot(depthGradient, tapNdc) - view.params.y;
-        lit += shadow_atlas_compare.SampleCmpLevelZero(
+        lit += shared_shadow_compare(cached,
             clamp(tapLocal * view.atlas.xy + view.atlas.zw, lo, hi), reference);
     }
     return lerp(1.0, lit * 0.25, view.params.w);
 }
 
-float shared_point_shadow_factor(uint index,Light light,float3 position,float3 normal)
+float shadow_view_factor_filtered(uint index,float3 position,float3 normal,float filter_radius)
+{
+    return shadow_view_factor_filtered_from(index,position,normal,filter_radius,false);
+}
+
+float shared_point_shadow_factor_from(uint index,Light light,float3 position,float3 normal,bool cached)
 {
     uint view=light.meta.y;
     if(view==0xffffffffu)return 1.0;
@@ -502,9 +494,57 @@ float shared_point_shadow_factor(uint index,Light light,float3 position,float3 n
         float receiverDistance=max(distance(position,light.direction.xyz),1e-4);
         float texel=push.frame[0].shadow_views[view].params.x;
         float radius=clamp(halfExtent/(receiverDistance*7.4641016*texel),1.0,6.0);
-        return shadow_view_factor_filtered(view,position,normal,radius);
+        return shadow_view_factor_filtered_from(view,position,normal,radius,cached);
     }
-    return shadow_view_factor(view,position,normal);
+    return shadow_view_factor_filtered_from(view,position,normal,1.0,cached);
+}
+
+float shared_point_shadow_factor(uint index,Light light,float3 position,float3 normal)
+{
+    return shared_point_shadow_factor_from(index,light,position,normal,false);
+}
+
+// Add only the visibility lost to moving casters. The projected box is a cheap
+// gate; comparing the static and combined maps keeps the cached baseline intact.
+float3 shared_baked_dynamic_delta(FrameBlock* frame,float3 normal,float3 receiverNormal,float3 position)
+{
+    float3 delta=float3(0.0);
+    uint count=(uint)frame[0].lighting.y;
+    for(uint i=0u;i<count;++i)
+    {
+        Light light=frame[0].lights[i];
+        if(!shared_light_is_baked(light)||light.meta.y==0xffffffffu)continue;
+        uint parts=light.meta.z==1u?6u:1u;
+        bool inside=false;
+        for(uint part=0u;part<parts&&!inside;++part)
+        {
+            ShadowGpuView view=frame[0].shadow_views[light.meta.y+part];
+            float4 rect=view.dynamic_rect;
+            if(rect.z<=rect.x||rect.w<=rect.y)continue;
+            float4 clip=mul(view.view_projection,float4(position,1.0));
+            if(clip.w<=0.0)continue;
+            float2 ndc=clip.xy/clip.w;
+            float2 uv=float2(0.5+0.5*ndc.x,0.5-0.5*ndc.y);
+            inside=all(uv>=rect.xy)&&all(uv<=rect.zw);
+        }
+        if(!inside)continue;
+        float live=shared_point_shadow_factor_from(i,light,position,receiverNormal,false);
+        float cached=shared_point_shadow_factor_from(i,light,position,receiverNormal,true);
+        float visibility=min(live-cached,0.0);
+        if(visibility>=0.0)continue;
+        if(light.meta.z==2u||light.meta.z==3u)
+        {
+            SharedAreaShape shape=shared_area_shape(light,position,normal);
+            float area=shape.scale>0.0?shared_area_polygon_diffuse(shape,normal):0.0;
+            delta+=light.color.rgb*area*visibility;
+            continue;
+        }
+        float reach;float3 toward=light_toward(light.direction,position,reach);
+        if(light.meta.z==4u)reach*=shared_spot_reach(light,toward);
+        float nl=max(dot(normal,toward),0.0);
+        delta+=light.color.rgb*light.color.w*reach*nl*visibility;
+    }
+    return delta;
 }
 
 struct SharedLightTerms
