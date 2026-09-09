@@ -153,3 +153,9 @@
   Always 0 with `three.alwaysRender` on, and 0 for a headless batch or a screenshot, which always draw.
 - `renderedFrames` — Frames that were drawn, the other half of `skippedFrames`. The two together are
   every frame the window path recorded.
+- `sceneCachePixels` — Scene pixels rebuilt by submitted frames, accumulated over the process. A full
+  redraw adds `width * height`, a partial redraw adds its dirty rectangle, and a wholly reused scene adds 0.
+- `sceneCacheReused` — Scene pixels preserved by submitted frames, accumulated over the process. Divide
+  this by `sceneCachePixels + sceneCacheReused` to measure the cache's pixel share. Frames counted by
+  `skippedFrames` add neither because they were not submitted; frames drawn with `three.sceneCache = false`
+  add no reused pixels.

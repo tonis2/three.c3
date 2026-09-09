@@ -385,7 +385,8 @@ fn String? assemble_shader(
 	// instances for a table to be indexed by, so its caller never asks.
 	bool spill = false, // The same again for `//@bake`: a post pass shades the whole frame and has no
 	// surface to bake.
-	bool bake = false
+	bool bake = false,
+	bool lightmap = false
 ) @private
 {
 	@pool()
@@ -415,10 +416,12 @@ fn String? assemble_shader(
 			String marker = line.trim();
 			if (marker == MARKER_BAKE)
 			{
-				if (!bake) continue;
-				out.append_string("#define THREE_BAKE 1");
+				if (!bake && !lightmap) continue;
+				out.append_string(lightmap
+					? "#define THREE_LIGHTMAP_BAKE 1\n#define THREE_NO_AO 1\n#define THREE_NO_LIGHTMAP 1\n#define THREE_AREA_REFERENCE 1"
+					: "#define THREE_BAKE 1");
 				out.append_char('\n');
-				physical++;
+				physical += lightmap ? 4 : 1;
 				continue;
 			}
 			if (marker == MARKER_FEATURES)

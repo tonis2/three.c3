@@ -207,6 +207,8 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "depthPrepassSet", &js_depth_prepass_set, 1);
 	self.bind(host, "alwaysRenderGet", &js_always_render_get, 0);
 	self.bind(host, "alwaysRenderSet", &js_always_render_set, 1);
+	self.bind(host, "sceneCacheGet", &js_scene_cache_get, 0);
+	self.bind(host, "sceneCacheSet", &js_scene_cache_set, 1);
 	self.bind(host, "shadowFit", &js_shadow_fit, 0);
 	self.bind(host, "debugViewGet", &js_debug_view_get, 0);
 	self.bind(host, "debugViewSet", &js_debug_view_set, 1);
@@ -788,6 +790,29 @@ fn void js_always_render_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc
 	qjs::Context js = qjs::wrap(ctx);
 	bool on         = arg_float(&js, argc, args, 0) != 0;
 	if (self.renderer != null) self.renderer.always_render = on;
+}
+
+<*
+ `sceneCacheGet()` — whether submitted frames may preserve unchanged scene
+ pixels, as 1 or 0.
+*>
+fn void js_scene_cache_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	*out = qjs::number_value(self.renderer == null || !self.renderer.scene_cache_disabled ? 1 : 0);
+}
+
+<*
+ `sceneCacheSet(on)` — preserve unchanged scene pixels inside a submitted frame.
+*>
+fn void js_scene_cache_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	bool on = arg_float(&js, argc, args, 0) != 0;
+	if (self.renderer == null) return;
+	self.renderer.scene_cache_disabled = !on;
+	if (!on) self.renderer.scene_cache.invalidate();
 }
 
 <*
@@ -1987,6 +2012,10 @@ fn void js_stats(
 		qjs::number_value(self.renderer != null ? (double)self.renderer.skipped_frames : 0.0));
 	js.set_property(object, "renderedFrames",
 		qjs::number_value(self.renderer != null ? (double)self.renderer.rendered_frames : 0.0));
+	js.set_property(object, "sceneCachePixels",
+		qjs::number_value(self.renderer != null ? (double)self.renderer.scene_cache_pixels : 0.0));
+	js.set_property(object, "sceneCacheReused",
+		qjs::number_value(self.renderer != null ? (double)self.renderer.scene_cache_reused : 0.0));
 	*out = object;
 }
 

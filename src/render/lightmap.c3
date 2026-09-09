@@ -8,14 +8,15 @@
  marks `baked` and the receivers marked `static`, the whole per-light loop becomes
  one texture read.
 
- ## Into the mesh's own uvs
+ ## Into an unwrap or a projected height-field chart
 
- There is no unwrapper here and no second uv set. A mesh is eligible when its own
- TEXCOORD_0 is a layout rather than a tiling — inside [0,1] and not overlapping
- itself, measured by `GpuMesh.measure_lightmap` when the geometry uploads — and
- a mesh that is not eligible keeps the real-time loop for every light, baked ones
- included. Nothing ever goes dark: a light marked baked is still shaded in real
- time everywhere there is no tile for it.
+ TEXCOORD_0 is used when it is a layout rather than a tiling. Otherwise an
+ axis-projected surface whose triangles do not overlap in that projection gets a
+ separate coordinate stream; this includes uneven ground and walls as well as a
+ strict plane. Material maps continue to use TEXCOORD_0. Folded geometry and
+ overlapping projections remain in the real-time loop. Nothing ever goes dark: a
+ light marked baked is still shaded in real time everywhere there is no tile for
+ it.
 
  That makes eligibility the contract rather than a list. Foliage unwrapped by hand
  in Blender and re-exported joins the bake with nothing here to change.
@@ -28,14 +29,12 @@
  different copy each time the camera moved. Sixteen bytes an instance, and the
  copies of a mesh stay one draw call.
 
- ## One pipeline, from `mesh.slang`
+ ## Built-in and layered material pipelines
 
- The bake is `mesh.slang` compiled with `THREE_LIGHTMAP_BAKE`: the vertex stage
- rasterises in uv space and the fragment stage answers with the direct diffuse of
- the baked lights and nothing else. One pipeline for every material in the scene,
- because a lightmap holds light rather than colour and no material body moves a
- light. What that gives up is a `vertex:` body's displacement and a `shade` body's
- `discard`, both of which the bake sees the mesh without.
+ Built-in materials use `mesh.slang` compiled with `THREE_LIGHTMAP_BAKE`. Known
+ layered materials use their generated material program so their blended normal
+ maps match the frame. Arbitrary shader bodies and displaced geometry remain in
+ the real-time path because the cache cannot infer what their output means.
 
  Area lights are integrated numerically here whatever the frame does — the define
  turns on `THREE_AREA_REFERENCE` — because a bake is one texel per surface point
@@ -55,16 +54,21 @@
  `Scene.static_revision` — the same events the cached shadow map is invalidated
  by — and `JsRuntime.set_lighting` marks what a baked light's own change reaches.
  `MeshPass.resolve_lightmap` spreads a moved receiver's change to the receivers
- the baked lights could carry it to, and `MeshPass.update_lightmap` re-bakes the
- dirty tiles a few at a time under a millisecond budget, so a drag in an editor
- stays live. A dirty tile keeps being *displayed* while it waits: stale light is
- closer to right than no light, and the one thing that does drop the atlas is the
- set of baked lights changing, which is a different picture rather than an old one.
+ the baked lights could carry it to. Layered-material parameters and the camera
+ invalidate their affected tiles as well, because their blended normal and
+ parallax result can change the cached diffuse. `MeshPass.update_lightmap`
+ re-bakes dirty tiles a few at a time under a millisecond budget; a dirty tile
+ uses real-time lighting until it is current. A moving caster's current shadow
+ footprint makes the same per-fragment fallback, leaving the unaffected part of
+ a large ground cached. Specular always stays live. The one thing that drops the
+ atlas is the set of baked lights changing, which is a different picture rather
+ than an old one.
 
  ## Persistence
 
- `MeshPass.save_lightmap` writes the atlas and its tile table beside the assets
- as `LIGHTMAP_MAGIC`: a header, one record per tile naming the receiver by node
+ `MeshPass.save_lightmap` writes version 3 of the atlas and its tile table beside
+ the assets as `LIGHTMAP_MAGIC`: a header, one record per tile naming the
+ receiver by node
  name, mesh index and copy index, and the tiles' texels packed one after another
  rather than the whole square — a bake fills a quarter of its atlas and the empty
  three quarters are not worth shipping. `MeshPass.load_lightmap` reads it back,
@@ -74,6 +78,7 @@
 module three;
 
 import std::collections::list;
+import std::collections::map;
 import std::math;
 import std::math::matrix;
 import std::time;
@@ -146,6 +151,70 @@ struct LightmapTile
 	// The whole rectangle, margin included. The rendered part is this minus two
 	// pads on each axis.
 	uint size;
+	ulong material_signature;
+}
+
+struct LightmapMaterialKey @local
+{
+	uint material;
+	uint asset;
+	uint generation;
+	uint mesh;
+	uint variant;
+	uint[4] color;
+}
+
+macro uint LightmapMaterialKey.hash(self)
+{
+	ulong value = ((ulong)self.material << 32) | self.asset;
+	value ^= ((ulong)self.generation << 32) | self.mesh;
+	value ^= ((ulong)self.variant << 32) | self.color[0];
+	value ^= ((ulong)self.color[1] << 32) | self.color[2];
+	value ^= self.color[3];
+	value *= 0x9E3779B97F4A7C15;
+	return (uint)(value ^ (value >> 32));
+}
+
+fn bool LightmapMaterialKey.equals(self, LightmapMaterialKey other) @operator(==)
+{
+	if (self.material != other.material || self.asset != other.asset
+		|| self.generation != other.generation || self.mesh != other.mesh
+		|| self.variant != other.variant) return false;
+	for (uint i = 0; i < 4; i++) if (self.color[i] != other.color[i]) return false;
+	return true;
+}
+
+alias LightmapMaterialSignatures = HashMap{LightmapMaterialKey, ulong};
+
+fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
+{
+	Material* material = self.material(node.material);
+	GpuMesh* mesh = self.assets.mesh(node.asset, node.mesh);
+	ulong signature = hash_bytes(KEY_SEED, &node.variant, uint::size);
+	if (material == null || mesh == null) return signature;
+	signature = hash_bytes(signature, &material.block, PUSH_BUDGET);
+	if (material.table.len > 0) signature = hash_bytes(signature, material.table.ptr, material.table.len);
+	// These inputs live beside the material's reflected block, but still alter the
+	// final normal and therefore the diffuse irradiance stored in the tile.
+	signature = hash_bytes(signature, &material.uv_transform, float[4]::size);
+	signature = hash_bytes(signature, &material.uv_variant_count, uint::size);
+	signature = hash_bytes(signature, &material.uv_variants, UvVariant[UV_VARIANTS]::size);
+	signature = hash_bytes(signature, &material.stochastic, bool::size);
+	uint map_flags = self.map_flags(material);
+	signature = hash_bytes(signature, &map_flags, uint::size);
+	signature = hash_bytes(signature, &mesh.base_color, float[4]::size);
+	signature = hash_bytes(signature, &node.color, float[4]::size);
+	uint[DRAW_TEXTURE_INDICES] textures = texture_index_row(&self.assets, material, mesh);
+	signature = hash_bytes(signature, &textures, uint[DRAW_TEXTURE_INDICES]::size);
+	// A decoded image may replace its contents without changing its bindless slot.
+	return hash_bytes(signature, &self.assets.revision, uint::size);
+}
+
+struct LightmapMaterialPipeline
+{
+	uint material;
+	MeshPipeline pipeline;
+	bool ready;
 }
 
 // A sphere a change reaches, in world space. A radius at or below zero is a
@@ -228,6 +297,7 @@ struct Lightmap
 	MeshPipeline pipeline;
 	bool pipeline_ready;
 	bool pipeline_refused;
+	List{LightmapMaterialPipeline} material_pipelines;
 
 	// The four buffers one bake's draws read through `MeshPush`, plus the readback
 	// the seam sweep works in. One each rather than one per frame in flight: a bake
@@ -291,6 +361,7 @@ struct Lightmap
 	// row. A bake reads the shadow atlas as the last frame left it.
 	uint settle;
 	uint stalled;
+	ulong camera_signature;
 
 	LightmapResult last;
 }
@@ -377,6 +448,61 @@ fn void MeshPass.update_lightmap(&self, Gpu* gpu)
 	Lightmap* map = &self.lightmap;
 	if (self.scene == null || !map.live || map.scene_id != self.scene.id) return;
 	if (self.baked_light_signature() != map.signature) return;
+	Vec3 eye = self.camera.eye();
+	Matrix4f camera_view_projection = self.camera.view_projection(self.aspect);
+	ulong camera_signature = hash_bytes(KEY_SEED, &eye, Vec3::size);
+	camera_signature = hash_bytes(camera_signature, &camera_view_projection, Matrix4f::size);
+	if (map.live && map.camera_signature != camera_signature)
+	{
+		foreach (tile : map.tiles)
+		{
+			Node* node = &self.scene.nodes[tile.node];
+			Material* material = self.material(node.material);
+			if (material == null || !material.script_layers.present) continue;
+			node.lightmap_dirty = true;
+			node.lightmap = { 0, 0, 0, 0 };
+		}
+		map.camera_signature = camera_signature;
+		self.scene.lightmap_changes++;
+	}
+	@pool()
+	{
+		// Re-read materials every frame so direct uniform writes are observed, but
+		// hash identical receiver/material state only once.
+		LightmapMaterialSignatures signatures;
+		signatures.tinit();
+		foreach (&tile : map.tiles)
+		{
+			Node* node = &self.scene.nodes[tile.node];
+			LightmapMaterialKey key = {
+				.material = node.material,
+				.asset = node.asset.index,
+				.generation = node.asset.generation,
+				.mesh = node.mesh,
+				.variant = node.variant,
+				.color = {
+					bitcast(node.color[0], uint), bitcast(node.color[1], uint),
+					bitcast(node.color[2], uint), bitcast(node.color[3], uint),
+				},
+			};
+			ulong? cached = signatures.get(key);
+			ulong material_signature;
+			if (try cached)
+			{
+				material_signature = cached;
+			}
+			else
+			{
+				material_signature = self.lightmap_material_signature(node);
+				signatures.set(key, material_signature);
+			}
+			if (tile.material_signature == material_signature) continue;
+			tile.material_signature = material_signature;
+			node.lightmap_dirty = true;
+			node.lightmap = { 0, 0, 0, 0 };
+			self.scene.lightmap_changes++;
+		}
+	};
 
 	if (self.scene.lightmap_changes != map.seen || self.scene.lightmap_dirty_all
 		|| map.pending_count > 0 || map.pending_all)
@@ -430,9 +556,9 @@ fn collision::Aabb3 MeshPass.node_lightmap_box(&self, Node* node)
  is dirty. A light that moved arrives here as its own reach, from
  `note_lighting_change`.
 
- A dirty tile is still displayed. Stale light is nearer to right than none, and
- the alternative — dropping the tile until it is re-baked — would make a drag
- flicker between the cache and the real-time loop.
+ A dirty tile is not displayed. The ordinary light loop is more work, but it is
+ also the only correct answer while a moving caster or light has made the cached
+ shadowing stale.
 *>
 fn void MeshPass.resolve_lightmap(&self)
 {
@@ -480,7 +606,11 @@ fn void MeshPass.resolve_lightmap(&self)
 				}
 			}
 		}
-		if (node.lightmap_dirty) dirty++;
+		if (node.lightmap_dirty)
+		{
+			node.lightmap = { 0, 0, 0, 0 };
+			dirty++;
+		}
 	}
 	map.dirty = dirty;
 	map.pending_count = 0;
@@ -514,7 +644,7 @@ fn void MeshPass.bake_dirty_tiles(&self, Gpu* gpu)
 			if (!node.alive || node.generation != tile.generation || !node.lightmap_dirty) continue;
 			// A copy that stopped being a static receiver keeps its rectangle in the
 			// packing and no longer reads it, so re-baking it is work for nobody.
-			if (!node.static_caster || node.lightmap[2] <= 0)
+			if (!node.static_caster)
 			{
 				node.lightmap_dirty = false;
 				continue;
@@ -557,7 +687,17 @@ fn void MeshPass.bake_dirty_tiles(&self, Gpu* gpu)
 			}
 			for (sz i = 0; i < take; i++)
 			{
-				self.scene.nodes[queue[at + i].node].lightmap_dirty = false;
+				LightmapTile tile = queue[at + i];
+				Node* node = &self.scene.nodes[tile.node];
+				float inv = 1.0f / (float)map.side;
+				uint inner = tile.size - 2 * LIGHTMAP_TILE_PAD;
+				node.lightmap = {
+					(float)(tile.x + LIGHTMAP_TILE_PAD) * inv,
+					(float)(tile.y + LIGHTMAP_TILE_PAD) * inv,
+					(float)inner * inv,
+					(float)inner * inv,
+				};
+				node.lightmap_dirty = false;
 				if (map.dirty > 0) map.dirty--;
 			}
 			at += take;
@@ -604,10 +744,42 @@ fn void Lightmap.free(&self, Gpu* gpu)
 	self.free_buffers();
 	self.free_image(gpu);
 	if (self.pipeline_ready) self.pipeline.free(gpu);
+	foreach (&entry : self.material_pipelines) if (entry.ready) entry.pipeline.free(gpu);
+	if (self.material_pipelines.allocator != null) self.material_pipelines.free();
 	if (self.tiles.allocator != null) self.tiles.free();
 	LightmapResult last = self.last;
 	*self = { };
 	self.last = last;
+}
+
+fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_index)
+{
+	Material* material = self.material(material_index);
+	if (material == null || !material.script_layers.present || material.vertex.len > 0) return null;
+	Lightmap* map = &self.lightmap;
+	if (map.material_pipelines.allocator == null) map.material_pipelines.init(mem, 4);
+	foreach (&known : map.material_pipelines)
+		if (known.material == material_index) return known.ready ? &known.pipeline : null;
+
+	LightmapMaterialPipeline entry = { .material = material_index };
+	@pool()
+	{
+		String? source = material_source(material.fragment, material.declared_uniforms, tmem,
+			material.declared_textures, material.vertex, lightmap: true);
+		if (try source)
+		{
+			ShaderModule mod = compile_slang(source, "three.lightmap", MESH_ENTRIES[..])!;
+			defer mod.free();
+			if (mod.ok)
+			{
+				entry.pipeline.init_post(gpu, &mod, LIGHTMAP_FORMAT, MESH_PUSH_FIELDS[..])!;
+				entry.ready = true;
+			}
+		}
+	};
+	map.material_pipelines.push(entry);
+	sz last = map.material_pipelines.len() - 1;
+	return map.material_pipelines[last].ready ? &map.material_pipelines[last].pipeline : null;
 }
 
 <*
@@ -824,7 +996,8 @@ fn uint MeshPass.lightmap_receivers(&self, uint[] slots, float[] wanted, float d
 		// A posed mesh is not the shape its uvs describe from one frame to the next,
 		// and `set_static_caster` already refuses a pre-skinned one.
 		if (node.skin >= 0 || node.preskinned) { if (skipped != null) (*skipped)++; continue; }
-		if (!mesh.has_uvs || !mesh.lightmap_eligible || mesh.lightmap_uv_area <= 0)
+		if ((!mesh.has_uvs && !mesh.lightmap_generated) || !mesh.lightmap_eligible
+			|| mesh.lightmap_uv_area <= 0)
 		{
 			if (skipped != null) (*skipped)++;
 			continue;
@@ -834,6 +1007,15 @@ fn uint MeshPass.lightmap_receivers(&self, uint[] slots, float[] wanted, float d
 		// `THREE_NO_LIGHTMAP` in `shader/assemble.c3`. Asked of the reflected layout
 		// rather than of the texture count, so the two cannot drift.
 		Material* material = self.material(node.material);
+		// A generated chart is safe for the built-in material, whose normal map the
+		// bake evaluates below. An arbitrary body may displace the vertex or replace
+		// the normal, and the generic bake cannot reproduce that program.
+		bool layered = material != null && material.script_layers.present && material.vertex.len == 0;
+		if (!self.shades_built_in(material) && !layered)
+		{
+			if (skipped != null) (*skipped)++;
+			continue;
+		}
 		if (material != null && material.pipeline != null
 			&& !pipeline_declares_binding(material.pipeline, LIGHTMAP_BINDING))
 		{
@@ -962,7 +1144,7 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	// node pointing into an atlas the submission did not fill would draw whatever
 	// was there before.
 	float inv = 1.0f / (float)side;
-	foreach (tile : tiles)
+	foreach (&tile : tiles)
 	{
 		uint inner = tile.size - 2 * LIGHTMAP_TILE_PAD;
 		self.scene.nodes[tile.node].lightmap = {
@@ -971,11 +1153,16 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 			(float)inner * inv,
 			(float)inner * inv,
 		};
+		tile.material_signature = self.lightmap_material_signature(&self.scene.nodes[tile.node]);
 	}
 	map.adopt(tiles.array_view(), self.scene.id, density * scale);
 	map.live = true;
 	map.signature = self.baked_light_signature();
 	map.seen = self.scene.lightmap_changes;
+	Vec3 baked_eye = self.camera.eye();
+	Matrix4f baked_view_projection = self.camera.view_projection(self.aspect);
+	map.camera_signature = hash_bytes(KEY_SEED, &baked_eye, Vec3::size);
+	map.camera_signature = hash_bytes(map.camera_signature, &baked_view_projection, Matrix4f::size);
 	self.scene.lightmap_live = true;
 
 	usz texels = 0;
@@ -1105,6 +1292,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		Node* node = &self.scene.nodes[tile.node];
 		GpuMesh* mesh = self.assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
+		Material* material = self.material(node.material);
 		copies[i] = {
 			.model = node.world,
 			.normal = node.normal,
@@ -1117,27 +1305,57 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			.positions = mesh.positions.address,
 			.normals = mesh.has_normals ? mesh.normals.address : 0,
 			.uvs = mesh.uvs.address,
-			.colors = 0,
+			.lightmap_uvs = mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address,
+			.colors = mesh.has_colors ? mesh.colors.address : 0,
 			.joints = 0,
 			.weights = 0,
 			.palette = 0,
 			.posed = 0,
 			.morph = 0,
 			.base_color = { 1, 1, 1, 1 },
-			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | FLAG_HAS_UVS,
+			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
+				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
+				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
+				| (mesh.colors_are_mask ? FLAG_COLORS_ARE_MASK : 0)
+				| self.map_flags(material),
 			.skin_stride = 0,
 			.morph_targets = 0,
-			.uv_transform = { 1, 1, 0, 0 },
+			.uv_transform = material.uv_transform_or_identity(),
 			.surface = { 1, 0, 0, 0 },
-			.uv_variant_count = 0,
+			.uv_variant_count = material.uv_variant_count,
+			.uv_variants = material.uv_variants,
 			// Nothing here samples a material's maps — the bake defines drop them —
 			// and the row still has to name a live slot rather than index 0, which is
 			// a real image.
-			.texture_index = texture_index_row(&self.assets, null, null),
+			.texture_index = texture_index_row(&self.assets, material, mesh),
 		};
 		drawn++;
 	}
 	if (drawn == 0) return LIGHTMAP_NO_ATLAS~;
+	MeshPipeline*[] tile_pipelines = mem::new_array(MeshPipeline*, tiles.len);
+	defer mem::free(tile_pipelines);
+	// Compile first. The cache is a growing List, so pointers into it are only
+	// taken after every push that can relocate its storage has happened.
+	foreach (i, tile : tiles)
+	{
+		Node* node = &self.scene.nodes[tile.node];
+		Material* material = self.material(node.material);
+		if (material != null && material.script_layers.present)
+		{
+			MeshPipeline* custom = self.lightmap_pipeline_for(gpu, node.material)!;
+			if (custom == null) return LIGHTMAP_NO_PIPELINE~;
+		}
+	}
+	foreach (i, tile : tiles)
+	{
+		Node* node = &self.scene.nodes[tile.node];
+		Material* material = self.material(node.material);
+		tile_pipelines[i] = pipeline;
+		if (material != null && material.script_layers.present)
+		{
+			tile_pipelines[i] = self.lightmap_pipeline_for(gpu, node.material)!;
+		}
+	}
 
 	// Where each tile's texels land in the staging buffer, packed rather than
 	// windowed: `bufferRowLength` is the tile's own width, so a tile is contiguous
@@ -1212,7 +1430,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
 		{
 			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
-				self.shadow_manager.sample_static, self.shadows.live || self.point_shadows.live));
+				true, self.shadow_manager.atlas.static_initialized));
 		}
 		samplers.push(cmd, pipeline);
 
@@ -1255,12 +1473,43 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			};
 			set_viewport_rect(cmd, rect, false);
 
+			MeshPipeline* selected = tile_pipelines[i];
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, selected.handle);
+			gpu.texture_table.bind(cmd, selected.layout);
+			SampledBindings selected_samplers;
+			foreach (declared : selected.shader.bindings)
+			{
+				if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+				if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING) continue;
+				selected_samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
+			}
+			if (pipeline_declares_binding(selected, SHADOW_ATLAS_COMPARE_BINDING))
+			{
+				selected_samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
+					self.shadow_manager.atlas.compare_descriptor(
+						true, self.shadow_manager.atlas.static_initialized));
+			}
+			selected_samplers.push(cmd, selected);
 			MeshPush push = {
 				.frame = map.frame.address,
 				.instances = map.instances.address + (ulong)i * Instance::size,
 				.draw = map.draws.address + (ulong)i * DrawRecord::size,
 			};
-			vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, MeshPush::size, &push);
+			char[PUSH_BUDGET] pushed = {};
+			mem::copy(&pushed, &push, MeshPush::size);
+			Material* material = self.material(node.material);
+			uint push_size = selected.shader.push_size;
+			if (material != null && push_size > MATERIAL_PUSH_START)
+			{
+				mem::copy(&pushed[MATERIAL_PUSH_START], &material.block[MATERIAL_PUSH_START],
+					(sz)(push_size - MATERIAL_PUSH_START));
+				if (material.table_pointer != NO_TABLE_POINTER && self.table_address != 0)
+				{
+					ulong table = self.table_address + (ulong)material.table_offset;
+					mem::copy(&pushed[material.table_pointer], &table, ulong::size);
+				}
+			}
+			vk::cmdPushConstants(cmd, selected.layout, selected.shader.stages, 0, push_size, &pushed);
 			vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 			vk::cmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);
 		}
@@ -1350,7 +1599,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 1;
+const uint LIGHTMAP_FILE_VERSION = 3;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1368,6 +1617,7 @@ struct LightmapHeader
 	// this scene's is a bake of a different lighting and is refused.
 	uint signature;
 	float density;
+	ulong camera_signature;
 	// FNV-1a over everything after this header — the records and the texels.
 	ulong hash;
 	ulong texel_bytes;
@@ -1385,6 +1635,7 @@ struct LightmapFileTile
 	uint y;
 	uint size;
 	float density;
+	ulong material_signature;
 }
 
 // What one copy is called, for a file that has to find it again in a scene the
@@ -1571,6 +1822,7 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 				.y = tile.y,
 				.size = tile.size,
 				.density = map.density,
+				.material_signature = tile.material_signature,
 			};
 		}
 	};
@@ -1586,6 +1838,7 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 		.tiles = (uint)tiles.len,
 		.signature = map.signature,
 		.density = map.density,
+		.camera_signature = map.camera_signature,
 		.hash = hash_bytes(KEY_SEED, &file[LightmapHeader::size], total - LightmapHeader::size),
 		.texel_bytes = texel_bytes,
 	};
@@ -1637,6 +1890,11 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	if (header.version != LIGHTMAP_FILE_VERSION) return LIGHTMAP_BAD_FILE~;
 	if (header.format != (uint)LIGHTMAP_FORMAT) return LIGHTMAP_BAD_FILE~;
 	if (header.tiles == 0 || header.side == 0) return LIGHTMAP_BAD_FILE~;
+	Vec3 load_eye = self.camera.eye();
+	Matrix4f load_view_projection = self.camera.view_projection(self.aspect);
+	ulong load_camera = hash_bytes(KEY_SEED, &load_eye, Vec3::size);
+	load_camera = hash_bytes(load_camera, &load_view_projection, Matrix4f::size);
+	if (header.camera_signature != load_camera) return LIGHTMAP_STALE~;
 
 	usz records = (usz)header.tiles * LightmapFileTile::size;
 	usz total = LightmapHeader::size + records + (usz)header.texel_bytes;
@@ -1681,8 +1939,10 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 				.x = saved[found].x,
 				.y = saved[found].y,
 				.size = saved[found].size,
+				.material_signature = self.lightmap_material_signature(node),
 			};
-			moved[i] = saved[found].world != lightmap_world_hash(node.world);
+			moved[i] = saved[found].world != lightmap_world_hash(node.world)
+				|| saved[found].material_signature != tiles[i].material_signature;
 			if (moved[i]) dirty++;
 		}
 
@@ -1711,7 +1971,7 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 		{
 			uint inner = tiles[i].size - 2 * LIGHTMAP_TILE_PAD;
 			Node* node = &self.scene.nodes[tiles[i].node];
-			node.lightmap = {
+			node.lightmap = moved[i] ? (float[4]){ 0, 0, 0, 0 } : (float[4]){
 				(float)(tiles[i].x + LIGHTMAP_TILE_PAD) * inv,
 				(float)(tiles[i].y + LIGHTMAP_TILE_PAD) * inv,
 				(float)inner * inv,
@@ -1725,6 +1985,7 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	map.live = true;
 	map.revision++;
 	map.signature = header.signature;
+	map.camera_signature = header.camera_signature;
 	map.dirty = dirty;
 	map.seen = self.scene.lightmap_changes;
 	map.settle = 1;

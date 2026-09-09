@@ -628,7 +628,8 @@ fn void? PostPass.record_chain(
 	Assets* assets = null,
 	double now = 0,
 	float near_plane = 0,
-	float far_plane = 0
+	float far_plane = 0,
+	bool scene_cached = false
 )
 {
 	sz count = self.stages.len();
@@ -641,13 +642,16 @@ fn void? PostPass.record_chain(
 	// `set` call site would put the same number in two places for that.
 	self.now = now;
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				shader_read_barrier(self.scene.image),
-				depth_read_barrier(target.depth),
-			}
-		));
+	if (!scene_cached)
+	{
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
+			.setImageMemoryBarriers(
+				{
+					shader_read_barrier(self.scene.image),
+					depth_read_barrier(target.depth),
+				}
+			));
+	}
 
 	foreach (i, boxed : self.stages)
 	{

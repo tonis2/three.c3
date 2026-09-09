@@ -411,6 +411,103 @@ fn void Target.begin_render_to(
 }
 
 <*
+ Reopens a cached scene attachment and clears only the region which will be
+ replayed. `sampled` describes the layouts left by a post chain; otherwise the
+ colour is the final transfer source and depth is still an attachment.
+*>
+fn void Target.begin_cached_render_to(
+	&self,
+	vk::CommandBuffer cmd,
+	vk::Image image,
+	vk::ImageView view,
+	vk::Rect2D dirty,
+	float[4] clear,
+	bool sampled,
+	bool keep_depth = false
+)
+{
+	vk::ImageMemoryBarrier2 color = {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = sampled ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT : ACCESS_2_TRANSFER_READ_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_READ_BIT | ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.oldLayout = sampled ? IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	};
+	vk::ImageMemoryBarrier2 depth = {
+		...IMAGE_BARRIER,
+		.image = self.depth,
+		.srcStageMask = sampled && !keep_depth ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = sampled && !keep_depth ? ACCESS_2_SHADER_SAMPLED_READ_BIT
+			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = sampled && !keep_depth ? IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+			: IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color, depth }));
+
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
+		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL).setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
+	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
+		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL).setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+		.setColorAttachments({ color_attachment }).setDepthAttachment(&depth_attachment);
+	vk::cmdBeginRendering(cmd, &rendering);
+
+	float[4] clear_linear = srgb_to_linear_rgb(clear);
+	vk::ClearAttachment[2] attachments = {
+		{ .aspectMask = IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0,
+			.clearValue = { .color = { .float32 = clear_linear } } },
+		{ .aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+			.clearValue = { .depthStencil = { 1.0, 0 } } },
+	};
+	vk::ClearRect area = { .rect = dirty, .baseArrayLayer = 0, .layerCount = 1 };
+	vk::cmdClearAttachments(cmd, keep_depth ? 1 : 2, &attachments[0], 1, &area);
+	set_full_viewport(cmd, self.extent, true);
+	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { dirty });
+}
+
+// Rebuilds depth only inside a cached scene's dirty region.
+fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty, bool sampled)
+{
+	vk::ImageMemoryBarrier2 depth = {
+		...IMAGE_BARRIER,
+		.image = self.depth,
+		.srcStageMask = sampled ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT
+			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = sampled ? IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+			: IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth }));
+	vk::RenderingAttachmentInfo attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
+		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD).setStoreOp(ATTACHMENT_STORE_OP_STORE);
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent })
+		.setLayerCount(1).setDepthAttachment(&attachment);
+	vk::cmdBeginRendering(cmd, &rendering);
+	vk::ClearAttachment clear = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT,
+		.clearValue = { .depthStencil = { 1.0, 0 } } };
+	vk::ClearRect area = { .rect = dirty, .baseArrayLayer = 0, .layerCount = 1 };
+	vk::cmdClearAttachments(cmd, 1, &clear, 1, &area);
+	set_full_viewport(cmd, self.extent, true);
+	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { dirty });
+}
+
+<*
  Reopens the finished frame as a colour attachment, to draw an interface over it.
 
  The third way a rendering starts here, and the only one that keeps what is

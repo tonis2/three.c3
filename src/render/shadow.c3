@@ -223,6 +223,9 @@ struct ShadowGpuView
 	Matrix4f view_projection;
 	float[4] atlas;
 	float[4] params;
+	// xy..zw is the current dynamic caster footprint in tile-local UV. Zero when
+	// the view has no dynamic overlay.
+	float[4] dynamic_rect;
 	// Receiver-plane constants, filled by `shadow_gpu_view`. See it for what the
 	// twelve floats are and what the shader does with them.
 	float[4] plane_x;

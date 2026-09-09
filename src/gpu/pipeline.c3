@@ -467,6 +467,7 @@ struct DrawRecord
 	ulong positions;
 	ulong normals;
 	ulong uvs;
+	ulong lightmap_uvs;
 	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`. The
 	// first field added since the record replaced the push block, and the whole of
 	// what it cost is this line and 8 bytes per bucket per frame.
@@ -655,7 +656,7 @@ $assert @layout_matches(
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
-$assert DrawRecord::size == 376 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+$assert DrawRecord::size == 384 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 400 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 80 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 180 : "Instance no longer matches shaders/mesh.slang";
@@ -778,22 +779,23 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "positions", 0, 8 },
 	{ "normals", 8, 8 },
 	{ "uvs", 16, 8 },
-	{ "colors", 24, 8 },
-	{ "joints", 32, 8 },
-	{ "weights", 40, 8 },
-	{ "palette", 48, 8 },
-	{ "posed", 56, 8 },
-	{ "morph", 64, 8 },
-	{ "base_color", 72, 16 },
-	{ "flags", 88, 4 },
-	{ "skin_stride", 92, 4 },
-	{ "morph_targets", 96, 4 },
-	{ "uv_transform", 100, 16 },
-	{ "surface", 116, 16 },
-	{ "uv_variant_count", 132, 4 },
-	{ "uv_variants", 136, 128 },
-	{ "emissive", 264, 16 },
-	{ "texture_index", 280, 96 },
+	{ "lightmap_uvs", 24, 8 },
+	{ "colors", 32, 8 },
+	{ "joints", 40, 8 },
+	{ "weights", 48, 8 },
+	{ "palette", 56, 8 },
+	{ "posed", 64, 8 },
+	{ "morph", 72, 8 },
+	{ "base_color", 80, 16 },
+	{ "flags", 96, 4 },
+	{ "skin_stride", 100, 4 },
+	{ "morph_targets", 104, 4 },
+	{ "uv_transform", 108, 16 },
+	{ "surface", 124, 16 },
+	{ "uv_variant_count", 140, 4 },
+	{ "uv_variants", 144, 128 },
+	{ "emissive", 272, 16 },
+	{ "texture_index", 288, 96 },
 };
 
 // How many of those `shaders/mesh.slang` declares in its own `struct Draw`. All

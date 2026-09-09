@@ -449,6 +449,41 @@ fn void moving_a_static_receiver_dirties_the_tiles_around_it() @test
 }
 
 <*
+ A dynamic caster does not invalidate a whole ground tile. Its current shadow
+ footprint locally bypasses the cached diffuse, so the moving shadow still agrees
+ with the fully live picture while the rest of the ground remains cached.
+*>
+fn void a_dynamic_caster_shadow_survives_on_a_baked_ground() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		image::Image warm = renderer.capture()!!; warm.free();
+		three::RunResult baked = run.run(
+			`point.baked = true; disk.baked = true;
+			 globalThis.dyn = three.scene.children[2];
+			 return three.lights.bake({ texelsPerMetre: 32 }).receivers;`);
+		defer baked.free();
+		test::@check(baked.value == "1", "the ground was baked: %s", baked.value);
+
+		three::RunResult moved = run.run(`dyn.position.set(0, 0.5, 0); return dyn.static;`);
+		defer moved.free();
+		test::@check(moved.value == "false", "the moving caster stayed dynamic: %s", moved.value);
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		three::RunResult live_mode = run.run(`point.baked = false; disk.baked = false; return 1;`);
+		defer live_mode.free();
+		image::Image live = renderer.capture()!!;
+		defer live.free();
+		test::@check(worst_channel(&cached, &live) <= 64,
+			"the dynamic shadow remains the live one over cached ground, worst %d",
+			worst_channel(&cached, &live));
+	};
+}
+
+<*
  A saved bake loads back as the same atlas and asks for no bake at all.
 
  Two checks and they are different questions. The picture is the one the bake
@@ -651,6 +686,85 @@ fn void a_receiver_that_moved_since_the_save_is_the_only_dirty_tile() @test
 				"and the loaded-plus-caught-up picture is the freshly baked one — worst channel %d",
 				worst_channel(&caught, &fresh)
 			);
+		};
+	};
+}
+
+<*
+ A generated layered material uses its own lightmap program, including its final
+ mapped normal. Because parallax is viewed from the camera, moving that camera
+ drops the tile to the real-time path and also makes a persisted bake incompatible.
+*>
+fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@with_assets(run)
+		{
+			three::RunResult built = run.run(`
+				const scene = new three.Scene(); three.scene = scene;
+				const normal = new three.DataTexture(
+					new Uint8Array([210, 128, 220, 255]), 1, 1,
+					{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
+				const mat = new three.LayeredMaterial({ normal, bump: { distance: 0.001 }, layers: [] });
+				mat.reflectance = 1; mat.roughness = 0.3;
+				const plane = new three.Mesh(new three.PlaneGeometry(4, 4), mat);
+				plane.rotation.x = -Math.PI / 2; plane.static = true; scene.add(plane);
+				globalThis.layeredPlane = plane;
+				for (let i = 0; i < 4; i++) {
+					const extraMat = new three.LayeredMaterial({
+						normal, reflectance: 0.2 + i * 0.05, layers: [] });
+					const extra = new three.Mesh(new three.PlaneGeometry(1, 1), extraMat);
+					extra.position.x = 20 + i * 2; extra.rotation.x = -Math.PI / 2;
+					extra.static = true; scene.add(extra);
+				}
+				globalThis.light = three.lights.add(
+					{ position: [1.5, 3, 1], range: 12, color: 0xffffff, intensity: 7 });
+				light.shadow = false;
+				three.light.intensity = 0; three.light.ambient = 0;
+				three.camera.lookAt(0, 0, 0); three.camera.orbit(0, 45, 7);
+				return 1;`);
+			defer built.free();
+			test::@check(built.ok, "the layered scene built: %s", built.error);
+
+			image::Image live = renderer.capture()!!;
+			defer live.free();
+			three::RunResult baked = run.run(
+				`light.baked = true; const b = three.lights.bake({ texelsPerMetre: 32 });
+				 three.lights.saveBake('layered.lightmap'); return [b.receivers, b.skipped].join(' ');`);
+			defer baked.free();
+			test::@check(baked.value == `"5 0"`, "five layered variants got tiles: %s", baked.value);
+			image::Image cached = renderer.capture()!!;
+			defer cached.free();
+			uint live_middle = luma_at(&live, W / 2, H / 2);
+			uint cached_middle = luma_at(&cached, W / 2, H / 2);
+			uint middle_delta = live_middle > cached_middle
+				? live_middle - cached_middle : cached_middle - live_middle;
+			test::@check(middle_delta <= 12,
+				"the mapped normal gives the same interior irradiance, luma %d cached %d delta %d",
+				live_middle, cached_middle, middle_delta);
+			three::RunResult changed = run.run(`layeredPlane.material.repeat = [2, 2]; return 1;`);
+			defer changed.free();
+			image::Image material_fallback = renderer.capture()!!; material_fallback.free();
+			three::RunResult material_dirty = run.run(`return three.stats().lightmapDirty;`);
+			defer material_dirty.free();
+			test::@check(material_dirty.value == "1",
+				"changing the layered normal coordinates dirties its tile: %s", material_dirty.value);
+			for (uint i = 0; i < 12; i++) { image::Image tick = renderer.capture()!!; tick.free(); }
+
+			three::RunResult moved = run.run(
+				`three.camera.orbit(18, 45, 7); return three.lights.loadBake('layered.lightmap') === null;`);
+			defer moved.free();
+			test::@check(moved.value == "true", "a bake from another camera is refused: %s", moved.value);
+			image::Image fallback = renderer.capture()!!;
+			fallback.free();
+			three::RunResult dirty = run.run(`return three.stats().lightmapDirty;`);
+			defer dirty.free();
+			test::@check(dirty.value == "5", "all camera-dependent tiles fell back while dirty: %s", dirty.value);
+			for (uint i = 0; i < 12; i++) { image::Image tick = renderer.capture()!!; tick.free(); }
+			three::RunResult settled = run.run(`return three.stats().lightmapDirty;`);
+			defer settled.free();
+			test::@check(settled.value == "0", "the camera-dependent tile rebaked: %s", settled.value);
 		};
 	};
 }

@@ -285,6 +285,10 @@ struct Renderer
 	*>
 	ulong rendered_key;
 	bool rendered_once;
+	// Shaded scene colour and depth survive between compatible window frames.
+	SceneCache scene_cache;
+	// Test and diagnostic escape hatch: force the traditional full redraw.
+	bool scene_cache_disabled;
 
 	<*
 	 Draw every frame, whatever the key says — `three.alwaysRender`.
@@ -300,6 +304,9 @@ struct Renderer
 	ulong skipped_frames;
 	// Frames that were drawn — `stats().renderedFrames`.
 	ulong rendered_frames;
+	// Scene pixels rebuilt and preserved across submitted frames.
+	ulong scene_cache_pixels;
+	ulong scene_cache_reused;
 }
 
 <*
@@ -433,6 +440,7 @@ fn void Renderer.free(&self)
 	self.ui.free();
 	self.post.release_textures(&self.gpu, &self.pass.assets);
 	self.post.free(&self.gpu);
+	self.scene_cache.free();
 	self.pass.free(&self.gpu);
 	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
@@ -573,6 +581,33 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	self.rendered_once = may_skip;
 	self.rendered_frames++;
 
+	// The exact frame key changed, but most of the shaded scene may not have.
+	// Explicit captures use the same cache when their target has an uncontaminated
+	// scene image; `scene_cache_disabled` gives comparisons a forced-full path.
+	ulong cache_global = KEY_SEED;
+	cache_global = @hash_value(cache_global, self.clear);
+	cache_global = @hash_value(cache_global, posted);
+	// Extent alone cannot distinguish a target rebuilt at the same size.
+	cache_global = @hash_value(cache_global, self.target.color);
+	cache_global = @hash_value(cache_global, self.target.depth);
+	if (posted) cache_global = @hash_value(cache_global, self.post.scene.image);
+	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
+	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial
+		&& (posted || presenting || !self.ui.active());
+	vk::Rect2D cache_dirty = cache_full;
+	if (cache_safe) { cache_dirty = self.pass.scene_cache_update(&self.scene_cache, &self.target, cache_global); }
+	else { self.scene_cache.invalidate(); }
+	bool cache_partial = cache_safe
+		&& self.scene_cache.valid && !scene_cache_empty(cache_dirty)
+		&& !scene_cache_same(cache_dirty, cache_full);
+	bool cache_reuse = cache_safe && self.scene_cache.valid && scene_cache_empty(cache_dirty);
+	ulong frame_pixels = (ulong)self.target.extent.width * (ulong)self.target.extent.height;
+	ulong dirty_pixels = cache_partial
+		? (ulong)cache_dirty.extent.width * (ulong)cache_dirty.extent.height
+		: (cache_reuse ? 0 : frame_pixels);
+	self.scene_cache_pixels += dirty_pixels;
+	self.scene_cache_reused += frame_pixels - dirty_pixels;
+
 	// The shadow map, and it is a line rather than a branch. It begins and ends a
 	// rendering of its own, so it has to be here and not inside the block below;
 	// it records nothing at all in a frame with shadows off, so an unshadowed
@@ -586,17 +621,31 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// this timestamp and `stats().shadowMs` reads 0. The alternative is a frame
 	// that reports no timings at all — see `gpu/timing.c3`.
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
-	self.pass.record_ambient_occlusion(cmd);
+	if (!cache_reuse) self.pass.record_ambient_occlusion(cmd);
 
 	// The depth prepass, and outside the query below on purpose: it is what makes
 	// `fragmentsShaded` mean "how many times the scene pass shaded a pixel" rather
 	// than that plus the prepass's own cut-out fragments. `docs/stats.md` says so.
-	bool prepassed = self.pass.record_depth_prepass(cmd, &self.target);
+	self.pass.cache_rect = cache_dirty;
+	bool prepassed = cache_reuse ? false
+		: self.pass.record_depth_prepass(cmd, &self.target, cache_partial, posted);
 
 	// Around the scene rendering and outside it — `gpu/timing.c3` says why.
 	self.timer.scene_begin(cmd, slot);
 
-	if (posted)
+	if (cache_reuse)
+	{
+		// The preserved scene attachment is already in the layout its next
+		// consumer expects. There is no rendering to open or clear.
+	}
+	else if (cache_partial)
+	{
+		self.target.begin_cached_render_to(cmd,
+			posted ? self.post.scene.image : self.target.color,
+			posted ? self.post.scene.view : self.target.color_view,
+			cache_dirty, self.clear, posted, prepassed);
+	}
+	else if (posted)
 	{
 		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear, prepassed);
 	}
@@ -609,12 +658,18 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// call, on purpose: the frame path does not grow a branch per kind of thing
 	// that can be drawn. A pass that was never given a pipeline records nothing,
 	// which lets a headless clear-colour render work with no shader on disk.
-	self.pass.record(cmd);
+	if (!cache_reuse)
+	{
+		self.pass.cache_rect = cache_dirty;
+		self.pass.cache_partial = cache_partial;
+		self.pass.record(cmd);
+		self.pass.cache_partial = false;
+		vk::cmdEndRendering(cmd);
+	}
 
 	// The scene's rendering ends here on both paths, which lets the chain below be
 	// a list of passes rather than a thing that also has to know how the frame
 	// started.
-	vk::cmdEndRendering(cmd);
 	self.timer.scene_end(cmd, slot);
 	self.timer.mark(cmd, slot, FrameMark.SCENE);
 
@@ -629,7 +684,8 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 			&self.pass.assets,
 			self.pass.clock.time,
 			self.pass.camera.near_plane,
-			self.pass.camera.far_plane
+			self.pass.camera.far_plane,
+			cache_reuse
 		)!;
 	}
 
@@ -651,7 +707,9 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		vk::cmdEndRendering(cmd);
 	}
 
-	self.target.close(cmd);
+	// With no post pass a reused target was already left in TRANSFER_SRC by the
+	// previous frame. Closing it again would claim the wrong old layout.
+	if (posted || !cache_reuse) self.target.close(cmd);
 }
 
 <*

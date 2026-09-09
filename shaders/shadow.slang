@@ -86,6 +86,7 @@ struct ShadowGpuView
     float4x4 view_projection;
     float4 atlas;
     float4 params;
+    float4 dynamic_rect;
     // Frame constants for the receiver-plane gradient: row i of the cofactor of
     // `view_projection`'s upper-left 3x3 in xyz, and component i of that 3x3's
     // inverse-transpose times the projection's w row in w.
@@ -166,6 +167,7 @@ struct Draw
     float3* positions;
     float3* normals;
     float2* uvs;
+    float2* lightmap_uvs;
     float4* colors;
     uint4* joints;
     float4* weights;
