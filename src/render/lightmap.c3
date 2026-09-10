@@ -149,6 +149,9 @@ struct LightmapTile
 	// The whole rectangle, margin included. The rendered part is this minus two
 	// pads on each axis.
 	uint size;
+	// Desired inner side before atlas-wide scaling. It travels with the receiver
+	// when packing sorts tiles between attempts.
+	float requested_size;
 	ulong material_signature;
 }
 
@@ -1121,10 +1124,6 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	List{LightmapTile} tiles;
 	tiles.init(mem, 64);
 	defer tiles.free();
-	List{float} wanted;
-	wanted.init(mem, 64);
-	defer wanted.free();
-
 	uint skipped = 0;
 	sz pool = self.scene.nodes.len();
 	if (pool == 0) return LIGHTMAP_NO_ATLAS~;
@@ -1135,10 +1134,9 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	uint found = self.lightmap_receivers(slots, sides, density, &skipped);
 	for (uint i = 0; i < found; i++)
 	{
-		wanted.push(sides[i]);
 		tiles.push({
 			.node = slots[i], .generation = self.scene.nodes[slots[i]].generation,
-			.x = 0, .y = 0, .size = 0,
+			.x = 0, .y = 0, .size = 0, .requested_size = sides[i],
 		});
 	}
 	if (tiles.len() == 0) return LIGHTMAP_NO_ATLAS~;
@@ -1151,9 +1149,9 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	for (uint attempt = 0; attempt < 16 && side == 0; attempt++)
 	{
 		usz total = 0;
-		foreach (i, &tile : tiles)
+		foreach (&tile : tiles)
 		{
-			float at = wanted[i] * scale;
+			float at = tile.requested_size * scale;
 			uint inner = (uint)math::ceil((double)at);
 			if (inner < LIGHTMAP_TILE_MIN) inner = LIGHTMAP_TILE_MIN;
 			if (inner > LIGHTMAP_TILE_MAX) inner = LIGHTMAP_TILE_MAX;
@@ -1653,7 +1651,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 5;
+const uint LIGHTMAP_FILE_VERSION = 6;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
