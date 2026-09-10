@@ -5182,6 +5182,10 @@ fn void Assets.free(&self, Gpu* gpu)
 		if (!asset.alive) continue;
 		foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
 		asset.meshes.free();
+		// In `free_slot`'s order, and for its reason: a baked navigation profile is
+		// plain heap the same way the nodes and the bodies are, so the wholesale
+		// teardown owes it too.
+		free_navigation(asset);
 		free_nodes(asset);
 		free_physics(asset);
 		free_stream(asset);

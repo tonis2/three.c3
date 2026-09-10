@@ -390,6 +390,7 @@ enum ToneMap : char
 {
 	NONE,
 	AGX,
+	AGX_BLENDER,
 }
 
 <*
@@ -476,8 +477,103 @@ float3 post(Post p)
 	return clamp(c, 0.0, 1.0);
 }`;
 
+<*
+ The same transform with Blender's own contrast curve in place of the fit.
+
+ Everything around the curve is shared with `TONEMAP_AGX_BODY` — the same
+ rotation into Rec.2020, the same inset, the same 16.5-stop log window, the same
+ outset — because that part is not where the two part company. The curve is.
+
+ AgX's contrast is a sigmoid built from two hyperbolic segments meeting at a
+ pivot: `y = x / (1 + x^p)^(1/p)` run backwards below the pivot and forwards
+ above it, each scaled so the curve reaches 0 at the bottom of the window and 1
+ at the top. `agx_contrast` in the body above is a seven-term polynomial fitted
+ to that sigmoid, and it is a *fit*: measured against the curve Blender actually
+ applies it is out by up to 0.052, low through the toe and high from the pivot
+ up, which reads as crushed shadows and lifted mid-tones — most of a night
+ scene.
+
+ The five parameters were recovered from Blender rather than copied from a
+ config: a 2048-step linear ramp from 2^-16 to 2^4 rendered through the AgX view
+ transform at 16 bits, the display encode and the 2.2 undone, and the sigmoid
+ fitted to what came back. The residual is 0.00176 at worst and 0.00051 rms,
+ which is a fifth of an 8-bit level once the 2.2 and the encode are back on —
+ against 0.052 and 0.023 for the polynomial. `tools/ff9_blender_reference.py`
+ renders the comparison frames this was checked against.
+
+ The two scales are constants because the five parameters are: they are what
+ makes `curve(0)` exactly 0 and `curve(1)` exactly 1, and solving for them per
+ pixel would be two `pow`s for a number that never moves.
+*>
+const String TONEMAP_AGX_BLENDER_BODY = `static const float3x3 AGX_SRGB_TO_REC2020 = float3x3(
+	float3(0.6274, 0.3293, 0.0433),
+	float3(0.0691, 0.9195, 0.0113),
+	float3(0.0164, 0.0880, 0.8956));
+
+static const float3x3 AGX_REC2020_TO_SRGB = float3x3(
+	float3(1.6605, -0.5876, -0.0728),
+	float3(-0.1246, 1.1329, -0.0083),
+	float3(-0.0182, -0.1006, 1.1187));
+
+static const float3x3 AGX_INSET = float3x3(
+	float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
+	float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
+	float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
+
+static const float3x3 AGX_OUTSET = float3x3(
+	float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
+	float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
+	float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
+
+static const float AGX_PIVOT_X = 0.6186810;
+static const float AGX_PIVOT_Y = 0.4886874;
+static const float AGX_SLOPE = 2.4290370;
+static const float AGX_TOE_POWER = 1.7141845;
+static const float AGX_SHOULDER_POWER = 1.4540615;
+static const float AGX_TOE_SCALE = 0.5357367;
+static const float AGX_SHOULDER_SCALE = 0.7450037;
+
+// The segment, and the reason the negative half is kept rather than clamped: at
+// any x one of the two calls below has a negative argument, and the max inside the
+// power keeps that branch finite so the select can throw it away. Clamping the
+// argument itself would fold the wrong branch onto the pivot instead.
+float3 agx_segment(float3 u, float power)
+{
+	return u * pow(1.0 + pow(max(u, 0.0), power), -1.0 / power);
+}
+
+float3 agx_contrast(float3 x)
+{
+	float3 toe = AGX_PIVOT_Y - AGX_TOE_SCALE
+		* agx_segment((AGX_PIVOT_X - x) * (AGX_SLOPE / AGX_TOE_SCALE), AGX_TOE_POWER);
+	float3 shoulder = AGX_PIVOT_Y + AGX_SHOULDER_SCALE
+		* agx_segment((x - AGX_PIVOT_X) * (AGX_SLOPE / AGX_SHOULDER_SCALE), AGX_SHOULDER_POWER);
+	return lerp(shoulder, toe, step(x, float3(AGX_PIVOT_X)));
+}
+
+float3 post(Post p)
+{
+	float3 c = p.color * exposure;
+	c = mul(AGX_SRGB_TO_REC2020, c);
+	c = mul(AGX_INSET, c);
+	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
+	c = agx_contrast(c);
+	c = mul(AGX_OUTSET, c);
+	c = pow(max(c, 0.0), 2.2);
+	c = mul(AGX_REC2020_TO_SRGB, c);
+	return clamp(c, 0.0, 1.0);
+}`;
+
 // The body one mode is.
-fn String tonemap_body(ToneMap mode) => mode == ToneMap.AGX ? TONEMAP_AGX_BODY : TONEMAP_BODY;
+fn String tonemap_body(ToneMap mode)
+{
+	switch (mode)
+	{
+		case AGX: return TONEMAP_AGX_BODY;
+		case AGX_BLENDER: return TONEMAP_AGX_BLENDER_BODY;
+		default: return TONEMAP_BODY;
+	}
+}
 
 // What AgX's exposure uniform is called, in the body and in the push block.
 const String TONEMAP_EXPOSURE = "exposure";
@@ -509,11 +605,11 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 	self.tonemap.pipeline = { };
 
 	ToneMap mode = self.tonemap_mode;
-	// Only AgX declares one. The identity would have Slang drop an unread uniform
-	// before reflection saw it, which is a push field that is there on one build
-	// and not on the next.
+	// Only the curves declare one. The identity would have Slang drop an unread
+	// uniform before reflection saw it, which is a push field that is there on one
+	// build and not on the next.
 	MaterialUniform[1] uniforms = { { .name = TONEMAP_EXPOSURE, .components = 1, .rows = 1 } };
-	MaterialUniform[] declared = mode == ToneMap.AGX ? uniforms[..] : {};
+	MaterialUniform[] declared = mode != ToneMap.NONE ? uniforms[..] : {};
 
 	@pool()
 	{

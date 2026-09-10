@@ -589,6 +589,74 @@ fn void the_fitted_area_lights_match_the_numeric_integration() @test
 	renderer.pass.area_reference = false;
 }
 
+<*
+ A wide emitter close to what it lights, where the horizon runs through it.
+
+ The test above looks at two emitters small enough in the sky that any horizon
+ term is nearly right. This one is the case that separated a real clip from the
+ sphere approximation that used to stand in for one: a disk wider than its own
+ height above the plane, so most of the surface sees it at a grazing angle and
+ the far half sees only part of it. Measured against the numeric integration the
+ approximation ran 1.7x bright there and fell to zero where a wide emitter still
+ has half of itself above the horizon; the clip holds the frame's energy to a
+ fraction of a percent.
+*>
+fn void a_wide_area_light_agrees_with_the_numeric_integration_at_grazing_angles() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		scene.add(new three.Mesh(new three.PlaneGeometry(80, 60), new three.MeshLambertMaterial({
+			color: 0x909090, roughness: 0.9, metalness: 0, reflectance: 0
+		})));
+		three.light.intensity = 0;
+		three.light.ambient = 0;
+		// A disk 8.8 across, 8 out from the plane: small enough in the sky at the
+		// edges of the frame that the numeric integration is still a yardstick,
+		// wide enough near the middle that the horizon term has to be right.
+		three.lights.add({ shape: 'disk', position: [0, 0, 8], range: 200,
+			right: [1, 0, 0], up: [0, 1, 0], width: 8.8, height: 8.8,
+			color: [1.0, 0.95, 0.9], intensity: 4000 });
+		three.camera.target.set(0, 0, 0);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the wide-emitter scene built: %s", built.error);
+
+	float[2] yaw = { 0, 62 };
+	float[2] distance = { 40, 46 };
+	String[2] view = { "head-on", "grazing" };
+	for (uint i = 0; i < 2; i++)
+	{
+		renderer.pass.camera.yaw = yaw[i];
+		renderer.pass.camera.pitch = 0;
+		renderer.pass.camera.distance = distance[i];
+
+		renderer.pass.area_reference = false;
+		image::Image fitted = renderer.capture()!!;
+		defer fitted.free();
+		test::@check(renderer.pass.ltc.live, "the fit is on the device");
+
+		renderer.pass.area_reference = true;
+		image::Image numeric = renderer.capture()!!;
+		defer numeric.free();
+
+		double mean = mean_rgb_difference(&fitted, &numeric);
+		test::@check(mean < 2.0,
+			"the %s view differs by %.2f channel levels on average", view[i], mean);
+		long lit = rgb_sum(&numeric);
+		double energy = lit == 0 ? 0.0 : (double)(rgb_sum(&fitted) - lit) / (double)lit;
+		test::@check(lit > 0 && energy > -0.02 && energy < 0.02,
+			"the %s view carries %.3f of the numeric frame's energy", view[i], 1.0 + energy);
+	}
+
+	renderer.pass.area_reference = false;
+}
+
 fn void a_held_light_tracks_its_stable_id_across_remove() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
