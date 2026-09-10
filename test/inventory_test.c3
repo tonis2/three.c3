@@ -5,7 +5,7 @@
  and — usefully — `.py` files beside them, so the filter is tested by the fixture
  layout rather than by a mock of one.
 
- There are three glTFs there, which matters more than it looks. A directory
+	There are several glTFs there, which matters more than it looks. A directory
  holding exactly one file cannot tell a working listing apart from a function
  that describes whatever it finds first, and it lets every check index `found[0]`
  and call that a test. So nothing here indexes: each check names the file it is
@@ -42,7 +42,7 @@ fn void a_directory_is_described_without_being_loaded() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 14, "every glTF in test/fixtures (%d)", found.len());
+	test::@check(found.len() == 16, "every glTF in test/fixtures (%d)", found.len());
 
 	three::InventoryEntry* entry = named(&found, "textured.glb");
 	if (entry == null) return;

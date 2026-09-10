@@ -15,10 +15,11 @@
 //     });
 //     door.dispose();                                   // when the goal changes
 //
-// ## Nothing is baked for you
+// ## Loading or baking is explicit
 //
-// `three.nav.bake()` has to be called, and it has to be called after the level
-// is built. Baking on demand inside `path()` would hide a cost that
+// Call `scene.nav.load(asset)` for a profile embedded in a glTF, or call
+// `scene.nav.bake()` after the level is built to voxelize its live geometry.
+// Doing either on demand inside `path()` would hide a cost that
 // `three.nav.stats()` exists to make visible, and it would rebake on the first
 // call after anything moved — which for a scene with a moving door is every
 // frame.
@@ -160,11 +161,8 @@ export function makeSceneNav(scene) {
 	// crowd of people and a herd of vehicles walk different graphs over the same
 	// triangles. (One at a time, though: a second bake replaces the first.)
 	//
-	// **`cell` decides everything.** It is the resolution and it is also the
-	// largest step that can be climbed, because two cells are connected when
-	// they are adjacent and one cell up. Half a metre is a generous stair and a
-	// cheap bake; a scene with finer stairs wants a finer cell and pays for it
-	// as the CUBE.
+	// `cell` controls grid resolution and memory cost. `stepHeight` (or `step`)
+	// independently controls the largest climb, and defaults to one cell.
 	//
 	// Answers with the same object `stats()` does, or null when there was no
 	// standing room in the region — an empty scene, a scene of walls, or a
@@ -178,21 +176,42 @@ export function makeSceneNav(scene) {
 		if (!(Number.isFinite(cell) && cell > 0)) {
 			throw new RangeError(`three.nav.bake({ cell }) wants a positive cell size, not ${options?.cell}`);
 		}
+		const radius = +(options?.radius ?? 0.35);
+		const height = +(options?.height ?? 1.8);
+		const slope = +(options?.slope ?? 50);
+		const stepHeight = +(options?.stepHeight ?? options?.step ?? cell);
+		if (!(Number.isFinite(radius) && radius >= 0)) throw new RangeError(`three.nav.bake({ radius }) wants a finite non-negative radius, not ${options?.radius}`);
+		if (!(Number.isFinite(height) && height > 0)) throw new RangeError(`three.nav.bake({ height }) wants a finite positive height, not ${options?.height}`);
+		if (!(Number.isFinite(slope) && slope >= 0 && slope < 90)) throw new RangeError(`three.nav.bake({ slope }) wants a finite slope from 0 up to 90 degrees, not ${options?.slope}`);
+		if (!(Number.isFinite(stepHeight) && stepHeight >= 0 && stepHeight <= height)) throw new RangeError(`three.nav.bake({ stepHeight }) wants a finite climb from 0 through agent height, not ${options?.stepHeight ?? options?.step}`);
 		let six = [0, 0, 0, 0, 0, 0];
 		const bounds = options?.bounds ?? null;
 		if (bounds !== null) {
 			const lo = readVector(bounds.min ?? bounds[0], 'three.nav.bake({ bounds })');
 			const hi = readVector(bounds.max ?? bounds[1], 'three.nav.bake({ bounds })');
+			if (!(hi[0] > lo[0] && hi[1] > lo[1] && hi[2] > lo[2])) {
+				throw new RangeError('three.nav.bake({ bounds }) wants max greater than min on every axis');
+			}
 			six = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
 		}
 		return H.navBake(
 			scene._sid,
 			cell,
-			+(options?.radius ?? 0.35),
-			+(options?.height ?? 1.8),
-			+(options?.slope ?? 50),
+			radius,
+			height,
+			slope,
+			stepHeight,
 			bounds !== null,
 			six[0], six[1], six[2], six[3], six[4], six[5]);
+	},
+
+	// Replace this scene's current bake with a navigation profile embedded in a
+	// loaded glTF asset. Omit the name to prefer "default", then the first profile.
+	load(asset, profile = '') {
+		if (!asset || !Number.isInteger(asset._a) || !Number.isInteger(asset._g)) {
+			throw new TypeError('scene.nav.load(asset, profile) wants an Asset from three.load()');
+		}
+		return H.navLoad(scene._sid, asset._a, asset._g, profile);
 	},
 
 	// What the last bake produced and what it cost, or null if there has not
@@ -249,7 +268,12 @@ export function makeSceneNav(scene) {
 	path(from, to, options = null) {
 		const [fx, fy, fz] = readVector(from, 'three.nav.path(from, to)');
 		const [tx, ty, tz] = readVector(to, 'three.nav.path(from, to)');
-		const limit = Math.max(2, Math.floor(+(options?.limit ?? 64)));
+		const requestedLimit = +(options?.limit ?? 64);
+		if (!(Number.isFinite(requestedLimit) && Number.isInteger(requestedLimit)
+				&& requestedLimit >= 2 && requestedLimit <= 65536)) {
+			throw new RangeError(`three.nav.path({ limit }) wants an integer from 2 through 65536, not ${options?.limit}`);
+		}
+		const limit = requestedLimit;
 		const out = new Float32Array(limit * 3);
 		const count = H.navPath(scene._sid, fx, fy, fz, tx, ty, tz, out.buffer, out.byteOffset, out.length);
 		const points = [];
