@@ -959,18 +959,19 @@ fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @tes
 			three::RunResult clean = run.run(`return three.stats().lightmapDirty;`);
 			defer clean.free();
 			test::@check(clean.value == "0", "the restored material settled before moving the camera: %s", clean.value);
+
 			three::RunResult moved = run.run(`three.camera.orbit(18, 45, 7); return 1;`);
 			defer moved.free();
 			image::Image moved_frame = renderer.capture()!!;
 			moved_frame.free();
 			three::RunResult dirty = run.run(`return three.stats().lightmapDirty;`);
 			defer dirty.free();
-			test::@check(dirty.value == "0", "camera movement leaves every layered tile live: %s", dirty.value);
+			test::@check(dirty.value == "5", "camera movement dirties every view-dependent layered tile: %s", dirty.value);
 			three::RunResult loaded = run.run(
 				`const b = three.lights.loadBake('layered.lightmap'); return b && [b.tiles, b.dirty].join(' ');`);
 			defer loaded.free();
-			test::@check(loaded.value == `"5 0"`,
-				"the persisted diffuse loads cleanly from another camera: %s", loaded.value);
+			test::@check(loaded.value == "null",
+				"the persisted view-dependent diffuse is rejected from another camera: %s", loaded.value);
 		};
 	};
 }

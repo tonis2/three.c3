@@ -913,17 +913,33 @@ direction need not be normalised. Answers with an intersection or null.
 
 # Navigation
 
+## scene.nav.load(asset, profile?)
+
+Replace this scene's navigation grid with a profile embedded in an Asset's glTF. The optional
+`CUSTOM_physics_navigation` root extension carries named version-1 profiles and a uint32 cell accessor.
+It belongs in `extensionsUsed`, not `extensionsRequired`, so assets without it remain ordinary glTF.
+
+Omit `profile` to prefer one named `default`, falling back to the first. A requested name that does not
+exist throws. An asset with no embedded navigation, or a profile whose payload cannot be loaded, answers
+null. Success answers the same object as `stats()`.
+
+Loading and baking are separate explicit operations. `load` does no voxelization and retains the authored
+`sourceHash` for stale-data checks; `bake` builds from the scene's current collision geometry. Either
+replaces the previous grid and its fields. `three.nav.load` operates on the rendered scene.
+
 ## three.nav.bake(options)
 
 Voxelize the scene's standing room, so `three.nav.path` and `three.nav.field` have a graph to work
-over. `{ cell, radius, height, slope, bounds }` — every one a property of the agent except the last.
+over. `{ cell, radius, height, stepHeight, slope, bounds }` — every one a property of the agent except the
+last. `step` is an alias for `stepHeight`; when neither is present it defaults to `cell`.
 
-Call it after the level is built. Nothing bakes on demand, because that would hide a cost and rebake on
-the first call after anything moved.
+Call it after the level is built. Nothing bakes or loads on demand, because that would hide a cost and
+silently rebuild on the first call after anything moved.
 
-`cell` decides everything: it is the resolution and also the largest step that can be climbed, because
-two cells are connected when they are adjacent and one cell up. Half a metre is a generous stair and a
-cheap bake; a finer one costs as the cube.
+`cell` controls voxel resolution and cost. `stepHeight` independently controls the largest rise between
+neighbouring horizontal columns, and may span several vertical cells. Match it to the character
+controller's step without making the whole grid finer. Diagonal links are conservative: both orthogonal
+sides must offer a walkable passage within the step height, so touching obstacle corners are not linked.
 
 Answers with the same object `stats()` does, or null when the region held no standing room, which is an
 answer and not an error. A second bake replaces the first.
@@ -936,8 +952,10 @@ number will look healthy while half your agents stand still.
 
 ## three.nav.stats()
 
-What the last bake produced and what it cost: `{ cell, radius, height, slope, voxels, solid, floor,
-walkable, components, largest, bakeMs, bounds }`, or null if there has not been one.
+What the current loaded or baked grid contains: `{ cell, radius, height, stepHeight, slope, voxels, solid,
+floor, walkable, components, largest, bakeMs, bounds, profile?, sourceHash? }`, or null if there is no grid.
+`profile` and `sourceHash` are present for embedded data and absent for a live bake. A loaded profile has
+`bakeMs: 0` and reports the counts recorded when the asset was authored.
 
 `bakeMs` and `voxels` decide whether baking is a level-boundary operation or a loading screen for your
 level rather than for a reference one.

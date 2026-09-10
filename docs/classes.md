@@ -2171,7 +2171,7 @@ numbers: a crowd steered by `three.steer`, a particle field, a chunked terrain.
 three.nav.field(goals)
 ```
 
-A solved flow field over the current `three.nav.bake()` — the solve kept, which is the whole reason there
+A solved flow field over the current grid from `scene.nav.load()` or `scene.nav.bake()` — the solve kept, which is the whole reason there
 are two navigation verbs instead of one. `three.nav.path` solves the entire reachable set and throws it
 away after one answer, so a hundred agents heading for the same door is a hundred solves for one field.
 

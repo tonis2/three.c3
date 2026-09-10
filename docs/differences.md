@@ -431,8 +431,10 @@ and answers a frame late.
 
 ## navigation
 
-`three.nav.bake({ cell, radius, height, slope })` voxelizes the scene's standing room, and nothing bakes it
-for you — call it after the level is built.
+Navigation is explicit in either form. `scene.nav.load(asset, profile)` adopts an optional pre-baked
+`CUSTOM_physics_navigation` profile embedded in a glTF; omit `profile` to prefer one named `default`, then
+the first. `scene.nav.bake({ cell, radius, height, stepHeight, slope })` voxelizes the live scene after it
+is built. Neither happens on the first path query. `three.nav` is the rendered scene's navigation object.
 
 Then two verbs, and the split is the design: `three.nav.path(from, to)` is one agent's route, and
 `three.nav.field(goals)` is a solve kept that a whole crowd samples. A path solves the entire reachable set
@@ -442,9 +444,10 @@ and throws it away, so a hundred agents heading for one door is a hundred solves
 Paths come back shortened against the actual geometry with a capsule sweep at the agent's own size, so they
 do not look like they are walking cell centres, and their waypoints sit on the floor.
 
-`cell` decides everything: it is the resolution and the largest step that can be climbed, because two cells
-are connected when they are adjacent and one cell up. `three.nav.stats()` reports voxels, walkable and
-bakeMs, which is how you find out whether the bake is a level-boundary operation or a loading screen.
+`cell` is grid resolution; `stepHeight` (or `step`) independently limits the rise between neighbouring
+columns. Diagonal links require a walkable passage through both orthogonal sides, so a route cannot cut
+through touching obstacle corners. `three.nav.stats()` reports settings, connectivity and counts; a loaded
+profile also reports `profile` and `sourceHash`, while a live bake reports its `bakeMs`.
 
 ## steering
 
