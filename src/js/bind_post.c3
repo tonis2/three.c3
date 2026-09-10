@@ -480,7 +480,13 @@ fn void js_tone_map_set(
 	int mode = arg_int(&js, argc, args, 0);
 	// Read defensively rather than as a second copy of the prelude's list: an
 	// ordinal this does not know is the identity, not an out-of-range enum.
-	ToneMap wanted = mode == 1 ? ToneMap.AGX : ToneMap.NONE;
+	ToneMap wanted = ToneMap.NONE;
+	switch (mode)
+	{
+		case 1: wanted = ToneMap.AGX;
+		case 2: wanted = ToneMap.AGX_BLENDER;
+		default: wanted = ToneMap.NONE;
+	}
 
 	self.renderer.post.set_tonemap_exposure((float)arg_float(&js, argc, args, 1));
 	if (catch err = self.renderer.post.set_tonemap(&self.renderer.gpu, &self.renderer.target, wanted))
