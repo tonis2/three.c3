@@ -176,6 +176,20 @@ fn void TextureTable.set_fallback(&self, Gpu* gpu, vk::DescriptorImageInfo info)
 	self.write_slot(gpu, self.fallback_slot(), info);
 }
 
+<*
+ Forgets the fallback, because the white it names is about to go.
+
+ The table outlives the `Assets` that owns the white — it is the `Gpu`'s — so
+ without this a release after `Assets.free` writes a destroyed view into the
+ set. The slots stay as they are: `PARTIALLY_BOUND` allows it, and the next
+ `set_fallback` points them at a live white again.
+*>
+fn void TextureTable.clear_fallback(&self)
+{
+	self.fallback = {};
+	self.has_fallback = false;
+}
+
 // One descriptor, written where the set already is. Update-after-bind, so a
 // command buffer recorded against this set stays valid.
 fn void TextureTable.write_slot(&self, Gpu* gpu, uint index, vk::DescriptorImageInfo info)

@@ -337,7 +337,10 @@ fn c3w::Window* Engine.viewer(&self) => self.windowed ? &self.window : null;
 
 fn void? run(Options opts)
 {
-	Engine engine;
+	// On the heap: at 65 KB the engine is over c3c's stack object limit, and
+	// there is exactly one of it for the whole run.
+	Engine* engine = mem::new(Engine);
+	defer mem::free(engine);
 	defer engine.close();
 	engine.open(opts.width, opts.height, opts.headless)!;
 
