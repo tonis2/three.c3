@@ -5209,10 +5209,11 @@ fn void Assets.free(&self, Gpu* gpu)
 
 	if (self.has_white)
 	{
+		// The table's fallback is this white's view; it must not outlive it.
+		gpu.texture_table.clear_fallback();
 		self.white.free(gpu);
 		self.has_white = false;
 	}
-
 
 	*self = { };
 }

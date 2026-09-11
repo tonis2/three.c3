@@ -1597,7 +1597,14 @@ VertexOutput vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     // Built from the displaced position, which is the whole point: a vertex that
     // moved and a clip position that did not would be geometry lit and textured
     // as though it were somewhere it is not drawn.
-    output.sv_position = mul(push.frame[0].view_projection, float4(v.position, 1.0));
+    //
+    // `world.w` rather than a literal 1.0, though they are the same number. The
+    // depth prepass tests this position with EQUAL against the one
+    // `shadow.slang` wrote, and a literal lets the compiler fold the last FMA
+    // differently — on Metal it does, and the surface tears along its iso-depth
+    // lines at grazing views. Keeping the vector `mul(model, ...)` produced
+    // keeps the expression the prepass and `mesh.slang` compile.
+    output.sv_position = mul(push.frame[0].view_projection, float4(v.position, world.w));
 #endif
     output.normal = v.normal;
     output.uv = v.uv;
