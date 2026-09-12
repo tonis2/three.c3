@@ -1,10 +1,10 @@
 // three.c3 shadow pass, ported to shady for the ShaderDef generator
 // (`src/shader/shadow.c3`).
 //
-// The declarations are gone: the push block comes from the C3 `ShadowPush` the
-// pass fills, and the structs it points at come from `abi.c3`'s wire list. What
-// is left is the constants and the vertex path - where one vertex of one copy
-// lands in the light's clip space.
+// The push block comes from the C3 `ShadowPush` the pass fills, and the structs
+// it points at come from `abi.c3`'s wire list. What is here is the stage
+// interface, the entry point, the constants, and the vertex path - where one
+// vertex of one copy lands in the light's clip space.
 //
 // **This file is the vertex half of both shadow pipelines.** The cut-out variant
 // is a second module (`shaders/shadow_cutout.shady`) because shady has no
@@ -28,6 +28,19 @@
 //    have already moved would swing with the limb;
 //  - the two skinning paths are here for the same reason the body is: a
 //    character's shadow has to be the shadow of the pose it is wearing.
+
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+	uint iid @builtin(instance_index);
+}
+
+// Depth, and nothing else: no normal and no colour ride along, and a uv rides
+// along only in the cut-out module.
+struct VertexOutput
+{
+	float4 sv_position @position;
+}
 
 // Where one vertex of one copy lands in the light's clip space.
 //
@@ -53,4 +66,11 @@ fn float4 posed_clip(uint vid, uint iid)
 	// character's space, the model matrix puts the character in the world, and the
 	// light looks at the world.
 	return push.projection * (instance.model * float4(position, 1.0));
+}
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	output.sv_position = posed_clip(input.vid, input.iid);
+	return output;
 }

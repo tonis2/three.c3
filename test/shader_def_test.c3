@@ -24,56 +24,49 @@ import std::io::path;
 import std::core::string;
 
 <*
- One whole program: two stages, a sampler, the bindless table, a feature, and a
- body under a `#line`.
+ One module's text, as a file writes it: the stage interface, a binding, the
+ bindless table, a feature, and the entry points - everything the file says for
+ itself. The generator adds the prologue above it and nothing else.
+*>
+const String A_MODULE = `
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+}
+
+struct VertexOutput
+{
+	float4 sv_position @position;
+	float2 clip;
+}
+
+Sampler2D sky_map @set(0) @binding(0);
+Sampler2D three_textures[] @set(1) @binding(0);
+const bool SHADOWS @spec(0) = true;
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	return output;
+}
+
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	return float4(1.0);
+}
+`;
+
+<*
+ A module through the def: the prologue C3 walks, then the text under its own
+ `#line`.
 
  `three::SkyPush` is the push block because it is the smallest wire struct with
  nothing to point at, which keeps the generated text short enough to read.
 *>
-macro String sky_program(String body_file)
+macro String emitted_module(String name, String text)
 {
-	three::ShaderIo[] io = {
-		{ "VertexIn", (three::ShaderIoField[]) {
-			{ "vid", "uint", "@builtin(vertex_index)" },
-		} },
-		{ "VertexOutput", (three::ShaderIoField[]) {
-			{ "sv_position", "float4", "@position" },
-			{ "clip", "float2", "" },
-		} },
-	};
-	three::ShaderResource[] resources = {
-		{ "sky_map", "Sampler2D", 0, 0, false },
-		{ "three_textures", "Sampler2D", 1, 0, true },
-	};
-	three::ShaderFeature[] features = { { "SHADOWS", "bool", "true", 0 } };
-	three::ShaderStage[] stages = {
-		// An entry point takes a struct, not a bare builtin - shady says so, and
-		// it is the same rule for a vertex stage as for a compute one. The
-		// vertex body here is a file's code, the fragment's is a script's.
-		{
-			.kind = shady::Stage.VERTEX,
-			.entry = "vertexMain",
-			.params = "VertexIn input",
-			.returns = "VertexOutput",
-			.body = "VertexOutput output;\nreturn output;\n",
-			.body_file = "sky",
-		},
-		{
-			.kind = shady::Stage.FRAGMENT,
-			.entry = "fragmentMain",
-			.params = "VertexOutput input",
-			.returns = "float4",
-			.body = "return float4(1.0);\n",
-			.body_file = body_file,
-		},
-	};
-	three::ShaderDef def = {
-		.name      = "sky",
-		.io        = io,
-		.resources = resources,
-		.features  = features,
-		.stages    = stages,
-	};
+	ShaderSource[] sources = { { name, text } };
+	ShaderDef def = { .name = "sky", .sources = sources };
 
 	DString out;
 	out.tinit(16384);
@@ -83,29 +76,30 @@ macro String sky_program(String body_file)
 
 fn void a_def_emits_the_whole_module() @test
 {
-	String source = sky_program("sky");
+	String source = emitted_module("sky", A_MODULE);
 
-	// The push block: a C3 struct that became a block, and the variable every
-	// entry point reaches it through.
+	// The prologue: a C3 struct that became a block, the variable every entry
+	// point reaches it through, and the fields walked from the C3 struct rather
+	// than written in the shader.
 	test::@check(source.contains("struct SkyPush @pushconstant"), "the push struct is marked\n%s", source);
 	test::@check(source.contains("SkyPush push;"), "and a variable of it exists");
 	test::@check(source.contains("float4x4 inverse_view_projection;"),
 		"walked from the C3 struct rather than written in the shader");
 
-	// The structure the def described.
+	// The file's own text, verbatim: the generator has nothing to say about a
+	// declaration the shader makes for itself.
 	test::@check(source.contains("struct VertexOutput\n{\n\tfloat4 sv_position @position;\n\tfloat2 clip;\n}"),
-		"stage IO is emitted as written: %s", source);
-	test::@check(source.contains("const bool SHADOWS @spec(0) = true;"), "the feature is a spec constant");
+		"stage IO is the file's, unchanged: %s", source);
+	test::@check(source.contains("const bool SHADOWS @spec(0) = true;"), "a spec constant too");
 	test::@check(source.contains("Sampler2D sky_map @set(0) @binding(0);"), "a resource carries its binding");
 	test::@check(source.contains("Sampler2D three_textures[] @set(1) @binding(0);"),
 		"and a runtime-sized one is the bindless table");
-
-	// The entry points, and the body behind one.
 	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
-		"the vertex signature is generated");
-	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"),
-		"and so is the fragment signature");
-	test::@check(source.contains("#line 1 \"sky\""), "the body is numbered from one, in the body's name");
+		"the entry points are the file's as well");
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"), "both of them");
+	test::@check(source.contains("#line 1 \"sky\""), "and the file's text is numbered from one");
+
+	// Nothing here is a preprocessor: no markers, no macros, no templating.
 	test::@check(!source.contains("#define") && !source.contains("#if") && !source.contains("//@"),
 		"and there are no markers and no macros anywhere");
 }
@@ -122,7 +116,7 @@ fn void a_def_emits_the_whole_module() @test
 *>
 fn void a_restore_directive_numbers_the_line_after_it() @test
 {
-	String source = sky_program("material");
+	String source = emitted_module("material", A_MODULE);
 
 	uint line = 1;
 	usz  at   = 0;
@@ -160,10 +154,7 @@ fn void a_restore_directive_numbers_the_line_after_it() @test
 *>
 fn void the_ported_sky_module_is_generated() @test
 {
-	String code = three::load_source("shaders/sky.shady")!!;
-	defer code.free(mem);
-
-	three::ShaderDef def = three::sky_def(code);
+	three::ShaderDef def = three::sky_def();
 
 	DString out;
 	out.tinit(32768);
@@ -200,25 +191,23 @@ fn void the_ported_sky_module_is_generated() @test
 
 fn void a_compute_stage_carries_its_thread_counts() @test
 {
-	three::ShaderIo[] io = {
-		{ "ComputeIn", (three::ShaderIoField[]) { { "id", "uint3", "@builtin(global_invocation_id)" } } },
+	// The dispatch size is a property of the entry point, so it is written where
+	// the entry point is - not in a table on the C3 side that would have to be
+	// kept in step with it.
+	ShaderSource[] sources = {
+		{ "cluster", `
+struct ComputeIn
+{
+	uint3 id @builtin(global_invocation_id);
+}
+
+fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
+{
+	return;
+}
+` },
 	};
-	three::ShaderStage[] stages = {
-		{
-			.kind = shady::Stage.COMPUTE,
-			.entry = "computeMain",
-			.params = "ComputeIn input",
-			.returns = "void",
-			.body = "return;\n",
-			.body_file = "cluster",
-			.threads = "64, 1, 1",
-		},
-	};
-	three::ShaderDef def = {
-		.name   = "cluster",
-		.io     = io,
-		.stages = stages,
-	};
+	ShaderDef def = { .name = "cluster", .sources = sources };
 
 	DString out;
 	out.tinit(8192);
@@ -239,10 +228,7 @@ fn void a_compute_stage_carries_its_thread_counts() @test
 *>
 fn void the_ported_skin_module_is_generated() @test
 {
-	String code = three::load_source("shaders/skin.shady")!!;
-	defer code.free(mem);
-
-	three::ShaderDef def = three::skin_def(code);
+	three::ShaderDef def = three::skin_def();
 
 	DString out;
 	out.tinit(32768);
@@ -312,10 +298,8 @@ fn void the_ported_mesh_module_is_generated() @test
 {
 	String geometry = three::load_source("shaders/mesh.shady")!!;
 	defer geometry.free(mem);
-	String skinning = three::load_source("shaders/skinning.shady")!!;
-	defer skinning.free(mem);
 
-	three::ShaderDef def = three::mesh_def(geometry, skinning, mesh_test_fragment());
+	three::ShaderDef def = three::mesh_def(mesh_test_fragment());
 
 	DString out;
 	out.tinit(32768);
@@ -375,16 +359,9 @@ fn void the_ported_mesh_module_is_generated() @test
 *>
 fn void the_ported_shadow_modules_are_generated() @test
 {
-	String code = three::load_source("shaders/shadow.shady")!!;
-	defer code.free(mem);
-	String cutout_code = three::load_source("shaders/shadow_cutout.shady")!!;
-	defer cutout_code.free(mem);
-	String skinning = three::load_source("shaders/skinning.shady")!!;
-	defer skinning.free(mem);
-
 	DString out;
 	out.tinit(32768);
-	three::append_shader_def(&out, three::shadow_def(code, skinning), three::ShadowPush);
+	three::append_shader_def(&out, three::shadow_def(), three::ShadowPush);
 	String source = out.str_view();
 
 	// The depth-only module: one entry point, no fragment stage, no resources.
@@ -416,7 +393,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 
 	DString cutout;
 	cutout.tinit(32768);
-	three::append_shader_def(&cutout, three::shadow_cutout_def(code, skinning, cutout_code), three::ShadowPush);
+	three::append_shader_def(&cutout, three::shadow_cutout_def(), three::ShadowPush);
 	String cutout_source = cutout.str_view();
 
 	// The same vertex path, the same lines - the def handed the same text twice.
@@ -426,7 +403,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 		"beside the uv only it carries");
 
 	// The fragment stage, the sampler, and nothing else that changed.
-	test::@check(cutout_source.contains("fn void fragmentMain(VertexOutput input) @fragment"),
+	test::@check(cutout_source.contains("fn void fragmentMain(CutoutOutput input) @fragment") && cutout_source.contains("fn CutoutOutput cutoutVertexMain(VertexIn input) @vertex"),
 		"the cut-out variant has the fragment stage");
 	test::@check(cutout_source.contains("float2 uv;") && cutout_source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
 		"and a uv on the vertex output");
@@ -468,10 +445,7 @@ fn void check_compiles(String source, String what)
 *>
 fn void the_ported_cluster_module_is_generated() @test
 {
-	String code = three::load_source("shaders/cluster.shady")!!;
-	defer code.free(mem);
-
-	three::ShaderDef def = three::cluster_def(code);
+	three::ShaderDef def = three::cluster_def();
 
 	DString out;
 	out.tinit(32768);

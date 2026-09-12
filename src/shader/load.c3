@@ -64,13 +64,24 @@ const char[*] EMBED_SKY      = $embed("../../shaders/sky.slang");
 const char[*] EMBED_SURFACE  = $embed("../../shaders/surface.slang");
 const char[*] EMBED_LIGHTING = $embed("../../shaders/lighting.slang");
 
+// The shady modules, which are whole programs rather than templates: a def names
+// the file and gets its text, and nothing splices anything into it. They are
+// small next to the Slang library above.
+const char[*] EMBED_SKY_SHADY             = $embed("../../shaders/sky.shady");
+const char[*] EMBED_MESH_SHADY            = $embed("../../shaders/mesh.shady");
+const char[*] EMBED_SKINNING_SHADY        = $embed("../../shaders/skinning.shady");
+const char[*] EMBED_SKIN_SHADY            = $embed("../../shaders/skin.shady");
+const char[*] EMBED_CLUSTER_SHADY         = $embed("../../shaders/cluster.shady");
+const char[*] EMBED_SHADOW_SHADY          = $embed("../../shaders/shadow.shady");
+const char[*] EMBED_SHADOW_CUTOUT_SHADY   = $embed("../../shaders/shadow_cutout.shady");
+
 struct EmbeddedShader
 {
 	String name;
 	String source;
 }
 
-const EmbeddedShader[9] EMBEDDED = {
+const EmbeddedShader[16] EMBEDDED = {
 	{ "mesh.slang", (String)EMBED_MESH[..] },
 	{ "material.slang", (String)EMBED_MATERIAL[..] },
 	{ "post.slang", (String)EMBED_POST[..] },
@@ -80,6 +91,13 @@ const EmbeddedShader[9] EMBEDDED = {
 	{ "sky.slang", (String)EMBED_SKY[..] },
 	{ SHARED_TEMPLATE, (String)EMBED_SURFACE[..] },
 	{ LIGHTING_TEMPLATE, (String)EMBED_LIGHTING[..] },
+	{ "sky.shady", (String)EMBED_SKY_SHADY[..] },
+	{ "mesh.shady", (String)EMBED_MESH_SHADY[..] },
+	{ "skinning.shady", (String)EMBED_SKINNING_SHADY[..] },
+	{ "skin.shady", (String)EMBED_SKIN_SHADY[..] },
+	{ "cluster.shady", (String)EMBED_CLUSTER_SHADY[..] },
+	{ "shadow.shady", (String)EMBED_SHADOW_SHADY[..] },
+	{ "shadow_cutout.shady", (String)EMBED_SHADOW_CUTOUT_SHADY[..] },
 };
 
 <*

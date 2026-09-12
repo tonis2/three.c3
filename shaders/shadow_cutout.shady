@@ -7,15 +7,25 @@
 // the thing the depth-only pass cannot do: a leaf card casts the shadow of the
 // leaf instead of the shadow of its quad.
 //
-// The vertex path is not here. The def hands `shaders/shadow.shady` to both
-// modules, so a pose cannot drift between the pipeline every ordinary caster
-// shares and the one that cuts; what is here is the uv those cutters need, the
-// sampler that decides, and the fragment stage that discards.
+// The vertex path's *pose* is not here. The def hands `shaders/shadow.shady` to
+// both modules, so a pose cannot drift between the pipeline every ordinary
+// caster shares and the one that cuts; what is here is the entry points, the uv
+// those cutters need, the sampler that decides, and the fragment stage that
+// discards.
 //
 // **The plain pass must not merely skip this code but not contain it**: the
 // reflection reports the linked program, so a sampler declared in one module
 // would put a descriptor binding on every ordinary caster - and a binding
 // declared and never written is undefined behaviour rather than a wasted byte.
+
+// Its own output, because it carries a uv that the depth-only module does not -
+// and its own name for it, because `shadow.shady` above has already declared the
+// interface the two have in common.
+struct CutoutOutput
+{
+	float4 sv_position @position;
+	float2 uv;
+}
 
 // The material's base colour map, and the only image this pass ever reads. It is
 // a slot of the device-wide texture array - set 1, bound once for the device by
@@ -66,7 +76,7 @@ fn float2 variant_uv(float2 uv, UvVariant row)
 // The one thing a shadow fragment stage is for: deciding this texel is not
 // there. It writes nothing - depth is still the rasteriser's - so `discard` is
 // the whole body.
-fn void cutout_fragment(VertexOutput input)
+fn void cutout_fragment(CutoutOutput input)
 {
 	DrawRecord draw = push.draw[0];
 	// A mesh with no uvs has nowhere to put a map, so there is nothing to cut and
@@ -80,4 +90,24 @@ fn void cutout_fragment(VertexOutput input)
 	// *colour*, and a blend of three alphas cuts a shape that is in none of the
 	// three.
 	if (three_textures[draw.texture_index[SLOT_BASE_COLOR]].Sample(uv).a * draw.base_color.a < draw.surface.w) discard;
+}
+
+// The sampler is a slot of the device-wide texture array - set 1, bound once for
+// the device by `TextureTable`.
+Sampler2D three_textures[] @set(1) @binding(0);
+
+// `cutoutVertexMain` and not `vertexMain`: the module carries `shadow.shady`,
+// whose depth-only entry point already has that name, and two entry points of
+// one stage cannot share a name.
+fn CutoutOutput cutoutVertexMain(VertexIn input) @vertex
+{
+	CutoutOutput output;
+	output.sv_position = posed_clip(input.vid, input.iid);
+	output.uv = shadow_uv(push.draw[0], push.instances[input.iid], input.vid);
+	return output;
+}
+
+fn void fragmentMain(CutoutOutput input) @fragment
+{
+	cutout_fragment(input);
 }
