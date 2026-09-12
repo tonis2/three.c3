@@ -188,18 +188,7 @@ fn void the_ported_sky_module_is_generated() @test
 	test::@check(!source.contains("#define") && !source.contains("#if") && !source.contains("//@"),
 		"with no markers, no macros and no #ifdef anywhere:\n%s", source);
 
-	// The round trip, which is what keeps the generator honest about a language
-	// it writes but does not own: shady reads back what the def wrote.
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(source, &diagnostic);
-	if (catch spirv)
-	{
-		test::@check(false, "the generated module does not compile: %s", diagnostic.to_string(tmem));
-	}
-	else
-	{
-		free(spirv);
-	}
+	check_compiles(source, "the generated sky module");
 
 	// And again in kong, against the Vulkan environment rather than the generic
 	// one: `spirv-val --target-env vulkan1.3` is the stricter reader, and it is
@@ -240,4 +229,82 @@ fn void a_compute_stage_carries_its_thread_counts() @test
 	test::@check(source.contains("uint3 id @builtin(global_invocation_id);"),
 		"and a builtin is a member attribute");
 	test::@check(source.contains("struct ClusterPush @pushconstant"), "with the compute pass's own push block");
+}
+
+<*
+ The second port, and the first compute stage: a module whose only resource is a
+ push block, whose structs come from the shared wire list, and whose stage is a
+ dispatch. Kong dispatches it and reads the posed vertices back.
+*>
+fn void the_ported_skin_module_is_generated() @test
+{
+	String code = three::load_source("shaders/skin.shady")!!;
+	defer code.free(mem);
+
+	three::ShaderDef def = three::skin_def(code);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::SkinPush);
+	String source = out.str_view();
+
+	// The stage: a compute entry point at the dispatch size the pass assumes.
+	test::@check(source.contains("fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)"),
+		"the workgroup size is part of the signature");
+	test::@check(source.contains("uint3 thread @builtin(global_invocation_id);"),
+		"and the dispatch thread id is a builtin, not a parameter");
+	test::@check(source.contains("skin_vertices(input);"), "the stage body is a call and nothing else");
+
+	// No samplers and no blocks: every buffer this pass touches is an address
+	// in the push block, so a module with no resources at all is correct here.
+	test::@check(!source.contains("@set("), "a compute pass with no descriptors");
+
+	// The push block is walked from C3, pointers included - the first port where
+	// that matters, because this is the first push block to carry any.
+	test::@check(source.contains("struct SkinPush @pushconstant"), "the push block is the C3 struct");
+	test::@check(source.contains("Vec3* positions;") || source.contains("float3* positions;"),
+		"a pointer member is a shady pointer to the wire type: %s", source);
+	test::@check(source.contains("Instance* instances;") && source.contains("float4x4* baked;"),
+		"including pointers to structs and to matrices");
+	test::@check(source.contains("uint vertex_count;") && source.contains("uint morph_targets;"),
+		"and the scalars the dispatch is sized by");
+
+	// The structs it points at come from the one wire list every module carries.
+	test::@check(source.contains("struct SkinnedVertex @address"), "the output is the shared wire struct");
+	test::@check(source.contains("struct MorphDelta @address"), "and so are the morph deltas");
+
+	// The port itself.
+	test::@check(source.contains("fn void skin_vertices(ComputeIn input)"), "the body survived the port");
+	test::@check(source.contains("fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)"),
+		"a function can take a pointer, which the palette needs");
+	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
+	test::@check(source.contains("(pose * float4(normal, 0.0)).xyz"),
+		"the normal is the w = 0 multiply the original's 3x3 cast spelled out");
+	test::@check(source.contains("weights.x * palette[base + joints.x]"),
+		"and a matrix scales by a scalar on the left");
+
+	check_compiles(source, "the generated skin module");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/skin.shady", source)!!;
+}
+
+<*
+ The round trip: shady reads back what the def wrote. This is the test that keeps
+ the generator honest about a language it writes but does not own, and it is why
+ the engine depends on shady at all.
+*>
+fn void check_compiles(String source, String what)
+{
+	shady::Diagnostic diagnostic;
+	// Scalar layout, because that is the mode the engine compiles in: every
+	// struct in a generated module is one of C3's wire structs, and std430
+	// would stride them differently - `SkinnedVertex` by 32 rather than 24.
+	char[]? spirv = shady::compile(source, &diagnostic, scalar_layout: true);
+	if (catch spirv)
+	{
+		test::@check(false, "%s does not compile: %s", what, diagnostic.to_string(tmem));
+		return;
+	}
+	free(spirv);
 }
