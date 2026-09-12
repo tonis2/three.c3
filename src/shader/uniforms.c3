@@ -12,11 +12,6 @@ module three;
 
 fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms)
 {
-	// The rows a table can be indexed by, emitted for every material including one
-	// with no uniforms at all: `Surface.variant` is clamped against this, and a
-	// body that reads nothing still carries the row it did not need.
-	out.appendf("const uint MATERIAL_ROWS = %du;\n", material_rows(uniforms))!!;
-
 	out.append_string("struct Uniforms\n{\n");
 	if (uniforms.len == 0)
 	{

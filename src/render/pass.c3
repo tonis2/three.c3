@@ -1473,6 +1473,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.uv_variants = material.uv_variants,
 			.emissive = material.emissive_value(),
 			.texture_index = texture_index_row(&self.assets, material, mesh),
+			.material_rows = material_rows(material.declared_uniforms),
 		};
 
 		self.draw_indices.push(recorded);

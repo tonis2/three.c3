@@ -62,9 +62,9 @@ struct Surface
 	float4 vertex_color;   // the mesh's COLOR_0, white where the file had none
 
 	// Which row of this material's uniform tables this copy reads. Already clamped
-	// to the rows the material declared: `MATERIAL_ROWS` is emitted with the
-	// uniforms, so the clamp costs a body nothing and a body that forgot it could
-	// not read past the table's end.
+	// to the rows the material declared - the count is the record's, the way the uv
+	// table's is - so a body indexing `s.uniforms.palette[s.variant]` is in range
+	// without a check of its own.
 	uint variant;
 
 	float roughness;
@@ -135,7 +135,7 @@ fn float4 mesh_fragment(VertexOutput input)
 	s.position = input.world;
 	s.color = input.color;
 	s.vertex_color = input.vertex_color;
-	s.variant = input.variant;
+	s.variant = min(input.variant, draw.material_rows - 1u);
 
 	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
 	// a second clamp here would be a second place for the range to be decided.
