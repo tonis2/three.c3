@@ -212,6 +212,10 @@ struct Draw
     // `mesh.slang` declares, and a copy for the reason every other declaration
     // here is one.
     uint texture_index[24];
+
+    // The tallest uniform table column this material declared, so a body
+    // indexing one by `s.variant` is in range without a check of its own.
+    uint material_rows;
 };
 
 // The mesh contract exactly, and nothing appended: there are no material

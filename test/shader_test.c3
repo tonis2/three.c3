@@ -681,7 +681,7 @@ fn void the_draw_record_matches_the_shader() @test
 	// side against **Slang's** answer for the same declaration.
 	// 288 of it is what `mesh.slang`'s `Draw` declares; the rest is the texture
 	// index row above, which nothing samples through yet.
-	test::@check(three::DrawRecord::size == 384, "and the record is 384 bytes, got %d", three::DrawRecord::size);
+	test::@check(three::DrawRecord::size == 392, "and the record is 392 bytes, got %d", three::DrawRecord::size);
 }
 
 <*
