@@ -31,10 +31,10 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 }
 
 <*
- The default the flips leave behind: cluster, skin and shadow are on shady, and
- no other row moved.
+ The default the flips leave behind: cluster, skin, shadow and sky are on shady,
+ and no other row moved.
 *>
-fn void the_table_flips_cluster_skin_and_shadow_and_nothing_else() @test
+fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 {
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
 		"cluster compiles through shady");
@@ -42,11 +42,14 @@ fn void the_table_flips_cluster_skin_and_shadow_and_nothing_else() @test
 		"skin compiles through shady");
 	test::@check(three::shader_compiler(three::ShaderPass.SHADOW) == three::ShaderCompiler.SHADY,
 		"shadow compiles through shady");
+	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SHADY,
+		"sky compiles through shady");
 	foreach (i, row : three::PASS_COMPILERS)
 	{
 		if ((three::ShaderPass)i == three::ShaderPass.CLUSTER) continue;
 		if ((three::ShaderPass)i == three::ShaderPass.SKIN) continue;
 		if ((three::ShaderPass)i == three::ShaderPass.SHADOW) continue;
+		if ((three::ShaderPass)i == three::ShaderPass.SKY) continue;
 		test::@check(row.compiler == three::ShaderCompiler.SLANG,
 			"%s is still compiled by Slang", row.name);
 	}
@@ -86,8 +89,8 @@ fn void an_override_list_names_passes_by_their_table_names() @test
 		"cluster was named");
 	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SLANG,
 		"skin was named");
-	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SLANG,
-		"sky was not");
+	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SLANG,
+		"mesh was not");
 }
 
 <*

@@ -63,16 +63,16 @@ struct PassCompiler
 <*
  Which implementation compiles each pass.
 
- `CLUSTER`, `SKIN` and `SHADOW` are the flips so far; every other row is still
- Slang, and each names the def that will replace it. See the file header for what
- a flip takes.
+ `CLUSTER`, `SKIN`, `SHADOW` and `SKY` are the flips so far; every other row is
+ still Slang, and each names the def that will replace it. See the file header
+ for what a flip takes.
 *>
 const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
 	[ShaderPass.CLUSTER] = { .compiler = ShaderCompiler.SHADY, .name = "cluster", .def = "cluster_def" },
 	[ShaderPass.SKIN] = { .compiler = ShaderCompiler.SHADY, .name = "skin", .def = "skin_def" },
 	[ShaderPass.SHADOW] = { .compiler = ShaderCompiler.SHADY, .name = "shadow", .def = "shadow_def" },
 	[ShaderPass.SHADOW_CUTOUT] = { .compiler = ShaderCompiler.SLANG, .name = "shadow_cutout", .def = "shadow_cutout_def" },
-	[ShaderPass.SKY] = { .compiler = ShaderCompiler.SLANG, .name = "sky", .def = "sky_def" },
+	[ShaderPass.SKY] = { .compiler = ShaderCompiler.SHADY, .name = "sky", .def = "sky_def" },
 	[ShaderPass.MESH] = { .compiler = ShaderCompiler.SLANG, .name = "mesh", .def = "mesh_def" },
 	[ShaderPass.POST] = { .compiler = ShaderCompiler.SLANG, .name = "post", .def = "post_def" },
 	[ShaderPass.TONEMAP] = { .compiler = ShaderCompiler.SLANG, .name = "tonemap", .def = "post_def" },
