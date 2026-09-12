@@ -24,15 +24,7 @@
 *>
 module three;
 
-<*
- Which stage an entry point is.
-*>
-enum ShaderStageKind : char
-{
-	VERTEX,
-	FRAGMENT,
-	COMPUTE,
-}
+import shady;
 
 <*
  One descriptor: what it is, what it is called, and where it is bound.
@@ -100,20 +92,33 @@ struct ShaderSource
 }
 
 <*
- One entry point: its interface, its code, and what a diagnostic calls the code.
+ One entry point, as the blanks of a template the emitter fills in:
 
- `body` is text - the ported shading code, or the body a script wrote. The
- signature around it is generated, and the `#line` before it is what makes an
- error inside it name the file its author wrote rather than this module.
+     fn {returns} {entry}({params}) @{kind}
+     {
+     {body}
+     }
+
+ Every field is a piece of that line or of the body under it, and a stage is
+ usually two of them: an entry point here is a call into a ported function, so
+ `body` is one line and the code it calls is a `ShaderSource`.
+
+ `kind` is the language's own `Stage`, because that is what the parser reads
+ `@vertex` back as - a def writing a module and the compiler reading it agree
+ on the spelling by sharing the type.
+
+ `body_file` is what a diagnostic should call the body: the name of the ported
+ file or the script that wrote it, or empty for generated glue, which is
+ numbered as part of the module and named after it.
 *>
 struct ShaderStage
 {
-	ShaderStageKind kind;
+	Stage  kind;
 	String entry;      // "vertexMain"
-	String input;      // the parameter list, as written: "VertexOutput input"
+	String params;     // the parameter list, as written: "VertexOutput input"
 	String returns;    // "VertexOutput", "float4", "void"
-	String body;
-	String body_name;  // what `#line` calls the body: "sky", "material"
+	String body;       // usually a call: "return sky_vertex(input);\n"
+	String body_file;  // what `#line` calls the body: "sky", "material", or ""
 	String threads;    // compute only: "64, 1, 1"
 }
 
@@ -227,38 +232,28 @@ fn uint shader_lines(String text)
 *>
 fn void append_shader_stage(DString* out, ShaderStage stage, String restore_name)
 {
-	out.append_string("fn ");
-	out.append_string(stage.returns);
-	out.append_char(' ');
-	out.append_string(stage.entry);
-	out.append_char('(');
-	out.append_string(stage.input);
-	out.append_string(") ");
-
-	switch (stage.kind)
+	out.appendf(
+		"fn %s %s(%s) @%s",
+		stage.returns,
+		stage.entry,
+		stage.params,
+		stage.kind.attribute()
+	);
+	// The workgroup size a compute stage is dispatched with, and the only
+	// attribute a stage carries besides the one naming it.
+	if (stage.kind == Stage.COMPUTE && stage.threads.len)
 	{
-		case VERTEX:
-			out.append_string("@vertex");
-		case FRAGMENT:
-			out.append_string("@fragment");
-		case COMPUTE:
-			out.append_string("@compute");
-			if (stage.threads.len)
-			{
-				out.append_string(" @threads(");
-				out.append_string(stage.threads);
-				out.append_char(')');
-			}
+		out.appendf(" @threads(%s)", stage.threads);
 	}
 	out.append_string("\n{\n");
 
 	// A body with no name of its own is generated glue - a call into the ported
 	// functions - so it is numbered as part of the module. A body that came from
 	// a file or a script is numbered from one under that file's name.
-	if (stage.body_name.len)
+	if (stage.body_file.len)
 	{
 		out.append_string("#line 1 \"");
-		out.append_string(stage.body_name);
+		out.append_string(stage.body_file);
 		out.append_string("\"\n");
 		append_shader_body(out, stage.body);
 
