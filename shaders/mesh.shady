@@ -47,8 +47,9 @@ struct VertexOutput
 
 // The material half, which this file does not contain: the def splices its text
 // in ahead of this one, so a module is one whole program even though its two
-// halves are written in different places.
-fn float4 mesh_fragment(VertexOutput input);
+// halves are written in different places. `@required` is that claim in the
+// language, and a module whose material half never arrived is refused here.
+fn float4 mesh_fragment(VertexOutput input) @required;
 
 // One row of a material's uv variant table: a quarter turn, a flip, and a
 // translation. The fragment half carries the same function, and a copy that
