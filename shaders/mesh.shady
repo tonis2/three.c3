@@ -43,6 +43,12 @@ struct VertexOutput
 	float4 vertex_color;
 	float3 lightmap;
 	float4 sv_position @position;
+
+	// This copy's variant, the row a material's uniform tables are indexed by.
+	// Carried unclamped: which row is in range is a fact about the material's
+	// table, and the material half is where the table is. An integer varying, so
+	// it is Flat on both sides - there is no interpolating one.
+	uint variant;
 }
 
 // The material half, which this file does not contain: the def splices its text
@@ -79,6 +85,8 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 {
 	DrawRecord draw = push.draw[0];
 	Instance instance = push.instances[input.iid];
+
+	output.variant = instance.variant;
 
 	float3 position = draw.positions[input.vid];
 
