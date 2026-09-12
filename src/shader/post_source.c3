@@ -124,7 +124,14 @@ const String[*] POST_RESERVED @local = { // What the template declares.
 	"d",
 	"near",
 	"far",
-	"span", // Types.
+	"span", // What the generators declare around the agent's uniforms: the struct a body
+	// reads them through, the padding field a pass with no uniforms still gets,
+	// and the function the material half fills them with. Reserved before the
+	// switchover rather than at it, for `MATERIAL_RESERVED`'s reason: a name is
+	// reservable exactly once.
+	"Uniforms",
+	"material_unused",
+	"material_uniforms", // Types.
 	"float",
 	"float2",
 	"float3",
@@ -190,7 +197,7 @@ const String[*] POST_RESERVED @local = { // What the template declares.
  uniform is usually redundant: `p.time` already carries seconds since the shader
  was set.
 *>
-const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time", "depth", "tap" };
+const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time", "depth", "tap", "uniforms" };
 
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 

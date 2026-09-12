@@ -81,12 +81,16 @@ fn float2 variant_uv(float2 uv, UvVariant row)
 }
 
 // One vertex of one copy, in the light of the camera.
+//
+// The agent's vertex body runs here, **before the model matrix**: `Vertex` is
+// filled from the streams and the pose, `displace` moves it in object space, and
+// everything after the call - the model transform, the normal matrix, the uv
+// variant - composes on top of what the body wrote. A body that wrote nothing
+// gets the empty function the def splices in, so the call is unconditional.
 fn void mesh_vertex(VertexIn input, out VertexOutput output)
 {
 	DrawRecord draw = push.draw[0];
 	Instance instance = push.instances[input.iid];
-
-	output.variant = instance.variant;
 
 	float3 position = draw.positions[input.vid];
 
@@ -100,16 +104,33 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 
 	pose_vertex(draw, instance, input.vid, input.iid, position, normal);
 
+	Vertex v;
+	v.position = position;
+	v.normal = normal;
+	v.uv = float2(0.0, 0.0);
+	if ((draw.flags & FLAG_HAS_UVS) != 0) v.uv = draw.uvs[input.vid];
+	v.color = instance.color;
+	// Clamped before the body sees it, so `palette[v.variant]` in a vertex body
+	// is in bounds for the same reason it is in a fragment one. The fragment half
+	// clamps again rather than trusting this, because a body may write it.
+	v.variant = min(instance.variant, draw.material_rows - 1u);
+	v.index = input.vid;
+	// The same seam `mesh_fragment` fills `Surface.uniforms` through, so a
+	// vertex body and a fragment body read one storage with one spelling.
+	v.uniforms = material_uniforms();
+
+	displace(v);
+
 	// Model first, camera second, and the normal by the instance's normal matrix
 	// rather than by the model: a non-uniform scale on a copy would otherwise tilt
-	// the surface away from the light that lights it.
-	float4 world = instance.model * float4(position, 1.0);
+	// the surface away from the light that lights it. Both read the displaced
+	// values, so a body that moved a vertex moved what is lit and what is drawn.
+	float4 world = instance.model * float4(v.position, 1.0);
 	output.sv_position = push.frame[0].view_projection * world;
 	output.world = world.xyz;
-	output.normal = (instance.normal * float4(normal, 0.0)).xyz;
-
-	output.uv = float2(0.0, 0.0);
-	if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[input.vid];
+	output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;
+	output.color = v.color;
+	output.variant = v.variant;
 
 	// The mesh's own TEXCOORD_0, before `variant_uv` moves it - the coordinate the
 	// bake rasterised in, and so the only one that indexes the tile.
@@ -122,14 +143,14 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 
 	// Clamped against this table's own length and not against the material's row
 	// count: one channel indexes two tables that have no reason to be the same
-	// size.
+	// size. Applied after `displace` and not before it, so a body that computes
+	// its own uv composes with the per-copy transform rather than overriding it.
+	output.uv = v.uv;
 	if (draw.uv_variant_count != 0)
 	{
 		uint variant = min(instance.variant, draw.uv_variant_count - 1);
 		output.uv = variant_uv(output.uv, draw.uv_variants[variant]);
 	}
-
-	output.color = instance.color;
 }
 
 fn VertexOutput vertexMain(VertexIn input) @vertex

@@ -6,11 +6,11 @@
  body. The body itself arrives as text - it is the script's `fragment` - exactly
  as a material's does, and the def does not care how many pieces it is.
 
- The push block here is a *header* rather than the whole block: a script's own
- uniforms are appended after `planes` at runtime, which is Phase 10's work, and
- `POST_PUSH_FIELDS` in `gpu/pipeline.c3` pins the two fields by offset and size.
- At the switchover that header stops being this struct and becomes the block the
- engine fills per pass; until then this is what a test needs.
+ The push block here is a *header* plus the agent's uniforms: `PostPush` holds
+ `info` and `planes` - pinned by `POST_PUSH_FIELDS` in `gpu/pipeline.c3` - and
+ the generator appends the `Uniforms` member the script's declared list
+ emitted, which is what fills `Post.uniforms`. At the switchover the engine
+ fills this block per pass; until then this is what a test needs.
 *>
 module three;
 

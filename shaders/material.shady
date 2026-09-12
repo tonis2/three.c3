@@ -23,16 +23,18 @@
 //  - the **debug views** and **relief**, which are the body-facing extras rather
 //    than the look.
 
-// **The material's own function, and the only thing this file needs from
+// **The material's own functions, and the only things this file needs from
 // outside.** Everything below is the built-in look; a material replaces exactly
-// this one function, and its text is spliced in ahead of this file, so the body
-// is defined before the fragment that calls it.
+// these two, and its text is spliced in ahead of this file, so the bodies are
+// defined before the stages that call them.
 //
 // `@required` is what says so in the language rather than in a comment: a module
 // that got no body is refused at this line, whether or not anything managed to
 // call it. A plain declaration would only be wrong where it was called, which is
-// not the same claim.
+// not the same claim. `displace` is the one a material may skip - the generator
+// emits the empty function when it does, so the call is never conditional.
 fn float3 shade(Surface s) @required;
+fn void displace(inout Vertex v) @required;
 
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
@@ -87,6 +89,29 @@ struct Surface
 	// by is a function of where its pixel is, so someone has to carry it, and the
 	// surface being shaded is the honest carrier.
 	float4 screen_position;
+}
+
+// **The other contract with the agent**, and the only place an object-space
+// position is on offer. `mesh_vertex` fills one of these, calls `displace` with
+// it, and only then applies the instance's model matrix - so a displacement is
+// written in the mesh's own space and scales with the mesh rather than with the
+// world, and the normal a body writes is rotated by the normal matrix the way
+// the surface's is.
+//
+// The first five fields are the varyings a body may move; `index` and the
+// uniform set are what it reads. The uniform set is the same one `Surface`
+// carries - one storage, one spelling - because a vertex effect is a function
+// of the clock or of a hit as often as not, and there is no other context a
+// vertex body has.
+struct Vertex
+{
+	float3 position; // object space, before the instance's model matrix
+	float3 normal;   // object space; write it if the displacement tilts the surface
+	float2 uv;       // the mesh's own uv, before `variant_uv`
+	float4 color;    // this copy's colour, raw
+	uint variant;    // already clamped to the rows the material declared
+	uint index;      // `SV_VertexID`, the per-vertex seed a scatter keys on
+	Uniforms uniforms; // what the script declared, as `Surface.uniforms` reads it
 }
 
 // The look a material has before anyone says otherwise, and the pieces a body

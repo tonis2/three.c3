@@ -10,14 +10,14 @@
 //
 // What is **not** here yet, and it is the whole of what a *script* sees:
 //
-//  - the agent's own uniforms. The original appends a field per uniform to the
-//    push block and `#define`s each name around the body; a body reads them
-//    through the `Post` struct here instead, which is the same object with the
-//    names resolved at compile time rather than by the preprocessor. That is
-//    Phase 10's work, and it is why `Post` has no uniform fields yet.
 //  - the agent's own textures, at bindings 4 and up.
 //  - the `//@shade` marker's job: the body arrives as text either way, and here
 //    it defines a function rather than being spliced into a hole.
+//
+// The agent's own uniforms *are* here: the generator emits a `Uniforms` struct
+// from the script's list and the push block carries one, so a body reads them
+// as `p.uniforms.channel` - the same object the old `#define` handed it, with
+// the names resolved at compile time instead of by the preprocessor.
 
 // The push block is the walker's: `PostPush` in `src/shader/post.c3` is the C3
 // type, and the generator emits the struct and the `push` variable from it, so
