@@ -308,3 +308,51 @@ fn void check_compiles(String source, String what)
 	}
 	free(spirv);
 }
+
+<*
+ The third port, and the second compute stage: light binning, whose outputs are
+ three device addresses and an atomic.
+*>
+fn void the_ported_cluster_module_is_generated() @test
+{
+	String code = three::load_source("shaders/cluster.shady")!!;
+	defer code.free(mem);
+
+	three::ShaderDef def = three::cluster_def(code);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::ClusterPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)"),
+		"the stage is a dispatch at the pass's workgroup size");
+	test::@check(source.contains("bin_lights(input);"), "and its body is a call");
+
+	// The push block: four addresses, a matrix, and the scalars the grid and the
+	// depth range come from.
+	test::@check(source.contains("struct ClusterPush @pushconstant"), "the push block is the C3 struct");
+	test::@check(source.contains("Light* lights;") && source.contains("uint* counts;")
+			&& source.contains("uint* indices;") && source.contains("uint* overflow;"),
+		"four device addresses: the lights and the three outputs");
+	test::@check(source.contains("float4x4 view_projection;"), "the matrix the planes come from");
+	test::@check(source.contains("float4 camera_near;") && source.contains("float far_plane;"),
+		"and the near plane and far plane the z slices are laid out with");
+
+	test::@check(source.contains("struct Light @address"), "the light struct is the shared wire one");
+
+	// The port itself.
+	test::@check(source.contains("const uint3 grid = uint3(16, 9, 24);"),
+		"the grid is a local constant with a vector constructor");
+	test::@check(source.contains("float4 planes[4] = { r0 - lo.x * r3, hi.x * r3 - r0, r1 - lo.y * r3, hi.y * r3 - r1 };"),
+		"a local array with an initialiser list survived the port");
+	test::@check(source.contains("push.indices[cluster * capacity + written++] = i;"),
+		"including a postfix increment inside an index");
+	test::@check(source.contains("InterlockedAdd(push.overflow[0], 1u);"),
+		"and the atomic keeps its HLSL spelling");
+
+	check_compiles(source, "the generated cluster module");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/cluster.shady", source)!!;
+}
