@@ -33,7 +33,7 @@ import shady;
  its arrays have to live in the caller's scope, or the def would be a view of
  the frame it was built in.
 *>
-macro ShaderDef shadow_def(String code)
+macro ShaderDef shadow_def(String code, String skinning_code)
 {
 	ShaderIo[] io = {
 		{
@@ -62,6 +62,9 @@ macro ShaderDef shadow_def(String code)
 	};
 
 	ShaderSource[] sources = {
+		// The shared pose, from `shaders/skinning.shady`: the same text the draw
+		// path carries, so the two cannot pose a vertex differently.
+		{ "skinning", skinning_code },
 		{ "shadow", code },
 	};
 
@@ -81,7 +84,7 @@ macro ShaderDef shadow_def(String code)
  gets - and `cutout_code` is `shaders/shadow_cutout.shady`, which holds the
  sampler, the uv and the discard.
 *>
-macro ShaderDef shadow_cutout_def(String vertex_code, String cutout_code)
+macro ShaderDef shadow_cutout_def(String vertex_code, String skinning_code, String cutout_code)
 {
 	ShaderIo[] io = {
 		{
@@ -126,6 +129,7 @@ macro ShaderDef shadow_cutout_def(String vertex_code, String cutout_code)
 	};
 
 	ShaderSource[] sources = {
+		{ "skinning", skinning_code },
 		{ "shadow", vertex_code },
 		{ "shadow_cutout", cutout_code },
 	};

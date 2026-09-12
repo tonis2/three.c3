@@ -1,0 +1,99 @@
+// three.c3's draw path, ported to shady for the ShaderDef generator
+// (`src/shader/mesh.c3`).
+//
+// This is the geometry half of the shading module: where one vertex of one copy
+// is, what direction its surface faces, and the attributes the fragment half
+// interpolates across the triangle. The pose itself is not here - it is
+// `shaders/skinning.shady`, which the shadow pass carries too, so a character
+// cannot be lit in one place and shadowed in another. The declarations are not
+// here either: the wire structs come from `abi.c3` and the push block from the C3
+// struct the pass fills.
+//
+// What the original says about the shape still holds, and the parts that are
+// easy to get wrong:
+//
+//  - **a stream that is absent is absent, not zero-filled.** A null pointer
+//    costs no flag bit, but reading one is a device fault rather than a
+//    fallback, so every optional read is guarded by its flag;
+//  - **white is the identity for the fragment stage's multiply**, so a mesh with
+//    no colour attribute and a mesh painted white are the same surface - which is
+//    what lets the fragment stage multiply unconditionally;
+//  - `variant_uv` is applied **here and not in the fragment stage**, because
+//    every operation in it is affine in uv and an affine map commutes with
+//    interpolation: three vertices' worth of work rather than a screen's;
+//  - the lightmap varying carries this copy's place in the atlas (the atlas uv
+//    and a flag for whether there is a tile), and it is affine in the mesh's own
+//    uv, so interpolating it is exact rather than a shortcut.
+
+// One row of a material's uv variant table: a quarter turn, a flip, and a
+// translation. The fragment half carries the same function, and a copy that
+// drifts is a surface sampled from a different part of the sheet than the
+// cut-out shadow that discarded it.
+//
+// **The row is the wire struct, not a float4.** `abi.c3` writes `UvVariant` by
+// its field names, so the components are named here too: a row that gained a
+// field could not then be read as four floats that happen to line up, and the
+// table's layout is walked in C3 rather than agreed on twice.
+fn float2 variant_uv(float2 uv, UvVariant row)
+{
+	uint turns = ((uint)row.turns) & 3;
+	if (turns == 1) uv = float2(uv.y, 1.0 - uv.x);
+	else if (turns == 2) uv = float2(1.0 - uv.x, 1.0 - uv.y);
+	else if (turns == 3) uv = float2(1.0 - uv.y, uv.x);
+
+	uint flip = (uint)row.flip;
+	if ((flip & 1) != 0) uv.x = 1.0 - uv.x;
+	if ((flip & 2) != 0) uv.y = 1.0 - uv.y;
+
+	return uv + float2(row.offset_u, row.offset_v);
+}
+
+// One vertex of one copy, in the light of the camera.
+fn void mesh_vertex(VertexIn input, out VertexOutput output)
+{
+	DrawRecord draw = push.draw[0];
+	Instance instance = push.instances[input.iid];
+
+	float3 position = draw.positions[input.vid];
+
+	// An `if` rather than a ternary: a ternary lets the compiler evaluate both
+	// sides and load through the null pointer it was meant to avoid.
+	float3 normal = float3(0.0, 1.0, 0.0);
+	if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[input.vid];
+
+	output.vertex_color = float4(1.0, 1.0, 1.0, 1.0);
+	if ((draw.flags & FLAG_HAS_COLORS) != 0) output.vertex_color = draw.colors[input.vid];
+
+	pose_vertex(draw, instance, input.vid, input.iid, position, normal);
+
+	// Model first, camera second, and the normal by the instance's normal matrix
+	// rather than by the model: a non-uniform scale on a copy would otherwise tilt
+	// the surface away from the light that lights it.
+	float4 world = instance.model * float4(position, 1.0);
+	output.sv_position = push.frame[0].view_projection * world;
+	output.world = world.xyz;
+	output.normal = (instance.normal * float4(normal, 0.0)).xyz;
+
+	output.uv = float2(0.0, 0.0);
+	if ((draw.flags & FLAG_HAS_UVS) != 0) output.uv = draw.uvs[input.vid];
+
+	// The mesh's own TEXCOORD_0, before `variant_uv` moves it - the coordinate the
+	// bake rasterised in, and so the only one that indexes the tile.
+	float2 lightmap_uv = float2(0.0, 0.0);
+	if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];
+	output.lightmap = float3(
+		instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
+		instance.lightmap.z > 0.0 ? 1.0 : 0.0
+	);
+
+	// Clamped against this table's own length and not against the material's row
+	// count: one channel indexes two tables that have no reason to be the same
+	// size.
+	if (draw.uv_variant_count != 0)
+	{
+		uint variant = min(instance.variant, draw.uv_variant_count - 1);
+		output.uv = variant_uv(output.uv, draw.uv_variants[variant]);
+	}
+
+	output.color = instance.color;
+}

@@ -21,6 +21,7 @@ import std::core::test;
 import std::io;
 import std::io::file;
 import std::io::path;
+import std::core::string;
 
 <*
  One whole program: two stages, a sampler, the bindless table, a feature, and a
@@ -290,6 +291,81 @@ fn void the_ported_skin_module_is_generated() @test
 }
 
 <*
+ The draw path: the geometry half of the shading module.
+
+ The fragment stage here is the test's own, and says so: it paints the varyings
+ the vertex stage interpolated so a drawing test can read them back out of a
+ colour attachment. The material half replaces it with the real one - which is
+ why the def takes it as an argument rather than writing it.
+*>
+macro String mesh_test_fragment()
+{
+	return `
+fn float4 mesh_fragment(VertexOutput input)
+{
+	return float4(input.uv, input.color.g, 1.0);
+}
+`;
+}
+
+fn void the_ported_mesh_module_is_generated() @test
+{
+	String geometry = three::load_source("shaders/mesh.shady")!!;
+	defer geometry.free(mem);
+	String skinning = three::load_source("shaders/skinning.shady")!!;
+	defer skinning.free(mem);
+
+	three::ShaderDef def = three::mesh_def(geometry, skinning, mesh_test_fragment());
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	String source = out.str_view();
+
+	// One module, two entry points: the shape `MESH_ENTRIES` and the pipeline
+	// layouts are built from.
+	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
+		"the vertex stage takes the two builtins");
+	test::@check(source.contains("uint vid @builtin(vertex_index);") && source.contains("uint iid @builtin(instance_index);"),
+		"as builtins rather than as vertex attributes");
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"),
+		"and the fragment stage is the second entry point");
+
+	// The varyings are the wire format between the two halves, in the order the
+	// material half declares them.
+	test::@check(source.contains("float3 normal;") && source.contains("float2 uv;")
+		&& source.contains("float3 world;") && source.contains("float4 vertex_color;")
+		&& source.contains("float3 lightmap;") && source.contains("float4 sv_position @position;"),
+		"every varying the fragment half reads is declared here");
+	sz normal_at = source.index_of("float3 normal;")!!;
+	sz world_at  = source.index_of("float3 world;")!!;
+	test::@check(normal_at < world_at, "and in the material half's order");
+
+	// The push block is the C3 struct the pass fills, and the structs behind it
+	// are the shared wire ones.
+	test::@check(source.contains("struct MeshPush @pushconstant"), "the push block is the C3 struct");
+	test::@check(source.contains("DrawRecord* draw;") && source.contains("Instance* instances;"),
+		"which points at this bucket's record and its instances");
+	test::@check(source.contains("struct FrameBlock @address") && source.contains("struct MorphDelta @address"),
+		"and the structs behind it come from one wire list for every module");
+
+	// The port itself.
+	test::@check(source.contains("fn void mesh_vertex(VertexIn input, out VertexOutput output)"),
+		"the vertex path survived the port");
+	test::@check(source.contains("pose_vertex(draw, instance, input.vid, input.iid, position, normal);"),
+		"and calls the pose the shadow pass calls");
+	test::@check(source.contains("fn void pose_vertex("), "which is carried as a source block of its own");
+	test::@check(source.contains("output.uv = variant_uv(output.uv, draw.uv_variants[variant]);"),
+		"the per-copy uv is applied in the vertex stage, where it is exact");
+	test::@check(source.contains("if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];"),
+		"and an absent stream is guarded by a null check rather than zero-filled");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/mesh.shady", source)!!;
+	check_compiles(source, "the generated mesh module");
+}
+
+<*
  Both shadow modules: the depth-only one and the cut-out variant of it.
 
  The claim that matters here is the one the pair makes together - the vertex path
@@ -303,10 +379,12 @@ fn void the_ported_shadow_modules_are_generated() @test
 	defer code.free(mem);
 	String cutout_code = three::load_source("shaders/shadow_cutout.shady")!!;
 	defer cutout_code.free(mem);
+	String skinning = three::load_source("shaders/skinning.shady")!!;
+	defer skinning.free(mem);
 
 	DString out;
 	out.tinit(32768);
-	three::append_shader_def(&out, three::shadow_def(code), three::ShadowPush);
+	three::append_shader_def(&out, three::shadow_def(code, skinning), three::ShadowPush);
 	String source = out.str_view();
 
 	// The depth-only module: one entry point, no fragment stage, no resources.
@@ -327,17 +405,18 @@ fn void the_ported_shadow_modules_are_generated() @test
 
 	// The port itself, which both modules share.
 	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid)"), "the body survived the port");
-	test::@check(source.contains("(skin_matrix(draw, instance, vid) * float4(position, 1.0)).xyz"),
-		"a joint matrix poses a position the same way the draw path poses it");
-	test::@check(source.contains("position = draw.posed[iid * draw.skin_stride + vid].position;"),
-		"and the pre-skinned path reads the buffer the compute pass wrote");
+	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal);"),
+		"the pose is the shared block's, not a copy of it");
+	test::@check(source.contains("(pose * float4(position, 1.0)).xyz")
+		&& source.contains("draw.posed[iid * draw.skin_stride + vid]"),
+		"and that block carries both skinning paths, unchanged");
 	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
 
 	check_compiles(source, "the generated shadow module");
 
 	DString cutout;
 	cutout.tinit(32768);
-	three::append_shader_def(&cutout, three::shadow_cutout_def(code, cutout_code), three::ShadowPush);
+	three::append_shader_def(&cutout, three::shadow_cutout_def(code, skinning, cutout_code), three::ShadowPush);
 	String cutout_source = cutout.str_view();
 
 	// The same vertex path, the same lines - the def handed the same text twice.

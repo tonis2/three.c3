@@ -1,0 +1,127 @@
+// The draw path's vertex pose, shared by every module that has to land a vertex
+// where the draw path lands it.
+//
+// **This file is one piece of text used by more than one module**, because two
+// shaders that pose a character differently are a bug that is invisible in
+// either one: a shadow cast from a different pose than the body, or a skinning
+// compute pass that disagrees with the draw that consumes it. `mesh_def` and
+// `shadow_def` both carry it as a source block, so the functions below exist
+// once in the repository and once in each module.
+//
+// What is here is morph, then skin, then nothing else:
+//
+//  - **the morph runs before the skin and never after.** A blend shape is
+//    authored against the rest mesh - the modeller moved those vertices with the
+//    character in its bind pose - so displacing a vertex the joints have already
+//    moved would apply a rest-space offset in posed space, and the correction
+//    would swing with the limb. glTF says the same thing in the same order:
+//    morph, then skin, then the model matrix.
+//  - **the model matrix is the caller's**, because the two callers want different
+//    things from it: the draw path needs a world position and a world normal,
+//    the shadow pass needs the light's clip space and no normal at all.
+//
+// The wire structs it reads (`DrawRecord`, `Instance`, `MorphDelta`,
+// `SkinnedVertex`) come from `abi.c3`, so this file names them without
+// declaring them.
+
+const uint FLAG_HAS_NORMALS = 1;
+const uint FLAG_HAS_UVS = 2;
+const uint FLAG_HAS_COLORS = 4;
+const uint FLAG_HAS_SKIN = 8;
+const uint FLAG_PRESKINNED = 16;
+
+const uint POSE_LIVE = 0x80000000;
+const uint POSE_MASK = 0x7fffffff;
+
+// The four influences of one vertex against one palette, summed into the matrix
+// that poses it. Split out so a crossfade can spend it twice - the two frames a
+// fade sits between are two offsets into one buffer.
+fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+	return weights.x * palette[base + joints.x]
+	     + weights.y * palette[base + joints.y]
+	     + weights.z * palette[base + joints.z]
+	     + weights.w * palette[base + joints.w];
+}
+
+// The four influences of one vertex, blended into the matrix that poses it.
+fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
+{
+	float4x4* palette = draw.palette;
+	if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
+	uint base = instance.pose & POSE_MASK;
+
+	uint4 joints = draw.joints[vid];
+	float4 weights = draw.weights[vid];
+
+	float4x4 pose = blend_joints(palette, base, joints, weights);
+	// Uniform across an instance, so this is a scalar branch.
+	//
+	// **The mix is of joint matrices and not of the transforms behind them.**
+	// Blending the transforms would need an inverse per joint per frame and would
+	// not be the same motion: two joints' contributions compose, they do not
+	// average, so a half-way between two poses is not the average of the two
+	// matrices - it is this, and this is what every engine does.
+	if (instance.blend <= 0.0) return pose;
+
+	float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
+	return pose + (from - pose) * instance.blend;
+}
+
+// The base vertex, displaced by every morph target this bucket carries.
+fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 position, inout float3 normal)
+{
+	if (draw.morph_targets == 0 || instance.morph == 0) return;
+
+	// Stored plus one, so zero can mean "this copy does not morph" - which is what
+	// a copy whose weights were cleared carries, and every copy of every unmorphed
+	// mesh with it.
+	uint base = instance.morph - 1;
+
+	for (uint t = 0; t < draw.morph_targets; t++)
+	{
+		float weight = push.frame[0].morph_weights[base + t];
+		// Skipped rather than multiplied by zero: a face wears two of its twenty
+		// expressions, so the branch is taken far more often than not and costs one
+		// compare against two multiply-adds and a 24-byte read.
+		if (weight == 0.0) continue;
+
+		MorphDelta delta = draw.morph[t * draw.skin_stride + vid];
+		position += weight * delta.position;
+		normal += weight * delta.normal;
+	}
+}
+
+// One vertex of one copy, moved by everything the instance says moves it: the
+// morph, then whichever of the two skinning paths the bucket set.
+//
+// `position` and `normal` arrive in the mesh's own space and leave in the
+// character's: the model matrix is the caller's, because a shadow has no use for
+// a normal and a draw has no use for a light's clip space. `iid` is needed for
+// the pre-skinned path, whose buffer holds one posed copy per instance.
+fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal)
+{
+	apply_morph(draw, instance, vid, position, normal);
+
+	// The two ways a vertex gets posed, in the same order and with the same
+	// exclusivity the draw path states: one flag or the other, never both. An `if`
+	// rather than a ternary, because a ternary lets the compiler evaluate both
+	// sides and load through the null pointer it was meant to avoid.
+	if ((draw.flags & FLAG_HAS_SKIN) != 0)
+	{
+		float4x4 pose = skin_matrix(draw, instance, vid);
+		position = (pose * float4(position, 1.0)).xyz;
+		// w = 0 so the matrix's translation cancels: a normal is a direction, and
+		// the original's `(float3x3)` cast was this sentence.
+		normal = (pose * float4(normal, 0.0)).xyz;
+	}
+	else if ((draw.flags & FLAG_PRESKINNED) != 0)
+	{
+		// The compute pass already did the blend, once per vertex per frame rather
+		// than once per vertex per draw. It wrote one copy of the mesh per
+		// instance, so the index carries the instance as well as the vertex.
+		SkinnedVertex skinned = draw.posed[iid * draw.skin_stride + vid];
+		position = skinned.position;
+		normal = skinned.normal;
+	}
+}
