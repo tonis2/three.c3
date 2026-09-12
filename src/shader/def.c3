@@ -88,6 +88,18 @@ struct ShaderIo
 }
 
 <*
+ A block of the shader's own code: the ported library a def's stages call.
+
+ Named, because it is bracketed by `#line` the way a stage body is - a fault in
+ a ported function has to name the file its author wrote.
+*>
+struct ShaderSource
+{
+	String name;
+	String source;
+}
+
+<*
  One entry point: its interface, its code, and what a diagnostic calls the code.
 
  `body` is text - the ported shading code, or the body a script wrote. The
@@ -111,9 +123,10 @@ struct ShaderStage
 struct ShaderDef
 {
 	String name;   // diagnostics and cache identity: "sky", "material"
-	ShaderIo[]   io;
+	ShaderIo[]       io;
 	ShaderResource[] resources;
 	ShaderFeature[]  features;
+	ShaderSource[]   sources;
 	ShaderStage[]    stages;
 }
 
@@ -239,14 +252,42 @@ fn void append_shader_stage(DString* out, ShaderStage stage, String restore_name
 	}
 	out.append_string("\n{\n");
 
+	// A body with no name of its own is generated glue - a call into the ported
+	// functions - so it is numbered as part of the module. A body that came from
+	// a file or a script is numbered from one under that file's name.
+	if (stage.body_name.len)
+	{
+		out.append_string("#line 1 \"");
+		out.append_string(stage.body_name);
+		out.append_string("\"\n");
+		append_shader_body(out, stage.body);
+
+		uint next = shader_lines(out.str_view()) + 2;
+		out.appendf("#line %d \"%s\"\n", (int)next, restore_name);
+	}
+	else
+	{
+		append_shader_body(out, stage.body);
+	}
+	out.append_string("}\n");
+}
+
+<*
+ A block of ported code, bracketed the way a stage body is.
+
+ The whole block is the file, line for line, so a fault inside a function here
+ is reported where the function is written rather than in the module that
+ generated it.
+*>
+fn void append_shader_source(DString* out, ShaderSource source, String restore_name)
+{
 	out.append_string("#line 1 \"");
-	out.append_string(stage.body_name);
+	out.append_string(source.name);
 	out.append_string("\"\n");
-	append_shader_body(out, stage.body);
+	append_shader_body(out, source.source);
 
 	uint next = shader_lines(out.str_view()) + 2;
 	out.appendf("#line %d \"%s\"\n", (int)next, restore_name);
-	out.append_string("}\n");
 }
 
 <*
@@ -271,5 +312,6 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 	// one under its own name, so the module's own text needs a name of its own
 	// for the two to be told apart in a diagnostic.
 	String restore = string::tformat("three.%s", def.name);
+	foreach (source : def.sources) append_shader_source(out, source, restore);
 	foreach (stage : def.stages) append_shader_stage(out, stage, restore);
 }

@@ -68,11 +68,6 @@ fn void a_def_emits_the_whole_module() @test
 {
 	String source = sky_program("sky");
 
-	// Handed to kong, whose renderer is where a module is asked to compile and
-	// draw: `test/generated_shader_test.c3` reads this file.
-	path::mkdir("build/shaderdef", recursive: true)!!;
-	file::save("build/shaderdef/sky.shady", source)!!;
-
 	// The push block: a C3 struct that became a block, and the variable every
 	// entry point reaches it through.
 	test::@check(source.contains("struct SkyPush @pushconstant"), "the push struct is marked\n%s", source);
@@ -138,6 +133,49 @@ fn void a_restore_directive_numbers_the_line_after_it() @test
 		at = end + 1;
 	}
 	test::@check(source.contains("#line 1 \"material\""), "the body's own name reaches the directive");
+}
+
+<*
+ The real thing: `sky.slang`'s port, through the def that describes the pass.
+
+ What this writes is what kong compiles and validates - the bridge by which a
+ generated module is asked whether it is one before the engine is switched over.
+*>
+fn void the_ported_sky_module_is_generated() @test
+{
+	String code = three::load_source("shaders/sky.shady")!!;
+	defer code.free(mem);
+
+	three::ShaderDef def = three::sky_def(code);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::SkyPush);
+	String source = out.str_view();
+
+	// The ported code, under the file's own name, so a fault inside it is
+	// reported in `sky.shady` rather than in the module that generated it.
+	test::@check(source.contains("#line 1 \"sky\""), "the ported code is numbered under its own name");
+	test::@check(source.contains("fn float2 equirect_uv(float3 direction)"), "the helper survived the port");
+	test::@check(source.contains("fn VertexOutput sky_vertex(VertexIn input)"), "and so did the vertex stage");
+	test::@check(source.contains("sky_map.Sample(equirect_uv(direction))"),
+		"a sampler is a method call, as the rest of the port will be");
+	test::@check(source.contains("atan2(direction.x, -direction.z)"),
+		"and `atan2` is the builtin rather than a rewritten quadrant case");
+
+	// The generated entry points around it.
+	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
+		"the entry point wraps the ported vertex");
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"),
+		"and the fragment entry wraps the fragment");
+	test::@check(source.contains("return sky_fragment(input);"), "each stage is a call and nothing else");
+	test::@check(!source.contains("#define") && !source.contains("#if") && !source.contains("//@"),
+		"with no markers, no macros and no #ifdef anywhere:\n%s", source);
+
+	// Handed to kong, which is where a generated module is compiled and
+	// validated until the engine itself depends on shady.
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/sky.shady", source)!!;
 }
 
 fn void a_compute_stage_carries_its_thread_counts() @test

@@ -1,0 +1,71 @@
+// three.c3 sky, ported to shady for the ShaderDef generator (`src/shader/sky.c3`).
+//
+// The declarations are gone from this file: the push block comes from the C3
+// `SkyPush`, the sampler's binding and the two entry points are emitted by the
+// def, and what is left is the code that was between them. The port is nearly
+// line for line - `mul(M, v)` is `M * v`, a sampler is a method, and a
+// declaration is written where the generator would otherwise have templated one.
+//
+// Everything the original says about the shape still holds:
+//
+//  - three vertices and no geometry: one oversized triangle, so the pixels are
+//    visited once and there is no seam down a screen-space diagonal;
+//  - z = 1, the far plane, so the sky is behind everything by construction
+//    rather than by being drawn first and hoping;
+//  - the direction through a pixel comes from unprojecting the vertex's own
+//    clip xy rather than from `sv_position`, which is the only version that
+//    survives a flipped viewport;
+//  - equirectangular rather than a cube: one 2D image, sampled with `REPEAT` in
+//    u so the seam at longitude ±π wraps.
+
+// A world direction to a texel of an equirectangular image.
+//
+// u is the longitude, mapped 0..1 with the seam behind the origin of the
+// mapping; v is the latitude, running from 0 at the zenith to 1 at the nadir,
+// which is the order an image file's rows are in.
+fn float2 equirect_uv(float3 direction)
+{
+	float PI = 3.14159265358979;
+
+	float u = atan2(direction.x, -direction.z) / (2.0 * PI) + 0.5;
+	float v = acos(clamp(direction.y, -1.0, 1.0)) / PI;
+	return float2(u, v);
+}
+
+// The oversized triangle, made here: `vid` is 0, 1 or 2 and the arithmetic
+// turns it into the three corners, so no vertex buffer is ever bound.
+fn VertexOutput sky_vertex(VertexIn input)
+{
+	float2 uv = float2(float((input.vid << 1) & 2), float(input.vid & 2));
+	float2 clip = uv * 2.0 - 1.0;
+
+	VertexOutput output;
+	output.clip = clip;
+	// z = 1.0 is the far plane under Vulkan's 0..1 depth range, and the pipeline
+	// compares LESS_OR_EQUAL against a buffer cleared to 1.0 - so the sky passes
+	// where nothing has been drawn and fails where anything has.
+	output.sv_position = float4(clip, 1.0, 1.0);
+	return output;
+}
+
+fn float4 sky_fragment(VertexOutput input)
+{
+	// Two points on the ray through this pixel, un-projected from the same clip
+	// xy at the near and far planes. Their difference is the direction; the
+	// perspective divide has to happen before the subtraction, because the two
+	// w's are different and subtracting before dividing is a different ray.
+	float4 near = push.inverse_view_projection * float4(input.clip, 0.0, 1.0);
+	float4 far = push.inverse_view_projection * float4(input.clip, 1.0, 1.0);
+	float3 direction = normalize(far.xyz / far.w - near.xyz / near.w);
+
+	// The rotation is applied to the *look* direction rather than to the uv, so
+	// it is a rotation of the world around the camera and not a slide of the
+	// image across it - the two differ everywhere except the equator.
+	float angle = push.params.y;
+	float s = sin(angle);
+	float c = cos(angle);
+	direction = float3(c * direction.x - s * direction.z, direction.y, s * direction.x + c * direction.z);
+
+	float3 color = sky_map.Sample(equirect_uv(direction)).rgb * push.params.x;
+	return float4(color, 1.0);
+}
