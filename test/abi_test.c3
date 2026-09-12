@@ -74,12 +74,24 @@ fn void same_declaration(String abi, String shader, String abi_header, String sh
 		what, generated, declared);
 }
 
-fn void the_emitted_declarations_are_what_the_shaders_declare() @test
+<*
+ The text of one program whose push block is `$Type`.
+
+ The ABI structs and the push block come out of it together, so a declaration
+ can be cut out of it the way the shader's own is cut out of the shader file.
+*>
+macro String abi_source($Type)
 {
 	DString out;
-	out.tinit(8192);
-	three::append_shader_abi(&out);
-	String abi = out.str_view();
+	out.tinit(16384);
+	three::ShaderDef def = { .name = "abi" };
+	three::append_shader_def(&out, def, $Type);
+	return out.str_view();
+}
+
+fn void the_emitted_declarations_are_what_the_shaders_declare() @test
+{
+	String abi = abi_source(three::MeshPush);
 
 	String mesh = three::load_source("shaders/mesh.slang")!!;
 	defer mesh.free(mem);
@@ -89,23 +101,23 @@ fn void the_emitted_declarations_are_what_the_shaders_declare() @test
 	same_declaration(abi, mesh, "struct SkinnedVertex", "struct SkinnedVertex", "SkinnedVertex");
 	same_declaration(abi, mesh, "struct MorphDelta", "struct MorphDelta", "MorphDelta");
 	same_declaration(abi, mesh, "struct FrameBlock", "struct FrameBlock", "FrameBlock");
-	same_declaration(abi, mesh, "struct MeshPush", "struct PushData", "MeshPush");
+	same_declaration(abi_source(three::MeshPush), mesh, "struct MeshPush", "struct PushData", "MeshPush");
 
 	String skin = three::load_source("shaders/skin.slang")!!;
 	defer skin.free(mem);
-	same_declaration(abi, skin, "struct SkinPush", "struct SkinPush", "SkinPush");
+	same_declaration(abi_source(three::SkinPush), skin, "struct SkinPush", "struct SkinPush", "SkinPush");
 
 	String cluster = three::load_source("shaders/cluster.slang")!!;
 	defer cluster.free(mem);
-	same_declaration(abi, cluster, "struct ClusterPush", "struct ClusterPush", "ClusterPush");
+	same_declaration(abi_source(three::ClusterPush), cluster, "struct ClusterPush", "struct ClusterPush", "ClusterPush");
 
 	String sky = three::load_source("shaders/sky.slang")!!;
 	defer sky.free(mem);
-	same_declaration(abi, sky, "struct SkyPush", "struct SkyPush", "SkyPush");
+	same_declaration(abi_source(three::SkyPush), sky, "struct SkyPush", "struct SkyPush", "SkyPush");
 
 	String shadow = three::load_source("shaders/shadow.slang")!!;
 	defer shadow.free(mem);
-	same_declaration(abi, shadow, "struct ShadowPush", "struct PushData", "ShadowPush");
+	same_declaration(abi_source(three::ShadowPush), shadow, "struct ShadowPush", "struct PushData", "ShadowPush");
 }
 
 <*
@@ -120,10 +132,7 @@ fn void the_emitted_declarations_are_what_the_shaders_declare() @test
 *>
 fn void the_record_keeps_the_c3_names() @test
 {
-	DString out;
-	out.tinit(4096);
-	three::append_shader_abi(&out);
-	String abi = out.str_view();
+	String abi = abi_source(three::SkyPush);
 
 	String record = declaration_at(abi, "struct DrawRecord");
 	test::@check(record.contains("float3* positions;"), "the geometry streams point at their own type");

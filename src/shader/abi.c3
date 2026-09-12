@@ -126,10 +126,15 @@ macro void append_shady_member(DString* out, $Type, String name)
  Members are emitted where they were declared rather than reordered: the layout
  the shader gets is the layout the C3 compiler gave the struct.
 *>
-macro void append_shady_struct(DString* out, $Type)
+macro void append_shady_struct(DString* out, $Type, String attribute)
 {
 	out.append_string("struct ");
 	out.append_string($Type::name);
+	if (attribute.len)
+	{
+		out.append_char(' ');
+		out.append_string(attribute);
+	}
 	out.append_string("\n{\n");
 	$foreach $m : $Type::members:
 		out.append_char('\t');
@@ -139,7 +144,7 @@ macro void append_shady_struct(DString* out, $Type)
 }
 
 <*
- Every struct a shader may need, in dependency order.
+ The structures a shader reaches through an address, in dependency order.
 
  A struct may only name one declared above it, so this order is the one fields
  require rather than the one they were written in. Emitting all of them costs a
@@ -147,22 +152,37 @@ macro void append_shady_struct(DString* out, $Type)
  pass does not read, and it answers for every pass the question of which
  declarations it has to ask for.
 
- `DrawRecord` names `UvVariant`, `SkinnedVertex` and `MorphDelta`; `FrameBlock`
- names `Light` and `ShadowGpuView`; the push blocks name the rest.
+ `@address` is what makes the layout a wire layout rather than a shader's own:
+ the struct is reached through a pointer a push block or another struct carried,
+ exactly as `DrawRecord` is reached through `MeshPush.draw`.
+
+ The push blocks are not here. There is only ever one in a module - Vulkan
+ allows exactly one - so `append_push_block` writes it from the type the shader
+ def names.
 *>
 fn void append_shader_abi(DString* out)
 {
-	append_shady_struct(out, UvVariant);
-	append_shady_struct(out, SkinnedVertex);
-	append_shady_struct(out, MorphDelta);
-	append_shady_struct(out, Light);
-	append_shady_struct(out, ShadowGpuView);
-	append_shady_struct(out, Instance);
-	append_shady_struct(out, DrawRecord);
-	append_shady_struct(out, FrameBlock);
-	append_shady_struct(out, MeshPush);
-	append_shady_struct(out, ShadowPush);
-	append_shady_struct(out, SkinPush);
-	append_shady_struct(out, ClusterPush);
-	append_shady_struct(out, SkyPush);
+	append_shady_struct(out, UvVariant, "");
+	append_shady_struct(out, SkinnedVertex, "@address");
+	append_shady_struct(out, MorphDelta, "@address");
+	append_shady_struct(out, Light, "@address");
+	append_shady_struct(out, ShadowGpuView, "@address");
+	append_shady_struct(out, Instance, "@address");
+	append_shady_struct(out, DrawRecord, "@address");
+	append_shady_struct(out, FrameBlock, "@address");
+}
+
+<*
+ The push block: one wire struct, plus the module-level variable every entry
+ point reaches it through.
+
+ It is one macro rather than two calls because a **push block must be the only
+ one in the module** - Vulkan allows exactly one per pipeline, and shady says so
+ - and a struct that is a push block is nothing until that variable is declared.
+*>
+macro void append_push_block(DString* out, $Type)
+{
+	append_shady_struct(out, $Type, "@pushconstant");
+	out.append_string($Type::name);
+	out.append_string(" push;\n");
 }
