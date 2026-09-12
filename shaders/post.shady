@@ -1,0 +1,122 @@
+// The post-processing pass, ported to shady from `post.slang`'s template.
+//
+// **One triangle, three vertices, no vertex buffer and no geometry at all.** The
+// vertices are arithmetic on `vertex_index`, and the fragment reads four images:
+// what the pass before wrote, the rendered scene, the frame's depth buffer, and
+// whichever earlier pass this one named. It shares nothing with the draw path's
+// contract - no frame block, no instance, no geometry pointers - which is why
+// its push block is a header and the material's uniforms rather than a
+// `MeshPush`.
+//
+// What is **not** here yet, and it is the whole of what a *script* sees:
+//
+//  - the agent's own uniforms. The original appends a field per uniform to the
+//    push block and `#define`s each name around the body; a body reads them
+//    through the `Post` struct here instead, which is the same object with the
+//    names resolved at compile time rather than by the preprocessor. That is
+//    Phase 10's work, and it is why `Post` has no uniform fields yet.
+//  - the agent's own textures, at bindings 4 and up.
+//  - the `//@shade` marker's job: the body arrives as text either way, and here
+//    it defines a function rather than being spliced into a hole.
+
+// The push block is the walker's: `PostPush` in `src/shader/post.c3` is the C3
+// type, and the generator emits the struct and the `push` variable from it, so
+// the header a fragment reads below - `info.xy` is the target's extent in
+// pixels, `info.z` the clock, `planes` the camera's near and far - has one place
+// to be wrong rather than two.
+
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+}
+
+struct VertexOutput
+{
+	float2 uv;
+	float4 sv_position @position;
+}
+
+// Two of the four reserved samplers are adjacency: what the previous pass wrote,
+// and the rendered scene. On a chain of one they are the same image, which is
+// what keeps a pass written before the chain existed working with no edit.
+Sampler2D prev @set(0) @binding(0);
+Sampler2D scene @set(0) @binding(1);
+
+// The frame's own depth buffer, as the rasteriser wrote it: non-linear device
+// depth, not a colour. The red channel is the value, and a body never touches
+// this - `Post.depth` is the same texel reconstructed into world units, so that
+// no body has to write the reconstruction or forget to.
+Sampler2D depth_buffer @set(0) @binding(2);
+
+// The fourth: another pass's output, named by a handle. Bound to the scene when
+// nothing was named.
+Sampler2D tap_image @set(0) @binding(3);
+
+// **The contract with the body.** Six values, none of them a Vulkan concept and
+// none of them a pointer.
+struct Post
+{
+	float3 color;       // this pixel of whatever ran before, linear
+	float3 scene;       // this pixel of the rendered scene, linear
+	float2 uv;          // 0..1 across the frame, (0, 0) at the top left
+	float2 resolution;  // the target's extent in pixels; 1.0 / resolution is one texel
+	float time;         // seconds since the shader was set, on the game clock
+	float depth;        // distance from the camera along the view direction, in world units
+	float3 tap;         // this pixel of the pass named by `reads`, linear
+}
+
+// Three vertices from the vertex index alone, in clip space already: no
+// projection is involved, so `uv` is the number the vertices were built from and
+// there is no flip anywhere in this file. A single oversized triangle rather
+// than a quad, because a quad's diagonal makes the two halves of the frame two
+// rasteriser invocations meeting along a seam.
+//
+//     vid  uv        clip xy
+//     0    (0, 0)    (-1, -1)
+//     1    (2, 0)    ( 3, -1)
+//     2    (0, 2)    (-1,  3)
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	float2 uv = float2(float((input.vid << 1) & 2u), float(input.vid & 2u));
+	output.uv = uv;
+	output.sv_position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+	return output;
+}
+
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	Post p;
+	p.uv = input.uv;
+	p.resolution = push.info.xy;
+	p.time = push.info.z;
+	p.color = prev.Sample(input.uv).rgb;
+	p.scene = scene.Sample(input.uv).rgb;
+	p.tap = tap_image.Sample(input.uv).rgb;
+
+	// The reciprocal undone. `d` is what the rasteriser wrote under a standard
+	// Vulkan 0..1 perspective projection, and
+	//
+	//     z = near * far / (far - d * (far - near))
+	//
+	// is its inverse. At d = 0 that is `near` and at d = 1 it is `far`, which is
+	// what makes a pixel nothing was drawn into read as the far plane rather
+	// than as a division by zero: the clear value is 1.0.
+	float d = depth_buffer.Sample(input.uv).r;
+	float near = push.planes.x;
+	float far = push.planes.y;
+	float span = far - d * (far - near);
+	// A guard rather than an assumption: `span` is positive for every d in 0..1
+	// with sane planes, and a runtime that has not set them yet - both zero -
+	// would otherwise put a NaN into every body that reads `p.depth`.
+	p.depth = span > 1e-6 ? near * far / span : far;
+
+	// **Alpha is not the body's to return.** The last thing a chain writes goes to
+	// the blit and the readback, and the readback forces alpha opaque regardless;
+	// a body that could dim it could make a screenshot differ from the window.
+	return float4(post(p), 1.0);
+}
+
+// Defined by the pass's body. The default an agent gets by attaching nothing is
+// the identity, so a chain that names an effect it did not write still draws.
+fn float3 post(Post p) @required;
