@@ -12,7 +12,11 @@
 // between the pipeline every caster shares and the one that cuts would be a leaf
 // whose shadow is cast from a different place than its neighbours.
 //
-// What the original says about the shape still holds:
+// What the original says about the shape still holds, and the pose itself is not
+// here: it is `shaders/skinning.shady`, which the draw path carries too, so a
+// character cannot be lit in one place and shadowed in another.
+//
+// What remains true of the original:
 //
 //  - depth is a function of position, so no normal and no colour ride along, and
 //    a uv rides along only in the cut-out module;
@@ -24,73 +28,6 @@
 //    have already moved would swing with the limb;
 //  - the two skinning paths are here for the same reason the body is: a
 //    character's shadow has to be the shadow of the pose it is wearing.
-
-const uint FLAG_HAS_NORMALS = 1;
-const uint FLAG_HAS_UVS = 2;
-const uint FLAG_HAS_COLORS = 4;
-const uint FLAG_HAS_SKIN = 8;
-const uint FLAG_PRESKINNED = 16;
-
-const uint POSE_LIVE = 0x80000000;
-const uint POSE_MASK = 0x7fffffff;
-
-// The four influences of one vertex against one palette, summed into the matrix
-// that poses it. Split out so a crossfade can spend it twice - the two frames a
-// fade sits between are two offsets into one buffer.
-fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
-{
-	return weights.x * palette[base + joints.x]
-	     + weights.y * palette[base + joints.y]
-	     + weights.z * palette[base + joints.z]
-	     + weights.w * palette[base + joints.w];
-}
-
-// The four influences of one vertex, blended into the matrix that poses it. The
-// same function `mesh.shady` carries, and it has to be: a shadow cast from a
-// different blend is a character whose shadow walks out of step with it.
-fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
-{
-	float4x4* palette = draw.palette;
-	if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
-	uint base = instance.pose & POSE_MASK;
-
-	uint4 joints = draw.joints[vid];
-	float4 weights = draw.weights[vid];
-
-	float4x4 pose = blend_joints(palette, base, joints, weights);
-	// Uniform across an instance, so this is a scalar branch. The mix is of joint
-	// matrices and not of the transforms behind them: `mesh.shady` names that lie
-	// and argues for it, and this pass has to make the same trade or a character's
-	// shadow fades out of step with the character.
-	if (instance.blend <= 0.0) return pose;
-
-	float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
-	return pose + (from - pose) * instance.blend;
-}
-
-// The base vertex, displaced by every morph target this bucket carries.
-fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 position, inout float3 normal)
-{
-	if (draw.morph_targets == 0 || instance.morph == 0) return;
-
-	// Stored plus one, so zero can mean "this copy does not morph" - which is what
-	// a copy whose weights were cleared carries, and every copy of every unmorphed
-	// mesh with it.
-	uint base = instance.morph - 1;
-
-	for (uint t = 0; t < draw.morph_targets; t++)
-	{
-		float weight = push.frame[0].morph_weights[base + t];
-		// Skipped rather than multiplied by zero: a face wears two of its twenty
-		// expressions, so the branch is taken far more often than not and costs one
-		// compare against two multiply-adds and a 24-byte read.
-		if (weight == 0.0) continue;
-
-		MorphDelta delta = draw.morph[t * draw.skin_stride + vid];
-		position += weight * delta.position;
-		normal += weight * delta.normal;
-	}
-}
 
 // Where one vertex of one copy lands in the light's clip space.
 //
@@ -105,22 +42,11 @@ fn float4 posed_clip(uint vid, uint iid)
 	float3 position = draw.positions[vid];
 
 	// A shadow has to be cast by the face the character is wearing, so the same
-	// displacement runs here. `normal` is a discard - this pass has none, and the
+	// pose the draw path computes runs here - `shaders/skinning.shady` is that
+	// text, used by both. `normal` is a discard: this pass has none, and the
 	// shared function writes one.
 	float3 unused_normal = float3(0.0, 1.0, 0.0);
-	apply_morph(draw, instance, vid, position, unused_normal);
-
-	// The two skinning paths, in the same order and with the same exclusivity the
-	// draw path states: one flag or the other, never both. An `if` rather than a
-	// ternary, because one of the two pointers is null on any given draw.
-	if ((draw.flags & FLAG_HAS_SKIN) != 0)
-	{
-		position = (skin_matrix(draw, instance, vid) * float4(position, 1.0)).xyz;
-	}
-	else if ((draw.flags & FLAG_PRESKINNED) != 0)
-	{
-		position = draw.posed[iid * draw.skin_stride + vid].position;
-	}
+	pose_vertex(draw, instance, vid, iid, position, unused_normal);
 
 	// Model first, light second - the same order the main pass uses with the
 	// camera, and the only order that makes sense: a joint matrix is in the

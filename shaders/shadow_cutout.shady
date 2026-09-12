@@ -36,7 +36,7 @@ fn float2 shadow_uv(DrawRecord draw, Instance instance, uint vid)
 	if (draw.uv_variant_count != 0)
 	{
 		uint variant = min(instance.variant, draw.uv_variant_count - 1);
-		uv = variant_uv(uv, float4(0.0, 0.0, 0.0, 0.0));
+		uv = variant_uv(uv, draw.uv_variants[variant]);
 	}
 	return uv;
 }
@@ -46,18 +46,21 @@ fn float2 shadow_uv(DrawRecord draw, Instance instance, uint vid)
 // carry the same function, and a copy that drifts is a cut-out sampled from a
 // different part of the sheet than the surface was drawn from - which is a leaf
 // whose shadow is a different leaf.
-fn float2 variant_uv(float2 uv, float4 row)
+// **The row is the wire struct, not a float4.** `abi.c3` writes `UvVariant` by
+// its field names, so the components are named here too: a row that gained a
+// field could not then be read as four floats that happen to line up.
+fn float2 variant_uv(float2 uv, UvVariant row)
 {
-	uint turns = ((uint)row.z) & 3;
+	uint turns = ((uint)row.turns) & 3;
 	if (turns == 1) uv = float2(uv.y, 1.0 - uv.x);
 	else if (turns == 2) uv = float2(1.0 - uv.x, 1.0 - uv.y);
 	else if (turns == 3) uv = float2(1.0 - uv.y, uv.x);
 
-	uint flip = (uint)row.w;
+	uint flip = (uint)row.flip;
 	if ((flip & 1) != 0) uv.x = 1.0 - uv.x;
 	if ((flip & 2) != 0) uv.y = 1.0 - uv.y;
 
-	return uv + row.xy;
+	return uv + float2(row.offset_u, row.offset_v);
 }
 
 // The one thing a shadow fragment stage is for: deciding this texel is not
