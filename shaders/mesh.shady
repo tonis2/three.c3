@@ -55,7 +55,18 @@ struct VertexOutput
 // in ahead of this one, so a module is one whole program even though its two
 // halves are written in different places. `@required` is that claim in the
 // language, and a module whose material half never arrived is refused here.
-fn float4 mesh_fragment(VertexOutput input) @required;
+//
+// `front_facing` is a parameter rather than a field of `VertexOutput`: that
+// struct is what `vertexMain` returns as well as what the fragment stage takes,
+// and a builtin the rasteriser produces has no meaning on the way out.
+fn float4 mesh_fragment(VertexOutput input, bool front_facing) @required;
+
+// The rasteriser's own front-face flag, as an entry parameter of its own - the
+// port of Slang's `bool front_facing : SV_IsFrontFace`.
+struct FragmentFace
+{
+	bool front_facing @builtin(front_facing);
+}
 
 // One row of a material's uv variant table: a quarter turn, a flip, and a
 // translation. The fragment half carries the same function, and a copy that
@@ -160,7 +171,7 @@ fn VertexOutput vertexMain(VertexIn input) @vertex
 	return output;
 }
 
-fn float4 fragmentMain(VertexOutput input) @fragment
+fn float4 fragmentMain(VertexOutput input, FragmentFace face) @fragment
 {
-	return mesh_fragment(input);
+	return mesh_fragment(input, face.front_facing);
 }

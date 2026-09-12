@@ -296,15 +296,28 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"Uniforms",
 	"material_unused",
 	"material_uniforms",
-	// The shadow lookup: the reserved sampler at binding 1, the function that
-	// reads it, and the one global in the template. `g_shadow` is the one worth
-	// naming out loud — a uniform of that name would shadow the value `lambert`
-	// folds into the direct light, and the body would compile and come out lit.
+	// The shadow lookup: the reserved comparison samplers in the frame's set,
+	// the functions that read them, and the value `standard` folds into the
+	// direct light. `g_shadow` is the one worth naming out loud - a uniform of
+	// that name would shadow the value `lambert` folds in, and the body would
+	// compile and come out lit.
 	"shadow_map",
 	"shadow_factor",
 	"g_shadow",
 	"point_shadow_map",
-	"point_shadow_factor", // The sky the same way: the reserved sampler at binding 2, the term that
+	"point_shadow_factor",
+	"shadow_compare",
+	"shadow_atlas_compare",
+	"shadow_atlas_static_compare",
+	"shadow_view_factor_filtered",
+	"shadow_view_factor_filtered_from", // The crevice term: the frame depth at binding 4, the function that reads
+	// it, and the field it lands on.
+	"ambient_occlusion_depth",
+	"crevice_occlusion", // The baked light: the atlas at binding 20, the bit that says a light is in
+	// it, and the delta a moving caster took away from the bake.
+	"lightmap_atlas",
+	"light_is_baked",
+	"baked_dynamic_delta", // The sky the same way: the reserved sampler at binding 2, the term that
 	// reads it and the mapping that term projects a direction through. A body
 	// naming any of the three would compile against its own and the reflection
 	// would resolve the binding to a texture the pass never wrote.
@@ -325,7 +338,13 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"three_textures",
 	"Map",
 	"map_at",
-	"SLOT_BASE_COLOR", // The three push fields the mesh contract pins, and the record the third of
+	"SLOT_BASE_COLOR", // The map a material wears through `surface.shady`: the three-tap sampler
+	// and the two pure helpers under it, and the bit that selects it. Also the
+	// row a base colour map sits at, above.
+	"stochastic_sample",
+	"hash_cell",
+	"triangle_cell",
+	"FLAG_STOCHASTIC", // The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
 	// no longer share a scope with a uniform — they stay refused because the
@@ -417,6 +436,7 @@ const String[*] MATERIAL_CONTRACT_FIELDS @local = { // Surface. `shadow` is here
 // the `s.shadow` in the body that declared it into `s.(push.shadow)`.
 	"albedo",
 	"normal",
+	"receiver_normal",
 	"uv",
 	"position",
 	"color",

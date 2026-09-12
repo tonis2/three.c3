@@ -503,12 +503,49 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("s.uniforms = material_uniforms();"),
 		"which is where the surface's uniforms come from, storage and all");
 
-	test::@check(source.contains("fn float4 mesh_fragment(VertexOutput input)"),
+	test::@check(source.contains("fn float4 mesh_fragment(VertexOutput input, bool front_facing)"),
 		"the material half defines the function the geometry half declared");
+	test::@check(source.contains("bool front_facing @builtin(front_facing);"),
+		"and the fragment entry takes the rasteriser's flag as its own parameter");
 	test::@check(source.contains("s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);"),
 		"the record's base colour and the copy's colour reach the surface");
 	test::@check(source.contains("s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;"),
 		"and the tiling is applied where a body's own sampling lands on the same texel");
+	test::@check(source.contains("Sampler2D three_textures[] @set(1) @binding(0);"),
+		"the device-wide texture array is the module's one resource");
+	test::@check(source.contains("Map base_color_map = map_at(SLOT_BASE_COLOR);"),
+		"the base colour map is reached by its row through `Map`");
+	test::@check(source.contains("if (base.a * draw.base_color.a < draw.surface.w) discard;"),
+		"and the alpha test is before the body, on the map's alpha times the material's");
+	test::@check(source.contains("Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);")
+		&& source.contains("Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);"),
+		"the shadow atlases are declared at the bindings the pass already writes");
+	test::@check(source.contains("s.shadow = shadow_factor(s.position, s.normal);"),
+		"the surface carries the sun's visibility, read once");
+	test::@check(source.contains("float visibility = i == 0u ? sun_shadow : point_shadow_factor(i, light, position, receiver_normal);"),
+		"and the direct light folds it in, the sun from the surface and every other light from its own view");
+	test::@check(source.contains("Sampler2D ambient_occlusion_depth @set(0) @binding(4);"),
+		"the frame depth the crevice reads is declared at the engine's own binding");
+	test::@check(source.contains("s.crevice = crevice_occlusion(s.position, s.normal);"),
+		"the surface carries the crevice the ambient terms scale by");
+	test::@check(source.contains("float3 diffuse = ambient * s.crevice")
+		&& source.contains("+ push.frame[0].world.rgb * s.crevice;"),
+		"and the ambient floor and the world light are what it multiplies");
+	test::@check(source.contains("Sampler2D lightmap_atlas @set(0) @binding(20);"),
+		"the baked atlas is declared at the engine's own binding");
+	test::@check(source.contains("s.lightmapped = front_facing && input.lightmap.z > 0.5;")
+		&& source.contains("lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb"),
+		"front faces with a tile read it once, and back faces fall back to real time");
+	test::@check(source.contains("if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;"),
+		"a baked light's diffuse is skipped where the tile carries it and its highlight is not");
+	test::@check(source.contains("baked_dynamic_delta(push.frame, s.normal, s.receiver_normal, s.position)"),
+		"and the moving-caster delta is added beside the tile");
+	test::@check(source.contains("Sampler2D environment_map @set(0) @binding(2);"),
+		"the environment is declared at the engine's own binding");
+	test::@check(source.contains("environment_map.SampleLevel(environment_uv(reflected), lod).rgb"),
+		"and the reflection samples it through the same mapping the sky background draws with");
+	test::@check(source.contains("+ environment_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance) * s.crevice"),
+		"the reflection is added beside the direct term and scaled by the crevice");
 	test::@check(source.contains("return float4(shade(s), draw.base_color.a * input.color.a);"),
 		"the alpha is the material's and the copy's, never the body's");
 	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
@@ -909,8 +946,8 @@ fn void the_ported_mesh_module_is_generated() @test
 		"the vertex stage takes the two builtins");
 	test::@check(source.contains("uint vid @builtin(vertex_index);") && source.contains("uint iid @builtin(instance_index);"),
 		"as builtins rather than as vertex attributes");
-	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"),
-		"and the fragment stage is the second entry point");
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input, FragmentFace face) @fragment"),
+		"and the fragment stage is the second entry point, with the front-face builtin beside it");
 
 	// The varyings are the wire format between the two halves, in the order the
 	// material half declares them.

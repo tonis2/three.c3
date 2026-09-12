@@ -125,9 +125,28 @@ fn void the_mesh_def_arrives_with_the_engines_abi() @test
 	test::@check(mod.layout.field_of("material_unused") == null,
 		"and the reserved padding is not a uniform");
 
-	// This module declares no descriptors, and that is a legal layout.
-	test::@check(mod.layout.bindings.len() == 0 && mod.layout.set_count == 0,
-		"a module with no resources reports none");
+	// The file's own resources reach the layout: set 0's shadow comparison
+	// samplers at the engine's own bindings, and the device-wide texture array
+	// at set 1. The adapter did not know either of them; it read them out of
+	// the module about to run.
+	uint shadow_samplers = 0;
+	bool textures = false;
+	foreach (binding : mod.layout.bindings)
+	{
+		if (binding.set == 0 && (binding.binding == 18 || binding.binding == 21)
+			&& binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+		{
+			shadow_samplers++;
+		}
+		if (binding.set == 1 && binding.binding == 0
+			&& binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+		{
+			textures = true;
+		}
+	}
+	test::@check(mod.layout.set_count == 2, "two sets, got %d", mod.layout.set_count);
+	test::@check(shadow_samplers == 2 && textures,
+		"the shadow samplers and the texture array are the bindings the module declares");
 
 	// The def's own lines reached the module, and the module is exactly what
 	// compiling the generated text produces.
