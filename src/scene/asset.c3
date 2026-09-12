@@ -600,6 +600,32 @@ struct AssetSkin
 	bool loaded;
 }
 
+struct AssetNavigationProfile
+{
+	String name;
+	String source_hash;
+	NavSettings settings;
+	Vec3 origin;
+	int nx, ny, nz;
+	int[] cells;
+	uint components;
+	uint largest_component;
+	uint solid_cells;
+	uint floor_cells;
+}
+
+fn void free_navigation(Asset* asset)
+{
+	foreach (&profile : asset.nav_profiles)
+	{
+		profile.name.free(mem);
+		profile.source_hash.free(mem);
+		if (profile.cells.len > 0) mem::free(profile.cells);
+	}
+	asset.nav_profiles.free();
+	asset.nav_profiles = { };
+}
+
 struct Asset
 {
 	String path; // owned
@@ -650,6 +676,7 @@ struct Asset
 	// `asset.cameras` are what a script reads them through.
 	List{AssetLight} lights;
 	List{AssetCamera} cameras;
+	List{AssetNavigationProfile} nav_profiles;
 
 	// What the file said collides — `scene/collider.c3`. Empty, and `has_physics`
 	// false, for every file that does not carry `KHR_physics_rigid_bodies`, which
@@ -1377,6 +1404,7 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 		mesh.free_buffers(gpu);
 	}
 	asset.meshes.free();
+	free_navigation(asset);
 	free_nodes(asset);
 	free_physics(asset);
 	free_stream(asset);
@@ -2240,10 +2268,73 @@ fn bool take_pretranscoded(AssetImages* images, int image_index, BlockImage* out
  "linked, not duplicated" — the fine half is the content-hash texture dedup
  below, which catches two *different* files sharing an image.
 
- @param path : `A .glb or a .gltf; gltf.c3l reads both.`
- @return `The asset's handle, for Scene.add_mesh.`
- @return ? ASSET_HAS_NO_MESHES : `The file parsed but contains no drawable geometry, which is almost always the wrong file rather than an empty one.`
 *>
+fn void record_navigation(Asset* asset, gltf::GltfStream* stream) @local
+{
+	foreach (source : stream.gltf.navigation_profiles)
+	{
+		if (source.cells >= stream.gltf.accessors.len()
+			|| !(source.cell_size > 0.0f) || !(source.agent_height > 0.0f)
+			|| source.agent_radius < 0.0f || source.step_height < 0.0f
+			|| source.step_height > source.agent_height
+			|| source.slope_limit < 0.0f || source.slope_limit >= 90.0f
+			|| !math::is_finite(source.cell_size) || !math::is_finite(source.agent_radius)
+			|| !math::is_finite(source.agent_height) || !math::is_finite(source.step_height)
+			|| !math::is_finite(source.slope_limit)
+			|| !math::is_finite(source.origin.x) || !math::is_finite(source.origin.y)
+			|| !math::is_finite(source.origin.z)) continue;
+		long nx = source.dimensions[0];
+		long ny = source.dimensions[1];
+		long nz = source.dimensions[2];
+		if (nx < 2 * NAV_PAD + 1 || ny < 2 * NAV_PAD + 1 || nz < 2 * NAV_PAD + 1
+			|| nx > NAV_MAX_VOXELS || ny > NAV_MAX_VOXELS / nx
+			|| nz > NAV_MAX_VOXELS / (nx * ny))
+		{
+			continue;
+		}
+		long total = nx * ny * nz;
+		gltf::Accessor accessor = stream.gltf.accessors[source.cells];
+		if (accessor.type != gltf::AccessorType.SCALAR || accessor.data_type != gltf::DataType.UINT
+			|| accessor.count == 0 || accessor.count > (usz)total || accessor.count > NAV_MAX_VOXELS
+			|| source.components == 0 || source.largest_component == 0
+			|| source.largest_component > accessor.count || source.components > accessor.count
+			|| source.solid_cells > (uint)total || source.floor_cells > source.solid_cells) continue;
+		int[] cells = mem::new_array(int, accessor.count);
+		bool valid = true;
+		uint previous = 0;
+		for (usz i = 0; i < accessor.count; i++)
+		{
+			uint voxel = stream.@cast_buffer(accessor, (sz)i, uint);
+			if (voxel >= (uint)total || (i > 0 && voxel <= previous)) { valid = false; break; }
+			int x = (int)(voxel % source.dimensions[0]);
+			int y = (int)((voxel / source.dimensions[0]) % source.dimensions[1]);
+			int z = (int)(voxel / (source.dimensions[0] * source.dimensions[1]));
+			if (x < NAV_PAD || y < NAV_PAD || z < NAV_PAD
+				|| x >= (int)source.dimensions[0] - NAV_PAD
+				|| y >= (int)source.dimensions[1] - NAV_PAD
+				|| z >= (int)source.dimensions[2] - NAV_PAD) { valid = false; break; }
+			cells[i] = (int)voxel;
+			previous = voxel;
+		}
+		if (!valid)
+		{
+			mem::free(cells);
+			continue;
+		}
+		asset.nav_profiles.push({
+			.name = source.name.copy(mem), .source_hash = source.source_hash.copy(mem),
+			.settings = { .cell = source.cell_size, .agent_radius = source.agent_radius,
+				.agent_height = source.agent_height, .step_height = source.step_height,
+				.slope_limit = source.slope_limit },
+			.origin = source.origin, .nx = (int)source.dimensions[0], .ny = (int)source.dimensions[1],
+			.nz = (int)source.dimensions[2], .cells = cells, .components = source.components,
+			.largest_component = source.largest_component, .solid_cells = source.solid_cells,
+			.floor_cells = source.floor_cells,
+		});
+	}
+}
+
+<* @param path : `A .glb or a .gltf; gltf.c3l reads both.` *>
 fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 {
 	if (!self.started) self.init();
@@ -2272,6 +2363,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 		asset.stream.close();
 		asset.meshes.free();
 		asset.images.free();
+		free_navigation(&asset);
 		asset.path.free(mem);
 	}
 
@@ -2289,6 +2381,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	asset.meshes.init(mem, 8);
 	asset.images.memo.init(mem, 4);
 	asset.images.blocks.init(mem, 4);
+	asset.nav_profiles.init(mem, 1);
 
 	// Every `KHR_texture_basisu` image at once, before a material asks for one.
 	// After the mesh check because a file with nothing to draw has nothing to
@@ -2341,6 +2434,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	record_skins(&asset, &asset.stream);
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
 	record_lights(&asset, &asset.stream);
+	record_navigation(&asset, &asset.stream);
 	// After the nodes, which it writes `AssetNode.body` into, and after the mesh
 	// loop, because an implicit shape's proxy is pushed onto the end of
 	// `asset.meshes` and would otherwise shift the ranges the nodes just took.
@@ -5088,6 +5182,10 @@ fn void Assets.free(&self, Gpu* gpu)
 		if (!asset.alive) continue;
 		foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
 		asset.meshes.free();
+		// In `free_slot`'s order, and for its reason: a baked navigation profile is
+		// plain heap the same way the nodes and the bodies are, so the wholesale
+		// teardown owes it too.
+		free_navigation(asset);
 		free_nodes(asset);
 		free_physics(asset);
 		free_stream(asset);
@@ -5111,10 +5209,11 @@ fn void Assets.free(&self, Gpu* gpu)
 
 	if (self.has_white)
 	{
+		// The table's fallback is this white's view; it must not outlive it.
+		gpu.texture_table.clear_fallback();
 		self.white.free(gpu);
 		self.has_white = false;
 	}
-
 
 	*self = { };
 }

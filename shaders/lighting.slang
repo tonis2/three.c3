@@ -122,14 +122,45 @@ float3 shared_ltc_edge(float3 v1,float3 v2)
 }
 
 // The horizon-clipped cosine integral, as a fraction of a full hemisphere.
-// Hill's sphere approximation rather than a real polygon clip: the vector form
-// factor already carries the whole geometry, and reading it as a sphere of the
-// same solid angle costs a length where clipping costs five vertices and a
-// branch per edge.
-float shared_ltc_clipped(float3 f,float3 axis)
+//
+// The polygon is convex, so the tangent plane cuts it in at most two places:
+// every edge contributes the part of itself that is above the horizon, and the
+// one chord from where the boundary leaves to where it comes back closes the
+// shape. Exact, and static — the two crossings are named rather than pushed
+// into an array, so both loops still unroll against constant indices.
+//
+// Hill's sphere approximation stood here before and reads the vector form
+// factor as a sphere of the same solid angle. That is within a percent for an
+// emitter small in the sky and wrong for a near one: measured against the
+// integral it runs to 1.7x at grazing views, and it falls to zero at the very
+// angles where a wide emitter still has half of itself above the horizon.
+float shared_ltc_clipped(float3 corner[6],float3 axis)
 {
-    float l=length(f);
-    return max((l*l+dot(f,axis))/(l+1.0),0.0);
+    float d[6];
+    [unroll] for(uint i=0u;i<6u;++i)d[i]=dot(corner[i],axis);
+    float3 sum=float3(0.0),leaving=float3(0.0),entering=float3(0.0);
+    bool cut=false;
+    [unroll] for(uint i=0u;i<6u;++i)
+    {
+        uint j=i==5u?0u:i+1u;
+        bool here=d[i]>=0.0,there=d[j]>=0.0;
+        if(here&&there){sum+=shared_ltc_edge(corner[i],corner[j]);continue;}
+        if(!here&&!there)continue;
+        float3 span=lerp(corner[i],corner[j],d[i]/(d[i]-d[j]));
+        float len2=dot(span,span);
+        if(here)
+        {
+            float3 at=len2>1e-12?span*rsqrt(len2):corner[i];
+            sum+=shared_ltc_edge(corner[i],at);leaving=at;cut=true;
+        }
+        else
+        {
+            float3 at=len2>1e-12?span*rsqrt(len2):corner[j];
+            sum+=shared_ltc_edge(at,corner[j]);entering=at;
+        }
+    }
+    if(cut)sum+=shared_ltc_edge(leaving,entering);
+    return max(dot(sum,axis),0.0);
 }
 
 // The emitter as a polygon of directions from the shading point, plus the shared
@@ -198,9 +229,7 @@ SharedAreaShape shared_area_shape(Light light,float3 position,float3 normal)
 // not use the LTC fit texture; only the specular lobe needs that approximation.
 float shared_area_polygon_diffuse(SharedAreaShape shape,float3 normal)
 {
-    float3 sum=float3(0.0);
-    [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(shape.corner[i],shape.corner[i==5u?0u:i+1u]);
-    return shape.scale*shared_ltc_clipped(sum,normal);
+    return shape.scale*shared_ltc_clipped(shape.corner,normal);
 }
 
 #ifndef THREE_AREA_REFERENCE
@@ -243,9 +272,7 @@ float3 shared_area_ltc_specular(SharedAreaShape shape,SharedAreaLtcContext conte
         float3 c=shape.corner[i];
         local[i]=normalize(float3(dot(context.row0,c),dot(context.row1,c),dot(context.row2,c)));
     }
-    float3 sum=float3(0.0);
-    [unroll] for(uint i=0u;i<6u;++i)sum+=shared_ltc_edge(local[i],local[i==5u?0u:i+1u]);
-    float form=shared_ltc_clipped(sum,float3(0.0,0.0,1.0));
+    float form=shared_ltc_clipped(local,float3(0.0,0.0,1.0));
     return shape.scale*form*context.fresnel;
 }
 
