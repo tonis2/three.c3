@@ -2881,7 +2881,7 @@ shader.
 
 ## three.toneMapping
 
-The curve the finished frame ends on: `'none'` or `'agx'`. Anything else throws.
+The curve the finished frame ends on: `'none'`, `'agx'` or `'agx-blender'`. Anything else throws.
 
 `'none'` is the default and is the identity — the chain hands its linear values straight to the display encode,
 and anything above 1 clips. It is the default because every scene in this project was graded against it, so a
@@ -2895,9 +2895,20 @@ path through the colour cube is what the *inset* matrix in the middle of it buys
 a linear 0.18 grey comes out around sRGB 128 under AgX against 118 under the identity, and the whole frame reads
 a little flatter and a little cooler in the shadows.
 
-It is a fit and not Blender's own curve, and the two part company in the deep shadows: below about four stops
-under middle grey this reads a few levels lighter than EEVEE puts the same colour. Through the mid-tones and the
-highlights they agree.
+It is a fit and not Blender's own curve, and the two part company by more than the word "fit" suggests. Measured
+against the curve Blender applies — a 2048-step ramp from 2^-16 to 2^4 through the AgX view transform at 16 bits
+— the polynomial runs *low* through the toe and *high* from the pivot up, by as much as 14.3 sRGB levels and 5.1
+on average. A scene lit like daylight spends little time in that band; a night scene spends all of it there, and
+the shape reads as crushed dark objects against lifted mid-tones.
+
+`'agx-blender'` is the same transform carrying Blender's own contrast curve instead: the sigmoid the AgX config
+is generated from, two hyperbolic segments meeting at a pivot, with its five parameters recovered by rendering
+that ramp through Blender and fitting what came back rather than copied out of a config. Everything around the
+curve is shared, so this is only about where a value lands. Over the same ramp it is 0.3 sRGB levels from
+Blender on average and 0.8 at worst. Reach for it when the frame is meant to match an EEVEE render; `'agx'` is
+still what to reach for when you want the filmic answer and were grading against it. It is the more expensive of
+the two — two `pow`s a channel against a polynomial's six multiplies — and it is a separate mode precisely so
+that nothing already graded against the fit moves.
 
 **The sRGB encode is not this.** It happens at the attachment, after the curve, on both settings — so a post body
 still returns linear whichever mode is selected, and a screenshot is sRGB either way.
