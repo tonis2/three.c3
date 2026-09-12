@@ -63,6 +63,10 @@ struct Post
 	float time;         // seconds since the shader was set, on the game clock
 	float depth;        // distance from the camera along the view direction, in world units
 	float3 tap;         // this pixel of the pass named by `reads`, linear
+
+	// The pass's own uniforms, emitted from what the script declared and spliced
+	// in above the push block, which carries the struct.
+	Uniforms uniforms;
 }
 
 // Three vertices from the vertex index alone, in clip space already: no
@@ -110,6 +114,7 @@ fn float4 fragmentMain(VertexOutput input) @fragment
 	// with sane planes, and a runtime that has not set them yet - both zero -
 	// would otherwise put a NaN into every body that reads `p.depth`.
 	p.depth = span > 1e-6 ? near * far / span : far;
+	p.uniforms = push.uniforms;
 
 	// **Alpha is not the body's to return.** The last thing a chain writes goes to
 	// the blit and the readback, and the readback forces alpha opaque regardless;

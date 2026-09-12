@@ -309,7 +309,14 @@ fn float3 post(Post p)
 
 fn void the_ported_post_is_generated() @test
 {
-	three::ShaderDef def = three::post_def(identity_post());
+	// A post pass with no uniforms of its own: the identity body reads none, and the
+	// push block still carries the struct - one field of padding - so a body that
+	// reads nothing and a body that reads four floats are the same module shape.
+	DString no_uniforms;
+	no_uniforms.tinit(128);
+	three::append_shady_uniforms(&no_uniforms, {});
+
+	three::ShaderDef def = three::post_def(identity_post(), no_uniforms.str_view());
 
 	DString out;
 	out.tinit(16384);
@@ -367,7 +374,15 @@ fn float3 shade(Surface s)
 
 fn void the_ported_mesh_is_lit() @test
 {
-	three::ShaderDef def = three::mesh_def(material_sources(default_shade()));
+	MaterialUniform[] declared = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 8 },
+	};
+	DString uniforms;
+	uniforms.tinit(256);
+	three::append_shady_uniforms(&uniforms, declared);
+
+	three::ShaderDef def = three::mesh_def(material_sources(default_shade()), uniforms.str_view());
 
 	DString out;
 	out.tinit(32768);
@@ -384,6 +399,17 @@ fn void the_ported_mesh_is_lit() @test
 
 	// The half's own seam: the record becomes a Surface, the surface goes to the
 	// body, and the body is text that was spliced in rather than a file.
+	// The merge: the emitted struct stands above the push block, which carries one
+	// member of it, and the body reaches it through the surface.
+	sz uniforms_at = source.index_of("struct Uniforms")!!;
+	sz push_at = source.index_of("struct MeshPush @pushconstant")!!;
+	test::@check(uniforms_at < push_at,
+		"the uniforms struct is declared before the push block that holds one");
+	test::@check(source.contains("\tUniforms uniforms;\n}\nMeshPush push;"),
+		"and the walked block carries it as its last member");
+	test::@check(source.contains("s.uniforms = push.uniforms;"),
+		"which is where the surface's uniforms come from");
+
 	test::@check(source.contains("fn float4 mesh_fragment(VertexOutput input)"),
 		"the material half defines the function the geometry half declared");
 	test::@check(source.contains("s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);"),
