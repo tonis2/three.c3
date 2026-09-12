@@ -75,6 +75,8 @@ const char[*] EMBED_CLUSTER_SHADY         = $embed("../../shaders/cluster.shady"
 const char[*] EMBED_SHADOW_SHADY          = $embed("../../shaders/shadow.shady");
 const char[*] EMBED_SHADOW_CUTOUT_SHADY   = $embed("../../shaders/shadow_cutout.shady");
 const char[*] EMBED_POST_SHADY            = $embed("../../shaders/post.shady");
+const char[*] EMBED_LIGHTING_SHADY        = $embed("../../shaders/lighting.shady");
+const char[*] EMBED_MATERIAL_SHADY        = $embed("../../shaders/material.shady");
 
 struct EmbeddedShader
 {
@@ -82,7 +84,7 @@ struct EmbeddedShader
 	String source;
 }
 
-const EmbeddedShader[17] EMBEDDED = {
+const EmbeddedShader[19] EMBEDDED = {
 	{ "mesh.slang", (String)EMBED_MESH[..] },
 	{ "material.slang", (String)EMBED_MATERIAL[..] },
 	{ "post.slang", (String)EMBED_POST[..] },
@@ -100,6 +102,8 @@ const EmbeddedShader[17] EMBEDDED = {
 	{ "shadow.shady", (String)EMBED_SHADOW_SHADY[..] },
 	{ "shadow_cutout.shady", (String)EMBED_SHADOW_CUTOUT_SHADY[..] },
 	{ "post.shady", (String)EMBED_POST_SHADY[..] },
+	{ "lighting.shady", (String)EMBED_LIGHTING_SHADY[..] },
+	{ "material.shady", (String)EMBED_MATERIAL_SHADY[..] },
 };
 
 <*

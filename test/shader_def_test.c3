@@ -353,19 +353,59 @@ fn void the_ported_post_is_generated() @test
 }
 
 <*
- A material: the shared lighting block, the material half, and a body.
+ A body that reads both halves of what the merged post pass hands it.
 
- This is the whole of what a material is - `material.shady` declares `shade` and
- the text below defines it, which is the same seam a script's `shade()` arrives
- through in the engine, and the reason a body cannot be written as a file.
+ `p.uniforms` is the struct the script's list emitted, and `p.depth` is the
+ reconstruction the fixed half runs before the body - the two things a post
+ effect actually keys on. The body is its own source region, ahead of the fixed
+ half, so a fault in it is reported at the line the agent typed rather than at
+ the line of the module it was spliced into.
 *>
-macro String material_sources(String body)
+macro String graded_post()
 {
-	return string::tformat("%s\n%s\n%s",
-		three::load_source("shaders/lighting.shady", tmem)!!,
-		three::load_source("shaders/material.shady", tmem)!!,
-		body
-	);
+	return `
+fn float3 post(Post p)
+{
+	float gain = p.uniforms.gain;
+	float scale = p.uniforms.near_scale;
+	return p.color * p.uniforms.tint.rgb * gain + float3(p.depth * scale);
+}
+`;
+}
+
+fn void a_post_body_reads_its_uniforms_and_its_depth() @test
+{
+	MaterialUniform[] declared = {
+		{ "tint", 3, 1 },
+		{ "gain", 1, 1 },
+		{ "near_scale", 1, 1 },
+	};
+	DString uniforms;
+	uniforms.tinit(512);
+	three::append_shady_uniforms(&uniforms, declared);
+
+	three::ShaderDef def = three::post_def(graded_post(), uniforms.str_view());
+
+	DString out;
+	out.tinit(16384);
+	three::append_shader_def(&out, def, three::PostPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("struct Uniforms\n{\n\tfloat3 tint;\n\tfloat gain;\n\tfloat near_scale;\n}"),
+		"the declared list becomes the typed struct above the block: %s", source);
+	test::@check(source.contains("p.uniforms = push.uniforms;"),
+		"which the fixed half fills from the block");
+	test::@check(source.contains("p.depth = span > 1e-6 ? near * far / span : far;"),
+		"and `p.depth` is reconstructed before the body runs");
+	test::@check(source.contains("float gain = p.uniforms.gain;")
+		&& source.contains("float3(p.depth * scale)"),
+		"and the body's own text reads both");
+	test::@check(source.contains("fn float3 post(Post p)\n{\n\tfloat gain = p.uniforms.gain;"),
+		"with the body spliced as a region of its own");
+	test::@check(source.index_of("#line 1 \"post_body\"")!! < source.index_of("#line 1 \"post\"")!!,
+		"ahead of the fixed half it plugs into");
+
+	check_compiles(source, "a post body reading p.uniforms and p.depth");
 }
 
 <*
@@ -408,13 +448,13 @@ fn float3 shade(Surface s)
  emitter and the def together, so the region above the block and the block itself
  cannot disagree about which one this material got.
 *>
-macro String material_module(MaterialUniform[] declared, bool spilled, String body)
+macro String material_module(MaterialUniform[] declared, bool spilled, String body, String vertex = "")
 {
 	DString uniforms;
 	uniforms.tinit(1024);
 	three::append_shady_uniforms(&uniforms, declared, spilled);
 
-	three::ShaderDef def = three::mesh_def(material_sources(body), uniforms.str_view());
+	three::ShaderDef def = three::mesh_def(body, uniforms.str_view(), vertex);
 	def.uniforms_spilled = spilled;
 
 	DString out;
@@ -433,7 +473,7 @@ fn void the_ported_mesh_is_lit() @test
 	uniforms.tinit(256);
 	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::mesh_def(material_sources(default_shade()), uniforms.str_view());
+	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view());
 
 	DString out;
 	out.tinit(32768);
@@ -570,6 +610,208 @@ fn void a_body_reading_its_uniforms_compiles_in_both_shapes() @test
 }
 
 <*
+ A material's vertex body: the same seam as `shade`, one stage earlier.
+
+ The contract is `material.shady`'s - the `Vertex` struct and the `@required`
+ declaration - and the body is text spliced behind it, so a script's `displace`
+ and the built-in nobody wrote are one mechanism. What the checks below hold is
+ where the call sits: before the model matrix, so the displacement is in object
+ space, and before `variant_uv`, so a body that computes its own uv composes with
+ the per-copy transform rather than overriding it.
+*>
+macro String leaning_vertex()
+{
+	return `
+fn void displace(inout Vertex v)
+{
+	float gain = v.uniforms.gain;
+	v.position.y += sin(v.position.x * 3.0 + gain) * 0.25;
+	v.normal = normalize(v.normal + float3(0.1, 0.0, 0.0));
+	v.uv += float2(0.25, 0.0);
+	v.color = float4(float(v.index) * 0.1, 0.0, 0.0, 1.0);
+}
+`;
+}
+
+fn void a_vertex_body_moves_the_vertex_in_object_space() @test
+{
+	MaterialUniform[] declared = { { "gain", 1, 1 } };
+	String source = material_module(declared, false, default_shade(), leaning_vertex());
+
+	// The contract the body is written against, from the material half: the
+	// varyings it may move, the per-vertex seed, and the uniform set it reads
+	// through the same seam `Surface.uniforms` does.
+	test::@check(source.contains("struct Vertex\n{") && source.contains("\tfloat3 position;")
+		&& source.contains("\tfloat3 normal;") && source.contains("\tfloat2 uv;")
+		&& source.contains("\tfloat4 color;") && source.contains("\tuint variant;")
+		&& source.contains("\tuint index;") && source.contains("Uniforms uniforms;"),
+		"the body-facing struct is material.shady's: %s", source);
+	test::@check(source.contains("fn void displace(inout Vertex v) @required;"),
+		"beside the declaration a body satisfies");
+
+	// The splice, the call, and the transform the call has to precede.
+	sz body_at  = source.index_of("float gain = v.uniforms.gain;")!!;
+	sz call_at  = source.index_of("displace(v);")!!;
+	sz model_at = source.index_of("float4 world = instance.model * float4(v.position, 1.0);")!!;
+	test::@check(body_at > source.index_of("struct Vertex")!!,
+		"the body is spliced behind the contract it defines");
+	test::@check(call_at > body_at && model_at > call_at,
+		"and the displacement lands in object space, before the model transform");
+
+	// What the body wrote comes back out of the vertex's fields, and what it did
+	// not write is the path's own answer.
+	test::@check(source.contains("output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;"),
+		"the body's normal goes through the instance's normal matrix");
+	test::@check(source.contains("output.uv = variant_uv(output.uv, draw.uv_variants[variant]);"),
+		"the per-copy uv is applied on top of whatever the body wrote");
+	test::@check(source.contains("v.variant = min(instance.variant, draw.material_rows - 1u);"),
+		"the row is clamped before the body can read it");
+	test::@check(source.contains("v.index = input.vid;"),
+		"the vertex number is the per-vertex seed the body gets");
+	test::@check(source.contains("v.uniforms = material_uniforms();"),
+		"and the uniforms reach it through the one fill the fragment half also uses");
+	test::@check(source.contains("output.color = v.color;") && source.contains("output.variant = v.variant;"),
+		"the colour and the row the body moved reach the fragment stage");
+
+	check_compiles(source, "a material with a vertex body");
+}
+
+<*
+ A material that wrote no vertex body still compiles.
+
+ `mesh_vertex` calls `displace` unconditionally, so the def generates the empty
+ function the way the caller generates `standard(s)` for a fragment that wrote
+ none: the call is folded away, and the module is the one it was before the
+ vertex stage existed.
+*>
+fn void a_material_without_a_vertex_body_moves_nothing() @test
+{
+	MaterialUniform[] declared = {};
+	String source = material_module(declared, false, default_shade());
+
+	test::@check(source.contains("fn void displace(inout Vertex v)\n{\n}"),
+		"the def splices the empty function in: %s", source);
+	test::@check(source.contains("displace(v);"), "and the call is still there to be folded");
+	check_compiles(source, "a material with no vertex body");
+}
+
+<*
+ **A body's own lines, all the way through.** The map's own unit test is shady's
+ - a hand-written `#line 1 "material"` module reported as `material:3:12` - and
+ what these three add is the whole way: text in, a generated module, and a
+ diagnostic that names the body and counts in it.
+
+ Each body has its fault on the same line of its own text - line 4 - and the
+ assembled module's line for it is hundreds higher, so a diagnostic that named
+ the module would fail every assertion below.
+*>
+fn shady::Diagnostic diagnostic_of(String source)
+{
+	shady::Diagnostic diagnostic;
+	char[]? spirv = shady::compile(source, &diagnostic, scalar_layout: true);
+	if (catch spirv)
+	{
+		// expected: the body has a fault in it
+	}
+	else
+	{
+		free(spirv);
+	}
+	return diagnostic;
+}
+
+macro String broken_shade()
+{
+	return `
+fn float3 shade(Surface s)
+{
+	return s.albedo * notAFunction(s.uv);
+}
+`;
+}
+
+macro String broken_displace()
+{
+	return `
+fn void displace(inout Vertex v)
+{
+	v.position.y += notAFunction(v.position.x);
+}
+`;
+}
+
+macro String broken_post()
+{
+	return `
+fn float3 post(Post p)
+{
+	return p.color * notAFunction(p.uv);
+}
+`;
+}
+
+fn void a_fragment_body_error_names_the_bodys_own_line() @test
+{
+	MaterialUniform[] declared = {};
+	String source = material_module(declared, false, broken_shade());
+	shady::Diagnostic diagnostic = diagnostic_of(source);
+
+	test::@check(diagnostic.kind == shady::DiagnosticKind.ERROR, "the body does not compile");
+	test::@check(diagnostic.name == "material",
+		"the region is the body's own name; got '%s'", diagnostic.name);
+	test::@check(diagnostic.line == 4, "its line is the body's line 4; got %d", diagnostic.line);
+	test::@check(diagnostic.line_text == "\treturn s.albedo * notAFunction(s.uv);",
+		"and the echoed line is the body's; got '%s'", diagnostic.line_text);
+	test::@check(diagnostic.to_string(tmem).contains("material:4:32"),
+		"the heading names body coordinates; got '%s'", diagnostic.to_string(tmem));
+
+	diagnostic.free();
+}
+
+fn void a_vertex_body_error_names_the_bodys_own_line() @test
+{
+	MaterialUniform[] declared = {};
+	String source = material_module(declared, false, default_shade(), broken_displace());
+	shady::Diagnostic diagnostic = diagnostic_of(source);
+
+	test::@check(diagnostic.kind == shady::DiagnosticKind.ERROR, "the body does not compile");
+	test::@check(diagnostic.name == "vertex",
+		"the region is the vertex body's own name; got '%s'", diagnostic.name);
+	test::@check(diagnostic.line == 4, "its line is the body's line 4; got %d", diagnostic.line);
+	test::@check(diagnostic.line_text == "\tv.position.y += notAFunction(v.position.x);",
+		"and the echoed line is the body's; got '%s'", diagnostic.line_text);
+	test::@check(diagnostic.to_string(tmem).contains("vertex:4:30"),
+		"the heading names body coordinates; got '%s'", diagnostic.to_string(tmem));
+
+	diagnostic.free();
+}
+
+fn void a_post_body_error_names_the_bodys_own_line() @test
+{
+	MaterialUniform[] declared = { { "gain", 1, 1 } };
+	DString uniforms;
+	uniforms.tinit(128);
+	three::append_shady_uniforms(&uniforms, declared);
+
+	three::ShaderDef def = three::post_def(broken_post(), uniforms.str_view());
+	DString out;
+	out.tinit(16384);
+	three::append_shader_def(&out, def, three::PostPush);
+	shady::Diagnostic diagnostic = diagnostic_of(out.str_view());
+
+	test::@check(diagnostic.kind == shady::DiagnosticKind.ERROR, "the body does not compile");
+	test::@check(diagnostic.name == "post_body",
+		"the region is the post body's own name; got '%s'", diagnostic.name);
+	test::@check(diagnostic.line == 4, "its line is the body's line 4; got %d", diagnostic.line);
+	test::@check(diagnostic.line_text == "\treturn p.color * notAFunction(p.uv);",
+		"and the echoed line is the body's; got '%s'", diagnostic.line_text);
+	test::@check(diagnostic.to_string(tmem).contains("post_body:4:31"),
+		"the heading names body coordinates; got '%s'", diagnostic.to_string(tmem));
+
+	diagnostic.free();
+}
+
+<*
  The second port, and the first compute stage: a module whose only resource is a
  push block, whose structs come from the shared wire list, and whose stage is a
  dispatch. Kong dispatches it and reads the posed vertices back.
@@ -625,19 +867,22 @@ fn void the_ported_skin_module_is_generated() @test
 }
 
 <*
- The draw path: the geometry half of the shading module.
+ The draw path's varyings, returned instead of shaded.
 
- The fragment stage here is the test's own, and says so: it paints the varyings
- the vertex stage interpolated so a drawing test can read them back out of a
- colour attachment. The material half replaces it with the real one - which is
- why the def takes it as an argument rather than writing it.
+ The fragment stage that runs is the real material half's; what this stub
+ replaces is only the *look*, so a drawing test can read the interpolated
+ varyings back out of a colour attachment. `Surface.uv` is the material's own uv
+ transform applied to the mesh's, which the kong rig sets to the identity, so
+ the red and green channels are the vertex stage's uv and blue is the instance's
+ own tint. The material half replaces this - which is why the def takes it as an
+ argument rather than writing it.
 *>
-macro String mesh_test_fragment()
+macro String mesh_test_shade()
 {
 	return `
-fn float4 mesh_fragment(VertexOutput input)
+fn float3 shade(Surface s)
 {
-	return float4(input.uv, input.color.g, 1.0);
+	return float3(s.uv, s.color.g);
 }
 `;
 }
@@ -647,7 +892,11 @@ fn void the_ported_mesh_module_is_generated() @test
 	String geometry = three::load_source("shaders/mesh.shady")!!;
 	defer geometry.free(mem);
 
-	three::ShaderDef def = three::mesh_def(mesh_test_fragment());
+	DString uniforms;
+	uniforms.tinit(128);
+	three::append_shady_uniforms(&uniforms, {});
+
+	three::ShaderDef def = three::mesh_def(mesh_test_shade(), uniforms.str_view());
 
 	DString out;
 	out.tinit(32768);
@@ -691,6 +940,19 @@ fn void the_ported_mesh_module_is_generated() @test
 		"the per-copy uv is applied in the vertex stage, where it is exact");
 	test::@check(source.contains("if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];"),
 		"and an absent stream is guarded by a null check rather than zero-filled");
+
+	// The vertex body's seam: the contract from the material half, the empty
+	// function standing in for a body nobody wrote, and the call between the
+	// pose and the model transform.
+	test::@check(source.contains("struct Vertex\n{") && source.contains("\tfloat3 position;")
+		&& source.contains("\tfloat3 normal;") && source.contains("\tfloat2 uv;")
+		&& source.contains("\tfloat4 color;") && source.contains("\tuint variant;"),
+		"the body-facing struct is declared by the material half");
+	test::@check(source.contains("fn void displace(inout Vertex v) @required;"),
+		"beside the declaration a body satisfies");
+	test::@check(source.contains("fn void displace(inout Vertex v)\n{\n}"),
+		"and the def splices the empty function in when the material wrote none");
+	test::@check(source.contains("displace(v);"), "which the vertex path calls unconditionally");
 
 	path::mkdir("build/shaderdef", recursive: true)!!;
 	file::save("build/shaderdef/mesh.shady", source)!!;
