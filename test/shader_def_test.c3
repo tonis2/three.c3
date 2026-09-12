@@ -241,14 +241,13 @@ fn void a_scripts_uniforms_become_a_typed_struct() @test
 	emitted.tinit(512);
 	three::append_shady_uniforms(&emitted, uniforms);
 
-	test::@check(emitted.str_view() == `const uint MATERIAL_ROWS = 8u;
-struct Uniforms
+	test::@check(emitted.str_view() == `struct Uniforms
 {
 	float4 tint;
 	float4 colors[8];
 	float cells;
 }
-`, "the uniform list becomes fields of the shape the list says, and the rows a body may index: %s", emitted.str_view());
+`, "the uniform list becomes fields of the shape the list says: %s", emitted.str_view());
 
 	String text = string::tformat("%s\n%s", emitted.str_view(), `
 struct FragmentIn
@@ -278,14 +277,13 @@ fn void a_material_with_no_uniforms_still_has_the_type() @test
 {
 	// `Surface.uniforms` has to exist for every material, or the body's vocabulary
 	// would depend on how many uniforms a script happened to declare. One reserved
-	// field is the price, and the rows constant is emitted as well because the row
-	// a body did not need is still the row it carries.
+	// field is the price. The rows a body may index are not emitted at all: the
+	// record carries them, the way it carries the uv table's height.
 	DString emitted;
 	emitted.tinit(256);
 	three::append_shady_uniforms(&emitted, {});
 
-	test::@check(emitted.str_view() == `const uint MATERIAL_ROWS = 1u;
-struct Uniforms
+	test::@check(emitted.str_view() == `struct Uniforms
 {
 	float material_unused;
 }

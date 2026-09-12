@@ -272,6 +272,10 @@ struct Draw
     // per-draw descriptor set. Every slot nothing filled holds the array's
     // reserved 1x1 white.
     uint texture_index[24];
+
+    // The tallest uniform table column this material declared, so a body
+    // indexing one by `s.variant` is in range without a check of its own.
+    uint material_rows;
 };
 
 // **The three mesh fields come first, in this order, and material uniforms only

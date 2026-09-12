@@ -550,6 +550,17 @@ struct DrawRecord
 	 shader never tests for "no texture". Nothing samples through this yet.
 	*>
 	uint[DRAW_TEXTURE_INDICES] texture_index;
+
+	// The tallest uniform table column this material declared, and **carried
+	// rather than compiled in**: the uv table's height arrives the same way
+	// (`uv_variant_count` above) and there is no reason for two tables that mean
+	// the same thing to be clamped by two different mechanisms. A body indexing
+	// `s.uniforms.palette[s.variant]` is in range because `fragmentMain` clamped
+	// the row against this.
+	//
+	// At least one, so the clamp's subtraction cannot wrap on a material with no
+	// tables at all.
+	uint material_rows;
 }
 
 struct MeshPush
@@ -656,7 +667,9 @@ $assert @layout_matches(
 // buffer rather than an error. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
-$assert DrawRecord::size == 384 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
+// 388 bytes of fields and four of the struct's own tail alignment: the padding is
+// not a field and not part of the wire format, which is why the new field is last.
+$assert DrawRecord::size == 392 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
 $assert FrameBlock::size == 400 : "FrameBlock no longer matches shaders/mesh.slang";
 $assert Light::size == 80 : "Light no longer matches shaders/mesh.slang";
 $assert Instance::size == 180 : "Instance no longer matches shaders/mesh.slang";
@@ -796,6 +809,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "uv_variants", 144, 128 },
 	{ "emissive", 272, 16 },
 	{ "texture_index", 288, 96 },
+	{ "material_rows", 384, 4 },
 };
 
 // How many of those `shaders/mesh.slang` declares in its own `struct Draw`. All
