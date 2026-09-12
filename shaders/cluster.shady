@@ -45,6 +45,13 @@ fn void bin_lights(ComputeIn input)
 	float zlo = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)z / (float)grid.z);
 	float zhi = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)(z + 1) / (float)grid.z);
 
+	// Slang indexes a matrix by row, shady by column; the planes are rows of
+	// the view-projection, so transpose once here rather than per light.
+	float4x4 rows = transpose(push.view_projection);
+	float4 r0 = rows[0];
+	float4 r1 = rows[1];
+	float4 r3 = rows[3];
+
 	uint written = 0;
 	for (uint i = 1; i < push.light_count; ++i)
 	{
@@ -57,12 +64,8 @@ fn void bin_lights(ComputeIn input)
 			        + length(light.area_up.xyz * light.area_up.w);
 		}
 
-		// One declaration per row: shady has no comma-declarator list. The
-		// third row is not here because the z slices come from the camera
-		// distance instead; only the side planes come from the matrix.
-		float4 r0 = push.view_projection[0];
-		float4 r1 = push.view_projection[1];
-		float4 r3 = push.view_projection[3];
+		// The side planes, from the rows taken above. The third row is not
+		// used because the z slices come from the camera distance instead.
 		float4 planes[4] = { r0 - lo.x * r3, hi.x * r3 - r0, r1 - lo.y * r3, hi.y * r3 - r1 };
 		float4 world = float4(light.direction.xyz, 1.0);
 		bool overlap = true;

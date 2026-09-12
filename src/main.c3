@@ -16,6 +16,8 @@
  --frames <n>          run n frames, then stop. Implies --headless
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
+ --shady <pass,...>    compile those passes through shady
+ --slang <pass,...>    compile those passes through Slang
  --debug               validation layers, @debug_log, and the window's own chords
  --cache-dir <dir>     where compiled shaders are kept — see paths.c3
 
@@ -112,6 +114,12 @@ fn Options? parse_args(String[] args)
 			case "--camera":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.camera = args[++i];
+			case "--shady":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.shady = args[++i];
+			case "--slang":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.slang = args[++i];
 			case "--mcp":
 				// The port is optional, so a following argument is consumed only
 				// when it actually looks like one — otherwise `three --mcp
@@ -202,6 +210,9 @@ fn void usage()
 	io::printn("  --frames <n>          run n frames and stop — implies --headless");
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
+	io::printn("  --shady <pass,...>    compile these passes through shady");
+	io::printn("  --slang <pass,...>    compile these passes through Slang");
+	io::printn("                        (THREE_SHADY / THREE_SLANG spell the same thing)");
 	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
 	io::printn("  -h, --help            this");
@@ -252,6 +263,10 @@ fn int main(String[] args)
 		usage();
 		return 0;
 	}
+
+	// Before `run`, and therefore before anything compiles: these choose the
+	// implementation per pass, and the first compile of a pass picks for good.
+	if (catch apply_shader_overrides(opts.shady, opts.slang)) return 1;
 
 	// Before anything that opens a window or a device, and before anything that
 	// could print: this process is the stdio end of another one's server, and the

@@ -134,6 +134,14 @@ struct Options
 	*>
 	String cache_dir;
 	bool cache_dir_set;
+	<*
+	 `--shady` and `--slang`: comma-separated pass names whose compiler this run
+	 forces, for A/B-ing one pass without a rebuild. `apply_shader_overrides`
+	 reads them, and the environment variables behind them, before the first
+	 compile.
+	*>
+	String shady;
+	String slang;
 	bool help;
 }
 

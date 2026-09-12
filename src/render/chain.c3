@@ -614,7 +614,8 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 	@pool()
 	{
 		String source    = post_source(tonemap_body(mode), declared, tmem)!;
-		ShaderModule mod = compile_slang_cached(source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(
+			ShaderPass.TONEMAP, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
 		self.tonemap.pipeline.init_post(gpu, &mod, target.color_format)!;

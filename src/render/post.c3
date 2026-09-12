@@ -493,7 +493,8 @@ fn PostStage*? PostPass.build_stage(
 		// Through the disk cache, so the second run of a script that sets the same
 		// body pays no Slang call at all. The assembled source is the key, so live
 		// editing needs no invalidation path: a different body is a different key.
-		ShaderModule mod = compile_slang_cached(source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(
+			ShaderPass.POST, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
 		defer mod.free();
 
 		// Handed over before the `ok` check: a successful compile can still warn,
