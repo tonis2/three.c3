@@ -2,22 +2,11 @@
  The window walked through a spread of sizes, minimised and restored, rendering
  the whole way — swapchain recreation under real presentation.
 
- ## Not run, on purpose. `@test` is commented out below.
+ Opt-in: THREE_TEST_WINDOW_RESIZE=1 c3c test --trust=full --test-filter three_tests::resize
 
- **It belongs in `lib/window.c3l` and should move there.** Everything it
- actually exercises is that library's contract — `set_size`, `set_minimized`,
- and the surface reporting a new extent afterwards — and this project is only
- where it happens to have been written. Left here, compiling but never invoked,
- so the walk is not lost between now and the move; `c3c test` still type-checks
- every line of it.
-
- The reason it is off rather than merely tagged: it opens a real window and its
- frames are vsynced, so it costs a few seconds of somebody watching a window
- flicker — twice over, since a working session runs the suite under
- `--test-noleak` and then leak-tracked. That is a poor trade for a check on
- library behaviour that has not regressed.
-
- To run it by hand, put `@test` back and use the filter above.
+ The environment switch keeps ordinary test runs headless. This exercises the
+ window library and renderer together, including presentation on every resize
+ rather than only after the requested size stops changing.
 
  **It was the one test that opens a real window.** Everything else in the
  suite runs headless, and the bugs this exists for — the blit's destination
@@ -25,7 +14,7 @@
  are only reachable through `Renderer.frame`, which needs a surface. Both
  headless frame paths wait on their own fence after submitting, so neither can
  ever see them. This was `--stress-resize` on the CLI until the CLI stopped
- carrying dev probes; the walk is unchanged.
+ carrying dev probes.
 
  The sizes are deliberately awkward — a near-square, a very wide one, a very
  tall one, one small enough to be mostly title bar — because both bugs hide at
@@ -48,13 +37,17 @@ import vk;
 import c3w;
 import std::core::test;
 import std::io;
+import std::os::env;
 
 const uint W = 640;
 const uint H = 400;
 
-// @test — deliberately off. See the header: this wants to live in window.c3l.
-fn void the_swapchain_survives_awkward_sizes_minimise_and_restore()
+fn void the_swapchain_survives_awkward_sizes_minimise_and_restore() @test
 {
+	String? enabled = env::get_var(mem, "THREE_TEST_WINDOW_RESIZE");
+	if (catch enabled) return;
+	defer enabled.free(mem);
+	if (enabled != "1") return;
 	c3w::Window? opened = c3w::new(
 		params: { .x = 0, .y = 0, .width = (int)W, .height = (int)H },
 		name: "three.c3 resize test"
@@ -113,6 +106,18 @@ fn void the_swapchain_survives_awkward_sizes_minimise_and_restore()
 
 	test::@check(changes > 0, "no requested size ever changed the surface — set_size did nothing");
 
+	// A new size on every iteration must not starve presentation. In particular,
+	// Wayland learns the requested extent before the swapchain is rebuilt.
+	uint presented = 0;
+	for (int i = 0; i < 12; i++)
+	{
+		window.set_size(700 + i * 12, 450 + i * 8);
+		window.getEvent();
+		three::want_surface(&renderer, &window);
+		if (renderer.frame()!!) presented++;
+	}
+	test::@check(presented >= 6, "live resizing starved presentation: only %d of 12 frames", presented);
+
 	// Minimised, the surface reports a zero extent and there is nothing to
 	// build a swapchain for. The frame path has to notice and skip rather than
 	// spin on an acquire that keeps failing.
@@ -149,6 +154,7 @@ fn void pump(three::Renderer* renderer, c3w::Window* window, uint frames) @local
 	for (uint i = 0; i < frames; i++)
 	{
 		window.getEvent();
+		three::want_surface(renderer, window);
 		renderer.frame()!!;
 	}
 }
