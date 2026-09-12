@@ -172,6 +172,55 @@ fn void release()
 }
 
 <*
+ One device buffer's bytes, copied out. The source is device-local, so a transfer
+ read is the only way at it; the staging buffer is host-visible and coherent and
+ the single-time command submits and waits before this returns.
+
+ Requires `TRANSFER_SRC` on `source`.
+*>
+fn char[] read_device_bytes(three::Renderer* renderer, vk::Memory* source, sz size)
+{
+	vk::Memory staging = vk::new_buffer(
+		&renderer.gpu.allocator,
+		usage: vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_DST_BIT,
+		properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			| vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data_size: size
+	)!!;
+	defer staging.free();
+
+	renderer.gpu.handle.@single_time_command(queue: renderer.gpu.graphics ; vk::CommandBuffer cmd)
+	{
+		// The producing dispatch ran in an earlier submission whose fence the
+		// capture waited on, so the barrier is the memory dependency left.
+		vk::BufferMemoryBarrier2 ready = {
+			.sType = vk::StructureType.STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+			.srcStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+			.srcAccessMask = vk::AccessFlagBits2.ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			.dstStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.dstAccessMask = vk::AccessFlagBits2.ACCESS_2_TRANSFER_READ_BIT,
+			.srcQueueFamilyIndex = vk::QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = vk::QUEUE_FAMILY_IGNORED,
+			.buffer = source.buffer,
+			.offset = 0,
+			.size = (vk::DeviceSize)size,
+		};
+		vk::DependencyInfo dependency = {
+			.sType = vk::StructureType.STRUCTURE_TYPE_DEPENDENCY_INFO,
+			.bufferMemoryBarrierCount = 1,
+			.pBufferMemoryBarriers = &ready,
+		};
+		vk::cmdPipelineBarrier2(cmd, &dependency);
+		vk::BufferCopy region = { .size = (vk::DeviceSize)size };
+		vk::cmdCopyBuffer(cmd, source.buffer, staging.buffer, 1, &region);
+	}!!;
+
+	char[] out = alloc::new_array(mem, char, size);
+	mem::copy(out.ptr, staging.data(), size);
+	return out;
+}
+
+<*
  One upload of every shape a test makes, so a page for each memory property
  combination is resident before any test runs. `pass.init` asks for the
  device-local one; geometry reaching the GPU asks for the host-visible one; the
