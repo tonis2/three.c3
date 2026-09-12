@@ -901,6 +901,11 @@ struct PipelineState
 	// and not in a command because it cannot be a command on this device — see
 	// `BlendMode`.
 	BlendMode blend;
+	// What the pipeline writes into. Zero — `FORMAT_UNDEFINED` — is the scene
+	// image, `POST_CHAIN_FORMAT`, which is where every frame draw lands; only a
+	// pass with a target of its own names another. Dynamic rendering checks it
+	// against the attachment, and a mismatch is a draw Metal silently drops.
+	vk::Format color;
 }
 
 <*
@@ -997,11 +1002,16 @@ const PipelineState ADDITIVE_STATE = {
  The cull mode is dynamic, as it is for everything here, and `MaterialBaker` sets
  it to none: a triangle's winding in uv space says nothing about which way it
  faces in the world.
+
+ The colour format is the bake target's, not the scene image's: the baker reads
+ the answer back as 8-bit texels, and a pipeline declared for the HDR scene
+ format draws nothing into it.
 *>
 const PipelineState BAKE_STATE = {
 	.topology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
 	.depth_test = false,
 	.depth_write = false,
+	.color = TARGET_COLOR_FORMAT,
 };
 
 fn ulong PipelineState.hash(self)
@@ -1014,7 +1024,8 @@ fn ulong PipelineState.hash(self)
 			^ ((ulong)self
 				.blend
 				.ordinal
-				* 0x9e3779b97f4a7c15);
+				* 0x9e3779b97f4a7c15)
+			^ ((ulong)self.color * 0xd6e8feb86659fd93);
 }
 
 fn bool PipelineState.equals(self, PipelineState other)
@@ -1024,7 +1035,8 @@ fn bool PipelineState.equals(self, PipelineState other)
 			== other
 				.depth_write // The line that makes a blended variant its own cache entry: one Slang
 				// compile, about a millisecond for the extra `VkPipeline`.
-		&& self.blend == other.blend;
+		&& self.blend == other.blend
+		&& self.color == other.color;
 }
 
 struct MeshPipeline
@@ -1413,8 +1425,9 @@ fn MeshPipeline? MeshPipeline.init(
 			.setMod(module_handle)
 			.setName("fragmentMain"), };
 
+	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
-		.setColorAttachmentFormats((vk::Format[]) { POST_CHAIN_FORMAT })
+		.setColorAttachmentFormats((vk::Format[]) { color })
 		.setDepthAttachmentFormat(target.depth_format);
 
 	// Baked in, because it cannot be anything else on this device. Every
