@@ -222,47 +222,39 @@ fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 }
 
 <*
- A material that lights: the shared block, and a fragment that calls it.
+ A material: the shared lighting block, the material half, and a body.
 
- The same split the engine's material half will use - `lighting.shady` is one
- piece of text, several materials' worth of `shade()` sit on top of it - and the
- one thing this half needs from the geometry half is the function it defines.
+ This is the whole of what a material is - `material.shady` declares `shade` and
+ the text below defines it, which is the same seam a script's `shade()` arrives
+ through in the engine, and the reason a body cannot be written as a file.
 *>
-macro String lit_material()
+macro String material_sources(String body)
+{
+	return string::tformat("%s\n%s\n%s",
+		three::load_source("shaders/lighting.shady", tmem)!!,
+		three::load_source("shaders/material.shady", tmem)!!,
+		body
+	);
+}
+
+<*
+ The default body: a material nobody wrote. It is the built-in look, and the
+ reason the record's own fields are worth asserting on - base colour, roughness
+ and emissive all reach the pixels through here.
+*>
+macro String default_shade()
 {
 	return `
-fn float4 mesh_fragment(VertexOutput input)
+fn float3 shade(Surface s)
 {
-	float3 albedo = input.color.rgb * input.vertex_color.rgb;
-	LightTerms terms = shade_lights(
-		push.frame,
-		input.sv_position,
-		input.world,
-		normalize(input.normal),
-		albedo,
-		0.5,
-		0.0,
-		0.5
-	);
-	// The shape material.slang's standard shading has, minus what is not ported
-	// yet: the ambient scale and the environment term are the next piece of the
-	// material half, and the metalness weighting is one here because metalness is
-	// zero. Backticks belong in a .shady file and not in this string.
-	return float4(albedo * terms.diffuse + terms.specular, 1.0);
+	return standard(s);
 }
 `;
 }
 
 fn void the_ported_mesh_is_lit() @test
 {
-	// What a material is made of: the shared lighting block, then the fragment
-	// that shades with it. The def does not care how many pieces that is.
-	String material = string::tformat("%s\n%s",
-		three::load_source("shaders/lighting.shady", tmem)!!,
-		lit_material()
-	);
-
-	three::ShaderDef def = three::mesh_def(material);
+	three::ShaderDef def = three::mesh_def(material_sources(default_shade()));
 
 	DString out;
 	out.tinit(32768);
@@ -276,6 +268,19 @@ fn void the_ported_mesh_is_lit() @test
 		"read out of the frame block's list, overflow bit and all");
 	test::@check(source.contains("if (light.meta.z != LIGHT_DIRECTIONAL) continue;"),
 		"directionals come from the frame's list, punctuals from the cluster");
+
+	// The half's own seam: the record becomes a Surface, the surface goes to the
+	// body, and the body is text that was spliced in rather than a file.
+	test::@check(source.contains("fn float4 mesh_fragment(VertexOutput input)"),
+		"the material half defines the function the geometry half declared");
+	test::@check(source.contains("s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);"),
+		"the record's base colour and the copy's colour reach the surface");
+	test::@check(source.contains("s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;"),
+		"and the tiling is applied where a body's own sampling lands on the same texel");
+	test::@check(source.contains("return float4(shade(s), draw.base_color.a * input.color.a);"),
+		"the alpha is the material's and the copy's, never the body's");
+	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
+		"and the body that was spliced in is the one that runs");
 
 	path::mkdir("build/shaderdef", recursive: true)!!;
 	file::save("build/shaderdef/mesh_lit.shady", source)!!;

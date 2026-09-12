@@ -1,0 +1,136 @@
+// The material half of the draw path: the record a fragment shades, and the
+// built-in shading a body gets for free.
+//
+// **This file is where the two halves meet.** The geometry half declares
+// `mesh_fragment` and this file defines it; this file declares `shade` and
+// *whoever writes the material* defines it - the default body being
+// `return standard(s);`, which is a material nobody wrote. That is the same
+// splice the Slang template did with `//@shade`, with the pieces swapped: the
+// body arrives as text either way, and neither half has to know the other's
+// declarations.
+//
+// What is here is the record and the standard look. What is **not**, each of
+// which is one line in the original that reads something this file does not have
+// yet:
+//
+//  - **maps** (`SLOT_BASE_COLOR`, `map_at`, `texture_index`), and with them the
+//    alpha test: a material's texture is the record's next slice, and a cut-out
+//    is whether the surface is there at all;
+//  - **shadows** and the sun's visibility, so every light reaches a fragment a
+//    wall should have stopped;
+//  - **occlusion and crevice**, **baked light** and the lightmap, and
+//    **environment** reflection;
+//  - the **debug views** and **relief**, which are the body-facing extras rather
+//    than the look.
+
+// sRGB to linear, for the one colour that arrives from a file rather than from
+// the frame: the instance colour is what a person picked in a colour picker.
+fn float3 srgb_to_linear(float3 c)
+{
+	return float3(
+		c.r <= 0.04045 ? c.r / 12.92 : pow((c.r + 0.055) / 1.055, 2.4),
+		c.g <= 0.04045 ? c.g / 12.92 : pow((c.g + 0.055) / 1.055, 2.4),
+		c.b <= 0.04045 ? c.b / 12.92 : pow((c.b + 0.055) / 1.055, 2.4)
+	);
+}
+
+// Everything a body is allowed to read and everything the built-in look reads.
+//
+// The record's material fields are named once, here, and a body reaches them
+// through this rather than through `push.draw[0]`: the record is a wire format
+// that can gain a field, and a body is text that cannot be recompiled by
+// whoever changed it.
+struct Surface
+{
+	float3 albedo;         // base colour, times the map and the instance colour
+	float3 normal;         // normalized, world space, and already flipped for a back face
+	float2 uv;             // after `uv_transform`, which is what a map is sampled with
+	float2 mesh_uv;        // the mesh's own uv, before it
+	float3 position;       // world space
+	float4 color;          // this copy's colour, raw
+	float4 vertex_color;   // the mesh's COLOR_0, white where the file had none
+
+	float roughness;
+	float metalness;
+	float reflectance;
+	float3 emissive;
+	float time;
+
+	// Where this fragment is on the screen, in pixels. It was a file-scope global
+	// in the original - shady has no module-level mutable state, and that is the
+	// reason this is a field rather than a spelling: the cluster a fragment is lit
+	// by is a function of where its pixel is, so someone has to carry it, and the
+	// surface being shaded is the honest carrier.
+	float4 screen_position;
+}
+
+// The look a material has before anyone says otherwise, and the pieces a body
+// can borrow one at a time.
+//
+// `standard` returns *radiance already multiplied by the albedo*, which is what
+// makes the default body one line and what makes the metalness wedge below mean
+// something: `(1 - metalness)` because a metal's colour comes back through a
+// reflection, and the specular term is a highlight on top of a body rather than
+// part of its colour.
+fn float3 standard(Surface s)
+{
+	LightTerms direct = shade_lights(
+		push.frame,
+		s.screen_position,
+		s.position,
+		s.normal,
+		s.albedo,
+		s.roughness,
+		s.metalness,
+		s.reflectance
+	);
+
+	// The original's three ambient pieces, with the two that need files this half
+	// does not have yet left at their identity: `lighting.x` is how much of the
+	// frame's ambient term reaches a surface - one minus it is how much is left
+	// for the lights to do - and `world.rgb` is the colour of the room the scene
+	// is in. Occlusion would scale both, and the environment is added beside them
+	// rather than inside.
+	float3 diffuse = push.frame[0].lighting.x
+		+ (1.0 - push.frame[0].lighting.x) * direct.diffuse
+		+ push.frame[0].world.rgb;
+
+	// Metalness takes the diffuse away and the environment would give it back as a
+	// reflection; with no environment ported yet a metal is simply darker, which
+	// is the honest half of that trade rather than a wrong answer.
+	return s.albedo * diffuse * (1.0 - s.metalness) + direct.specular + s.emissive;
+}
+
+// The fragment stage: build the record from the interpolated varyings, hand it
+// to the body, and keep the alpha. **The alpha is not the body's to return** —
+// it is the material's opacity times this copy's, decided by whoever built the
+// material and whoever placed the instance, so a body cannot make geometry
+// invisible by accident.
+fn float4 mesh_fragment(VertexOutput input)
+{
+	DrawRecord draw = push.draw[0];
+
+	Surface s;
+	s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+	s.normal = normalize(input.normal);
+	s.mesh_uv = input.uv;
+	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+	s.position = input.world;
+	s.color = input.color;
+	s.vertex_color = input.vertex_color;
+
+	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
+	// a second clamp here would be a second place for the range to be decided.
+	s.roughness = draw.surface.x;
+	s.metalness = draw.surface.y;
+	s.reflectance = draw.surface.z;
+	s.emissive = draw.emissive.rgb;
+	s.time = push.frame[0].lighting.z;
+	s.screen_position = input.sv_position;
+
+	return float4(shade(s), draw.base_color.a * input.color.a);
+}
+
+// Defined by the material. Every material has one - the default is a line - and
+// a body that wants the built-in look writes `return standard(s);`.
+fn float3 shade(Surface s);
