@@ -32,7 +32,7 @@ struct PostPush
 // here because the engine's own post path writes bytes rather than this struct.
 $assert @layout_matches(PostPush, POST_PUSH_FIELDS) : "PostPush no longer lays out the way POST_PUSH_FIELDS says";
 
-macro ShaderDef post_def(String body)
+macro ShaderDef post_def(String body, String uniforms)
 {
 	ShaderSource[] sources = {
 		// The body first: it defines `post`, which the module's fragment entry
@@ -41,5 +41,5 @@ macro ShaderDef post_def(String body)
 		{ "post", shader_source("post.shady", tmem)!! },
 	};
 
-	return (ShaderDef) { .name = "post", .sources = sources };
+	return (ShaderDef) { .name = "post", .uniforms = uniforms, .sources = sources };
 }

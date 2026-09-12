@@ -16,7 +16,7 @@ module three;
 
 import shady;
 
-macro ShaderDef mesh_def(String fragment_code)
+macro ShaderDef mesh_def(String fragment_code, String uniforms = "")
 {
 	ShaderSource[] sources = {
 		// The material half first: it defines `mesh_fragment`, which the module's
@@ -26,5 +26,5 @@ macro ShaderDef mesh_def(String fragment_code)
 		{ "mesh", shader_source("mesh.shady", tmem)!! },
 	};
 
-	return (ShaderDef) { .name = "mesh", .sources = sources };
+	return (ShaderDef) { .name = "mesh", .uniforms = uniforms, .sources = sources };
 }

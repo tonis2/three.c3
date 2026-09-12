@@ -67,6 +67,13 @@ struct Surface
 	// without a check of its own.
 	uint variant;
 
+	// What the script declared, emitted as a struct and spliced in above the push
+	// block, which carries one. **One storage per material**: a material that
+	// spills has its whole set in the buffer the push block points at instead,
+	// and the generator emits the same struct either way, so a body reads a field
+	// and never a storage.
+	Uniforms uniforms;
+
 	float roughness;
 	float metalness;
 	float reflectance;
@@ -136,6 +143,7 @@ fn float4 mesh_fragment(VertexOutput input)
 	s.color = input.color;
 	s.vertex_color = input.vertex_color;
 	s.variant = min(input.variant, draw.material_rows - 1u);
+	s.uniforms = push.uniforms;
 
 	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
 	// a second clamp here would be a second place for the range to be decided.

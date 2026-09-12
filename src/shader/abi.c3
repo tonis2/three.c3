@@ -131,7 +131,7 @@ macro void append_shady_member(DString* out, $Type, String name)
  work out from it: which struct to go and look at when a field's meaning is not
  the field's name.
 *>
-macro void append_shady_struct(DString* out, $Type, String attribute, String origin)
+macro void append_shady_struct(DString* out, $Type, String attribute, String origin, String trailing_type = "")
 {
 	out.append_string("// ");
 	out.append_string(origin);
@@ -150,6 +150,17 @@ macro void append_shady_struct(DString* out, $Type, String attribute, String ori
 		out.append_char('\t');
 		append_shady_member(out, $m.type, $m.name);
 	$endforeach
+
+	// The one member the walker cannot see: a material's uniforms are declared by
+	// a script at runtime, so the generator emits their struct and names it here.
+	// It goes last because the walked part is a wire format with pinned offsets,
+	// and because `MATERIAL_PUSH_START` is where it then lands.
+	if (trailing_type.len)
+	{
+		out.append_char('\t');
+		out.append_string(trailing_type);
+		out.append_string(" uniforms;\n");
+	}
 	out.append_string("}\n");
 }
 
@@ -192,9 +203,9 @@ fn void append_shader_abi(DString* out)
  one in the module** - Vulkan allows exactly one per pipeline, and shady says so
  - and a struct that is a push block is nothing until that variable is declared.
 *>
-macro void append_push_block(DString* out, $Type)
+macro void append_push_block(DString* out, $Type, String uniforms_type = "")
 {
-	append_shady_struct(out, $Type, "@pushconstant", "the push block, walked from the C3 struct the pass fills");
+	append_shady_struct(out, $Type, "@pushconstant", "the push block, walked from the C3 struct the pass fills", uniforms_type);
 	out.append_string($Type::name);
 	out.append_string(" push;\n");
 }

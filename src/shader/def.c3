@@ -42,6 +42,11 @@ struct ShaderDef
 {
 	String name;   // diagnostics and cache identity: "sky", "material"
 
+	// The uniforms struct, emitted from the uniform list a script declared, and
+	// empty for a pass that has none. It is a *source region* like any other, so
+	// the module's `#line` map and a body's diagnostics treat it as one more file.
+	String uniforms;
+
 	// The module's text, in the order it is written out. A pass whose source is
 	// more than one file lists them here - a shared piece first, then the file
 	// that is the pass - and the whole of what a reader needs is in them.
@@ -98,11 +103,22 @@ fn void append_shader_source(DString* out, ShaderSource source, String restore_n
 macro void append_shader_def(DString* out, ShaderDef def, $Type)
 {
 	append_shader_abi(out);
-	append_push_block(out, $Type);
 
 	// What the generated lines after a body are called. A body is numbered from
 	// one under its own name, so the module's own text needs a name of its own
 	// for the two to be told apart in a diagnostic.
 	String restore = string::tformat("three.%s", def.name);
+
+	// Above the push block, because the push block has a member of it.
+	if (def.uniforms.len > 0)
+	{
+		append_shader_source(out, { "uniforms", def.uniforms }, restore);
+		append_push_block(out, $Type, "Uniforms");
+	}
+	else
+	{
+		append_push_block(out, $Type);
+	}
+
 	foreach (source : def.sources) append_shader_source(out, source, restore);
 }
