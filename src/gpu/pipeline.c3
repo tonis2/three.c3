@@ -141,7 +141,7 @@ const uint POSE_MASK = 0x7fffffff;
 const uint PUSH_BUDGET = 128;
 
 // The entry points `mesh.slang` is required to contain, and the stages they are
-// compiled for. Named rather than discovered — see `compile_slang`.
+// compiled for. Named rather than discovered — see `compile_shader`.
 const ShaderEntry[*] MESH_ENTRIES = {
 	{ "vertexMain", slang::STAGE_VERTEX },
 	{ "fragmentMain", slang::STAGE_FRAGMENT },
@@ -1411,7 +1411,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
  are declared here through `PipelineRenderingCreateInfo` and the attachments
  themselves at record time.
 
- @param mod : `A module from compile_slang. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
+ @param mod : `A module from compile_shader. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
  @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
  @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
  @return ? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
@@ -1537,7 +1537,7 @@ fn MeshPipeline? MeshPipeline.init(
  position would make the same body at slot 3 and at slot N two `VkPipeline`s,
  put output format in the key, and turn reordering a chain into a recompile.
 
- @param mod : `A module from post_source + compile_slang_cached. Its layout is copied, not moved.`
+ @param mod : `A module from post_source + compile_shader. Its layout is copied, not moved.`
  @param color_format : `What this pass writes — POST_CHAIN_FORMAT for a chain pass, target.color_format for the tonemap. Dynamic rendering checks it against the attachment, so a wrong one is a validation error rather than a wrong colour.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not begin its push block with a 16-byte 'info'. Reachable from a hand-written shader, not from post_source.`
 *>
@@ -1615,7 +1615,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  buffers, which is what makes a skinned character's shadow the shadow of the
  pose it is actually in.
 
- @param mod : `A module from compile_slang containing vertexMain, and fragmentMain too when cutout is set. Its layout is copied, not moved.`
+ @param mod : `A module from compile_shader containing vertexMain, and fragmentMain too when cutout is set. Its layout is copied, not moved.`
  @param cutout : `Whether this is the alpha-tested variant — a fragment stage that discards, and the base colour map bound at 0. False builds the pipeline every ordinary caster shares.`
  @param depth_format : `The atlas format, chosen for both depth attachment and sampling.`
  @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
@@ -1711,11 +1711,11 @@ struct SkinPipeline
 <*
  Compiles the skinning shader and builds the compute pipeline from it.
 
- The same runtime compile every other shader here goes through — `compile_slang`
+ The same runtime compile every other shader here goes through — `compile_shader`
  takes the entry points it wants by name and stage, and `slang::STAGE_COMPUTE` is
  one of them.
 
- @param mod : `A module from compile_slang containing computeMain.`
+ @param mod : `A module from compile_shader containing computeMain.`
  @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, and so does everything else here.`
  @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push bytes than the block needs.`
  @return ? SHADER_MISSING_ENTRY_POINT : `The module has no computeMain.`
@@ -1930,7 +1930,12 @@ fn void PipelineCache.init(&self)
 
  @return `Borrowed from the cache, which owns it. Null is never returned — a failure is a fault.`
 *>
-fn CachedModule*? PipelineCache.module_for(&self, String source, String name, String* diagnostic)
+fn CachedModule*? PipelineCache.module_for(
+	&self,
+	String source,
+	String name,
+	ShaderPass pass,
+	String* diagnostic)
 {
 	ulong hash = content_hash((char[])source);
 
@@ -1948,7 +1953,7 @@ fn CachedModule*? PipelineCache.module_for(&self, String source, String name, St
 	// line is unchanged by which side answered, the diagnostic included: a stored
 	// module carries the warning it was compiled with.
 	bool ran         = false;
-	ShaderModule mod = compile_slang_cached(source, name, MESH_ENTRIES[..], &ran)!;
+	ShaderModule mod = compile_shader(pass, source, name, MESH_ENTRIES[..], &ran)!;
 	if (ran)
 	{
 		self.compiles++;
@@ -2004,13 +2009,14 @@ fn MeshPipeline*? PipelineCache.acquire(
 	String source,
 	String name,
 	PipelineState state,
+	ShaderPass pass,
 	String* diagnostic = null,
 	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..]
 )
 {
 	// The module first, and by source alone. A state this cache has not seen before
 	// must not reach Slang: `CachedModule` has the measurement.
-	CachedModule* compiled = self.module_for(source, name, diagnostic)!;
+	CachedModule* compiled = self.module_for(source, name, pass, diagnostic)!;
 
 	foreach (entry : self.entries)
 	{

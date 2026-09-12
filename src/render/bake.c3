@@ -260,7 +260,8 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 					&self.target,
 					source,
 					"three.bake",
-					BAKE_STATE
+					BAKE_STATE,
+					ShaderPass.LIGHTMAP_MATERIAL
 				);
 				if (try made) built = made;
 			}

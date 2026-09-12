@@ -808,7 +808,8 @@ fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_
 			material.declared_textures, material.vertex, lightmap: true);
 		if (try source)
 		{
-			ShaderModule mod = compile_slang(source, "three.lightmap", MESH_ENTRIES[..])!;
+			ShaderModule mod = compile_shader(
+				ShaderPass.LIGHTMAP_MATERIAL, source, "three.lightmap", MESH_ENTRIES[..])!;
 			defer mod.free();
 			if (mod.ok)
 			{
@@ -849,7 +850,8 @@ fn void? Lightmap.ensure_pipeline(&self, Gpu* gpu)
 		variant.append_string("#define THREE_AREA_REFERENCE 1\n#line 1\n");
 		variant.append_string(source);
 
-		ShaderModule mod = compile_slang(variant.str_view(), "mesh.slang", MESH_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(
+			ShaderPass.LIGHTMAP, variant.str_view(), "mesh.slang", MESH_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok)
 		{

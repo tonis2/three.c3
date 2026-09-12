@@ -949,11 +949,11 @@ fn void the_pipeline_cache_skips_the_compile() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(cache.compiles == 1, "the first acquire compiled");
 		test::@check(cache.hits == 0, "and was not a hit");
 
-		three::MeshPipeline* second = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* second = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(second == first, "the same pipeline came back");
 		test::@check(cache.compiles == 1, "and Slang was not called again");
 		test::@check(cache.hits == 1, "it was a hit");
@@ -990,8 +990,8 @@ fn void a_different_render_state_is_a_different_pipeline() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* culled = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
-		three::MeshPipeline* both = cache.acquire(gpu, target, source, "mesh.slang", three::LINE_STATE)!!;
+		three::MeshPipeline* culled = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* both = cache.acquire(gpu, target, source, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
 
 		test::@check(culled != both, "two render states, two pipelines");
 		test::@check(culled.handle != both.handle, "and two Vulkan handles");
@@ -1024,14 +1024,14 @@ fn void a_broken_shader_leaves_the_cache_empty() @test
 		defer cache.free(gpu);
 
 		three::MeshPipeline*? broken = cache.acquire(
-			gpu, target, "this is not a shader", "broken.slang", three::SOLID_STATE
+			gpu, target, "this is not a shader", "broken.slang", three::SOLID_STATE, three::ShaderPass.MESH
 		);
 		test::@check(@catch(broken), "it failed");
 		test::@check(cache.entries.len() == 0, "and cached nothing");
 
 		String source = mesh_module()!!;
 		defer source.free(mem);
-		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(good != null, "and the cache still works afterwards");
 		test::@check(cache.entries.len() == 1, "with one entry");
 	};
@@ -1055,7 +1055,7 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
 		test::@check(pipeline.shader.bindings.len() == 8,
@@ -1103,13 +1103,13 @@ fn void a_released_pipeline_is_kept_for_the_next_acquire() @test
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		cache.release(gpu, first);
 
 		test::@check(cache.entries.len() == 1, "the entry stayed: %d", (int)cache.entries.len());
 		test::@check(cache.evictions == 0, "and nothing was evicted: %d", cache.evictions);
 
-		three::MeshPipeline* again = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE)!!;
+		three::MeshPipeline* again = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(again == first, "the same pipeline came back");
 		test::@check(cache.builds == 1, "and no second VkPipeline was built: %d", cache.builds);
 		test::@check(cache.compiles == 1, "nor a second compile: %d", cache.compiles);
@@ -1161,8 +1161,8 @@ fn void the_pipeline_cache_evicts_what_nothing_uses() @test
 				// the cache keys on content, so this is the cheapest way to ask
 				// for a compile it has not seen.
 				String variant = string::tformat("%s\n// %d\n", source, i);
-				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE)!!;
-				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE)!!;
+				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
 			}
 		};
 
@@ -1215,8 +1215,8 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
 			for (int i = 0; i < 5; i++)
 			{
 				String variant = string::tformat("%s\n// %d\n", source, i);
-				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE)!!;
-				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE)!!;
+				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
 			}
 		};
 
@@ -1815,7 +1815,7 @@ fn void the_pipeline_cache_reads_the_disk_before_slang() @test
 		defer cache.free(gpu);
 
 		three::MeshPipeline* pipeline = cache.acquire(
-			gpu, target, source, "material.slang", three::SOLID_STATE
+			gpu, target, source, "material.slang", three::SOLID_STATE, three::ShaderPass.MESH
 		)!!;
 
 		test::@check(cache.compiles == 0 && cache.disk_hits == 1,

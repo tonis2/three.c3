@@ -488,7 +488,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// happened to be found would miss the cache for the same bytes.
 		String source = shader_source("mesh.slang", tmem)!;
 		String path   = "mesh.slang";
-		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE)!;
+		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE, ShaderPass.MESH)!;
 
 		// The line pipeline is the same shader over a different fixed-function state
 		// — `LINE_STATE` has the argument — so this is a second `VkPipeline` and
@@ -499,14 +499,14 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// because building it on demand would put a 1 ms pipeline creation inside
 		// whichever frame first added a box helper, and the whole point of a debug
 		// tool is that reaching for it is free.
-		self.line_pipeline = self.pipelines.acquire(gpu, target, source, path, LINE_STATE)!;
+		self.line_pipeline = self.pipelines.acquire(gpu, target, source, path, LINE_STATE, ShaderPass.MESH)!;
 
 		// And the two blended variants, for the same reason and at the same price.
 		// Neither is claimed by a built-in material, so unlike the two above they
 		// take no second reference here: what `acquire` handed back is the pass's
 		// own, and `create_texture_material` retains per material on top of it.
-		self.alpha_pipeline = self.pipelines.acquire(gpu, target, source, path, ALPHA_STATE)!;
-		self.additive_pipeline = self.pipelines.acquire(gpu, target, source, path, ADDITIVE_STATE)!;
+		self.alpha_pipeline = self.pipelines.acquire(gpu, target, source, path, ALPHA_STATE, ShaderPass.MESH)!;
+		self.additive_pipeline = self.pipelines.acquire(gpu, target, source, path, ADDITIVE_STATE, ShaderPass.MESH)!;
 
 		// The sky is a different template and therefore a second Slang call, unlike
 		// the three above. Built here for their reason: a scene that assigns a
@@ -519,6 +519,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 			sky,
 			"sky.slang",
 			SKY_STATE,
+			ShaderPass.SKY,
 			contract: SKY_PUSH_FIELDS[..]
 		)!;
 	};
@@ -2243,7 +2244,8 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	{
 		String source = shader_source("cluster.slang", mem)!;
 		defer source.free(mem);
-		ShaderModule mod = compile_slang(source, "cluster.slang", CLUSTER_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(
+			ShaderPass.CLUSTER, source, "cluster.slang", CLUSTER_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok) { @advise("three: cluster shader: %s", mod.diagnostic); return SHADER_MISSING_ENTRY_POINT~; }
 		self.cluster_pipeline.init_cluster(gpu, &mod)!;
@@ -2869,7 +2871,8 @@ fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 	String source = shader_source("skin.slang", mem)!;
 	defer source.free(mem);
 
-	ShaderModule mod = compile_slang(source, "skin.slang", SKIN_ENTRIES[..])!;
+	ShaderModule mod = compile_shader(
+		ShaderPass.SKIN, source, "skin.slang", SKIN_ENTRIES[..])!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -2985,6 +2988,7 @@ fn uint? MeshPass.create_material(
 			source,
 			"three.material",
 			state_for_blend(blend),
+			ShaderPass.MESH,
 			diagnostic
 		)!;
 

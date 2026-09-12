@@ -8,6 +8,7 @@ module three_tests::cluster;
 import three;
 import three_tests::device;
 import image;
+import vk;
 import std::core::test;
 import std::core::string;
 
@@ -321,6 +322,171 @@ fn void cluster_overflow_falls_back_instead_of_dropping_lights() @test
 	image::Image advance1 = renderer.capture()!!;
 	advance1.free();
 	test::@check(renderer.pass.stats().cluster_overflow > 0, "overflow is explicit in stats");
+}
+
+<*
+ One turn of the pass, copied out. The source is device-local, so a transfer
+ read is the only way at it; the staging buffer is host-visible and coherent and
+ the single-time command submits and waits before this returns.
+*>
+fn char[] read_device_bytes(three::Renderer* renderer, vk::Memory* source, sz size)
+{
+	vk::Memory staging = vk::new_buffer(
+		&renderer.gpu.allocator,
+		usage: vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_DST_BIT,
+		properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			| vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data_size: size
+	)!!;
+	defer staging.free();
+
+	renderer.gpu.handle.@single_time_command(queue: renderer.gpu.graphics ; vk::CommandBuffer cmd)
+	{
+		// The dispatch ran in an earlier submission, and the capture waited its
+		// fence, so the barrier is the memory dependency the transfer read needs.
+		vk::BufferMemoryBarrier2 ready = {
+			.sType = vk::StructureType.STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+			.srcStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+			.srcAccessMask = vk::AccessFlagBits2.ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			.dstStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.dstAccessMask = vk::AccessFlagBits2.ACCESS_2_TRANSFER_READ_BIT,
+			.srcQueueFamilyIndex = vk::QUEUE_FAMILY_IGNORED,
+			.dstQueueFamilyIndex = vk::QUEUE_FAMILY_IGNORED,
+			.buffer = source.buffer,
+			.offset = 0,
+			.size = (vk::DeviceSize)size,
+		};
+		vk::DependencyInfo dependency = {
+			.sType = vk::StructureType.STRUCTURE_TYPE_DEPENDENCY_INFO,
+			.bufferMemoryBarrierCount = 1,
+			.pBufferMemoryBarriers = &ready,
+		};
+		vk::cmdPipelineBarrier2(cmd, &dependency);
+		vk::BufferCopy region = { .size = (vk::DeviceSize)size };
+		vk::cmdCopyBuffer(cmd, source.buffer, staging.buffer, 1, &region);
+	}!!;
+
+	char[] out = alloc::new_array(mem, char, size);
+	mem::copy(out.ptr, staging.data(), size);
+	return out;
+}
+
+<*
+ The same frame binned by both compilers, compared as bytes rather than pixels.
+
+ Slang and shady are different compilers and are expected to produce different
+ SPIR-V; what has to be identical is what the pass computes. The scene is the
+ oracle tests' own - a rotated spread that stresses the clip-plane walk - plus
+ one cell over capacity, so the atomic overflow, the top bit in an overflowing
+ count and the untouched tail of every slice are all inside the comparison.
+
+ Both lists are allocated with `TRANSFER_SRC` and zeroed: a cell writes only the
+ entries it holds, and a tail left as allocator garbage would make a byte
+ comparison of two fresh buffers a comparison of two unrelated pages.
+*>
+fn void cluster_bins_the_same_bytes_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+
+	scene(renderer);
+	points(renderer, 40, false);
+	// One cell over capacity, so the atomic overflow and the top bit in an
+	// overflowing count are in the comparison as well.
+	for (uint i = 0; i < 70; i++)
+	{
+		renderer.pass.lighting.lights[41 + i] = {
+			.direction = { 0, 0, 2, 20 },
+			.color = { 0.018f, 0.014f, 0.011f, 1 },
+			.meta = { 41 + i, 0xffffffff, 1, 0 },
+		};
+	}
+	renderer.pass.lighting.count = 111;
+	renderer.pass.lighting.next_light_id = 112;
+	renderer.pass.camera.yaw = 37;
+	renderer.pass.camera.pitch = 13;
+
+	sz counts_bytes = (sz)(three::CLUSTER_X * three::CLUSTER_Y * three::CLUSTER_Z) * uint::size;
+	sz indices_bytes = counts_bytes * three::CLUSTER_LIGHT_CAPACITY;
+	char[] zeros = alloc::new_array(mem, char, indices_bytes);
+	mem::clear(zeros.ptr, indices_bytes);
+	defer alloc::free(mem, zeros);
+	for (uint i = 0; i < three::MAX_FRAMES_IN_FLIGHT; i++)
+	{
+		renderer.pass.cluster_counts[i] = vk::new_buffer(
+			&renderer.gpu.allocator,
+			usage: vk::BufferUsageFlagBits.BUFFER_USAGE_STORAGE_BUFFER_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			data: zeros.ptr,
+			data_size: counts_bytes
+		)!!;
+		renderer.pass.cluster_indices[i] = vk::new_buffer(
+			&renderer.gpu.allocator,
+			usage: vk::BufferUsageFlagBits.BUFFER_USAGE_STORAGE_BUFFER_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			data: zeros.ptr,
+			data_size: indices_bytes
+		)!!;
+	}
+
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
+	uint slang_slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+	char[] counts_slang = read_device_bytes(
+		renderer, &renderer.pass.cluster_counts[slang_slot], counts_bytes);
+	char[] indices_slang = read_device_bytes(
+		renderer, &renderer.pass.cluster_indices[slang_slot], indices_bytes);
+	uint overflow_slang = *(uint*)renderer.pass.cluster_overflow[slang_slot].data();
+	defer alloc::free(mem, counts_slang);
+	defer alloc::free(mem, indices_slang);
+
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
+	// The pipeline holds the Slang module's layout and SPIR-V; the next dispatch
+	// has to build one from the shady module.
+	renderer.pass.cluster_pipeline.free(&renderer.gpu);
+	uint shady_slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+	char[] counts_shady = read_device_bytes(
+		renderer, &renderer.pass.cluster_counts[shady_slot], counts_bytes);
+	char[] indices_shady = read_device_bytes(
+		renderer, &renderer.pass.cluster_indices[shady_slot], indices_bytes);
+	uint overflow_shady = *(uint*)renderer.pass.cluster_overflow[shady_slot].data();
+	defer alloc::free(mem, counts_shady);
+	defer alloc::free(mem, indices_shady);
+
+	test::@check(mem::equals(counts_slang.ptr, counts_shady.ptr, counts_bytes),
+		"cluster_counts is byte-identical through both compilers");
+	sz first_difference = indices_bytes;
+	for (sz at = 0; at < indices_bytes; at++)
+	{
+		if (indices_slang[at] != indices_shady[at])
+		{
+			first_difference = at;
+			break;
+		}
+	}
+	test::@check(first_difference == indices_bytes,
+		"cluster_indices is byte-identical through both compilers, first difference at byte %d (cluster %d slot %d: %d against %d)",
+		first_difference,
+		first_difference / (uint::size * three::CLUSTER_LIGHT_CAPACITY),
+		(first_difference / uint::size) % three::CLUSTER_LIGHT_CAPACITY,
+		first_difference < indices_bytes ? *(uint*)&indices_slang[first_difference] : 0,
+		first_difference < indices_bytes ? *(uint*)&indices_shady[first_difference] : 0);
+	test::@check(overflow_slang == overflow_shady,
+		"the overflow total is the same, %d against %d", overflow_slang, overflow_shady);
+
+	uint overflowed = 0;
+	for (sz at = 0; at < counts_slang.len; at += uint::size)
+	{
+		if ((*(uint*)&counts_slang[at] & 0x80000000) != 0) overflowed++;
+	}
+	test::@check(overflowed > 0,
+		"the compared counts include an overflowing cell, got %d", overflowed);
 }
 
 fn void unchanged_cluster_inputs_are_reused_per_frame_slot() @test

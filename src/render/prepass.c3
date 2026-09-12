@@ -64,7 +64,8 @@ fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format forma
 	if (cutout) variant.append_string("#define THREE_SHADOW_CUTOUT 1\n#line 1\n");
 	variant.append_string(source);
 
-	ShaderModule mod = compile_slang(
+	ShaderModule mod = compile_shader(
+		cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW,
 		variant.str_view(),
 		"shadow.slang",
 		cutout ? SHADOW_CUTOUT_ENTRIES[..] : SHADOW_ENTRIES[..]
