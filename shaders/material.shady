@@ -9,13 +9,13 @@
 // body arrives as text either way, and neither half has to know the other's
 // declarations.
 //
-// What is here is the record and the standard look. What is **not**, each of
-// which is one line in the original that reads something this file does not have
-// yet:
+// What is here is the record, the standard look, and the body-facing extras.
+// What is **not**:
 //
-//  - **baked light** and the lightmap, and **environment** reflection;
-//  - the **debug views** and **relief**, which are the body-facing extras rather
-//    than the look.
+//  - the built-in path's other maps - normal, metallic-roughness, occlusion and
+//    emissive - which `mesh.slang` reads under the same uv test as the base one;
+//  - **relief** (`Surface.height`), which nothing writes yet;
+//  - the bake and lightmap variants, which are separate modules.
 
 // **The material's own functions, and the only things this file needs from
 // outside.** Everything below is the built-in look; a material replaces exactly
@@ -47,6 +47,19 @@ Sampler2D environment_map @set(0) @binding(2);
 // copy's tile. `render/lightmap.c3` fills it, and a copy with no tile carries a
 // zero size that the vertex stage turned into the flag which stops the sample.
 Sampler2D lightmap_atlas @set(0) @binding(20);
+
+// The shadow map's own depth, un-filtered, for the `shadowMap` debug view. The
+// comparison samplers in `lighting.shady` are the lookup; this is the map the
+// lookup reads. Reserved like them and always bound, carrying the same 1x1
+// white in a frame with no shadow pass.
+Sampler2D shadow_atlas @set(0) @binding(17);
+
+// This mesh's COLOR_0 is a layer mask an artist painted rather than a colour, so
+// the built-in look must not multiply the albedo by it. `material.slang` has no
+// need of the bit: a body reads the attribute as a weight through
+// `Surface.vertex_mask` or as a colour through `Surface.vertex_color` and
+// decides for itself, which is why the fold below is behind `MATERIAL_BUILT_IN`.
+const uint FLAG_COLORS_ARE_MASK = 1024;
 
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
@@ -164,6 +177,67 @@ fn float3 environment_light(
 	return sky * fresnel * intensity;
 }
 
+// The depth the shadow lookup would read at this fragment, out of the map
+// itself rather than through a comparison: the `shadowMap` view draws it as
+// greyscale near-to-far.
+fn float shadow_debug_depth(float2 local)
+{
+	uint index = push.frame[0].lights[0].meta.y;
+	if (index == 0xffffffffu) return 1.0;
+	ShadowGpuView view = push.frame[0].shadow_views[index];
+	if (view.params.w <= 0.0) return 1.0;
+	return shadow_atlas.SampleLevel(saturate(local) * view.atlas.xy + view.atlas.zw, 0.0).r;
+}
+
+// **The debug views.** `three.debug.view` picks one, `frame.debug.x` carries
+// the mode, and a view answers *instead of* the shading rather than beside it.
+//
+//   1  'shadow'     - `shadow_factor` as greyscale. White is lit, black is
+//                     fully shadowed; a uniformly white frame is a pass that did
+//                     not run or a fit nothing landed in, and a uniformly dark
+//                     one is everything in shot standing in the same shadow.
+//   2  'shadowMap'  - the depth above, as greyscale near-to-far. **Magenta is
+//                     outside the fitted box**, and dark purple is "no shadow
+//                     pass ran this frame" - the answer the other view cannot
+//                     tell from "lit".
+//
+// The sky is not a surface and has no shadow, so a view colours only what the
+// geometry covers.
+fn bool debug_view(float3 position, float3 normal, out float3 answer)
+{
+	answer = float3(0.0);
+	float mode = push.frame[0].debug.x;
+	if (mode < 0.5) return false;
+
+	if (mode < 1.5)
+	{
+		answer = float3(shadow_factor(position, normal));
+		return true;
+	}
+
+	float4 params = push.frame[0].shadow;
+	if (params.w <= 0.0)
+	{
+		answer = float3(0.16, 0.0, 0.28);
+		return true;
+	}
+
+	// No normal offset here, unlike the lookup: this view answers "where does
+	// this fragment land in the map", and nudging it two texels first would
+	// answer about a point next to the one being asked about.
+	float4 clip = mul(push.frame[0].light_view_projection, float4(position, 1.0));
+	float3 ndc = clip.xyz / clip.w;
+	float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0)
+	{
+		answer = float3(1.0, 0.0, 1.0);
+		return true;
+	}
+
+	answer = float3(shadow_debug_depth(uv));
+	return true;
+}
+
 // Everything a body is allowed to read and everything the built-in look reads.
 //
 // The record's material fields are named once, here, and a body reaches them
@@ -180,6 +254,14 @@ struct Surface
 	float3 position;       // world space
 	float4 color;          // this copy's colour, raw
 	float4 vertex_color;   // the mesh's COLOR_0, white where the file had none
+
+	// The same attribute read as a weight: **zero on a mesh that carries none**,
+	// where `vertex_color` is white. Two fields for one stream because the
+	// identity differs on the two sides of the multiply - a missing tint is
+	// white, and a missing mask is *nothing painted*, which white would mean
+	// covering every unpainted surface. `layers.js` reads a `maskSource:
+	// 'vertexColor'` layer's weight from here.
+	float4 vertex_mask;
 
 	// Which row of this material's uniform tables this copy reads. Already clamped
 	// to the rows the material declared - the count is the record's, the way the uv
@@ -249,6 +331,11 @@ struct Vertex
 	float3 normal;   // object space; write it if the displacement tilts the surface
 	float2 uv;       // the mesh's own uv, before `variant_uv`
 	float4 color;    // this copy's colour, raw
+	// The mesh's COLOR_0, or white without one. Writable for the same reason
+	// `color` is: a displacement driven by a painted weight - a wind mask, grass
+	// height - is a vertex-stage question, and this is the only per-vertex value
+	// here an artist can author.
+	float4 vertex_color;
 	uint variant;    // already clamped to the rows the material declared
 	uint index;      // `SV_VertexID`, the per-vertex seed a scatter keys on
 	Uniforms uniforms; // what the script declared, as `Surface.uniforms` reads it
@@ -324,6 +411,14 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 
 	Surface s;
 	s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+	// **The built-in look applies glTF's COLOR_0 itself**, as `mesh.slang`'s own
+	// fragment stage does: a tint on the base colour unless the file painted the
+	// attribute as a layer weight, which is what `FLAG_COLORS_ARE_MASK` says.
+	// A script's body decides for itself instead - `Surface.vertex_color` and
+	// `Surface.vertex_mask` are there for it - so the fold is behind the
+	// constant the def emits for this pass and a scripted module is unchanged.
+	if (MATERIAL_BUILT_IN && (draw.flags & FLAG_COLORS_ARE_MASK) == 0)
+		s.albedo *= input.vertex_color.rgb;
 	s.normal = normalize(input.normal);
 	s.mesh_uv = input.uv;
 	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
@@ -348,6 +443,13 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	s.position = input.world;
 	s.color = input.color;
 	s.vertex_color = input.vertex_color;
+	// The mask reading of the same varying, and the one place the two differ: a
+	// mesh with no COLOR_0 has painted nothing, so every weight read off it is 0
+	// while `vertex_color` stays white. A body reads this one for a painted
+	// weight and `vertex_color` for a tint.
+	s.vertex_mask = (draw.flags & FLAG_HAS_COLORS) != 0
+		? input.vertex_color
+		: float4(0.0, 0.0, 0.0, 0.0);
 	s.variant = min(input.variant, draw.material_rows - 1u);
 	s.uniforms = material_uniforms();
 
@@ -380,5 +482,17 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	s.time = push.frame[0].lighting.z;
 	s.screen_position = input.sv_position;
 
-	return float4(shade(s), draw.base_color.a * input.color.a);
+	// The attribute's fourth channel joins the two the same way its rgb joins the
+	// albedo, and the mask flag drops it for the same reason: a mask's fourth
+	// channel is a fourth weight rather than an opacity. A scripted module keeps
+	// `material.slang`'s alpha, which is the material's and the copy's alone.
+	float alpha = draw.base_color.a * input.color.a;
+	if (MATERIAL_BUILT_IN && (draw.flags & FLAG_COLORS_ARE_MASK) == 0) alpha *= input.vertex_color.a;
+
+	// Before `shade`, so a debug view of a scene whose bodies are expensive is
+	// still one render - and so a body that cannot compile is still diagnosable.
+	float3 view;
+	if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
+
+	return float4(shade(s), alpha);
 }

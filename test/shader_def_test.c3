@@ -473,13 +473,15 @@ fn void the_ported_mesh_is_lit() @test
 	uniforms.tinit(256);
 	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view());
+	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), built_in: true);
 
 	DString out;
 	out.tinit(32768);
 	three::append_shader_def(&out, def, three::MeshPush);
 	String source = out.str_view();
 
+	test::@check(source.contains("const bool MATERIAL_BUILT_IN = true;"),
+		"the marker that says this is the built-in draw path is in the module");
 	test::@check(source.contains("fn LightTerms shade_lights("), "the lighting block is carried");
 	test::@check(source.contains("uint cluster = fragment_cluster(frame, screen_position, position);"),
 		"and the cluster a fragment is lit by is the culling pass's own index");
@@ -509,6 +511,11 @@ fn void the_ported_mesh_is_lit() @test
 		"and the fragment entry takes the rasteriser's flag as its own parameter");
 	test::@check(source.contains("s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);"),
 		"the record's base colour and the copy's colour reach the surface");
+	test::@check(source.contains("if (MATERIAL_BUILT_IN && (draw.flags & FLAG_COLORS_ARE_MASK) == 0)")
+		&& source.contains("s.albedo *= input.vertex_color.rgb;"),
+		"and the built-in path folds COLOR_0 into the albedo, leaving a mask alone");
+	test::@check(source.contains("s.vertex_mask = (draw.flags & FLAG_HAS_COLORS) != 0"),
+		"a body reads the same attribute as a weight through `Surface.vertex_mask`");
 	test::@check(source.contains("s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;"),
 		"and the tiling is applied where a body's own sampling lands on the same texel");
 	test::@check(source.contains("Sampler2D three_textures[] @set(1) @binding(0);"),
@@ -546,8 +553,14 @@ fn void the_ported_mesh_is_lit() @test
 		"and the reflection samples it through the same mapping the sky background draws with");
 	test::@check(source.contains("+ environment_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance) * s.crevice"),
 		"the reflection is added beside the direct term and scaled by the crevice");
-	test::@check(source.contains("return float4(shade(s), draw.base_color.a * input.color.a);"),
-		"the alpha is the material's and the copy's, never the body's");
+	test::@check(source.contains("Sampler2D shadow_atlas @set(0) @binding(17);"),
+		"the unfiltered shadow map the shadowMap view draws is declared at its reserved binding");
+	test::@check(source.contains("if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);"),
+		"and a debug view answers instead of the body, before the body runs");
+	test::@check(source.contains("float alpha = draw.base_color.a * input.color.a;")
+		&& source.contains("alpha *= input.vertex_color.a;")
+		&& source.contains("return float4(shade(s), alpha);"),
+		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's");
 	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
 		"and the body that was spliced in is the one that runs");
 
@@ -983,7 +996,8 @@ fn void the_ported_mesh_module_is_generated() @test
 	// pose and the model transform.
 	test::@check(source.contains("struct Vertex\n{") && source.contains("\tfloat3 position;")
 		&& source.contains("\tfloat3 normal;") && source.contains("\tfloat2 uv;")
-		&& source.contains("\tfloat4 color;") && source.contains("\tuint variant;"),
+		&& source.contains("\tfloat4 color;") && source.contains("\tfloat4 vertex_color;")
+		&& source.contains("\tuint variant;"),
 		"the body-facing struct is declared by the material half");
 	test::@check(source.contains("fn void displace(inout Vertex v) @required;"),
 		"beside the declaration a body satisfies");
