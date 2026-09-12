@@ -13,6 +13,8 @@
 *>
 module three;
 
+import shady;
+
 <*
  The whole module, with the ported code passed in rather than read here, so the
  caller decides where source comes from - disk in a checkout, `$embed` in a
@@ -49,24 +51,24 @@ macro ShaderDef sky_def(String code)
 		{ "sky_map", "Sampler2D", 0, 0, false },
 	};
 
+	// Two entry points around the ported functions: a vertex stage that makes
+	// its own three vertices and a fragment stage that samples the image. The
+	// bodies are calls, so `body_file` stays empty and a diagnostic inside
+	// `sky_vertex` names `sky`, from the source block below.
 	ShaderStage[] stages = {
 		{
-			ShaderStageKind.VERTEX,
-			"vertexMain",
-			"VertexIn input",
-			"VertexOutput",
-			"return sky_vertex(input);\n",
-			"",
-			"",
+			.kind = shady::Stage.VERTEX,
+			.entry = "vertexMain",
+			.params = "VertexIn input",
+			.returns = "VertexOutput",
+			.body = "return sky_vertex(input);\n",
 		},
 		{
-			ShaderStageKind.FRAGMENT,
-			"fragmentMain",
-			"VertexOutput input",
-			"float4",
-			"return sky_fragment(input);\n",
-			"",
-			"",
+			.kind = shady::Stage.FRAGMENT,
+			.entry = "fragmentMain",
+			.params = "VertexOutput input",
+			.returns = "float4",
+			.body = "return sky_fragment(input);\n",
 		},
 	};
 
