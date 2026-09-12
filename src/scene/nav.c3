@@ -31,12 +31,10 @@
  agent's height. So there is exactly one walkable layer per floor, which is what
  makes a bridge over a road two layers rather than an ambiguity.
 
- A step is one cell. The solver relaxes over a 3x3x3 neighbourhood, so two
- walkable cells are connected when they are adjacent — including diagonally and
- including one cell up. A stair with a rise larger than the cell size is not a
- stair to this grid, it is a wall. At the default half-metre cell that is a
- generous step; a scene with finer stairs wants a finer cell, and pays for it as
- the cube.
+ `stepHeight` sets how many vertical cell layers a horizontal move may span.
+ A diagonal also requires a valid two-cardinal route through one side, so it
+ cannot cut through a blocked corner. Cell size controls resolution and cost
+ independently.
 *>
 module three;
 
@@ -70,6 +68,7 @@ struct NavSettings
 	// How tall it is. Cells above a floor must be clear for this height or the
 	// floor is not standing room.
 	float agent_height;
+	float step_height;
 
 	// The steepest floor it will stand on, in degrees. Measured from the triangle
 	// normals under a cell, not from the shape of the voxels, so a ramp is a ramp
@@ -89,6 +88,7 @@ fn NavSettings default_nav_settings()
 		.cell = 0.5f,
 		.agent_radius = 0.35f,
 		.agent_height = 1.8f,
+		.step_height = 0.5f,
 		.slope_limit = 50.0f,
 		.has_bounds = false,
 	};
@@ -100,10 +100,8 @@ fn NavSettings default_nav_settings()
 // what a level wants.
 const long NAV_MAX_VOXELS = 16_000_000;
 
-// Padding cells on every side. `collision::relax_voxel` steps its whole 3x3x3
-// neighbourhood with no bounds test, on the promise that every entry is at least
-// two cells from the edge — this is that promise, and it is why nothing in the
-// padding may ever be marked walkable.
+// Padding cells on every side. Runtime bakes and embedded profiles share this
+// safety border, and nothing in the padding may be marked walkable.
 const int NAV_PAD = 2;
 
 <*
@@ -117,6 +115,8 @@ struct NavMesh
 {
 	collision::VoxelGrid grid;
 	NavSettings settings;
+	String profile_name;
+	String source_hash;
 	bool built;
 
 	uint solid_cells;
@@ -139,8 +139,7 @@ struct NavMesh
 	 where "there is no path" is the honest answer for some pairs of points, and a
 	 caller who did not intend that wants to know at bake time.
 
-	 Measured over the same 26-neighbour adjacency `collision::relax_voxel` relaxes
-	 across, so it is exactly the graph a field is solved on.
+	 Measured over the same step-limited, corner-safe links a field solves.
 	*>
 	uint components;
 	uint largest_component;
@@ -181,10 +180,74 @@ fn void Scene.drop_nav(&self)
 fn void NavMesh.free(&self)
 {
 	self.grid.free();
+	if (self.profile_name.len > 0) self.profile_name.free(mem);
+	if (self.source_hash.len > 0) self.source_hash.free(mem);
 	*self = { };
 }
 
 fn bool NavMesh.usable(&self) => self.built && self.grid.usable();
+
+fn int NavMesh.max_vertical_steps(&self)
+{
+	if (!(self.grid.cell > 0.0f) || !(self.settings.step_height > 0.0f)) return 0;
+	float reach = self.settings.step_height / self.grid.cell;
+	if (!math::is_finite(reach) || reach >= (float)self.grid.ny) return self.grid.ny - 1;
+	return math::max(0, (int)math::floor(reach + 1e-5f));
+}
+
+fn bool NavMesh.linked(&self, int voxel, int dx, int dy, int dz)
+{
+	if (math::abs((float)dy * self.grid.cell) > self.settings.step_height + 1e-5f) return false;
+	if (dx == 0 && dz == 0) return false;
+	int plane = self.grid.nx * self.grid.ny;
+	int x = voxel % self.grid.nx;
+	int y = (voxel / self.grid.nx) % self.grid.ny;
+	int z = voxel / plane;
+	if (x + dx < 0 || x + dx >= self.grid.nx || y + dy < 0 || y + dy >= self.grid.ny
+		|| z + dz < 0 || z + dz >= self.grid.nz) return false;
+	if (self.grid.index[voxel + dz * plane + dy * self.grid.nx + dx] < 0) return false;
+	if (dx != 0 && dz != 0)
+	{
+		int max_dy = self.max_vertical_steps();
+		for (int sy = -max_dy; sy <= max_dy; sy++)
+		{
+			if (y + sy < 0 || y + sy >= self.grid.ny) continue;
+			int x_side = voxel + sy * self.grid.nx + dx;
+			if (self.linked(voxel, dx, sy, 0) && self.linked(x_side, 0, dy - sy, dz)) return true;
+
+			int z_side = voxel + dz * plane + sy * self.grid.nx;
+			if (self.linked(voxel, 0, sy, dz) && self.linked(z_side, dx, dy - sy, 0)) return true;
+		}
+		return false;
+	}
+	return true;
+}
+
+fn bool Scene.load_nav(&self, AssetNavigationProfile* profile)
+{
+	self.drop_nav();
+	if (profile == null || profile.cells.len == 0) return false;
+	long total = (long)profile.nx * (long)profile.ny * (long)profile.nz;
+	int[] index = mem::new_array(int, (sz)total);
+	foreach (&entry : index) *entry = -1;
+	int[] cells = mem::new_array(int, profile.cells.len);
+	foreach (i, voxel : profile.cells)
+	{
+		cells[i] = voxel;
+		index[voxel] = (int)i;
+	}
+	self.nav = {
+		.grid = { .origin = profile.origin + (Vec3){ profile.settings.cell * 0.5f, profile.settings.cell * 0.5f, profile.settings.cell * 0.5f }, .cell = profile.settings.cell,
+			.nx = profile.nx, .ny = profile.ny, .nz = profile.nz, .index = index, .cells = cells },
+		.settings = profile.settings, .built = true, .solid_cells = profile.solid_cells,
+		.profile_name = profile.name.len > 0 ? profile.name.copy(mem) : "",
+		.source_hash = profile.source_hash.len > 0 ? profile.source_hash.copy(mem) : "",
+		.floor_cells = profile.floor_cells, .walkable_cells = (uint)cells.len, .voxels = total,
+		.components = profile.components, .largest_component = profile.largest_component,
+	};
+	self.nav.measure_components();
+	return true;
+}
 
 <*
  Voxelizes the scene's standing room.
@@ -252,7 +315,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 			float area     = normal.length();
 			// A degenerate triangle has no normal and no area; it is still solid,
 			// so it is rasterized and simply never counts as floor.
-			bool standable = area > 1e-9f && math::abs(normal.y / area) >= cos_limit;
+			bool standable = area > 1e-9f && normal.y / area >= cos_limit;
 
 			collision::Aabb3 box = collision::NEW_AABB3;
 			box.expand_by_point(tri[0]);
@@ -439,13 +502,13 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
  narrow, a step one cell too high and a ramp that does not quite reach all look
  identical in `walkable_cells`.
 
- A flood fill over the same 26-neighbourhood `collision::relax_voxel` steps, so
- "one component" means exactly "`solve_field` can carry a cost from any cell to
- any other". One pass over the cells with an explicit stack — no recursion,
+ A flood fill over the same step-limited, corner-safe links as the field solver,
+ so "one component" means exactly that a cost can travel between its cells.
+ One pass over the cells with an explicit stack — no recursion,
  because a broad sheet of standing room is tens of thousands of cells deep.
 
  Cheap next to the voxelization it follows: the walk touches each cell once and
- looks at 26 neighbours, against a rasterization that is per triangle per cell.
+ checks the profile's bounded horizontal-step neighbourhood.
 *>
 fn void NavMesh.measure_components(&self)
 {
@@ -459,6 +522,7 @@ fn void NavMesh.measure_components(&self)
 	foreach (&slot : label) *slot = -1;
 
 	int plane = self.grid.nx * self.grid.ny;
+	int max_dy = self.max_vertical_steps();
 
 	List{int} stack;
 	stack.init(mem, 64);
@@ -482,14 +546,13 @@ fn void NavMesh.measure_components(&self)
 
 			for (int dz = -1; dz <= 1; dz++)
 			{
-				for (int dy = -1; dy <= 1; dy++)
+				for (int dy = -max_dy; dy <= max_dy; dy++)
 				{
 					for (int dx = -1; dx <= 1; dx++)
 					{
 						if (dx == 0 && dy == 0 && dz == 0) continue;
-						// Unbounded on purpose, on NAV_PAD's promise that no entry
-						// is within two cells of the edge — the same promise
-						// `collision::relax_voxel` steps on.
+						// `linked` bounds the target and enforces the profile's step.
+						if (!self.linked(voxel, dx, dy, dz)) continue;
 						int neighbour = self.grid.index[voxel + dz * plane + dy * self.grid.nx + dx];
 						if (neighbour < 0 || label[(sz)neighbour] >= 0) continue;
 						label[(sz)neighbour] = id;
@@ -506,9 +569,8 @@ fn void NavMesh.measure_components(&self)
 <*
  The distance to the nearest goal, for every walkable cell.
 
- `collision::VoxelGrid.solve_field` unchanged — a chamfer transform, forward and
- backward sweeps until nothing moves, rather than a priority queue. Fast for
- exactly the shape a nav layer is: one broad sheet.
+ A chamfer transform with forward and backward sweeps, filtered through the
+ profile's step and corner rules. Fast for a broad navigation sheet.
 
  This is the expensive call, and there is one of it per goal set rather than per
  agent. See the file header.
@@ -526,7 +588,41 @@ fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
 	foreach (goal : goals) seeded += self.grid.seed_segment(field, goal, goal);
 	if (seeded == 0) return false;
 
-	self.grid.solve_field(field);
+	int max_dy = self.max_vertical_steps();
+	bool changed = true;
+	while (changed)
+	{
+		changed = false;
+		foreach (entry, voxel : self.grid.cells)
+		{
+			float best = field[entry];
+			for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
+			{
+				if (dx == 0 && dy == 0 && dz == 0 || !self.linked(voxel, dx, dy, dz)) continue;
+				int neighbour = self.grid.index[voxel + dz * self.grid.nx * self.grid.ny + dy * self.grid.nx + dx];
+				float distance = field[neighbour];
+				if (distance >= collision::VOXEL_UNREACHED) continue;
+				distance += self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
+				if (distance < best) best = distance;
+			}
+			if (best < field[entry]) { field[entry] = best; changed = true; }
+		}
+		for (sz entry = self.grid.cells.len - 1; entry >= 0; entry--)
+		{
+			int voxel = self.grid.cells[entry];
+			float best = field[entry];
+			for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
+			{
+				if (dx == 0 && dy == 0 && dz == 0 || !self.linked(voxel, dx, dy, dz)) continue;
+				int neighbour = self.grid.index[voxel + dz * self.grid.nx * self.grid.ny + dy * self.grid.nx + dx];
+				float distance = field[neighbour];
+				if (distance >= collision::VOXEL_UNREACHED) continue;
+				distance += self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
+				if (distance < best) best = distance;
+			}
+			if (best < field[entry]) { field[entry] = best; changed = true; }
+		}
+	}
 	return true;
 }
 
@@ -572,16 +668,18 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 	if (here >= collision::VOXEL_UNREACHED) return { 0, 0, 0 };
 
 	int plane      =  self.grid.nx * self.grid.ny;
+	int max_dy    = self.max_vertical_steps();
 	float best     =  here;
 	int best_voxel = -1;
 
 	for (int dz = -1; dz <= 1; dz++)
 	{
-		for (int dy = -1; dy <= 1; dy++)
+		for (int dy = -max_dy; dy <= max_dy; dy++)
 		{
 			for (int dx = -1; dx <= 1; dx++)
 			{
 				if (dx == 0 && dy == 0 && dz == 0) continue;
+				if (!self.linked(voxel, dx, dy, dz)) continue;
 				int step      = dz * plane + dy * self.grid.nx + dx;
 				int neighbour = self.grid.index[voxel + step];
 				if (neighbour < 0) continue;
@@ -625,7 +723,7 @@ fn Vec3 NavMesh.foot_of(&self, int voxel)
  The raw path, before shortening. Bounded by the slice it is given and by a step
  count, so a field with a flat spot cannot loop for ever.
 
- @return `How many points were written. Zero when the start is not on the mesh or the goal is unreachable from it.`
+ @return `How many points were written. Zero when the goal is unreachable or the output cannot hold the complete route.`
 *>
 fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 {
@@ -641,6 +739,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 	out[count++] = self.foot_of(voxel);
 
 	int plane  = self.grid.nx * self.grid.ny;
+	int max_dy = self.max_vertical_steps();
 	// One step per cell of the longest possible descent, with slack. A chamfer
 	// field is monotonically decreasing along this walk, so the bound is a
 	// backstop against a field that was never solved rather than a real limit.
@@ -656,11 +755,12 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 		int next = -1;
 		for (int dz = -1; dz <= 1; dz++)
 		{
-			for (int dy = -1; dy <= 1; dy++)
+			for (int dy = -max_dy; dy <= max_dy; dy++)
 			{
 				for (int dx = -1; dx <= 1; dx++)
 				{
 					if (dx == 0 && dy == 0 && dz == 0) continue;
+					if (!self.linked(voxel, dx, dy, dz)) continue;
 					int candidate = voxel + dz * plane + dy * self.grid.nx + dx;
 					int neighbour = self.grid.index[candidate];
 					if (neighbour < 0) continue;
@@ -679,7 +779,8 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 		out[count++] = self.foot_of(voxel);
 	}
 
-	return count;
+	int final_entry = self.grid.index[voxel];
+	return final_entry >= 0 && field[final_entry] <= 0.0f ? count : 0;
 }
 
 <*
@@ -718,7 +819,7 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
 
  @param path : `The raw walk, as NavMesh.walk wrote it. Foot points, not cell centres.`
  @param out : `Where the shortened path goes. May be the same slice the raw walk is in.`
- @return `How many points were written, always at least one.`
+ @return `How many points were written, or zero when the output cannot hold the complete shortened route.`
 *>
 fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, IgnoreSet skip)
 {
@@ -743,23 +844,24 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 	uint anchor = 0;
 	while (anchor < count - 1 && written < out.len)
 	{
-		uint reach = anchor + 1;
-		// Extend while the next waypoint is visible from the anchor. The first
-		// candidate is always accepted without a test: consecutive cells are
-		// adjacent by construction, and refusing one would leave the walk stuck.
-		while (reach + 1 < count)
+		uint reach = anchor;
+		uint candidate = anchor + 1;
+		// Even consecutive cells are swept: an embedded graph is metadata, while
+		// the collision scene is the physical authority for the path returned now.
+		while (candidate < count)
 		{
 			Vec3 a = path[anchor];
-			Vec3 b = path[reach + 1];
+			Vec3 b = path[candidate];
 			a.y += lift;
 			b.y += lift;
 			SweepHit hit = self.sweep_capsule(assets, a, b, radius, half, skin, skip);
 			if (hit.hit) break;
-			reach++;
+			reach = candidate++;
 		}
+		if (reach == anchor) return 0;
 		out[written++] = self.on_floor(assets, path[reach], nav.grid.cell);
 		anchor = reach;
 	}
 
-	return written;
+	return anchor == count - 1 ? written : 0;
 }

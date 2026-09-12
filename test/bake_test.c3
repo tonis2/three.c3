@@ -966,12 +966,55 @@ fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @tes
 			moved_frame.free();
 			three::RunResult dirty = run.run(`return three.stats().lightmapDirty;`);
 			defer dirty.free();
-			test::@check(dirty.value == "0", "camera movement leaves every layered tile live: %s", dirty.value);
+			test::@check(dirty.value == "5", "camera movement dirties every view-dependent layered tile: %s", dirty.value);
 			three::RunResult loaded = run.run(
 				`const b = three.lights.loadBake('layered.lightmap'); return b && [b.tiles, b.dirty].join(' ');`);
 			defer loaded.free();
-			test::@check(loaded.value == `"5 0"`,
-				"the persisted diffuse loads cleanly from another camera: %s", loaded.value);
+			test::@check(loaded.value == "null",
+				"the persisted view-dependent diffuse is rejected from another camera: %s", loaded.value);
 		};
+	};
+}
+
+<*
+ A packing retry keeps each requested resolution attached to its receiver.
+
+ The small plane is inserted first and the large one second. The first failed
+ attempt sorts them in the opposite order; a detached size list then assigns
+ their resolutions backwards on the next attempt.
+*>
+fn void a_lightmap_retry_keeps_tile_sizes_with_their_receivers() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene(); three.scene = scene;
+			const small = new three.Mesh(new three.PlaneGeometry(1, 1)); small.name = 'small';
+			const large = new three.Mesh(new three.PlaneGeometry(8, 8)); large.name = 'large';
+			small.static = true; large.static = true; large.position.x = 30;
+			scene.add(small, large);
+			three.lights.add({ position: [0, 5, 0], range: 100, intensity: 2 }).baked = true;
+			three.light.intensity = 0; three.light.ambient = 0;
+			three.camera.lookAt(0, 0, 0); three.camera.orbit(0, 45, 8);
+		`);
+		defer built.free();
+		test::@check(built.ok, "the unequal receiver scene built: %s", built.error);
+		image::Image warm = renderer.capture()!!;
+		warm.free();
+		three::RunResult baked = run.run(
+			`return three.lights.bake({ texelsPerMetre: 32, maxBytes: 256 * 256 * 8 }).receivers;`);
+		defer baked.free();
+		test::@check(baked.value == "2", "both receivers were packed: %s", baked.value);
+
+		uint small_size = 0;
+		uint large_size = 0;
+		foreach (tile : renderer.pass.lightmap.tiles)
+		{
+			String name = renderer.pass.scene.nodes[tile.node].name;
+			if (name == "small") small_size = tile.size;
+			if (name == "large") large_size = tile.size;
+		}
+		test::@check(small_size > 0 && large_size > small_size * 4,
+			"the 8x receiver kept size %d against the 1x receiver's %d", large_size, small_size);
 	};
 }

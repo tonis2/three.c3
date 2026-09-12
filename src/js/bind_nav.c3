@@ -33,7 +33,8 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 	// is voxelized out of that scene's triangles — and a field handle indexes that
 	// scene's own list, so a verb that assumed the active one would solve the wrong
 	// level's paths the moment a script baked ahead of a transition.
-	self.bind(host, "navBake", &js_nav_bake, 12);
+	self.bind(host, "navBake", &js_nav_bake, 13);
+	self.bind(host, "navLoad", &js_nav_load, 4);
 	self.bind(host, "navStats", &js_nav_stats, 1);
 	self.bind(host, "navClear", &js_nav_clear, 1);
 	self.bind(host, "navField", &js_nav_field, 4);
@@ -45,8 +46,41 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 	self.bind(host, "steer", &js_steer, 15);
 }
 
+fn void js_nav_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+	AssetId id = arg_asset(self, &js, argc, args, 1, out);
+	if (id == NO_ASSET) return;
+	Asset* loaded = self.pass.assets.slot(id);
+	if (loaded.nav_profiles.len() == 0) { *out = qjs::null_value(); return; }
+	@pool()
+	{
+		String wanted = argc > 3 ? arg_text(&js, argc, args, 3, tmem) : "";
+		AssetNavigationProfile* profile = null;
+		if (wanted.len == 0)
+		{
+			foreach (&candidate : loaded.nav_profiles) if (candidate.name == "default") { profile = candidate; break; }
+			if (profile == null) profile = &loaded.nav_profiles[0];
+		}
+		else
+		{
+			foreach (&candidate : loaded.nav_profiles) if (candidate.name == wanted) { profile = candidate; break; }
+		}
+		if (profile == null)
+		{
+			*out = js.raise(string::tformat("that asset has no navigation profile named '%s'", wanted));
+			return;
+		}
+		if (!scene.load_nav(profile)) { *out = qjs::null_value(); return; }
+		*out = nav_stats_value(scene, &js);
+	};
+}
+
 <*
- `navBake(cell, radius, height, slope, hasBounds, minX, minY, minZ, maxX, maxY, maxZ)`.
+ `navBake(cell, radius, height, slope, stepHeight, hasBounds, minX, minY, minZ, maxX, maxY, maxZ)`.
 
  Answers with the same object `navStats` does, or `null` when the region held no
  standing room — a real answer and not an error: an empty scene, a scene of
@@ -73,12 +107,13 @@ fn void js_nav_bake(
 	settings.agent_radius = math::max(arg_float(&js, argc, args, 2), 0.0f);
 	settings.agent_height = math::max(arg_float(&js, argc, args, 3), 0.0f);
 	settings.slope_limit = arg_float(&js, argc, args, 4);
-	settings.has_bounds = arg_truth(&js, argc, args, 5);
+	settings.step_height = math::max(arg_float(&js, argc, args, 5), 0.0f);
+	settings.has_bounds = arg_truth(&js, argc, args, 6);
 	if (settings.has_bounds)
 	{
 		settings.bounds = {
-			{ arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8) },
-			{ arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10), arg_float(&js, argc, args, 11) },
+			{ arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9) },
+			{ arg_float(&js, argc, args, 10), arg_float(&js, argc, args, 11), arg_float(&js, argc, args, 12) },
 		};
 		settings.bounds.fix();
 	}
@@ -105,7 +140,10 @@ fn qjs::Value nav_stats_value(Scene* scene, qjs::Context* js) @local
 	js.set_property(value, "cell", qjs::number_value(nav.settings.cell));
 	js.set_property(value, "radius", qjs::number_value(nav.settings.agent_radius));
 	js.set_property(value, "height", qjs::number_value(nav.settings.agent_height));
+	js.set_property(value, "stepHeight", qjs::number_value(nav.settings.step_height));
 	js.set_property(value, "slope", qjs::number_value(nav.settings.slope_limit));
+	if (nav.profile_name.len > 0) js.set_property(value, "profile", js.string(nav.profile_name));
+	if (nav.source_hash.len > 0) js.set_property(value, "sourceHash", js.string(nav.source_hash));
 	// The three counts and the time are what decide whether baking is a
 	// level-boundary operation or a loading-screen one, answerable for the
 	// caller's own level rather than for a reference one.
@@ -495,12 +533,9 @@ fn void js_nav_path(
 			return;
 		}
 
-		// The raw walk is one point per cell, so it can be as long as the reachable
-		// set. Bounded by the caller's slice times a factor, because shortening is
-		// what turns hundreds of cells into a handful of corners and a caller
-		// asking for eight waypoints still needs the cells between them walked.
-		sz raw_limit = math::min((sz)scene.nav.field_size(), (sz)(slots.len / 3) * 64 + 64);
-		Vec3[] raw   = mem::temp_array(Vec3, raw_limit);
+		// The raw walk is one point per cell. It must reach the goal before a
+		// shortened route is returned; output capacity only limits kept corners.
+		Vec3[] raw   = mem::temp_array(Vec3, scene.nav.field_size());
 		uint count   = scene.nav.walk(field, from, raw);
 		if (count == 0)
 		{

@@ -149,6 +149,9 @@ struct LightmapTile
 	// The whole rectangle, margin included. The rendered part is this minus two
 	// pads on each axis.
 	uint size;
+	// Desired inner side before atlas-wide scaling. It travels with the receiver
+	// when packing sorts tiles between attempts.
+	float requested_size;
 	ulong material_signature;
 }
 
@@ -1121,10 +1124,6 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	List{LightmapTile} tiles;
 	tiles.init(mem, 64);
 	defer tiles.free();
-	List{float} wanted;
-	wanted.init(mem, 64);
-	defer wanted.free();
-
 	uint skipped = 0;
 	sz pool = self.scene.nodes.len();
 	if (pool == 0) return LIGHTMAP_NO_ATLAS~;
@@ -1135,10 +1134,9 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	uint found = self.lightmap_receivers(slots, sides, density, &skipped);
 	for (uint i = 0; i < found; i++)
 	{
-		wanted.push(sides[i]);
 		tiles.push({
 			.node = slots[i], .generation = self.scene.nodes[slots[i]].generation,
-			.x = 0, .y = 0, .size = 0,
+			.x = 0, .y = 0, .size = 0, .requested_size = sides[i],
 		});
 	}
 	if (tiles.len() == 0) return LIGHTMAP_NO_ATLAS~;
@@ -1151,9 +1149,9 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	for (uint attempt = 0; attempt < 16 && side == 0; attempt++)
 	{
 		usz total = 0;
-		foreach (i, &tile : tiles)
+		foreach (&tile : tiles)
 		{
-			float at = wanted[i] * scale;
+			float at = tile.requested_size * scale;
 			uint inner = (uint)math::ceil((double)at);
 			if (inner < LIGHTMAP_TILE_MIN) inner = LIGHTMAP_TILE_MIN;
 			if (inner > LIGHTMAP_TILE_MAX) inner = LIGHTMAP_TILE_MAX;
@@ -1296,23 +1294,23 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 	FrameBlock frame = {
 		.view_projection = self.frame_view_projection,
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, 0, 0 },
-		.live_poses = 0,
+		.live_poses = null,
 		.light_view_projection = matrix::IDENTITY4{float},
 		.shadow = { 0, 0, 0, 0 },
 		.debug = { 0, 0, 0, 0 },
 		.camera = { eye.x, eye.y, eye.z, 0 },
 		.environment = { 0, 0, 0, 0 },
-		.lights = map.lights.address,
-		.morph_weights = 0,
+		.lights = (Light*)map.lights.address,
+		.morph_weights = null,
 		.world = self.lighting.world,
 		.point_shadow = { 0, 0, 0, 0 },
 		.inverse_view_projection = matrix::IDENTITY4{float},
 		.ambient_occlusion = { 0, 0, 0, 0 },
-		.shadow_views = views_address,
+		.shadow_views = (ShadowGpuView*)views_address,
 		// No cluster grid: the bake has no camera, so `shared_baked_diffuse` walks
 		// every light rather than a cluster's list.
-		.cluster_counts = 0,
-		.cluster_indices = 0,
+		.cluster_counts = null,
+		.cluster_indices = null,
 		.cluster_grid = { 0, 0, 0, 0 },
 		.cluster_screen = { 0, 0, 0, 0 },
 	};
@@ -1342,16 +1340,16 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			.lightmap = { 0, 0, 0, 0 },
 		};
 		records[i] = {
-			.positions = mesh.positions.address,
-			.normals = mesh.has_normals ? mesh.normals.address : 0,
-			.uvs = mesh.uvs.address,
-			.lightmap_uvs = mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address,
-			.colors = mesh.has_colors ? mesh.colors.address : 0,
-			.joints = 0,
-			.weights = 0,
-			.palette = 0,
-			.posed = 0,
-			.morph = 0,
+			.positions = (Vec3*)mesh.positions.address,
+			.normals = (Vec3*)(mesh.has_normals ? mesh.normals.address : 0),
+			.uvs = (Vec2*)mesh.uvs.address,
+			.lightmap_uvs = (Vec2*)(mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address),
+			.colors = (Vec4*)(mesh.has_colors ? mesh.colors.address : 0),
+			.joints = null,
+			.weights = null,
+			.palette = null,
+			.posed = null,
+			.morph = null,
 			.base_color = { 1, 1, 1, 1 },
 			.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0)
 				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
@@ -1545,9 +1543,9 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			}
 			selected_samplers.push(cmd, selected);
 			MeshPush push = {
-				.frame = map.frame.address,
-				.instances = map.instances.address + (ulong)i * Instance::size,
-				.draw = map.draws.address + (ulong)i * DrawRecord::size,
+				.frame = (FrameBlock*)map.frame.address,
+				.instances = (Instance*)(map.instances.address + (ulong)i * Instance::size),
+				.draw = (DrawRecord*)(map.draws.address + (ulong)i * DrawRecord::size),
 			};
 			char[PUSH_BUDGET] pushed = {};
 			mem::copy(&pushed, &push, MeshPush::size);
@@ -1653,7 +1651,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 5;
+const uint LIGHTMAP_FILE_VERSION = 6;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the

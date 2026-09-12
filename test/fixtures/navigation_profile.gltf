@@ -1,0 +1,21 @@
+{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": [ "CUSTOM_physics_navigation" ],
+  "extensions": { "CUSTOM_physics_navigation": { "version": 1, "profiles": [ {
+    "name": "default", "cellSize": 0.5, "agentRadius": 0.3, "agentHeight": 1.66,
+    "stepHeight": 0.42, "slopeLimit": 54, "origin": [ 0, 0, 0 ],
+    "dimensions": [ 7, 7, 7 ], "cells": 1, "components": 1,
+    "largestComponent": 3, "solidCells": 8, "floorCells": 4, "sourceHash": "fixture"
+  } ] } },
+  "buffers": [ { "byteLength": 48, "uri": "data:application/octet-stream;base64,AACAvwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAcgAAAHMAAAB0AAAA" } ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 12 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ -1, 0, 0 ], "max": [ 1, 1, 0 ] },
+    { "bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR" }
+  ],
+  "meshes": [ { "name": "triangle", "primitives": [ { "attributes": { "POSITION": 0 } } ] } ],
+  "nodes": [ { "mesh": 0 } ], "scenes": [ { "nodes": [ 0 ] } ], "scene": 0
+}

@@ -1818,7 +1818,7 @@ const debug = {
 // The two tone curves, by the names a script writes. The index is what
 // crosses — `toneMapSet` takes an ordinal, and the spelling is this side's,
 // along with the message a misspelling gets.
-const TONE_MAPPINGS = ['none', 'agx'];
+const TONE_MAPPINGS = ['none', 'agx', 'agx-blender'];
 
 export const three = {
 	Scene,
@@ -2427,7 +2427,8 @@ export const three = {
 		return H.screenshot(path);
 	},
 
-	// The curve the finished frame ends on, `'none'` or `'agx'`.
+	// The curve the finished frame ends on: `'none'`, `'agx'` or
+	// `'agx-blender'`.
 	//
 	// `'none'` is the default and is the identity: the chain hands its linear
 	// values to the display encode and anything above 1 clips. That is what
@@ -2441,8 +2442,20 @@ export const three = {
 	// and a bright saturated colour desaturates towards white on its way up
 	// rather than clipping one channel at a time into a primary. It costs
 	// contrast in the mid-tones, which is the trade — a 0.18 grey comes out
-	// around sRGB 128 rather than 118. Being a fit, it reads a few levels
-	// lighter than Blender's own curve in the deep shadows.
+	// around sRGB 128 rather than 118.
+	//
+	// `'agx-blender'` is the same transform with Blender's own contrast curve
+	// instead of the fit — the sigmoid the AgX config is generated from, its
+	// five parameters recovered by rendering a ramp through Blender and
+	// fitting what came back. Everything else is shared, so this is only
+	// about where the curve puts a value. The fit is out by up to 0.052 of
+	// the curve's own range, low through the toe and high from the pivot up,
+	// and this is out by 0.0018 — a fifth of an 8-bit level. Reach for it
+	// when the picture is meant to match an EEVEE render rather than merely
+	// to be filmic; on a night scene, where most of the frame sits in the
+	// shadows the two disagree over, the fit crushes the dark objects and
+	// lifts the mid-tones. It is the more expensive of the two: two `pow`s a
+	// channel against a polynomial's six multiplies.
 	//
 	// The encode to sRGB is not this. It happens at the attachment either
 	// way, after the curve, so a body in the chain still returns linear and

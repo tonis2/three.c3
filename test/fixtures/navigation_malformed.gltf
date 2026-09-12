@@ -1,0 +1,16 @@
+{
+  "asset":{"version":"2.0"},"extensionsUsed":["CUSTOM_physics_navigation"],
+  "extensions":{"CUSTOM_physics_navigation":{"version":1,"profiles":[
+    {"name":"unsorted","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":0.42,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":1,"components":1,"largestComponent":3,"solidCells":0,"floorCells":0,"sourceHash":"x"},
+    {"name":"duplicate","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":0.42,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":2,"components":1,"largestComponent":3,"solidCells":0,"floorCells":0,"sourceHash":"x"},
+    {"name":"range","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":0.42,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":3,"components":1,"largestComponent":3,"solidCells":0,"floorCells":0,"sourceHash":"x"},
+    {"name":"boundary","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":0.42,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":4,"components":1,"largestComponent":3,"solidCells":0,"floorCells":0,"sourceHash":"x"}
+    ,{"name":"pathological-step","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":1000000,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":1,"components":1,"largestComponent":3,"solidCells":0,"floorCells":0,"sourceHash":"x"}
+    ,{"name":"invalid-counters","cellSize":0.5,"agentRadius":0.3,"agentHeight":1.66,"stepHeight":0.42,"slopeLimit":54,"origin":[0,0,0],"dimensions":[7,7,7],"cells":1,"components":0,"largestComponent":0,"solidCells":1,"floorCells":2,"sourceHash":"x"}
+  ]}},
+  "buffers":[{"byteLength":84,"uri":"data:application/octet-stream;base64,AACAvwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAcwAAAHIAAAB0AAAAcgAAAHIAAAB0AAAAcgAAAHMAAABXAQAAAAAAAHIAAABzAAAA"}],
+  "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12},{"buffer":0,"byteOffset":48,"byteLength":12},{"buffer":0,"byteOffset":60,"byteLength":12},{"buffer":0,"byteOffset":72,"byteLength":12}],
+  "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[-1,0,0],"max":[1,1,0]},
+    {"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"},{"bufferView":2,"componentType":5125,"count":3,"type":"SCALAR"},{"bufferView":3,"componentType":5125,"count":3,"type":"SCALAR"},{"bufferView":4,"componentType":5125,"count":3,"type":"SCALAR"}],
+  "meshes":[{"name":"triangle","primitives":[{"attributes":{"POSITION":0}}]}],"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+}
