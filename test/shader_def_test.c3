@@ -222,6 +222,69 @@ fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 }
 
 <*
+ A script's uniforms, emitted as the struct a body reads.
+
+ The emitter's output is checked by compiling it: the struct is spliced into a
+ module that has a `Uniforms` field in its push block and a body that reads three
+ of its fields - a scalar, a table column indexed by the row, and a name that
+ would have been a `#define` once. A field that came out with the wrong type or
+ the wrong shape fails here rather than in a script.
+*>
+fn void a_scripts_uniforms_become_a_typed_struct() @test
+{
+	MaterialUniform[] uniforms = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 8 },
+		{ "cells", 1, 1 },
+	};
+	DString emitted;
+	emitted.tinit(512);
+	three::append_shady_uniforms(&emitted, uniforms);
+
+	test::@check(emitted.str_view() == `struct Uniforms
+{
+	float4 tint;
+	float4 colors[8];
+	float cells;
+}
+`, "the uniform list becomes fields of the shape the list says: %s", emitted.str_view());
+
+	String text = string::tformat("%s\n%s", emitted.str_view(), `
+struct FragmentIn
+{
+	float2 uv;
+	float4 color;
+}
+
+struct StepPush @pushconstant
+{
+	Uniforms uniforms;
+}
+
+StepPush push;
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	float3 mixed = push.uniforms.tint.rgb * push.uniforms.colors[3].rgb;
+	return float4(mixed, push.uniforms.cells);
+}
+`);
+
+	check_compiles(text, "a module whose body reads its uniforms as fields");
+}
+
+fn void an_empty_uniform_list_emits_nothing() @test
+{
+	// No uniforms means no body can name one, so there is nothing to declare - and
+	// an empty struct would be a type with no field a body could ever resolve.
+	DString emitted;
+	emitted.tinit(64);
+	three::append_shady_uniforms(&emitted, {});
+
+	test::@check(emitted.str_view().len == 0, "nothing is emitted for no uniforms, got `%s`", emitted.str_view());
+}
+
+<*
  A post pass: the header, the four reserved samplers, the triangle, and a body.
 
  The body is the script's `fragment`, so what this generates is the *fixed* half
