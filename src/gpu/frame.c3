@@ -859,8 +859,9 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 	vk::Extent2D surface_size = self.viewer.surface_extent(&self.gpu)!;
 	if (surface_size.width != self.viewer.extent.width || surface_size.height != self.viewer.extent.height)
 	{
-		self.rebuild()!;
-		return false;
+		if (!self.rebuild()!) return false;
+		// Present this size before polling another resize. Returning here lets a
+		// continuous drag repeatedly rebuild without ever showing a new frame.
 	}
 
 	uint slot              = self.frames.slot;
