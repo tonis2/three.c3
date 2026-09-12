@@ -14,18 +14,20 @@
  The module is compiled directly rather than through `MeshPass.init`, so both
  compilers' modules exist in one process at once, and the scene cache is off so
  a cache hit cannot hand the first compiler's frame back to compare with itself.
- The table's `MESH` row is wired to this def but its default is still Slang - the
- material half does not carry the built-in look whole yet - so both compiles here
- take an explicit override.
+ The table's `MESH` row is wired to this def but its default is still Slang: the
+ material half is whole, but the lighting half has no area lights, and the bake
+ suite spends them, so the row stays held until that lands. Both compiles here
+ therefore take an explicit override.
 
  **The comparison is byte equality, not resemblance**, and it is only meaningful
- on a frame this half can reproduce whole: occlusion, the lightmap, the
- environment and the debug views are not in `material.shady` yet, so the fixture
- leaves those inert - no ambient occlusion, no lightmap, no environment - and
- spends the unported features nowhere. What it does spend is the ported half: a
- bent, turned, scaled skinned character, a uv carrying box with a uv variant
- table, the sun's shadow, the sun plus two clustered point lights with different
- colours, and a specular material.
+ on a frame this half can reproduce whole: the lightmap and the environment are
+ not in the fixture - no lightmap uvs, no sky - so they stay at their ported
+ identity rather than at a difference this test cannot explain. What it does
+ spend is the whole of what the half carries: a bent, turned, scaled skinned
+ character, a uv carrying box with a uv variant table, a card whose COLOR_0 is a
+ painted layer mask, the sun's shadow, the sun plus two clustered point lights
+ with different colours, a specular material, and both debug views as frames of
+ their own.
 *>
 module three_tests::mesh_shader;
 
@@ -33,6 +35,7 @@ import three;
 import three_tests::device;
 import image;
 import std::core::test;
+import std::core::string;
 
 const uint W = 240;
 const uint H = 180;
@@ -77,6 +80,32 @@ fn String scene_source()
 		ground.material = null;
 		scene.add(ground);
 
+		// A mesh whose COLOR_0 is a painted layer mask. The built-in draw
+		// path must not tint its albedo with that attribute, so a fold that
+		// forgot FLAG_COLORS_ARE_MASK draws a green card here where Slang
+		// draws a grey one - the failure no mesh without an attribute can show.
+		const masked = (await three.load('test/fixtures/layered.glb')).instantiate();
+		masked.position.set(1.7, 1.0, -1.5);
+		masked.rotation.y = -0.6;
+		masked.scale.set(0.5, 0.5, 1.0);
+		masked.traverse(o => { if (o instanceof three.Mesh) o.material = null; });
+		scene.add(masked);
+
+		// The other side of the same flag: COLOR_0 as a plain tint. merge bakes
+		// each copy's mesh.color into the merged geometry's COLOR_0, so this mesh
+		// is one the built-in path *does* multiply the albedo by - the case the
+		// mask card above cannot see. Slang tints it, so a fold that stopped
+		// multiplying fails here.
+		const left = new three.Mesh(new three.BoxGeometry(0.7, 0.7, 0.7));
+		left.position.set(-1.9, 0.4, -1.2);
+		left.color = [0.15, 0.9, 0.35, 0.5];
+		const right = new three.Mesh(new three.BoxGeometry(0.7, 0.7, 0.7));
+		right.position.set(-2.6, 0.4, -1.2);
+		right.color = [0.95, 0.25, 0.1, 1.0];
+		const tinted = new three.Mesh(three.merge([left, right]));
+		tinted.material = null;
+		scene.add(tinted);
+
 		three.light.set([0.3, 1.0, 0.2], 0.6);
 		// The sun's shadow is on, so the ported lookup is inside the compared
 		// bytes: the character and the box both stand in the sun's way.
@@ -120,6 +149,24 @@ fn void frame_spread(image::Image* shot, sz* lit, uint* colours)
 	}
 	// A slot can be claimed by two different colours with the same bucket; the
 	// count is a floor, which is what the check needs.
+}
+
+<*
+ Move every material riding `from` onto `to`, and answer how many moved.
+
+ The fixture's meshes all share the pass's own built-in pipeline, so a swap of
+ those pointers is the whole of handing a capture to the other compiler.
+*>
+fn sz swap_materials(three::Renderer* renderer, three::MeshPipeline* from, three::MeshPipeline* to)
+{
+	sz moved = 0;
+	foreach (&material : renderer.pass.materials)
+	{
+		if (material.pipeline != from) continue;
+		material.pipeline = to;
+		moved++;
+	}
+	return moved;
 }
 
 fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
@@ -206,13 +253,7 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 	// Every material the fixture draws with is the built-in one. Moving those
 	// pointers for a capture is the whole swap; they go back below, because the
 	// pass releases its own pipeline when it is freed.
-	uint moved = 0;
-	foreach (&material : renderer.pass.materials)
-	{
-		if (material.pipeline != renderer.pass.pipeline) continue;
-		material.pipeline = &slang_pipe;
-		moved++;
-	}
+	sz moved = swap_materials(renderer, renderer.pass.pipeline, &slang_pipe);
 	test::@check(moved > 0,
 		"the fixture draws with the built-in pipeline, %d materials moved", moved);
 
@@ -263,17 +304,11 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 	defer reoccluded.free();
 	test::@check(reoccluded.ok, "and back on: %s", reoccluded.error);
 
-	foreach (&material : renderer.pass.materials)
-	{
-		if (material.pipeline == &slang_pipe) material.pipeline = &shady_pipe;
-	}
+	swap_materials(renderer, &slang_pipe, &shady_pipe);
 	image::Image through_shady = renderer.capture()!!;
 	defer through_shady.free();
 
-	foreach (&material : renderer.pass.materials)
-	{
-		if (material.pipeline == &shady_pipe) material.pipeline = renderer.pass.pipeline;
-	}
+	swap_materials(renderer, &shady_pipe, renderer.pass.pipeline);
 
 	sz lit = 0;
 	uint colours = 0;
@@ -294,6 +329,55 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 	test::@check(differing == 0,
 		"the draw path is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
 		differing, through_slang.pixels.len, first, first / 4 % W, first / 4 / W);
+
+	// **The debug views.** The comparison above runs with the view off, so the
+	// ported `debug_view` is compiled into both modules but never answers. Each
+	// view is a frame of its own: 'shadow' is the lookup's factor as greyscale,
+	// and 'shadowMap' reads the map itself through the un-filtered binding 17 -
+	// the two branches of the function, and the one resource the compared scene
+	// never reads. The control beside each says the view changed the frame, or
+	// a view that silently did nothing would compare equal to itself.
+	String[2] views = { "shadow", "shadowMap" };
+	foreach (view_name : views)
+	{
+		three::RunResult viewed = runtime.run(
+			string::tformat("three.debug.view = '%s'; return 1;", view_name)
+		);
+		defer viewed.free();
+		test::@check(viewed.ok, "the %s view could be selected: %s", view_name, viewed.error);
+
+		swap_materials(renderer, renderer.pass.pipeline, &slang_pipe);
+		image::Image view_slang = renderer.capture()!!;
+		defer view_slang.free();
+		swap_materials(renderer, &slang_pipe, &shady_pipe);
+		image::Image view_shady = renderer.capture()!!;
+		defer view_shady.free();
+		swap_materials(renderer, &shady_pipe, renderer.pass.pipeline);
+
+		sz view_differing = 0;
+		sz view_first = view_slang.pixels.len;
+		for (sz at = 0; at < view_slang.pixels.len; at++)
+		{
+			if (view_slang.pixels[at] == view_shady.pixels[at]) continue;
+			if (view_differing == 0) view_first = at;
+			view_differing++;
+		}
+		test::@check(view_differing == 0,
+			"the %s view is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
+			view_name, view_differing, view_slang.pixels.len, view_first, view_first / 4 % W, view_first / 4 / W);
+
+		sz against_scene = 0;
+		for (sz at = 0; at < view_slang.pixels.len; at++)
+		{
+			if (view_slang.pixels[at] != through_slang.pixels[at]) against_scene++;
+		}
+		test::@check(against_scene > 0,
+			"the %s view changes the frame: %d of %d bytes differ from the scene",
+			view_name, against_scene, view_slang.pixels.len);
+	}
+	three::RunResult view_off = runtime.run("three.debug.view = 'off'; return 1;");
+	defer view_off.free();
+	test::@check(view_off.ok, "and the view goes back off: %s", view_off.error);
 }
 
 <*

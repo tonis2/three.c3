@@ -65,13 +65,15 @@ struct PassCompiler
  Which implementation compiles each pass.
 
  `MESH` is the built-in draw path - `MeshPass.init`'s four pipelines - and it is
- *wired but not flipped*: `shaders/material.shady` carries the punctual direct
- look only, so maps, shadows, occlusion, the lightmap, the environment and the
- debug views would stop rendering the moment the built-in template changed hands.
- `test/mesh_shader_test.c3` compares the ported subset through both compilers and
- the row moves when the material half is whole. `MESH_MATERIAL` is the same files
+ *wired but held on Slang*: `shaders/material.shady` now carries the built-in
+ look, the base colour map and alpha test, shadows, occlusion, the lightmap, the
+ environment, the debug views and the vertex colours, but `lighting.shady` has
+ no area lights - kinds 2 and 3 and their LTC fit - and the bake tests spend
+ them, so flipping the row today fails `three_tests::bake` (and traps). The row
+ moves when the lighting half is whole. `MESH_MATERIAL` is the same files
  assembled around a script's `shade()` body, which the shady half cannot take
- yet either. Every other row is still Slang, and each names the def that will
+ yet - there is no shady assembly of a script's uniforms and body - so it stays
+ on Slang. Every other row is still Slang, and each names the def that will
  replace it. See the file header for what a flip takes.
 *>
 const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
@@ -223,11 +225,15 @@ fn ShaderModule? compile_shader(
 			{
 				// The built-in material: no script wrote a body, so the spliced
 				// half is `standard(s)` and the uniform set is the reserved empty
-				// one every material without a declaration emits.
+				// one every material without a declaration emits. `built_in` is
+				// what makes the half fold COLOR_0 the way `mesh.slang` does,
+				// which a script's body would decide for itself.
 				DString uniforms;
 				uniforms.tinit(64);
 				append_shady_uniforms(&uniforms, {});
-				ShaderModule mesh = compile_shady(mesh_def(DEFAULT_SHADE_SHADY, uniforms.str_view()), MeshPush);
+				ShaderModule mesh = compile_shady(
+					mesh_def(DEFAULT_SHADE_SHADY, uniforms.str_view(), built_in: true),
+					MeshPush);
 				uniforms.free();
 				return mesh;
 			}

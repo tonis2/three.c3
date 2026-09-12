@@ -32,8 +32,8 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 
 <*
  The default the flips leave behind: cluster, skin, shadow and sky are on shady;
- the draw path is wired but its rows are held on Slang by the material half, and
- no other row moved.
+ the draw path is wired but held on Slang by the lighting half's missing area
+ lights, and no other row moved.
 *>
 fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 {
@@ -45,9 +45,9 @@ fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 		"shadow compiles through shady");
 	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SHADY,
 		"sky compiles through shady");
-	// Wired in `compile_shader`, held here until `shaders/material.shady` carries
-	// the whole built-in look: maps, shadows, occlusion, the lightmap and the
-	// environment are not in it yet, and the built-in template is one module.
+	// Wired in `compile_shader`, held here because the material half is whole but
+	// the lighting half still lacks the area lights (kinds 2 and 3 and their LTC
+	// fit), which the bake tests spend - see the table's own comment.
 	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SLANG,
 		"the draw path is still compiled by Slang");
 	test::@check(three::shader_compiler(three::ShaderPass.MESH_MATERIAL) == three::ShaderCompiler.SLANG,
@@ -177,7 +177,7 @@ fn void the_cluster_call_site_reaches_both_compilers() @test
 
 <*
  The draw path's row reaches the shady def when a run asks it to, even though the
- table's default stays Slang until the material half is whole.
+ table holds it on Slang until the lighting half carries the area lights.
 
  The module is the built-in one's: the geometry and material halves, the
  `standard(s)` body a material nobody wrote gets, and the walk of `MeshPush`. Its

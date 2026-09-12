@@ -110,8 +110,12 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	float3 normal = float3(0.0, 1.0, 0.0);
 	if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[input.vid];
 
-	output.vertex_color = float4(1.0, 1.0, 1.0, 1.0);
-	if ((draw.flags & FLAG_HAS_COLORS) != 0) output.vertex_color = draw.colors[input.vid];
+	// White is the identity for the fragment stage's multiply, so a mesh with no
+	// colour attribute and a mesh painted white are the same surface - which is
+	// what lets the fragment stage multiply unconditionally and carry no second
+	// branch. Same rule and same sentence as `material.shady`'s.
+	float4 vertex_color = float4(1.0, 1.0, 1.0, 1.0);
+	if ((draw.flags & FLAG_HAS_COLORS) != 0) vertex_color = draw.colors[input.vid];
 
 	pose_vertex(draw, instance, input.vid, input.iid, position, normal);
 
@@ -121,6 +125,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	v.uv = float2(0.0, 0.0);
 	if ((draw.flags & FLAG_HAS_UVS) != 0) v.uv = draw.uvs[input.vid];
 	v.color = instance.color;
+	v.vertex_color = vertex_color;
 	// Clamped before the body sees it, so `palette[v.variant]` in a vertex body
 	// is in bounds for the same reason it is in a fragment one. The fragment half
 	// clamps again rather than trusting this, because a body may write it.
@@ -141,6 +146,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	output.world = world.xyz;
 	output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;
 	output.color = v.color;
+	output.vertex_color = v.vertex_color;
 	output.variant = v.variant;
 
 	// The mesh's own TEXCOORD_0, before `variant_uv` moves it - the coordinate the

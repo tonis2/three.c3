@@ -300,13 +300,17 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// the functions that read them, and the value `standard` folds into the
 	// direct light. `g_shadow` is the one worth naming out loud - a uniform of
 	// that name would shadow the value `lambert` folds in, and the body would
-	// compile and come out lit.
+	// compile and come out lit. `shadow_atlas` is the unfiltered map the
+	// `shadowMap` debug view draws, and `debug_view` is the view itself.
 	"shadow_map",
 	"shadow_factor",
 	"g_shadow",
 	"point_shadow_map",
 	"point_shadow_factor",
 	"shadow_compare",
+	"shadow_atlas",
+	"shadow_debug_depth",
+	"debug_view",
 	"shadow_atlas_compare",
 	"shadow_atlas_static_compare",
 	"shadow_view_factor_filtered",
@@ -332,6 +336,12 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"FLAG_HAS_NORMALS",
 	"FLAG_HAS_UVS",
 	"FLAG_HAS_COLORS",
+	// The built-in path's fold of glTF's COLOR_0 and the generated constant
+	// that says whether this module is that path. A scripted module reads the
+	// same attribute through `Surface.vertex_color` and `Surface.vertex_mask`
+	// and decides for itself, which is why the fold is not always on.
+	"FLAG_COLORS_ARE_MASK",
+	"MATERIAL_BUILT_IN",
 	"MATERIAL_ROWS", // The device-wide texture array and what a declared texture is: the array,
 	// the type each name is given, the accessor the template's own maps go
 	// through, and the row `material.map` sits at.

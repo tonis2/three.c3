@@ -1017,6 +1017,11 @@ fn void a_different_render_state_is_a_different_pipeline() @test
 *>
 fn void a_broken_shader_leaves_the_cache_empty() @test
 {
+	// This is the Slang cache's failure path, and `MESH` compiles through shady
+	// now, so the A/B override pins the run to the implementation under test.
+	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
+	defer three::shader_overrides_clear();
+
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
 		three::PipelineCache cache;
@@ -1046,6 +1051,11 @@ fn void a_broken_shader_leaves_the_cache_empty() @test
 *>
 fn void the_pipeline_layout_is_derived_from_the_shader() @test
 {
+	// The bindings and the push size asserted below are `mesh.slang`'s, so this
+	// asks Slang for the module even though `MESH` now defaults to shady.
+	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
+	defer three::shader_overrides_clear();
+
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
 		String source = mesh_module()!!;
@@ -1795,6 +1805,11 @@ fn void a_cached_warning_still_reaches_the_log() @test
 fn void the_pipeline_cache_reads_the_disk_before_slang() @test
 {
 	fresh_cache(CACHE_PIPELINE_DIR);
+
+	// The disk entry below is a Slang module and the acquire must look for it
+	// through Slang, so the flipped `MESH` row is overridden back for the run.
+	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
+	defer three::shader_overrides_clear();
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
