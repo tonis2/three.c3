@@ -1,89 +1,26 @@
 <*
- A shader program as the host describes it.
+ A shader program as the host describes it: the name, and the text.
 
- The old flow wrote the declarations into the shader text and spliced the host's
- values in with markers and `#define`s: the push block, the resources and the
- feature flags existed twice, once in C3 and once in Slang. This is the other
- half of that: the program is written from C3, and the only text that arrives
- from outside is code - the ported shading library, and the body a script wrote.
+ The file is the program. A `shaders/*.shady` holds its stage interface, the
+ bindings it reads, its spec constants, its entry points and its code, in the
+ order a person reads them - and nothing else writes those declarations.
 
- What a def carries, and where each part used to be:
+ What this adds is the one part only C3 knows: the wire structs and the push
+ block, walked from the structs the host fills (`abi.c3`), so a field added on
+ one side and not the other cannot be a read at the wrong offset that nothing
+ complains about.
 
-  - the wire structs, from `abi.c3` (were written in every shader file);
-  - the push block, from a C3 struct (was written in every shader file);
-  - descriptors with their set and binding (were written in the shader file, or
-    numbered by the assembler's constants);
-  - feature constants (were `#define`s the assembler emitted and `#ifdef`ed
-    around whole functions);
-  - stage IO (was written in the shader file);
-  - entry points with the body injected (were templates with marker lines).
-
- Nothing here is a preprocessor. A feature is a specialization constant rather
- than a macro, so the same module serves every value of it; a body is text
- spliced once, so it cannot rewrite a name it never wrote.
+ Nothing here is a preprocessor: no markers, no `#define`s. The half a generator
+ supplies - a material's fragment stage, chosen per material at runtime - arrives
+ as a function the file *declares* and the spliced text defines, so one module is
+ still one program with its two halves written in different places.
 *>
 module three;
 
 import shady;
 
 <*
- One descriptor: what it is, what it is called, and where it is bound.
-
- `type` is the shady spelling - `Sampler2D`, `texture2d`, `sampler`,
- `Sampler2DShadow`. `runtime_array` is the bindless table, whose length comes
- from the device rather than from the shader.
-*>
-struct ShaderResource
-{
-	String name;
-	String type;
-	uint   set;
-	uint   binding;
-	bool   runtime_array;
-}
-
-<*
- One feature knob: a value the host may set when the pipeline is created.
-
- Scalars only, as `@spec` is: a boolean gates a pass, a uint bounds a loop, a
- float scales a kernel. Anything that changes the interface - a descriptor, a
- varying, an entry point - is a different module instead; see the variant policy
- in `shader_plan.md`.
-*>
-struct ShaderFeature
-{
-	String name;
-	String type;   // bool, uint, int, float
-	String value;  // the default, as the shader source writes it
-	uint   id;
-}
-
-<*
- One member of a struct the generator writes rather than walks.
-
- Stage IO is the shader's own vocabulary - nothing on the CPU side names a
- `VertexOutput` - so there is no C3 struct to walk and the def describes it.
- `type` is the shady spelling; `attribute` is `@position`, `@builtin(name)`,
- `@flat`, or empty.
-*>
-struct ShaderIoField
-{
-	String name;
-	String type;
-	String attribute;
-}
-
-struct ShaderIo
-{
-	String name;
-	ShaderIoField[] fields;
-}
-
-<*
- A block of the shader's own code: the ported library a def's stages call.
-
- Named, because it is bracketed by `#line` the way a stage body is - a fault in
- a ported function has to name the file its author wrote.
+ A piece of the module's text, and what a diagnostic should call it.
 *>
 struct ShaderSource
 {
@@ -92,109 +29,27 @@ struct ShaderSource
 }
 
 <*
- One entry point, as the blanks of a template the emitter fills in:
-
-     fn {returns} {entry}({params}) @{kind}
-     {
-     {body}
-     }
-
- Every field is a piece of that line or of the body under it, and a stage is
- usually two of them: an entry point here is a call into a ported function, so
- `body` is one line and the code it calls is a `ShaderSource`.
-
- `kind` is the language's own `Stage`, because that is what the parser reads
- `@vertex` back as - a def writing a module and the compiler reading it agree
- on the spelling by sharing the type.
-
- `body_file` is what a diagnostic should call the body: the name of the ported
- file or the script that wrote it, or empty for generated glue, which is
- numbered as part of the module and named after it.
-*>
-struct ShaderStage
-{
-	Stage  kind;
-	String entry;      // "vertexMain"
-	String params;     // the parameter list, as written: "VertexOutput input"
-	String returns;    // "VertexOutput", "float4", "void"
-	String body;       // usually a call: "return sky_vertex(input);\n"
-	String body_file;  // what `#line` calls the body: "sky", "material", or ""
-	String threads;    // compute only: "64, 1, 1"
-}
-
-<*
  A whole program.
+
+ The wire structs and the push block are written by `append_shader_def` from the
+ C3 types the host fills; everything else a module says is in its sources. That
+ is the whole split: a declaration the host must agree with is walked rather than
+ written twice, and a declaration only the shader cares about - the stage
+ interface, a binding it reads, its own entry points - is in the file, where a
+ person reading the shader will find it.
 *>
 struct ShaderDef
 {
 	String name;   // diagnostics and cache identity: "sky", "material"
-	ShaderIo[]       io;
-	ShaderResource[] resources;
-	ShaderFeature[]  features;
-	ShaderSource[]   sources;
-	ShaderStage[]    stages;
+
+	// The module's text, in the order it is written out. A pass whose source is
+	// more than one file lists them here - a shared piece first, then the file
+	// that is the pass - and the whole of what a reader needs is in them.
+	ShaderSource[] sources;
 }
 
 // --- Emitters ----------------------------------------------------------------
 
-fn void append_shader_io(DString* out, ShaderIo io)
-{
-	out.append_string("struct ");
-	out.append_string(io.name);
-	out.append_string("\n{\n");
-	foreach (field : io.fields)
-	{
-		out.append_char('\t');
-		out.append_string(field.type);
-		out.append_char(' ');
-		out.append_string(field.name);
-		if (field.attribute.len)
-		{
-			out.append_char(' ');
-			out.append_string(field.attribute);
-		}
-		out.append_string(";\n");
-	}
-	out.append_string("}\n");
-}
-
-fn void append_shader_features(DString* out, ShaderFeature[] features)
-{
-	foreach (feature : features)
-	{
-		out.append_string("const ");
-		out.append_string(feature.type);
-		out.append_char(' ');
-		out.append_string(feature.name);
-		out.appendf(" @spec(%d) = ", (int)feature.id);
-		out.append_string(feature.value);
-		out.append_string(";\n");
-	}
-}
-
-fn void append_shader_resources(DString* out, ShaderResource[] resources)
-{
-	foreach (resource : resources)
-	{
-		out.append_string(resource.type);
-		out.append_char(' ');
-		out.append_string(resource.name);
-		if (resource.runtime_array) out.append_string("[]");
-		out.appendf(" @set(%d) @binding(%d);\n", (int)resource.set, (int)resource.binding);
-	}
-}
-
-<*
- Append a body line by line, normalising the ending, and say how many lines that
- was.
-
- The count is the point: `#line` restores numbering by absolute line, so the
- generator has to know exactly how tall the body it just wrote is - and a body
- that arrived without a trailing newline, or with a `\r` on every line because
- it was authored on Windows, must not change the answer. `assemble.c3` counted
- for the same reason; the difference is that counting here is the only case
- that exists rather than one of several.
-*>
 fn uint append_shader_body(DString* out, String body)
 {
 	uint lines = 0;
@@ -220,60 +75,6 @@ fn uint shader_lines(String text)
 	return lines;
 }
 
-<*
- One entry point: the signature and the stage attribute from the def, the body
- as it arrived.
-
- The body is bracketed by `#line` directives - a body of its own numbered from
- one, then back to the module's numbering - so a fault inside ported or
- script-written code is reported where its author wrote it. The restore number
- is counted rather than computed from a template's shape, which is what makes it
- right for a body of any height.
-*>
-fn void append_shader_stage(DString* out, ShaderStage stage, String restore_name)
-{
-	out.appendf(
-		"fn %s %s(%s) @%s",
-		stage.returns,
-		stage.entry,
-		stage.params,
-		stage.kind.attribute()
-	);
-	// The workgroup size a compute stage is dispatched with, and the only
-	// attribute a stage carries besides the one naming it.
-	if (stage.kind == Stage.COMPUTE && stage.threads.len)
-	{
-		out.appendf(" @threads(%s)", stage.threads);
-	}
-	out.append_string("\n{\n");
-
-	// A body with no name of its own is generated glue - a call into the ported
-	// functions - so it is numbered as part of the module. A body that came from
-	// a file or a script is numbered from one under that file's name.
-	if (stage.body_file.len)
-	{
-		out.append_string("#line 1 \"");
-		out.append_string(stage.body_file);
-		out.append_string("\"\n");
-		append_shader_body(out, stage.body);
-
-		uint next = shader_lines(out.str_view()) + 2;
-		out.appendf("#line %d \"%s\"\n", (int)next, restore_name);
-	}
-	else
-	{
-		append_shader_body(out, stage.body);
-	}
-	out.append_string("}\n");
-}
-
-<*
- A block of ported code, bracketed the way a stage body is.
-
- The whole block is the file, line for line, so a fault inside a function here
- is reported where the function is written rather than in the module that
- generated it.
-*>
 fn void append_shader_source(DString* out, ShaderSource source, String restore_name)
 {
 	out.append_string("#line 1 \"");
@@ -299,14 +100,9 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 	append_shader_abi(out);
 	append_push_block(out, $Type);
 
-	foreach (io : def.io) append_shader_io(out, io);
-	append_shader_features(out, def.features);
-	append_shader_resources(out, def.resources);
-
 	// What the generated lines after a body are called. A body is numbered from
 	// one under its own name, so the module's own text needs a name of its own
 	// for the two to be told apart in a diagnostic.
 	String restore = string::tformat("three.%s", def.name);
 	foreach (source : def.sources) append_shader_source(out, source, restore);
-	foreach (stage : def.stages) append_shader_stage(out, stage, restore);
 }

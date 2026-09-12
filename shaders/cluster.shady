@@ -1,9 +1,9 @@
 // three.c3 conservative Forward+ light binning, ported to shady for the
 // ShaderDef generator (`src/shader/cluster.c3`).
 //
-// The declarations are gone from this file: the push block comes from the C3
-// `ClusterPush`, the lights come from `abi.c3`'s wire list, and the entry point
-// is emitted by the def. What is left is the body, nearly line for line -
+// The push block comes from the C3 `ClusterPush` and the lights from `abi.c3`'s
+// wire list - the two things only C3 knows. The dispatch's shape is here, in the
+// file it belongs to. The body is the original nearly line for line -
 // `InterlockedAdd` keeps the HLSL spelling, which is the one shady knows.
 //
 // Everything the original says about the shape still holds:
@@ -15,6 +15,11 @@
 //  - a cluster with no room left records how many lights it dropped in the top
 //    bit of its count rather than writing past its own slice, which is what the
 //    atomic is for: the count is per-cluster, the overflow total is global.
+
+struct ComputeIn
+{
+	uint3 thread @builtin(global_invocation_id);
+}
 
 // One cluster's worth of lights, by dispatch thread.
 fn void bin_lights(ComputeIn input)
@@ -80,4 +85,10 @@ fn void bin_lights(ComputeIn input)
 		}
 	}
 	push.counts[cluster] = written;
+}
+
+// One invocation owns one cluster of the grid the dispatch is sized from.
+fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
+{
+	bin_lights(input);
 }

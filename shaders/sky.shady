@@ -1,10 +1,10 @@
 // three.c3 sky, ported to shady for the ShaderDef generator (`src/shader/sky.c3`).
 //
-// The declarations are gone from this file: the push block comes from the C3
-// `SkyPush`, the sampler's binding and the two entry points are emitted by the
-// def, and what is left is the code that was between them. The port is nearly
-// line for line - `mul(M, v)` is `M * v`, a sampler is a method, and a
-// declaration is written where the generator would otherwise have templated one.
+// The push block comes from the C3 `SkyPush` and the structs it points at from
+// `abi.c3`'s wire list - the two things only C3 knows. The stage interface, the
+// binding and the entry points are here, because this file is the module. The
+// port is nearly line for line - `mul(M, v)` is `M * v`, and a sampler is a
+// method.
 //
 // Everything the original says about the shape still holds:
 //
@@ -17,6 +17,26 @@
 //    survives a flipped viewport;
 //  - equirectangular rather than a cube: one 2D image, sampled with `REPEAT` in
 //    u so the seam at longitude ±π wraps.
+
+// The stage interface, and the binding. This file is the module: the def in
+// `src/shader/sky.c3` adds the wire structs and the push block, which are walked
+// from the C3 structs the host fills, and nothing else.
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+}
+
+struct VertexOutput
+{
+	float4 sv_position @position;
+	float2 clip;
+}
+
+// One image, always bound: there is no draw at all when a scene has no sky -
+// `MeshPass.record_sky` returns before recording anything - so unlike every
+// other sampler in this project there is no white 1x1 standing in for an absent
+// one, and no need for one.
+Sampler2D sky_map @set(0) @binding(0);
 
 // A world direction to a texel of an equirectangular image.
 //
@@ -68,4 +88,16 @@ fn float4 sky_fragment(VertexOutput input)
 
 	float3 color = sky_map.Sample(equirect_uv(direction)).rgb * push.params.x;
 	return float4(color, 1.0);
+}
+
+// The two entry points, and the whole of them: a vertex stage that makes its own
+// three vertices and a fragment stage that samples the image.
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	return sky_vertex(input);
+}
+
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	return sky_fragment(input);
 }

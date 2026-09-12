@@ -25,6 +25,31 @@
 //    and a flag for whether there is a tile), and it is affine in the mesh's own
 //    uv, so interpolating it is exact rather than a shortcut.
 
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+	uint iid @builtin(instance_index);
+}
+
+// The interpolated surface frame, and the world position a shadow lookup needs.
+// In the fragment half's order, because the fragment half's parameter is this
+// struct: one declaration, so the two stages cannot disagree about the wire.
+struct VertexOutput
+{
+	float3 normal;
+	float2 uv;
+	float3 world;
+	float4 color;
+	float4 vertex_color;
+	float3 lightmap;
+	float4 sv_position @position;
+}
+
+// The material half, which this file does not contain: the def splices its text
+// in ahead of this one, so a module is one whole program even though its two
+// halves are written in different places.
+fn float4 mesh_fragment(VertexOutput input);
+
 // One row of a material's uv variant table: a quarter turn, a flip, and a
 // translation. The fragment half carries the same function, and a copy that
 // drifts is a surface sampled from a different part of the sheet than the
@@ -96,4 +121,16 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	}
 
 	output.color = instance.color;
+}
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	mesh_vertex(input, output);
+	return output;
+}
+
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	return mesh_fragment(input);
 }

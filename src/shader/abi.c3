@@ -125,9 +125,19 @@ macro void append_shady_member(DString* out, $Type, String name)
 
  Members are emitted where they were declared rather than reordered: the layout
  the shader gets is the layout the C3 compiler gave the struct.
+
+ A comment above it says where the declaration came from, by the name it has in
+ C3. The module is a generated file and this is the one thing a reader cannot
+ work out from it: which struct to go and look at when a field's meaning is not
+ the field's name.
 *>
-macro void append_shady_struct(DString* out, $Type, String attribute)
+macro void append_shady_struct(DString* out, $Type, String attribute, String origin)
 {
+	out.append_string("// ");
+	out.append_string(origin);
+	out.append_string(": ");
+	out.append_string($Type::name);
+	out.append_string("\n");
 	out.append_string("struct ");
 	out.append_string($Type::name);
 	if (attribute.len)
@@ -160,16 +170,18 @@ macro void append_shady_struct(DString* out, $Type, String attribute)
  allows exactly one - so `append_push_block` writes it from the type the shader
  def names.
 *>
+const String WIRE_HOME = "walked from src/gpu/pipeline.c3";
+
 fn void append_shader_abi(DString* out)
 {
-	append_shady_struct(out, UvVariant, "");
-	append_shady_struct(out, SkinnedVertex, "@address");
-	append_shady_struct(out, MorphDelta, "@address");
-	append_shady_struct(out, Light, "@address");
-	append_shady_struct(out, ShadowGpuView, "@address");
-	append_shady_struct(out, Instance, "@address");
-	append_shady_struct(out, DrawRecord, "@address");
-	append_shady_struct(out, FrameBlock, "@address");
+	append_shady_struct(out, UvVariant, "", WIRE_HOME);
+	append_shady_struct(out, SkinnedVertex, "@address", WIRE_HOME);
+	append_shady_struct(out, MorphDelta, "@address", WIRE_HOME);
+	append_shady_struct(out, Light, "@address", WIRE_HOME);
+	append_shady_struct(out, ShadowGpuView, "@address", WIRE_HOME);
+	append_shady_struct(out, Instance, "@address", WIRE_HOME);
+	append_shady_struct(out, DrawRecord, "@address", WIRE_HOME);
+	append_shady_struct(out, FrameBlock, "@address", WIRE_HOME);
 }
 
 <*
@@ -182,7 +194,7 @@ fn void append_shader_abi(DString* out)
 *>
 macro void append_push_block(DString* out, $Type)
 {
-	append_shady_struct(out, $Type, "@pushconstant");
+	append_shady_struct(out, $Type, "@pushconstant", "the push block, walked from the C3 struct the pass fills");
 	out.append_string($Type::name);
 	out.append_string(" push;\n");
 }

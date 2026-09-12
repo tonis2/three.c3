@@ -1,11 +1,10 @@
 // three.c3 compute skinning, ported to shady for the ShaderDef generator
 // (`src/shader/skin.c3`).
 //
-// The declarations are gone from this file: the push block comes from the C3
-// `SkinPush`, the output struct and the morph deltas come from `abi.c3`'s wire
-// list, and the entry point is emitted by the def. What is left is the
-// constants and the two functions that entry point calls. The port is nearly
-// line for line - `mul(M, v)` is `M * v`, and the normal keeps its w = 0 so the
+// The push block comes from the C3 `SkinPush`, the output struct and the morph
+// deltas from `abi.c3`'s wire list - the two things only C3 knows. The constants
+// and the functions the entry point calls are here, and so is the entry point.
+// The port is nearly line for line - `mul(M, v)` is `M * v`, and the normal keeps its w = 0 so the
 // translation in the matrix's last column cancels, which is what the original's
 // `(float3x3)` cast was for.
 //
@@ -18,6 +17,11 @@
 //  - the morph displacement happens here and before the blend, because a
 //    displacement applied afterwards would move a vertex the joints already
 //    moved.
+
+struct ComputeIn
+{
+	uint3 thread @builtin(global_invocation_id);
+}
 
 const uint FLAG_HAS_NORMALS = 1;
 const uint POSE_LIVE = 0x80000000;
@@ -88,4 +92,12 @@ fn void skin_vertices(ComputeIn input)
 	skinned.normal = (pose * float4(normal, 0.0)).xyz;
 
 	push.output[index] = skinned;
+}
+
+// One invocation skins one vertex, and the tail is the last workgroup's
+// remainder - the body returns for a vertex past the end, because the dispatch
+// is rounded up to whole workgroups by definition.
+fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
+{
+	skin_vertices(input);
 }
