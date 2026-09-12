@@ -222,6 +222,50 @@ fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 }
 
 <*
+ A post pass: the header, the four reserved samplers, the triangle, and a body.
+
+ The body is the script's `fragment`, so what this generates is the *fixed* half
+ of a post pass - everything a pass has before it says what it does. The
+ identity body is what a chain with an effect nobody wrote gets.
+*>
+macro String identity_post()
+{
+	return `
+fn float3 post(Post p)
+{
+	return p.color;
+}
+`;
+}
+
+fn void the_ported_post_is_generated() @test
+{
+	three::ShaderDef def = three::post_def(identity_post());
+
+	DString out;
+	out.tinit(16384);
+	three::append_shader_def(&out, def, three::PostPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
+		"a post pass has its own entry points: %s", source);
+	test::@check(source.contains("float2 uv = float2(float((input.vid << 1) & 2u), float(input.vid & 2u));"),
+		"three vertices computed from the vertex index, and no vertex buffer");
+	test::@check(source.contains("Sampler2D prev @set(0) @binding(0);") && source.contains("Sampler2D tap_image @set(0) @binding(3);"),
+		"the four reserved samplers keep their bindings");
+	test::@check(source.contains("p.depth = span > 1e-6 ? near * far / span : far;"),
+		"and the depth a body reads is already in world units");
+	test::@check(source.contains("return float4(post(p), 1.0);"),
+		"with alpha the pass's rather than the body's");
+	test::@check(source.contains("fn float3 post(Post p)\n{\n\treturn p.color;"),
+		"and the body that was spliced in is the identity");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/post.shady", source)!!;
+	check_compiles(source, "the generated post module");
+}
+
+<*
  A material: the shared lighting block, the material half, and a body.
 
  This is the whole of what a material is - `material.shady` declares `shade` and
