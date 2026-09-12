@@ -23,6 +23,17 @@
 //  - the **debug views** and **relief**, which are the body-facing extras rather
 //    than the look.
 
+// **The material's own function, and the only thing this file needs from
+// outside.** Everything below is the built-in look; a material replaces exactly
+// this one function, and its text is spliced in ahead of this file, so the body
+// is defined before the fragment that calls it.
+//
+// It is declared rather than left to a call the reader has to imagine, because a
+// module that got no body should say so. A call to a name nothing declares is an
+// overload error about a function nobody wrote; this is the sentence that names
+// the half that is missing.
+fn float3 shade(Surface s);
+
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
 fn float3 srgb_to_linear(float3 c)
@@ -130,7 +141,3 @@ fn float4 mesh_fragment(VertexOutput input)
 
 	return float4(shade(s), draw.base_color.a * input.color.a);
 }
-
-// Defined by the material. Every material has one - the default is a line - and
-// a body that wants the built-in look writes `return standard(s);`.
-fn float3 shade(Surface s);
