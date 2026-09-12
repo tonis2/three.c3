@@ -1,0 +1,83 @@
+// three.c3 conservative Forward+ light binning, ported to shady for the
+// ShaderDef generator (`src/shader/cluster.c3`).
+//
+// The declarations are gone from this file: the push block comes from the C3
+// `ClusterPush`, the lights come from `abi.c3`'s wire list, and the entry point
+// is emitted by the def. What is left is the body, nearly line for line -
+// `InterlockedAdd` keeps the HLSL spelling, which is the one shady knows.
+//
+// Everything the original says about the shape still holds:
+//
+//  - one invocation owns one cluster, so the fixed-stride output needs no
+//    allocator and overflow is deterministic;
+//  - the grid is a constant here and the dispatch is sized from it, so the two
+//    cannot disagree by accident;
+//  - a cluster with no room left records how many lights it dropped in the top
+//    bit of its count rather than writing past its own slice, which is what the
+//    atomic is for: the count is per-cluster, the overflow total is global.
+
+// One cluster's worth of lights, by dispatch thread.
+fn void bin_lights(ComputeIn input)
+{
+	const uint3 grid = uint3(16, 9, 24);
+	const uint capacity = 64;
+
+	uint cluster = input.thread.x;
+	uint cluster_count = grid.x * grid.y * grid.z;
+	if (cluster >= cluster_count) return;
+
+	uint x = cluster % grid.x;
+	uint y = (cluster / grid.x) % grid.y;
+	uint z = cluster / (grid.x * grid.y);
+	// The conversions are written out: shady converts literals and nothing else,
+	// so a uint next to a float is the port's job to spell (LANGUAGE.md 5.3).
+	float2 lo = float2((float)x / (float)grid.x, (float)y / (float)grid.y) * 2.0 - 1.0;
+	float2 hi = float2((float)(x + 1) / (float)grid.x, (float)(y + 1) / (float)grid.y) * 2.0 - 1.0;
+	// Fragment rows increase down the framebuffer, while the geometry viewport's
+	// negative height puts clip-space +Y at its top.
+	lo.y = 1.0 - 2.0 * (float)(y + 1) / (float)grid.y;
+	hi.y = 1.0 - 2.0 * (float)y / (float)grid.y;
+	float zlo = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)z / (float)grid.z);
+	float zhi = push.camera_near.w * pow(push.far_plane / push.camera_near.w, (float)(z + 1) / (float)grid.z);
+
+	uint written = 0;
+	for (uint i = 1; i < push.light_count; ++i)
+	{
+		Light light = push.lights[i];
+		if (light.meta.z == 0u) continue; // directional lights are global
+		float radius = light.direction.w;
+		if (light.meta.z == 2u || light.meta.z == 3u)
+		{
+			radius += length(light.area_right.xyz * light.area_right.w)
+			        + length(light.area_up.xyz * light.area_up.w);
+		}
+
+		// One declaration per row: shady has no comma-declarator list. The
+		// third row is not here because the z slices come from the camera
+		// distance instead; only the side planes come from the matrix.
+		float4 r0 = push.view_projection[0];
+		float4 r1 = push.view_projection[1];
+		float4 r3 = push.view_projection[3];
+		float4 planes[4] = { r0 - lo.x * r3, hi.x * r3 - r0, r1 - lo.y * r3, hi.y * r3 - r1 };
+		float4 world = float4(light.direction.xyz, 1.0);
+		bool overlap = true;
+		for (uint p = 0; p < 4; ++p)
+		{
+			overlap = overlap && dot(planes[p], world) >= -radius * length(planes[p].xyz);
+		}
+		float cameraDistance = distance(light.direction.xyz, push.camera_near.xyz);
+		overlap = overlap && cameraDistance + radius >= zlo && cameraDistance - radius <= zhi;
+		if (!overlap) continue;
+
+		if (written < capacity)
+		{
+			push.indices[cluster * capacity + written++] = i;
+		}
+		else
+		{
+			InterlockedAdd(push.overflow[0], 1u);
+			written |= 0x80000000u;
+		}
+	}
+	push.counts[cluster] = written;
+}
