@@ -2945,6 +2945,10 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
  are still two materials — uniform values are pushed per draw, so two materials
  over one pipeline are two buckets with different bytes.
 
+ Its own pass row (`MESH_MATERIAL`) rather than the built-in draw path's: the
+ body is Slang until the material half takes one, so flipping the built-in
+ material must not route a script through the shady half.
+
  The diagnostic is handed back rather than printed: a bad shader has to throw a
  JS error carrying the Slang text. It is set on success too, because a warning
  arrives with `ok == true` and an agent that never sees its warnings writes the
@@ -2988,7 +2992,7 @@ fn uint? MeshPass.create_material(
 			source,
 			"three.material",
 			state_for_blend(blend),
-			ShaderPass.MESH,
+			ShaderPass.MESH_MATERIAL,
 			diagnostic
 		)!;
 
