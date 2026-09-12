@@ -250,7 +250,7 @@ struct FrameBlock
 	// the record is per bucket, and a single palette pointer there would split a
 	// live character away from the baked copies it shares a mesh and a material
 	// with. One buffer per frame keeps them in one draw.
-	ulong live_poses; // Matrix4f*
+	Matrix4f* live_poses;
 	<*
 	 The light's own view-projection, as `render/shadow.c3` fitted it this frame.
 
@@ -316,7 +316,7 @@ struct FrameBlock
 	 had when there was one light, and `shaders/shadow.slang` reads
 	 `light_view_projection` at 88 by that offset rather than by name.
 	*>
-	ulong lights; // Light*
+	Light* lights;
 	<*
 	 This frame's morph weights — `MeshPass.write_morph_weights`. Zero in a frame
 	 where nothing morphs, which is almost every frame of almost every project.
@@ -331,7 +331,7 @@ struct FrameBlock
 	 `shaders/shadow.slang` goes on reading `light_view_projection` at 88 by that
 	 offset and nothing had to be recompiled to agree.
 	*>
-	ulong morph_weights; // float*
+	float* morph_weights;
 	<*
 	 The world itself as a light — `three.light.world`. xyz linear rgb, w unused.
 
@@ -354,9 +354,9 @@ struct FrameBlock
 	Matrix4f inverse_view_projection;
 	float[4] ambient_occlusion;
 	// Device address of the unified shadow-view table, or zero when none cast.
-	ulong shadow_views;
-	ulong cluster_counts; // uint*, one count per cluster
-	ulong cluster_indices; // uint*, fixed-stride lists
+	ShadowGpuView* shadow_views;
+	uint* cluster_counts; // one count per cluster
+	uint* cluster_indices; // fixed-stride lists
 	uint[4] cluster_grid; // xyz dimensions, w per-cluster capacity
 	float[4] cluster_screen; // target width and height
 }
@@ -464,29 +464,29 @@ const uint DRAW_TEXTURE_INDICES = 24;
 
 struct DrawRecord
 {
-	ulong positions;
-	ulong normals;
-	ulong uvs;
-	ulong lightmap_uvs;
+	Vec3* positions;
+	Vec3* normals;
+	Vec2* uvs;
+	Vec2* lightmap_uvs;
 	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`. The
 	// first field added since the record replaced the push block, and the whole of
 	// what it cost is this line and 8 bytes per bucket per frame.
-	ulong colors;
+	Vec4* colors;
 	// glTF's JOINTS_0 and WEIGHTS_0, and the asset's baked joint matrices — the
 	// three fields this record exists to make possible. They cost 24 bytes of a
 	// buffer sized by the frame's bucket count, and nothing at all from the 128 the
 	// material uniforms are still spending.
-	ulong joints;
-	ulong weights;
-	ulong palette;
+	uint[<4>]* joints;
+	Vec4* weights;
+	Matrix4f* palette;
 	// Where the compute pass wrote this bucket's posed vertices, or zero.
-	// `SkinnedVertex*`, one copy of the mesh per instance.
-	ulong posed;
+	// One copy of the mesh per instance.
+	SkinnedVertex* posed;
 	// This mesh's morph target displacements, or zero — `morph_targets` blocks of
 	// `vertex_count` each. Per bucket because the geometry is: which targets exist
 	// is a property of the mesh, and how much of each is applied is a property of
 	// the copy and lives on the instance.
-	ulong morph;
+	MorphDelta* morph;
 	float[4] base_color; // rgb albedo factor, a material alpha
 	uint flags;
 	// The mesh's vertex count, and the stride two readers need: between one
@@ -554,17 +554,17 @@ struct DrawRecord
 
 struct MeshPush
 {
-	ulong frame; // FrameBlock*
-	ulong instances; // Instance*, offset to this bucket's first
-	ulong draw; // DrawRecord*, this bucket's own
+	FrameBlock* frame;
+	Instance* instances; // already offset to this bucket's first
+	DrawRecord* draw; // this bucket's own
 }
 
 struct ShadowPush
 {
-	ulong frame;
-	ulong instances;
-	ulong draw;
-	ulong padding;
+	FrameBlock* frame;
+	Instance* instances;
+	DrawRecord* draw;
+	uint[<2>] padding;
 	Matrix4f projection;
 }
 
@@ -578,19 +578,19 @@ struct ShadowPush
 *>
 struct SkinPush
 {
-	ulong positions;
-	ulong normals;
-	ulong joints;
-	ulong weights;
-	ulong instances; // Instance*, offset to this bucket's first
-	ulong baked; // Matrix4f*, the asset's table
-	ulong live; // Matrix4f*, this frame's live palette
-	ulong output; // SkinnedVertex*, this bucket's slice
+	Vec3* positions;
+	Vec3* normals;
+	uint[<4>]* joints;
+	Vec4* weights;
+	Instance* instances; // already offset to this bucket's first
+	Matrix4f* baked; // the asset's table
+	Matrix4f* live; // this frame's live palette
+	SkinnedVertex* output; // this bucket's slice
 	// The same pair the draw path carries, for the same reason: a character routed
 	// through the compute pass has to morph exactly as one left in the vertex
 	// shader does, or turning `skinning: 'compute'` on changes how it looks.
-	ulong morph; // MorphDelta*, or zero
-	ulong morph_weights; // float*, this frame's, or zero
+	MorphDelta* morph; // or zero
+	float* morph_weights; // this frame's, or zero
 	uint vertex_count;
 	uint instance_count;
 	uint flags;
@@ -599,10 +599,10 @@ struct SkinPush
 
 struct ClusterPush
 {
-	ulong lights;
-	ulong counts;
-	ulong indices;
-	ulong overflow;
+	Light* lights;
+	uint* counts;
+	uint* indices;
+	uint* overflow;
 	Matrix4f view_projection;
 	uint light_count;
 	float[4] camera_near; // xyz eye, w near

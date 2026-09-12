@@ -353,9 +353,9 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
-			.frame = self.frame.address,
-			.instances = self.instance.address,
-			.draw = self.draw.address,
+			.frame = (FrameBlock*)self.frame.address,
+			.instances = (Instance*)self.instance.address,
+			.draw = (DrawRecord*)self.draw.address,
 		};
 		// The mesh contract, then the material's uniforms on top of it, then the
 		// table pointer over the stale copy in the block — `MeshPass.record` byte for
@@ -422,12 +422,12 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 	FrameBlock frame = {
 		.view_projection = self.pass.frame_view_projection,
 		.lighting = { self.pass.lighting.ambient, (float)self.pass.lighting.count, 0, 0 },
-		.live_poses = 0,
+		.live_poses = null,
 		.light_view_projection = matrix::IDENTITY4{float},
 		.shadow = { 0, 0, 0, 0 },
 		.debug = { 0, 0, 0, 0 },
 		.camera = { eye.x, eye.y, eye.z, 0 },
-		.lights = 0,
+		.lights = null,
 	};
 	self.frame.upload(&frame, FrameBlock::size);
 
@@ -446,18 +446,18 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 	// The mesh's own base colour goes in, so `s.albedo` is what the frame handed
 	// the body. Its alpha does not: see `Instance.color` above.
 	DrawRecord record = {
-		.positions = mesh.positions.address,
-		.normals = mesh.has_normals ? mesh.normals.address : 0,
-		.uvs = mesh.uvs.address,
-		.lightmap_uvs = mesh.uvs.address,
-		.colors = mesh.has_colors ? mesh.colors.address
-			: 0, // A skinned mesh bakes in its bind pose, which is the pose its vertices are
+		.positions = (Vec3*)mesh.positions.address,
+		.normals = (Vec3*)(mesh.has_normals ? mesh.normals.address : 0),
+		.uvs = (Vec2*)mesh.uvs.address,
+		.lightmap_uvs = (Vec2*)mesh.uvs.address,
+		.colors = (Vec4*)(mesh.has_colors ? mesh.colors.address
+			: 0), // A skinned mesh bakes in its bind pose, which is the pose its vertices are
 			// written to the file in. Posing it would bake a frame of an animation into
 			// a texture that the geometry beside it does not match.
-		.joints = 0,
-		.weights = 0,
-		.palette = 0,
-		.posed = 0,
+		.joints = null,
+		.weights = null,
+		.palette = null,
+		.posed = null,
 		.base_color = { mesh.base_color[0], mesh.base_color[1], mesh.base_color[2], 1 },
 		.flags = (mesh.has_normals ? FLAG_HAS_NORMALS : 0) | FLAG_HAS_UVS
 			| (mesh.has_colors ? FLAG_HAS_COLORS : 0)

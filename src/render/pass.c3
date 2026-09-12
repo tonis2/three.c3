@@ -1149,22 +1149,22 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time,
 			self.ltc.live && !self.area_reference ? 1.0f : 0.0f },
 		.world = self.lighting.world,
-		.live_poses = live_address,
-		.morph_weights = morph_address,
+		.live_poses = (Matrix4f*)live_address,
+		.morph_weights = (float*)morph_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
 		.debug = { (float)self.debug_view, 0, 0, 0 },
 		.camera = { eye.x, eye.y, eye.z, 0 },
 		.environment = self.environment_params(),
-		.lights = light_address,
+		.lights = (Light*)light_address,
 		.point_shadow = { self.point_shadows.created > 0 ? 1.0f / (float)self.point_shadows.created : 0.0f,
 			self.point_shadows.bias, self.point_shadows.intensity, self.point_shadows.live ? 1.0f : 0.0f },
 		.inverse_view_projection = invert(view_projection),
 		.ambient_occlusion = { self.ambient_occlusion.live ? self.ambient_occlusion.intensity : 0.0f,
 			self.ambient_occlusion.radius, self.ambient_occlusion.bias, 0 },
-		.shadow_views = shadow_view_address,
-		.cluster_counts = self.cluster_counts[slot].address,
-		.cluster_indices = self.cluster_indices[slot].address,
+		.shadow_views = (ShadowGpuView*)shadow_view_address,
+		.cluster_counts = (uint*)self.cluster_counts[slot].address,
+		.cluster_indices = (uint*)self.cluster_indices[slot].address,
 		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z,
 			self.cluster_bruteforce || self.scene_rect_partial ? 0 : CLUSTER_LIGHT_CAPACITY },
 		.cluster_screen = { (float)target.extent.width, (float)target.extent.height,
@@ -1430,19 +1430,19 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		bool morphing = mesh.morph_targets > 0 && !preskinned && !soft && self.morph_address != 0;
 
 		records[recorded] = {
-			.positions = soft ? soft_positions : mesh.positions.address,
-			.normals = soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0),
-			.uvs = mesh.has_uvs ? mesh.uvs.address : 0,
-			.lightmap_uvs = mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address,
-			.colors = mesh.has_colors ? mesh.colors.address : 0,
-			.joints = skinned ? mesh.joints.address : 0,
-			.weights = skinned ? mesh.weights.address : 0,
-			.palette = skinned ? owner.poses.address
-				: 0, // Not on a soft bucket: a soft body's positions are this frame's
+			.positions = (Vec3*)(soft ? soft_positions : mesh.positions.address),
+			.normals = (Vec3*)(soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0)),
+			.uvs = (Vec2*)(mesh.has_uvs ? mesh.uvs.address : 0),
+			.lightmap_uvs = (Vec2*)(mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address),
+			.colors = (Vec4*)(mesh.has_colors ? mesh.colors.address : 0),
+			.joints = (uint[<4>]*)(skinned ? mesh.joints.address : 0),
+			.weights = (Vec4*)(skinned ? mesh.weights.address : 0),
+			.palette = (Matrix4f*)(skinned ? owner.poses.address
+				: 0), // Not on a soft bucket: a soft body's positions are this frame's
 				// deformed ones, and displacing them by a blend shape authored against
 				// the rest mesh would be two deformations fighting over one vertex.
-			.morph = morphing ? mesh.morph.address : 0,
-			.posed = preskinned ? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size : 0,
+			.morph = (MorphDelta*)(morphing ? mesh.morph.address : 0),
+			.posed = (SkinnedVertex*)(preskinned ? self.posed_buffers[slot].address + (ulong)posed_offset * SkinnedVertex::size : 0),
 			.base_color = base_color,
 			//TODO: Use bitstruct/masking ?
 			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS
@@ -1671,14 +1671,14 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
-			.frame = frame_address, // Offset on the CPU rather than passed as a base index: the shader then
+			.frame = (FrameBlock*)frame_address, // Offset on the CPU rather than passed as a base index: the shader then
 			// reads instance zero of its own slice and never has to know whether
 			// SV_InstanceID includes firstInstance.
-			.instances = instance_address
+			.instances = (Instance*)(instance_address
 				+ (ulong)bucket.first
-					* Instance::size, // And this bucket's own record, for the same reason — `push.draw[0]` is
+					* Instance::size), // And this bucket's own record, for the same reason — `push.draw[0]` is
 					// always the right one, whatever else is in the buffer.
-			.draw = draw_address + (ulong)at * DrawRecord::size,
+			.draw = (DrawRecord*)(draw_address + (ulong)at * DrawRecord::size),
 		};
 		// The reflected size, not `MeshPush::size`. The two agree at 24 today and
 		// have not always: the block used to end in a `uint` that C3 followed with
@@ -2045,9 +2045,9 @@ fn uint MeshPass.draw_casters(
 	// shader reads copy zero of its own slice. It is also what makes a sub-range
 	// legal at all — `SV_InstanceID` is relative to what is pushed here.
 	ShadowPush push = {
-		.frame = self.frame_address,
-		.instances = self.instance_address + (ulong)(bucket.first + offset) * Instance::size,
-		.draw = self.draw_address + (ulong)at * DrawRecord::size,
+		.frame = (FrameBlock*)self.frame_address,
+		.instances = (Instance*)(self.instance_address + (ulong)(bucket.first + offset) * Instance::size),
+		.draw = (DrawRecord*)(self.draw_address + (ulong)at * DrawRecord::size),
 		.projection = projection,
 	};
 
@@ -2101,12 +2101,12 @@ fn void MeshPass.fold_frame_key(&self, uint slot, FrameBlock* frame)
 	// the shader reads off them is whether they are there at all.
 	FrameBlock timeless = *frame;
 	timeless.lighting[2] = 0;
-	timeless.live_poses = frame.live_poses != 0 ? 1 : 0;
-	timeless.lights = frame.lights != 0 ? 1 : 0;
-	timeless.morph_weights = frame.morph_weights != 0 ? 1 : 0;
-	timeless.shadow_views = frame.shadow_views != 0 ? 1 : 0;
-	timeless.cluster_counts = frame.cluster_counts != 0 ? 1 : 0;
-	timeless.cluster_indices = frame.cluster_indices != 0 ? 1 : 0;
+	timeless.live_poses = frame.live_poses != null ? (Matrix4f*)1 : null;
+	timeless.lights = frame.lights != null ? (Light*)1 : null;
+	timeless.morph_weights = frame.morph_weights != null ? (float*)1 : null;
+	timeless.shadow_views = frame.shadow_views != null ? (ShadowGpuView*)1 : null;
+	timeless.cluster_counts = frame.cluster_counts != null ? (uint*)1 : null;
+	timeless.cluster_indices = frame.cluster_indices != null ? (uint*)1 : null;
 	self.scene_cache_frame = timeless;
 	ulong key = hash_bytes(self.frame_key, &timeless, FrameBlock::size);
 	if (self.reads_clock_time()) key = @hash_value(key, self.clock.time);
@@ -2248,8 +2248,8 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 		self.cluster_pipeline.init_cluster(gpu, &mod)!;
 	}
 	ClusterPush push = {
-		.lights = lights, .counts = self.cluster_counts[slot].address,
-		.indices = self.cluster_indices[slot].address, .overflow = self.cluster_overflow[slot].address,
+		.lights = (Light*)lights, .counts = (uint*)self.cluster_counts[slot].address,
+		.indices = (uint*)self.cluster_indices[slot].address, .overflow = (uint*)self.cluster_overflow[slot].address,
 		.view_projection = vp, .light_count = self.lighting.count,
 		.camera_near = { self.camera.eye().x, self.camera.eye().y, self.camera.eye().z, self.camera.near_plane },
 		.far_plane = self.camera.far_plane,
@@ -2806,21 +2806,21 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 		if (owner == null) continue;
 
 		SkinPush push = {
-			.positions = mesh.positions.address,
-			.normals = mesh.has_normals ? mesh.normals.address : 0,
-			.joints = mesh.joints.address,
-			.weights = mesh.weights
+			.positions = (Vec3*)mesh.positions.address,
+			.normals = (Vec3*)(mesh.has_normals ? mesh.normals.address : 0),
+			.joints = (uint[<4>]*)mesh.joints.address,
+			.weights = (Vec4*)mesh.weights
 				.address, // Offset to this bucket's first copy, exactly as the draw path offsets
 				// it, so `iid` starts at zero in the shader either way.
-			.instances = self.instance_address + (ulong)bucket.first * Instance::size,
-			.baked = owner.poses.address,
-			.live = self.live_address,
-			.output = output_address
+			.instances = (Instance*)(self.instance_address + (ulong)bucket.first * Instance::size),
+			.baked = (Matrix4f*)owner.poses.address,
+			.live = (Matrix4f*)self.live_address,
+			.output = (SkinnedVertex*)(output_address
 				+ (ulong)self.posed_offsets[i]
-					* SkinnedVertex::size, // The morph happens before the blend here exactly as it does in the
+					* SkinnedVertex::size), // The morph happens before the blend here exactly as it does in the
 					// vertex shader, or `skinning: 'compute'` would be a different face.
-			.morph = (mesh.morph_targets > 0 && self.morph_address != 0) ? mesh.morph.address : 0,
-			.morph_weights = self.morph_address,
+			.morph = (MorphDelta*)((mesh.morph_targets > 0 && self.morph_address != 0) ? mesh.morph.address : 0),
+			.morph_weights = (float*)self.morph_address,
 			.vertex_count = mesh.vertex_count,
 			.instance_count = bucket.count,
 			.flags = mesh.has_normals ? FLAG_HAS_NORMALS : 0,
