@@ -222,6 +222,67 @@ fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 }
 
 <*
+ A material that lights: the shared block, and a fragment that calls it.
+
+ The same split the engine's material half will use - `lighting.shady` is one
+ piece of text, several materials' worth of `shade()` sit on top of it - and the
+ one thing this half needs from the geometry half is the function it defines.
+*>
+macro String lit_material()
+{
+	return `
+fn float4 mesh_fragment(VertexOutput input)
+{
+	float3 albedo = input.color.rgb * input.vertex_color.rgb;
+	LightTerms terms = shade_lights(
+		push.frame,
+		input.sv_position,
+		input.world,
+		normalize(input.normal),
+		albedo,
+		0.5,
+		0.0,
+		0.5
+	);
+	// The shape material.slang's standard shading has, minus what is not ported
+	// yet: the ambient scale and the environment term are the next piece of the
+	// material half, and the metalness weighting is one here because metalness is
+	// zero. Backticks belong in a .shady file and not in this string.
+	return float4(albedo * terms.diffuse + terms.specular, 1.0);
+}
+`;
+}
+
+fn void the_ported_mesh_is_lit() @test
+{
+	// What a material is made of: the shared lighting block, then the fragment
+	// that shades with it. The def does not care how many pieces that is.
+	String material = string::tformat("%s\n%s",
+		three::load_source("shaders/lighting.shady", tmem)!!,
+		lit_material()
+	);
+
+	three::ShaderDef def = three::mesh_def(material);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("fn LightTerms shade_lights("), "the lighting block is carried");
+	test::@check(source.contains("uint cluster = fragment_cluster(frame, screen_position, position);"),
+		"and the cluster a fragment is lit by is the culling pass's own index");
+	test::@check(source.contains("frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + local]"),
+		"read out of the frame block's list, overflow bit and all");
+	test::@check(source.contains("if (light.meta.z != LIGHT_DIRECTIONAL) continue;"),
+		"directionals come from the frame's list, punctuals from the cluster");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/mesh_lit.shady", source)!!;
+	check_compiles(source, "the generated lit mesh module");
+}
+
+<*
  The second port, and the first compute stage: a module whose only resource is a
  push block, whose structs come from the shared wire list, and whose stage is a
  dispatch. Kong dispatches it and reads the posed vertices back.
