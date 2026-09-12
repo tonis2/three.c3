@@ -31,19 +31,22 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 }
 
 <*
- The default the flips leave behind: cluster and skin are on shady, and no other
- row moved.
+ The default the flips leave behind: cluster, skin and shadow are on shady, and
+ no other row moved.
 *>
-fn void the_table_flips_cluster_and_skin_and_nothing_else() @test
+fn void the_table_flips_cluster_skin_and_shadow_and_nothing_else() @test
 {
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
 		"cluster compiles through shady");
 	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SHADY,
 		"skin compiles through shady");
+	test::@check(three::shader_compiler(three::ShaderPass.SHADOW) == three::ShaderCompiler.SHADY,
+		"shadow compiles through shady");
 	foreach (i, row : three::PASS_COMPILERS)
 	{
 		if ((three::ShaderPass)i == three::ShaderPass.CLUSTER) continue;
 		if ((three::ShaderPass)i == three::ShaderPass.SKIN) continue;
+		if ((three::ShaderPass)i == three::ShaderPass.SHADOW) continue;
 		test::@check(row.compiler == three::ShaderCompiler.SLANG,
 			"%s is still compiled by Slang", row.name);
 	}

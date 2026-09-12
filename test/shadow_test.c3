@@ -22,6 +22,8 @@
  - The two skinning paths are required to produce the **byte-identical frame**,
    which is the same standard `three_tests::skinning` holds them to for the
    colour pass.
+ - The depth map itself is required to be **byte-identical through both shader
+   compilers**, with a bent, turned, translated skinned caster in it.
 *>
 module three_tests::shadow;
 
@@ -608,6 +610,164 @@ fn void the_two_skinning_paths_cast_the_same_shadow() @test
 			differing_bytes(&through_vertex, &through_compute)
 		);
 	};
+}
+
+fn sz shadow_depth_texel(vk::Format format)
+{
+	switch (format)
+	{
+		case FORMAT_D32_SFLOAT: return 4;
+		case FORMAT_D24_UNORM_S8_UINT: return 4;
+		case FORMAT_D32_SFLOAT_S8_UINT: return 8;
+		default: return 4;
+	}
+}
+
+<*
+ One shadow atlas's depth bytes, clear value included.
+
+ The map is copied out whole rather than sampled: `vkCmdCopyImageToBuffer`
+ converts nothing, so the words that come back are the words the rasteriser and
+ its clear wrote. The layout goes back where the frame's descriptors expect it,
+ so this runs between captures.
+*>
+fn char[] read_shadow_depth(three::Renderer* renderer)
+{
+	three::ShadowAtlas* atlas = &renderer.pass.shadow_manager.atlas;
+	sz bytes = (sz)atlas.width * atlas.height * shadow_depth_texel(atlas.format);
+	vk::Memory staging = vk::new_buffer(
+		&renderer.gpu.allocator,
+		usage: vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_DST_BIT,
+		properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+			| vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data_size: bytes
+	)!!;
+	defer staging.free();
+
+	renderer.gpu.handle.@single_time_command(queue: renderer.gpu.graphics ; vk::CommandBuffer cmd)
+	{
+		vk::ImageMemoryBarrier2 read = {
+			...three::IMAGE_BARRIER,
+			.subresourceRange = three::DEPTH_LEVEL,
+			.image = atlas.image,
+			.srcStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+			.srcAccessMask = vk::AccessFlagBits2.ACCESS_2_SHADER_SAMPLED_READ_BIT
+				| vk::AccessFlagBits2.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			.dstStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.dstAccessMask = vk::AccessFlagBits2.ACCESS_2_TRANSFER_READ_BIT,
+			.oldLayout = vk::ImageLayout.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.newLayout = vk::ImageLayout.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ read }));
+		vk::BufferImageCopy region = {
+			.imageSubresource = {
+				.aspectMask = vk::ImageAspectFlagBits.IMAGE_ASPECT_DEPTH_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+			.imageOffset = { 0, 0, 0 },
+			.imageExtent = { atlas.width, atlas.height, 1 },
+		};
+		vk::cmdCopyImageToBuffer(cmd, atlas.image, vk::ImageLayout.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			staging.buffer, 1, &region);
+
+		vk::ImageMemoryBarrier2 restore = {
+			...read,
+			.srcStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.srcAccessMask = vk::AccessFlagBits2.ACCESS_2_TRANSFER_READ_BIT,
+			.dstStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
+				| vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+			.dstAccessMask = vk::AccessFlagBits2.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+				| vk::AccessFlagBits2.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			.oldLayout = vk::ImageLayout.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			.newLayout = vk::ImageLayout.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ restore }));
+	}!!;
+
+	char[] out = alloc::new_array(mem, char, bytes);
+	mem::copy(out.ptr, staging.data(), bytes);
+	return out;
+}
+
+<*
+ The depth map through both compilers, compared as bytes rather than pixels.
+
+ Slang and shady emit different SPIR-V; what has to be identical is the depth
+ the pass produces. The one caster is the skinned fixture in a bent pose and a
+ turned, translated instance, so the palette blend and the model matrix are both
+ inside the compared bytes; the map is copied out whole, which puts the clear
+ value and every untouched texel in the comparison too.
+
+ The view caches are dropped between the captures: a full-plan frame that
+ changed nothing would leave the first compiler's depth in the atlas and compare
+ it with itself. `draws` is required to be non-zero after each capture for the
+ same reason - an empty map is all clear and would compare equal in silence.
+*>
+fn void the_depth_map_is_the_same_bytes_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		globalThis.depthCaster = (await three.load('test/fixtures/skinned.glb')).instantiate();
+		depthCaster.position.set(0.9, 0.15, -0.5);
+		depthCaster.rotation.y = 0.6;
+		scene.add(depthCaster);
+		depthCaster.play('Bend', { time: 0.9 });
+		three.light.set([0.3, 1.0, 0.2], 0.6);
+		three.light.shadow = { enabled: true, size: 512 };
+		three.camera.frameAll();
+		three.camera.orbit(0.3, 0.7, three.camera.distance);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the shadow scene built: %s", built.error);
+
+	three::shader_override(three::ShaderPass.SHADOW, three::ShaderCompiler.SLANG);
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.shadows.draws > 0, "the Slang frame drew the map");
+	char[] slang = read_shadow_depth(renderer);
+	defer alloc::free(mem, slang);
+
+	three::shader_override(three::ShaderPass.SHADOW, three::ShaderCompiler.SHADY);
+	// The pipeline holds the Slang module's SPIR-V; the next draw has to build
+	// one from the shady module instead.
+	if (renderer.pass.shadows.pipeline_ready)
+	{
+		renderer.pass.shadows.pipeline.free(&renderer.gpu);
+		renderer.pass.shadows.pipeline_ready = false;
+	}
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		if (!renderer.pass.shadow_view_set.views[at].live) continue;
+		renderer.pass.shadow_view_set.views[at].live_valid = false;
+		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
+	}
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.shadows.draws > 0, "the shady frame drew the map");
+	char[] shady = read_shadow_depth(renderer);
+	defer alloc::free(mem, shady);
+
+	test::@check(slang.len == shady.len,
+		"both maps are the same size, %d against %d bytes", slang.len, shady.len);
+	sz texel = shadow_depth_texel(renderer.pass.shadow_manager.atlas.format);
+	sz first_difference = slang.len;
+	for (sz at = 0; at < slang.len && at < shady.len; at++)
+	{
+		if (slang[at] != shady[at]) { first_difference = at; break; }
+	}
+	test::@check(first_difference == slang.len,
+		"the depth map is byte-identical through both compilers, first difference at byte %d (texel %d, %d)",
+		first_difference,
+		first_difference / texel % renderer.pass.shadow_manager.atlas.width,
+		first_difference / texel / renderer.pass.shadow_manager.atlas.width);
 }
 
 // ============================================================================
