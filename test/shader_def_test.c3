@@ -290,6 +290,80 @@ fn void the_ported_skin_module_is_generated() @test
 }
 
 <*
+ Both shadow modules: the depth-only one and the cut-out variant of it.
+
+ The claim that matters here is the one the pair makes together - the vertex path
+ is one piece of text handed to both, so the two pipelines cannot pose a vertex
+ differently - and the one that separates them: a sampler in the cut-out module
+ and none in the other.
+*>
+fn void the_ported_shadow_modules_are_generated() @test
+{
+	String code = three::load_source("shaders/shadow.shady")!!;
+	defer code.free(mem);
+	String cutout_code = three::load_source("shaders/shadow_cutout.shady")!!;
+	defer cutout_code.free(mem);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, three::shadow_def(code), three::ShadowPush);
+	String source = out.str_view();
+
+	// The depth-only module: one entry point, no fragment stage, no resources.
+	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
+		"the entry point returns the position alone");
+	test::@check(source.contains("uint iid @builtin(instance_index);"),
+		"and takes the instance id as a builtin");
+	test::@check(!source.contains("@fragment"), "a depth pass has no fragment stage");
+	test::@check(!source.contains("@set("), "and no descriptors at all");
+	test::@check(source.contains("output.sv_position = posed_clip(input.vid, input.iid);"),
+		"the stage body is a call to the shared vertex path");
+
+	// The push block and the structs behind it, from C3.
+	test::@check(source.contains("struct ShadowPush @pushconstant"), "the push block is the C3 struct");
+	test::@check(source.contains("float4x4 projection;"), "including the light's clip space");
+	test::@check(source.contains("struct DrawRecord @address") && source.contains("struct Instance @address"),
+		"and the structs the pass points at are the shared wire ones");
+
+	// The port itself, which both modules share.
+	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid)"), "the body survived the port");
+	test::@check(source.contains("(skin_matrix(draw, instance, vid) * float4(position, 1.0)).xyz"),
+		"a joint matrix poses a position the same way the draw path poses it");
+	test::@check(source.contains("position = draw.posed[iid * draw.skin_stride + vid].position;"),
+		"and the pre-skinned path reads the buffer the compute pass wrote");
+	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
+
+	check_compiles(source, "the generated shadow module");
+
+	DString cutout;
+	cutout.tinit(32768);
+	three::append_shader_def(&cutout, three::shadow_cutout_def(code, cutout_code), three::ShadowPush);
+	String cutout_source = cutout.str_view();
+
+	// The same vertex path, the same lines - the def handed the same text twice.
+	test::@check(cutout_source.contains("fn float4 posed_clip(uint vid, uint iid)"),
+		"the cut-out module carries the shared vertex path too");
+	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw[0], push.instances[input.iid], input.vid);"),
+		"beside the uv only it carries");
+
+	// The fragment stage, the sampler, and nothing else that changed.
+	test::@check(cutout_source.contains("fn void fragmentMain(VertexOutput input) @fragment"),
+		"the cut-out variant has the fragment stage");
+	test::@check(cutout_source.contains("float2 uv;") && cutout_source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
+		"and a uv on the vertex output");
+	test::@check(cutout_source.contains("Sampler2D three_textures[] @set(1) @binding(0);"),
+		"the device-wide texture array is what it samples");
+	test::@check(cutout_source.contains(".a * draw.base_color.a < draw.surface.w) discard;"),
+		"the threshold the draw record already carried decides the discard");
+
+	check_compiles(cutout_source, "the generated shadow cut-out module");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/shadow.shady", source)!!;
+	file::save("build/shaderdef/shadow_cutout.shady", cutout_source)!!;
+}
+
+<*
  The round trip: shady reads back what the def wrote. This is the test that keeps
  the generator honest about a language it writes but does not own, and it is why
  the engine depends on shady at all.

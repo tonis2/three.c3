@@ -1,0 +1,80 @@
+// The cut-out half of three.c3's shadow pass, ported to shady for the ShaderDef
+// generator (`src/shader/shadow_cutout_def`).
+//
+// This is a second module rather than a block of the first because shady has no
+// preprocessor and a variant has to be a whole program when it changes a
+// descriptor or an entry point - the policy in `shader_plan.md`. What it buys is
+// the thing the depth-only pass cannot do: a leaf card casts the shadow of the
+// leaf instead of the shadow of its quad.
+//
+// The vertex path is not here. The def hands `shaders/shadow.shady` to both
+// modules, so a pose cannot drift between the pipeline every ordinary caster
+// shares and the one that cuts; what is here is the uv those cutters need, the
+// sampler that decides, and the fragment stage that discards.
+//
+// **The plain pass must not merely skip this code but not contain it**: the
+// reflection reports the linked program, so a sampler declared in one module
+// would put a descriptor binding on every ordinary caster - and a binding
+// declared and never written is undefined behaviour rather than a wasted byte.
+
+// The material's base colour map, and the only image this pass ever reads. It is
+// a slot of the device-wide texture array - set 1, bound once for the device by
+// `TextureTable` - reached by the number it used to be bound at. The index is
+// uniform across a draw, so unlike `surface.slang` this does not need a
+// `NonUniformResourceIndex`: the number comes from the draw record, and every
+// thread of the draw reads the same one.
+const uint SLOT_BASE_COLOR = 0;
+
+// The uv of one vertex of one copy: the mesh's own, then this copy's row of the
+// variant table. The `uv_transform` is deliberately not applied here - it
+// belongs to the fragment stage, which is where the draw path applies it - so
+// the cut-out and the surface sample the same texel.
+fn float2 shadow_uv(DrawRecord draw, Instance instance, uint vid)
+{
+	float2 uv = float2(0.0, 0.0);
+	if ((draw.flags & FLAG_HAS_UVS) != 0) uv = draw.uvs[vid];
+	if (draw.uv_variant_count != 0)
+	{
+		uint variant = min(instance.variant, draw.uv_variant_count - 1);
+		uv = variant_uv(uv, float4(0.0, 0.0, 0.0, 0.0));
+	}
+	return uv;
+}
+
+// One row of a material's uv variant table: a quarter turn, a flip, and a
+// translation. `mesh.shady`'s vertex stage and the surface's fragment stage
+// carry the same function, and a copy that drifts is a cut-out sampled from a
+// different part of the sheet than the surface was drawn from - which is a leaf
+// whose shadow is a different leaf.
+fn float2 variant_uv(float2 uv, float4 row)
+{
+	uint turns = ((uint)row.z) & 3;
+	if (turns == 1) uv = float2(uv.y, 1.0 - uv.x);
+	else if (turns == 2) uv = float2(1.0 - uv.x, 1.0 - uv.y);
+	else if (turns == 3) uv = float2(1.0 - uv.y, uv.x);
+
+	uint flip = (uint)row.w;
+	if ((flip & 1) != 0) uv.x = 1.0 - uv.x;
+	if ((flip & 2) != 0) uv.y = 1.0 - uv.y;
+
+	return uv + row.xy;
+}
+
+// The one thing a shadow fragment stage is for: deciding this texel is not
+// there. It writes nothing - depth is still the rasteriser's - so `discard` is
+// the whole body.
+fn void cutout_fragment(VertexOutput input)
+{
+	DrawRecord draw = push.draw[0];
+	// A mesh with no uvs has nowhere to put a map, so there is nothing to cut and
+	// the whole quad casts - which is what this pass did for everything before
+	// the variant existed.
+	if ((draw.flags & FLAG_HAS_UVS) == 0) return;
+
+	float2 uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+	// A plain `Sample` and not a stochastic one, even on a material that asked
+	// for scattering: the three-tap blend is there to hide a tiling repeat in a
+	// *colour*, and a blend of three alphas cuts a shape that is in none of the
+	// three.
+	if (three_textures[draw.texture_index[SLOT_BASE_COLOR]].Sample(uv).a * draw.base_color.a < draw.surface.w) discard;
+}
