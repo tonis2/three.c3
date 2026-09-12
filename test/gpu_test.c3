@@ -862,18 +862,23 @@ fn void the_phases_account_for_the_whole_frame() @test
  An empty phase reports nothing, and the frame is charged to the one pass that
  did something.
 
- With scene reuse disabled, `@with_renderer` draws a clear: no shadow pass, no
- post chain, nothing to upload, and no blit or readback on `render_offscreen`.
- Four of the five spans therefore bound no commands at all, and the whole frame belongs to the
- rendering — which makes this the simplest possible attribution check, and one
- the sum above cannot make: five numbers can add up to the frame while being
- shared out wrongly among themselves.
+ With scene reuse disabled, `@with_renderer` draws a clear: no shadow pass,
+ nothing to upload, and no blit or readback on `render_offscreen`. The post
+ chain is the one phase that is never empty — the scene renders into the HDR
+ image A always and the display encode runs over it every frame — so it is
+ bounded by the pass that drew the picture rather than by nothing. The other
+ spans bound no commands at all, and the whole frame belongs to the rendering —
+ which makes this the simplest possible attribution check, and one the sum
+ above cannot make: five numbers can add up to the frame while being shared
+ out wrongly among themselves.
 
  The empty ones are bounded rather than required to be exactly 0. On this device
  two `ALL_COMMANDS` stamps recorded back to back land on the same tick and the
  span really is 0.000000, but that is a property of the driver's sampling and
  not of this code; 0.01 ms is two orders of magnitude under the frame and says
- the same thing without depending on it.
+ the same thing without depending on it. The encode is a full-screen triangle
+ over a 200x150 image: a tenth of a millisecond here, under the same 0.01 on a
+ discrete card, and neither number is the point.
 
  **Proved by injection.** The `SCENE` mark dropped from `record_scene`: "a clear
  frame spent 0.000000 of 0.277333 ms in the pass that drew it", and the whole of
@@ -899,7 +904,7 @@ fn void an_empty_phase_costs_a_zero_and_not_the_reading() @test
 			"a clear frame spent %f of %f ms in the pass that drew it", t.scene, t.total
 		);
 		test::@check(t.shadow < 0.01, "an unshadowed frame spent %f of %f ms in the shadow pass", t.shadow, t.total);
-		test::@check(t.post < 0.01, "an unposted frame spent %f of %f ms in the post chain", t.post, t.total);
+		test::@check(t.post < t.scene, "a clear frame spent %f ms in the post chain and %f in the pass that drew it", t.post, t.scene);
 	};
 }
 
@@ -947,6 +952,11 @@ fn void the_texture_table_reserves_a_white_fallback_slot() @test
 	test::@check(table.capacity <= three::TEXTURE_TABLE_MAX, "capacity %d over the cap", table.capacity);
 	test::@check(table.fallback_slot() == table.capacity - 1, "the fallback is not the last slot");
 	test::@check(table.usable() == table.capacity - 1, "the registry may hand out the fallback's slot");
+
+	// The white is `Assets`'s and goes with it at every `release`, so the table
+	// has no fallback until something asks for one — as the first upload does.
+	test::@check(!table.has_fallback, "the table kept a fallback across the pass that owned the white");
+	renderer.pass.assets.ensure_white(gpu)!!;
 	test::@check(table.has_fallback, "the fallback slot was never filled with the white image");
 }
 
