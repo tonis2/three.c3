@@ -28,11 +28,11 @@
 // this one function, and its text is spliced in ahead of this file, so the body
 // is defined before the fragment that calls it.
 //
-// It is declared rather than left to a call the reader has to imagine, because a
-// module that got no body should say so. A call to a name nothing declares is an
-// overload error about a function nobody wrote; this is the sentence that names
-// the half that is missing.
-fn float3 shade(Surface s);
+// `@required` is what says so in the language rather than in a comment: a module
+// that got no body is refused at this line, whether or not anything managed to
+// call it. A plain declaration would only be wrong where it was called, which is
+// not the same claim.
+fn float3 shade(Surface s) @required;
 
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
