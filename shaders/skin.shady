@@ -1,0 +1,91 @@
+// three.c3 compute skinning, ported to shady for the ShaderDef generator
+// (`src/shader/skin.c3`).
+//
+// The declarations are gone from this file: the push block comes from the C3
+// `SkinPush`, the output struct and the morph deltas come from `abi.c3`'s wire
+// list, and the entry point is emitted by the def. What is left is the
+// constants and the two functions that entry point calls. The port is nearly
+// line for line - `mul(M, v)` is `M * v`, and the normal keeps its w = 0 so the
+// translation in the matrix's last column cancels, which is what the original's
+// `(float3x3)` cast was for.
+//
+// Everything the original says about the shape still holds:
+//
+//  - the output stays in the character's own space, so two passes with
+//    different notions of where the character is can share it;
+//  - the tail guard is a write past the end of the output buffer rather than a
+//    wasted lane, so it returns;
+//  - the morph displacement happens here and before the blend, because a
+//    displacement applied afterwards would move a vertex the joints already
+//    moved.
+
+const uint FLAG_HAS_NORMALS = 1;
+const uint POSE_LIVE = 0x80000000;
+const uint POSE_MASK = 0x7fffffff;
+
+// The four influences of one vertex against one palette, summed into the
+// matrix that poses it. `mesh.shady` carries the same function for the same
+// reason: a crossfade spends it twice, once per frame it sits between.
+fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+	return weights.x * palette[base + joints.x]
+	     + weights.y * palette[base + joints.y]
+	     + weights.z * palette[base + joints.z]
+	     + weights.w * palette[base + joints.w];
+}
+
+// One vertex of one instance, by dispatch thread. The index is the flattened
+// pair rather than a `(vertex, instance)` one, so a workgroup's threads read
+// neighbouring vertices of the same instance.
+fn void skin_vertices(ComputeIn input)
+{
+	uint index = input.thread.x;
+	uint total = push.vertex_count * push.instance_count;
+	if (index >= total) return;
+
+	uint iid = index / push.vertex_count;
+	uint vid = index - iid * push.vertex_count;
+
+	Instance instance = push.instances[iid];
+
+	// An `if` rather than a ternary choice, the same as the draw path: one of
+	// these two pointers is null on any given dispatch.
+	float4x4* palette = push.baked;
+	if ((instance.pose & POSE_LIVE) != 0) palette = push.live;
+	uint base = instance.pose & POSE_MASK;
+
+	float3 position = push.positions[vid];
+	float3 normal = float3(0.0, 1.0, 0.0);
+	if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
+
+	// Before the blend, exactly as the draw path does it and for the reason its
+	// `apply_morph` gives: a blend shape is authored against the rest mesh.
+	if (push.morph_targets != 0 && instance.morph != 0)
+	{
+		uint morph_base = instance.morph - 1;
+		for (uint t = 0; t < push.morph_targets; t++)
+		{
+			float amount = push.morph_weights[morph_base + t];
+			if (amount == 0.0) continue;
+			MorphDelta delta = push.morph[t * push.vertex_count + vid];
+			position += amount * delta.position;
+			normal += amount * delta.normal;
+		}
+	}
+
+	uint4 joints = push.joints[vid];
+	float4 weights = push.weights[vid];
+
+	float4x4 pose = blend_joints(palette, base, joints, weights);
+	if (instance.blend > 0.0)
+	{
+		float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
+		pose = pose + (from - pose) * instance.blend;
+	}
+
+	SkinnedVertex skinned;
+	skinned.position = (pose * float4(position, 1.0)).xyz;
+	skinned.normal = (pose * float4(normal, 0.0)).xyz;
+
+	push.output[index] = skinned;
+}
