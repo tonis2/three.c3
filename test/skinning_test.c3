@@ -1010,6 +1010,166 @@ fn void a_compute_routed_character_splits_the_bucket() @test
 	};
 }
 
+// The written region of this frame's posed buffer, and the stride between one
+// copy's vertices and the next.
+struct PosedRegion
+{
+	sz bytes;
+	sz instance_stride;
+}
+
+fn PosedRegion posed_region(three::Renderer* renderer)
+{
+	PosedRegion region = { .bytes = 0, .instance_stride = 0 };
+	foreach (i, bucket : renderer.pass.scene.buckets)
+	{
+		if (i >= renderer.pass.posed_offsets.len()) break;
+		uint offset = renderer.pass.posed_offsets[i];
+		if (offset == three::NOT_PRESKINNED) continue;
+
+		three::GpuMesh* mesh = renderer.pass.assets.mesh(bucket.asset, bucket.mesh);
+		if (mesh == null) continue;
+
+		sz stride = (sz)mesh.vertex_count * three::SkinnedVertex::size;
+		if (region.instance_stride == 0) region.instance_stride = stride;
+		sz end = (sz)offset * three::SkinnedVertex::size + stride * bucket.count;
+		if (end > region.bytes) region.bytes = end;
+	}
+	return region;
+}
+
+<*
+ The same posed vertices through both compilers, compared as bytes.
+
+ Slang and shady emit different SPIR-V; what has to be identical is where the
+ pass puts the mesh. Four copies of the fixture go through one dispatch - the end
+ of `Bend`, the end of `Twist`, a crossfade halfway between them, and one posed
+ from a rotated bone - so the compared bytes carry two different joint rotations,
+ a two-palette blend and the live-palette branch. **The rotations are the point**:
+ a transposed read or a reversed multiply order moves a turned mesh and leaves a
+ translation-only one looking plausible.
+
+ The fixture's own arithmetic is checked first, on the bytes about to be
+ compared: `Bend`'s tip has to land where `make_skinned.py` works it out by hand
+ (`a_bent_joint_puts_the_tip_where_the_maths_says` uses the same number), or a
+ comparison of two identically wrong buffers would pass in silence.
+*>
+fn void skin_poses_the_same_bytes_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+
+	three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+	three::NodeId bent = renderer.pass.scene.instantiate(id, name: "", compute_skin: true);
+	three::NodeId twisted = renderer.pass.scene.instantiate(id, name: "", compute_skin: true);
+	three::NodeId faded = renderer.pass.scene.instantiate(id, name: "", compute_skin: true);
+	three::NodeId live = renderer.pass.scene.instantiate(id, name: "", skeleton: true, compute_skin: true);
+
+	// The fade is stepped before the two clips below are keyed, so the step does
+	// not push either of them past its own end; both then sit at t = 1, the
+	// quarter turn, and the fade halfway out of its outgoing frame.
+	renderer.pass.scene.play(faded, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+	renderer.pass.scene.play(faded, "Twist", loop: false, speed: 1.0f, time: 0, fade: 1.0f);
+	renderer.pass.scene.step_animations(0.5f);
+	renderer.pass.scene.play(bent, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+	renderer.pass.scene.play(twisted, "Twist", loop: false, speed: 1.0f, time: 1.0f);
+
+	// A quarter turn about +Z on `Mid`, the joint `Bend` drives: the fourth copy
+	// is posed through `push.live` rather than the baked table.
+	three::NodeId mid = node_at(renderer.pass.scene, live, "Mid");
+	test::@check(mid.is_set(), "the live copy materialised its `Mid` bone");
+	if (mid.is_set())
+	{
+		three::Node* bone = renderer.pass.scene.node(mid);
+		float half = (float)math::PI / 4.0f;
+		bone.rotation = { 0, 0, math::sin(half), math::cos(half) };
+		renderer.pass.scene.mark_moved(mid);
+	}
+
+	// The readback copies carry `TRANSFER_SRC` and are zeroed: a dispatch writes
+	// only the vertices its bucket has, and a tail left as allocator garbage
+	// would turn a comparison of two fresh buffers into a comparison of two
+	// unrelated pages.
+	const sz CAPACITY = 64;
+	sz capacity_bytes = CAPACITY * three::SkinnedVertex::size;
+	char[] zeros = alloc::new_array(mem, char, capacity_bytes);
+	mem::clear(zeros.ptr, capacity_bytes);
+	defer alloc::free(mem, zeros);
+	for (uint i = 0; i < three::MAX_FRAMES_IN_FLIGHT; i++)
+	{
+		renderer.pass.posed_buffers[i] = vk::new_buffer(
+			&renderer.gpu.allocator,
+			usage: vk::BufferUsageFlagBits.BUFFER_USAGE_STORAGE_BUFFER_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			data: zeros.ptr,
+			data_size: capacity_bytes
+		)!!;
+		renderer.pass.posed_capacity[i] = CAPACITY;
+	}
+
+	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SLANG);
+	uint slang_slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+
+	PosedRegion region = posed_region(renderer);
+	test::@check(region.bytes > 0, "the scene posed %d bytes", region.bytes);
+	if (region.bytes == 0) return;
+	char[] slang = device::read_device_bytes(
+		renderer, &renderer.pass.posed_buffers[slang_slot], region.bytes);
+	defer alloc::free(mem, slang);
+
+	// The tip rides joint 1 with weight 1, and the baked matrix at t = 1 walks
+	// (0.2, 2, 0) to (-1, 1.2, 0) - the number the fixture documents.
+	sz tip = 5 * three::SkinnedVertex::size;
+	test::@check(
+		near(*(float*)&slang[tip], -1.0f)
+			&& near(*(float*)&slang[tip + 4], 1.2f)
+			&& near(*(float*)&slang[tip + 8], 0.0f),
+		"`Bend`'s tip is where the fixture says, got (%f, %f, %f)",
+		*(float*)&slang[tip], *(float*)&slang[tip + 4], *(float*)&slang[tip + 8]
+	);
+	bool differs = false;
+	for (uint copy = 1; copy < 4; copy++)
+	{
+		if (!mem::equals(slang.ptr, slang.ptr + copy * region.instance_stride, region.instance_stride))
+		{
+			differs = true;
+		}
+	}
+	test::@check(differs, "the compared buffer carries more than one pose");
+
+	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SHADY);
+	// The pipeline holds the Slang module's SPIR-V; the next dispatch has to
+	// build one from the shady module.
+	renderer.pass.skin_pipeline.free(&renderer.gpu);
+	uint shady_slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+
+	char[] shady = device::read_device_bytes(
+		renderer, &renderer.pass.posed_buffers[shady_slot], region.bytes);
+	defer alloc::free(mem, shady);
+
+	sz first_difference = region.bytes;
+	for (sz at = 0; at < region.bytes; at++)
+	{
+		if (slang[at] != shady[at])
+		{
+			first_difference = at;
+			break;
+		}
+	}
+	test::@check(first_difference == region.bytes,
+		"the posed vertices are byte-identical through both compilers, first difference at byte %d (copy %d vertex %d byte %d)",
+		first_difference,
+		first_difference / region.instance_stride,
+		(first_difference % region.instance_stride) / three::SkinnedVertex::size,
+		first_difference % three::SkinnedVertex::size);
+}
+
 <*
  A scene with no compute-routed character builds no compute pipeline.
 

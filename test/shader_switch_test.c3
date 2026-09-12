@@ -31,16 +31,19 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 }
 
 <*
- The default the flips leave behind: cluster is the one pass on shady, and no
- other row moved.
+ The default the flips leave behind: cluster and skin are on shady, and no other
+ row moved.
 *>
-fn void the_table_flips_cluster_and_nothing_else() @test
+fn void the_table_flips_cluster_and_skin_and_nothing_else() @test
 {
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
 		"cluster compiles through shady");
+	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SHADY,
+		"skin compiles through shady");
 	foreach (i, row : three::PASS_COMPILERS)
 	{
 		if ((three::ShaderPass)i == three::ShaderPass.CLUSTER) continue;
+		if ((three::ShaderPass)i == three::ShaderPass.SKIN) continue;
 		test::@check(row.compiler == three::ShaderCompiler.SLANG,
 			"%s is still compiled by Slang", row.name);
 	}
@@ -54,11 +57,11 @@ fn void an_override_moves_one_pass_and_clear_restores_it() @test
 {
 	defer three::shader_overrides_clear();
 
-	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SHADY);
-	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SHADY,
+	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SLANG);
+	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SLANG,
 		"skin follows the override");
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
-		"and the flipped default is untouched");
+		"and the flipped default beside it is untouched");
 
 	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SLANG,
@@ -67,8 +70,8 @@ fn void an_override_moves_one_pass_and_clear_restores_it() @test
 	three::shader_overrides_clear();
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
 		"clearing returns the table's own answer for cluster");
-	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SLANG,
-		"and for the untouched pass");
+	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SHADY,
+		"and for skin");
 }
 
 fn void an_override_list_names_passes_by_their_table_names() @test
