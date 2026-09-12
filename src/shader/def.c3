@@ -47,6 +47,13 @@ struct ShaderDef
 	// the module's `#line` map and a body's diagnostics treat it as one more file.
 	String uniforms;
 
+	// Whether that region is the spilled shape: the set lives in the device
+	// buffer the push block points at rather than in the block itself. The
+	// caller passes the decision it already made when it emitted the region -
+	// `material_spills` is the one place it is made - so the region and the push
+	// block cannot disagree about which storage a material got.
+	bool uniforms_spilled;
+
 	// The module's text, in the order it is written out. A pass whose source is
 	// more than one file lists them here - a shared piece first, then the file
 	// that is the pass - and the whole of what a reader needs is in them.
@@ -109,11 +116,14 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 	// for the two to be told apart in a diagnostic.
 	String restore = string::tformat("three.%s", def.name);
 
-	// Above the push block, because the push block has a member of it.
+	// Above the push block, because the push block has a member of it - or a
+	// pointer to it, when the set spilled.
 	if (def.uniforms.len > 0)
 	{
 		append_shader_source(out, { "uniforms", def.uniforms }, restore);
-		append_push_block(out, $Type, "Uniforms");
+		append_push_block(out, $Type, def.uniforms_spilled
+			? string::tformat("Uniforms* %s", MATERIAL_TABLE_FIELD)
+			: "Uniforms uniforms");
 	}
 	else
 	{

@@ -222,13 +222,14 @@ fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 }
 
 <*
- A script's uniforms, emitted as the struct a body reads.
+ A script's uniforms, emitted as the struct a body reads, and the fill that
+ reaches it from the push block.
 
  The emitter's output is checked by compiling it: the struct is spliced into a
- module that has a `Uniforms` field in its push block and a body that reads three
- of its fields - a scalar, a table column indexed by the row, and a name that
- would have been a `#define` once. A field that came out with the wrong type or
- the wrong shape fails here rather than in a script.
+ module that has a `Uniforms` member in its push block and a body that reads
+ three of its fields - a scalar, a table column indexed by the row, and a name
+ that would have been a `#define` once. A field that came out with the wrong type
+ or the wrong shape fails here rather than in a script.
 *>
 fn void a_scripts_uniforms_become_a_typed_struct() @test
 {
@@ -247,7 +248,12 @@ fn void a_scripts_uniforms_become_a_typed_struct() @test
 	float4 colors[8];
 	float cells;
 }
-`, "the uniform list becomes fields of the shape the list says: %s", emitted.str_view());
+
+fn Uniforms material_uniforms()
+{
+	return push.uniforms;
+}
+`, "the uniform list becomes fields of the shape the list says, and one fill: %s", emitted.str_view());
 
 	String text = string::tformat("%s\n%s", emitted.str_view(), `
 struct FragmentIn
@@ -287,7 +293,12 @@ fn void a_material_with_no_uniforms_still_has_the_type() @test
 {
 	float material_unused;
 }
-`, "no uniforms still declares the type and one reserved field: %s", emitted.str_view());
+
+fn Uniforms material_uniforms()
+{
+	return push.uniforms;
+}
+`, "no uniforms still declares the type, one reserved field and the fill: %s", emitted.str_view());
 }
 
 <*
@@ -372,11 +383,51 @@ fn float3 shade(Surface s)
 `;
 }
 
+<*
+ A body that reads its uniforms through `s.uniforms` - the spelling that must not
+ move when the storage does. The table column is indexed by the per-copy row, the
+ read the old `#define` existed for.
+*>
+macro String reading_shade()
+{
+	return `
+fn float3 shade(Surface s)
+{
+	float3 tint = s.uniforms.tint.rgb;
+	float3 row = s.uniforms.colors[s.variant].rgb;
+	return tint * row * s.uniforms.cells;
+}
+`;
+}
+
+<*
+ A whole material module from a declared set, in either storage.
+
+ The same declared list and the same body go into both shapes; only the flag
+ differs - the decision `material_spills` makes for a caller, passed to the
+ emitter and the def together, so the region above the block and the block itself
+ cannot disagree about which one this material got.
+*>
+macro String material_module(MaterialUniform[] declared, bool spilled, String body)
+{
+	DString uniforms;
+	uniforms.tinit(1024);
+	three::append_shady_uniforms(&uniforms, declared, spilled);
+
+	three::ShaderDef def = three::mesh_def(material_sources(body), uniforms.str_view());
+	def.uniforms_spilled = spilled;
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	return out.str_view();
+}
+
 fn void the_ported_mesh_is_lit() @test
 {
 	MaterialUniform[] declared = {
 		{ "tint", 4, 1 },
-		{ "colors", 4, 8 },
+		{ "colors", 4, 4 },
 	};
 	DString uniforms;
 	uniforms.tinit(256);
@@ -407,8 +458,10 @@ fn void the_ported_mesh_is_lit() @test
 		"the uniforms struct is declared before the push block that holds one");
 	test::@check(source.contains("\tUniforms uniforms;\n}\nMeshPush push;"),
 		"and the walked block carries it as its last member");
-	test::@check(source.contains("s.uniforms = push.uniforms;"),
-		"which is where the surface's uniforms come from");
+	test::@check(source.contains("fn Uniforms material_uniforms()\n{\n\treturn push.uniforms;\n}"),
+		"a push-resident set is returned from the block by the generated fill");
+	test::@check(source.contains("s.uniforms = material_uniforms();"),
+		"which is where the surface's uniforms come from, storage and all");
 
 	test::@check(source.contains("fn float4 mesh_fragment(VertexOutput input)"),
 		"the material half defines the function the geometry half declared");
@@ -424,6 +477,96 @@ fn void the_ported_mesh_is_lit() @test
 	path::mkdir("build/shaderdef", recursive: true)!!;
 	file::save("build/shaderdef/mesh_lit.shady", source)!!;
 	check_compiles(source, "the generated lit mesh module");
+}
+
+<*
+ The push-resident shape: the declared set is a `Uniforms` member of the walked
+ block, and the generated fill reads it from there.
+*>
+fn void a_push_resident_material_fills_uniforms_from_the_block() @test
+{
+	MaterialUniform[] declared = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 4 },
+		{ "cells", 1, 1 },
+	};
+	test::@check(!three::material_spills(declared), "this set fits the push block");
+
+	String source = material_module(declared, false, reading_shade());
+
+	test::@check(source.contains("struct Uniforms\n{\n\tfloat4 tint;\n\tfloat4 colors[4];\n\tfloat cells;\n}"),
+		"the struct is the one the fields declared: %s", source);
+	test::@check(source.contains("fn Uniforms material_uniforms()\n{\n\treturn push.uniforms;\n}"),
+		"and the fill returns the block's member");
+	test::@check(source.contains("\tUniforms uniforms;\n}\nMeshPush push;"),
+		"which the push block carries by value");
+	test::@check(source.contains("s.uniforms = material_uniforms();"),
+		"and the surface is filled through the one line, not the storage");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/material_pushed.shady", source)!!;
+	check_compiles(source, "the push-resident material module");
+}
+
+<*
+ The spilled shape: the same struct lives in a device buffer, marked `@address`
+ as a pointer target must be, and the push block carries only the pointer.
+*>
+fn void a_spilled_material_fills_uniforms_from_the_table() @test
+{
+	MaterialUniform[] declared = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 32 },
+		{ "cells", 1, 1 },
+	};
+	test::@check(three::material_spills(declared), "this set outgrows the push block");
+
+	String source = material_module(declared, true, reading_shade());
+
+	test::@check(source.contains("struct Uniforms @address\n{\n\tfloat4 tint;\n\tfloat4 colors[32];\n\tfloat cells;\n}"),
+		"the same fields, the same lengths, behind a device address: %s", source);
+	test::@check(source.contains("fn Uniforms material_uniforms()\n{\n\treturn push.material_table[0];\n}"),
+		"and the fill loads the row from the buffer the push block points at");
+	test::@check(source.contains("\tUniforms* material_table;\n}\nMeshPush push;"),
+		"which is the block's only member for the set, a pointer of the struct's own type");
+	test::@check(!source.contains("\tUniforms uniforms;\n}\nMeshPush push;"),
+		"and not the set itself");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/material_spilled.shady", source)!!;
+	check_compiles(source, "the spilled material module");
+}
+
+<*
+ The whole point of the storage split: one body, `s.uniforms.<field>`, compiles
+ against both shapes.
+
+ The two modules differ above their push blocks and nowhere a body reads. The
+ same reading body - scalar, row-indexed table column, scalar - is spliced into
+ both, so a spelling that tracked the storage would fail one of them here.
+*>
+fn void a_body_reading_its_uniforms_compiles_in_both_shapes() @test
+{
+	MaterialUniform[] pushed = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 4 },
+		{ "cells", 1, 1 },
+	};
+	MaterialUniform[] spilled = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 32 },
+		{ "cells", 1, 1 },
+	};
+
+	String pushed_source = material_module(pushed, false, reading_shade());
+	String spilled_source = material_module(spilled, true, reading_shade());
+
+	test::@check(pushed_source.contains("s.uniforms.colors[s.variant]")
+		&& spilled_source.contains("s.uniforms.colors[s.variant]"),
+		"the body's own text is the same in both modules");
+
+	check_compiles(pushed_source, "the same body over the push block");
+	check_compiles(spilled_source, "and over the table buffer");
 }
 
 <*

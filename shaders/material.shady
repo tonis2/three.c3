@@ -71,7 +71,8 @@ struct Surface
 	// block, which carries one. **One storage per material**: a material that
 	// spills has its whole set in the buffer the push block points at instead,
 	// and the generator emits the same struct either way, so a body reads a field
-	// and never a storage.
+	// and never a storage. `material_uniforms` is the generator's one line from
+	// either storage to this field.
 	Uniforms uniforms;
 
 	float roughness;
@@ -143,7 +144,7 @@ fn float4 mesh_fragment(VertexOutput input)
 	s.color = input.color;
 	s.vertex_color = input.vertex_color;
 	s.variant = min(input.variant, draw.material_rows - 1u);
-	s.uniforms = push.uniforms;
+	s.uniforms = material_uniforms();
 
 	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
 	// a second clamp here would be a second place for the range to be decided.
