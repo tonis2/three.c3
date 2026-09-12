@@ -241,13 +241,14 @@ fn void a_scripts_uniforms_become_a_typed_struct() @test
 	emitted.tinit(512);
 	three::append_shady_uniforms(&emitted, uniforms);
 
-	test::@check(emitted.str_view() == `struct Uniforms
+	test::@check(emitted.str_view() == `const uint MATERIAL_ROWS = 8u;
+struct Uniforms
 {
 	float4 tint;
 	float4 colors[8];
 	float cells;
 }
-`, "the uniform list becomes fields of the shape the list says: %s", emitted.str_view());
+`, "the uniform list becomes fields of the shape the list says, and the rows a body may index: %s", emitted.str_view());
 
 	String text = string::tformat("%s\n%s", emitted.str_view(), `
 struct FragmentIn
@@ -273,15 +274,22 @@ fn float4 frag(FragmentIn input) @fragment
 	check_compiles(text, "a module whose body reads its uniforms as fields");
 }
 
-fn void an_empty_uniform_list_emits_nothing() @test
+fn void a_material_with_no_uniforms_still_has_the_type() @test
 {
-	// No uniforms means no body can name one, so there is nothing to declare - and
-	// an empty struct would be a type with no field a body could ever resolve.
+	// `Surface.uniforms` has to exist for every material, or the body's vocabulary
+	// would depend on how many uniforms a script happened to declare. One reserved
+	// field is the price, and the rows constant is emitted as well because the row
+	// a body did not need is still the row it carries.
 	DString emitted;
-	emitted.tinit(64);
+	emitted.tinit(256);
 	three::append_shady_uniforms(&emitted, {});
 
-	test::@check(emitted.str_view().len == 0, "nothing is emitted for no uniforms, got `%s`", emitted.str_view());
+	test::@check(emitted.str_view() == `const uint MATERIAL_ROWS = 1u;
+struct Uniforms
+{
+	float material_unused;
+}
+`, "no uniforms still declares the type and one reserved field: %s", emitted.str_view());
 }
 
 <*

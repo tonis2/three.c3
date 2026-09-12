@@ -7,40 +7,26 @@
      s.uniforms.tint
      s.uniforms.colors[s.variant]
 
- **Typed, which is the whole point of not `#define`ing them.** The assembler this
- replaces emitted `#define tint (push.tint)` (or, for a table column,
- `#define tint (push.material_table[0].tint)`), so a body's typo became a compile
- error about a name nobody declared, pointing wherever the macro happened to
- expand, and a name a script chose could rewrite the template's own lines until
- the `#undef` put it back. A struct field has none of those properties: a typo is
- an unknown field at the body's own line, and nothing outside the body can see
- the name at all.
-
- **One storage per material.** A material whose uniforms fit the push block reads
- them from it; one that spills has its whole uniform set - scalars and table
- columns alike - in the device buffer, and the push block carries only the
- pointer. That is the decision this emitter exists to make possible without a
- macro: two storages are two expressions, so hiding the choice needs a
- preprocessor, and one storage is a memcpy of a few dozen bytes beside a table
- the engine already writes per bucket per frame.
-
- The struct is emitted as a source region like any other piece of a module, so
- the body's line numbers and the module's `#line` map see it as one more file.
 *>
 module three;
 
 fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms)
 {
-	if (uniforms.len == 0)
-	{
-		// Nothing to read, and nothing that could read it: a body has no uniforms
-		// to name. Emitting an empty struct would declare a type no field could
-		// ever resolve against, and a `Surface` field of that type would be a
-		// field no body could use.
-		return;
-	}
+	// The rows a table can be indexed by, emitted for every material including one
+	// with no uniforms at all: `Surface.variant` is clamped against this, and a
+	// body that reads nothing still carries the row it did not need.
+	out.appendf("const uint MATERIAL_ROWS = %du;\n", material_rows(uniforms))!!;
 
 	out.append_string("struct Uniforms\n{\n");
+	if (uniforms.len == 0)
+	{
+		// **A material with no uniforms still has the type.** `Surface.uniforms`
+		// would otherwise be a field no material without uniforms could have, and
+		// `Surface` is the engine's contract rather than a script's - generating it
+		// per material would put the body's whole vocabulary behind a generator.
+		// One reserved float is the price, in a push block that has the room.
+		out.append_string("\tfloat material_unused;\n");
+	}
 	foreach (uniform : uniforms)
 	{
 		out.append_char('\t');
