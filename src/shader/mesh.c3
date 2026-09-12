@@ -43,6 +43,12 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 }
 
 <*
+ What a material with no script gets as its `shade()` body: the built-in look,
+ which is what `mesh.slang` computes for itself when nothing replaces it.
+*>
+const String DEFAULT_SHADE_SHADY @private = "fn float3 shade(Surface s)\n{\n\treturn standard(s);\n}\n";
+
+<*
  What a material with no vertex body gets instead of one.
 
  An empty function rather than an absent one, so `mesh_vertex` calls `displace`

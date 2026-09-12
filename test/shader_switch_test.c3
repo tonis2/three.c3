@@ -31,8 +31,9 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 }
 
 <*
- The default the flips leave behind: cluster, skin, shadow and sky are on shady,
- and no other row moved.
+ The default the flips leave behind: cluster, skin, shadow and sky are on shady;
+ the draw path is wired but its rows are held on Slang by the material half, and
+ no other row moved.
 *>
 fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 {
@@ -44,6 +45,13 @@ fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 		"shadow compiles through shady");
 	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SHADY,
 		"sky compiles through shady");
+	// Wired in `compile_shader`, held here until `shaders/material.shady` carries
+	// the whole built-in look: maps, shadows, occlusion, the lightmap and the
+	// environment are not in it yet, and the built-in template is one module.
+	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SLANG,
+		"the draw path is still compiled by Slang");
+	test::@check(three::shader_compiler(three::ShaderPass.MESH_MATERIAL) == three::ShaderCompiler.SLANG,
+		"and a script's material body with it");
 	foreach (i, row : three::PASS_COMPILERS)
 	{
 		if ((three::ShaderPass)i == three::ShaderPass.CLUSTER) continue;
@@ -89,8 +97,8 @@ fn void an_override_list_names_passes_by_their_table_names() @test
 		"cluster was named");
 	test::@check(three::shader_compiler(three::ShaderPass.SKIN) == three::ShaderCompiler.SLANG,
 		"skin was named");
-	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SLANG,
-		"mesh was not");
+	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SHADY,
+		"sky was not");
 }
 
 <*
@@ -165,4 +173,44 @@ fn void the_cluster_call_site_reaches_both_compilers() @test
 		through_slang.layout.push_size, through_shady.layout.push_size);
 	test::@check(through_shady.layout.bindings.len() == 0 && through_shady.layout.set_count == 0,
 		"cluster declares no descriptors either way");
+}
+
+<*
+ The draw path's row reaches the shady def when a run asks it to, even though the
+ table's default stays Slang until the material half is whole.
+
+ The module is the built-in one's: the geometry and material halves, the
+ `standard(s)` body a material nobody wrote gets, and the walk of `MeshPush`. Its
+ push block ends in the emitted `Uniforms` member, which is why this is 32 bytes
+ where the Slang module's 24 are.
+*>
+fn void the_mesh_call_site_is_wired_to_the_shady_def() @test
+{
+	defer three::shader_overrides_clear();
+
+	String source = three::shader_source("mesh.slang", mem)!!;
+	defer source.free(mem);
+
+	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SHADY);
+	three::ShaderModule? through_shady = three::compile_shader(
+		three::ShaderPass.MESH, source, "mesh.slang", three::MESH_ENTRIES[..]);
+	if (catch through_shady)
+	{
+		test::@check(false, "the shady draw path compiled");
+		return;
+	}
+	defer through_shady.free();
+	test::@check(through_shady.ok, "the shady draw path compiles: %s", through_shady.diagnostic);
+	if (catch three::check_entry_points(&through_shady))
+	{
+		test::@check(false, "the shady module has vertexMain and fragmentMain");
+	}
+	if (catch three::check_push_block(&through_shady.layout, three::MESH_PUSH_FIELDS[..]))
+	{
+		test::@check(false, "the shady module's push block matches the mesh contract");
+	}
+	test::@check(through_shady.layout.push_size == 32,
+		"the block is 24 walked bytes plus the empty uniforms, got %d", through_shady.layout.push_size);
+	test::@check(through_shady.layout.field_of(three::MATERIAL_TABLE_FIELD) == null,
+		"and a material with no uniforms has nothing to spill");
 }

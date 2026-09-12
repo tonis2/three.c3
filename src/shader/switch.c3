@@ -33,6 +33,7 @@ enum ShaderPass : char
 	SHADOW_CUTOUT,
 	SKY,
 	MESH,
+	MESH_MATERIAL,
 	POST,
 	TONEMAP,
 	LIGHTMAP,
@@ -63,9 +64,15 @@ struct PassCompiler
 <*
  Which implementation compiles each pass.
 
- `CLUSTER`, `SKIN`, `SHADOW` and `SKY` are the flips so far; every other row is
- still Slang, and each names the def that will replace it. See the file header
- for what a flip takes.
+ `MESH` is the built-in draw path - `MeshPass.init`'s four pipelines - and it is
+ *wired but not flipped*: `shaders/material.shady` carries the punctual direct
+ look only, so maps, shadows, occlusion, the lightmap, the environment and the
+ debug views would stop rendering the moment the built-in template changed hands.
+ `test/mesh_shader_test.c3` compares the ported subset through both compilers and
+ the row moves when the material half is whole. `MESH_MATERIAL` is the same files
+ assembled around a script's `shade()` body, which the shady half cannot take
+ yet either. Every other row is still Slang, and each names the def that will
+ replace it. See the file header for what a flip takes.
 *>
 const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
 	[ShaderPass.CLUSTER] = { .compiler = ShaderCompiler.SHADY, .name = "cluster", .def = "cluster_def" },
@@ -74,6 +81,7 @@ const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
 	[ShaderPass.SHADOW_CUTOUT] = { .compiler = ShaderCompiler.SLANG, .name = "shadow_cutout", .def = "shadow_cutout_def" },
 	[ShaderPass.SKY] = { .compiler = ShaderCompiler.SHADY, .name = "sky", .def = "sky_def" },
 	[ShaderPass.MESH] = { .compiler = ShaderCompiler.SLANG, .name = "mesh", .def = "mesh_def" },
+	[ShaderPass.MESH_MATERIAL] = { .compiler = ShaderCompiler.SLANG, .name = "material", .def = "mesh_def" },
 	[ShaderPass.POST] = { .compiler = ShaderCompiler.SLANG, .name = "post", .def = "post_def" },
 	[ShaderPass.TONEMAP] = { .compiler = ShaderCompiler.SLANG, .name = "tonemap", .def = "post_def" },
 	[ShaderPass.LIGHTMAP] = { .compiler = ShaderCompiler.SLANG, .name = "lightmap", .def = "" },
@@ -211,6 +219,18 @@ fn ShaderModule? compile_shader(
 			case ShaderPass.SKY:
 				ShaderModule sky = compile_shady(sky_def(), SkyPush);
 				return sky;
+			case ShaderPass.MESH:
+			{
+				// The built-in material: no script wrote a body, so the spliced
+				// half is `standard(s)` and the uniform set is the reserved empty
+				// one every material without a declaration emits.
+				DString uniforms;
+				uniforms.tinit(64);
+				append_shady_uniforms(&uniforms, {});
+				ShaderModule mesh = compile_shady(mesh_def(DEFAULT_SHADE_SHADY, uniforms.str_view()), MeshPush);
+				uniforms.free();
+				return mesh;
+			}
 			default:
 				@advise("three: %s is set to shady but no module is wired for it", PASS_COMPILERS[pass].name);
 				return SHADY_PASS_UNWIRED~;
