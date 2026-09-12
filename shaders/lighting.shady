@@ -1,0 +1,180 @@
+// Direct lighting, ported to shady from `lighting.slang`'s shared block.
+//
+// This is the first slice of it: a surface is lit by the punctual lights the
+// cluster pass left it - directionals from the frame's own list, points and
+// spots from this fragment's cluster. What is **not** here yet, and each is its
+// own piece of work rather than an omission to be discovered later:
+//
+//  - **shadows**, so every light reaches a fragment that a wall should have
+//    stopped. `shared_point_shadow_factor` is where they go;
+//  - **area lights**, the rectangle and disk kinds, whose LTC matrices are the
+//    bulk of the original;
+//  - **baked light**, the lightmap's diffuse and the dynamic-lights-only rule
+//    that keeps a baked light from being added twice.
+//
+// The shape that matters is kept: the light list is the *cluster's*, so a
+// fragment is lit by what the culling pass decided reaches it, and the two
+// lists (frame directionals, clustered punctuals) are walked in the original's
+// order.
+
+// `Light.meta.z`: what kind of emitter this is. 0 is directional and carries no
+// position at all; 4 is a spot, whose cone `spot_reach` narrows.
+const uint LIGHT_DIRECTIONAL = 0u;
+const uint LIGHT_POINT       = 1u;
+const uint LIGHT_RECT        = 2u;
+const uint LIGHT_DISK        = 3u;
+const uint LIGHT_SPOT        = 4u;
+
+// `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
+// direct diffuse in its tile. Nothing reads the lightmap yet, so nothing skips.
+const uint LIGHT_BAKED = 0x40000u;
+
+// A point or spot's cone, in cosine space: 1 inside, 0 outside, smooth between.
+fn float spot_reach(Light light, float3 toward)
+{
+	return smoothstep(light.area_right.w, light.area_up.w, dot(normalize(light.area_right.xyz), -toward));
+}
+
+// Which way a light is from a surface, and how much of it arrives.
+//
+// A negative w means the "direction" really is a direction and every ray
+// parallel: `reach` is one and the vector is normalized, which is the whole of a
+// directional light. Above zero it is a *place*, and the return is the offset to
+// it: `reach` carries the inverse square and the soft edge at the light's own
+// range, so a lamp lights the room it is in and nothing past its radius rather
+// than falling off like a star.
+fn float3 light_toward(float4 packed, float3 position, out float reach)
+{
+	if (packed.w <= 0.0)
+	{
+		reach = 1.0;
+		return normalize(packed.xyz);
+	}
+
+	float3 offset = packed.xyz - position;
+	float square = max(dot(offset, offset), 1e-4);
+	float distance = sqrt(square);
+
+	float edge = saturate(1.0 - pow(distance / packed.w, 4.0));
+	reach = edge * edge / square;
+	return offset / distance;
+}
+
+// This fragment's place in the cluster grid, from its screen position and its
+// distance to the camera - the same arithmetic the culling pass ran in reverse,
+// and it has to stay that arithmetic to the last `min`.
+fn uint fragment_cluster(FrameBlock* frame, float4 screen_position, float3 position)
+{
+	uint3 grid = frame[0].cluster_grid.xyz;
+	float2 extent = max(frame[0].cluster_screen.xy, float2(1.0));
+
+	uint x = min((uint)(screen_position.x * float(grid.x) / extent.x), grid.x - 1u);
+	uint y = min((uint)(screen_position.y * float(grid.y) / extent.y), grid.y - 1u);
+
+	float near_plane = frame[0].cluster_screen.z;
+	float far_plane = frame[0].cluster_screen.w;
+	float depth = max(distance(position, frame[0].camera.xyz), near_plane);
+	uint z = min((uint)(saturate(log(depth / near_plane) / log(far_plane / near_plane)) * float(grid.z)),
+		grid.z - 1u);
+
+	return x + grid.x * (y + grid.y * z);
+}
+
+// GGX's distribution, Smith's height-correlated visibility with the k the
+// original uses, and Schlick's Fresnel. One light's specular lobe, for a surface
+// whose roughness has already been squared.
+fn float3 punctual_specular(float3 normal, float3 view, float3 toward, float nl, float3 f0, float f90, float a2, float k, float nv)
+{
+	float3 h = normalize(toward + view);
+	float nh = max(dot(normal, h), 0.0);
+	float vh = max(dot(view, h), 0.0);
+
+	float den = nh * nh * (a2 - 1.0) + 1.0;
+	float d = a2 / (3.14159265 * den * den);
+	float g = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
+	float3 fresnel = f0 + (float3(f90) - f0) * pow(1.0 - vh, 5.0);
+
+	return d * g * fresnel / (4.0 * nv);
+}
+
+// One surface's direct light, in two terms: what it scatters and what it
+// mirrors. Kept apart because a material gets to weight them differently - and
+// because a scene with no specular costs nothing to leave at zero.
+struct LightTerms
+{
+	float3 diffuse;
+	float3 specular;
+}
+
+// Every light that reaches this fragment.
+//
+// The directional lights are the frame's own list: there are few, they are
+// infinite, and a cluster cannot cull them. Everything with a position is found
+// through the culling pass's cluster, whose counts and indices are the frame
+// block's - and whose overflow bit means "the culling gave up on this cluster,
+// shade it with every light there is", which is what makes the pair correct at
+// any scale rather than only at the scale it was tuned for.
+fn LightTerms shade_lights(
+	FrameBlock* frame,
+	float4 screen_position,
+	float3 position,
+	float3 normal,
+	float3 albedo,
+	float roughness,
+	float metalness,
+	float reflectance)
+{
+	float3 view = normalize(frame[0].camera.xyz - position);
+	float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
+	float f90 = clamp(dot(f0, float3(16.5)), 0.0, 1.0);
+	float a = max(roughness * roughness, 1e-3);
+	float a2 = a * a;
+	float nv = max(dot(normal, view), 1e-4);
+	float k = a * 0.5;
+
+	LightTerms terms;
+	terms.diffuse = float3(0.0);
+	terms.specular = float3(0.0);
+
+	uint count = (uint)frame[0].lighting.y;
+	for (uint i = 0u; i < count; i++)
+	{
+		Light light = frame[0].lights[i];
+		if (light.meta.z != LIGHT_DIRECTIONAL) continue;
+
+		float reach;
+		float3 toward = light_toward(light.direction, position, reach);
+		float nl = max(dot(normal, toward), 0.0);
+		if (nl * reach <= 0.0) continue;
+
+		float3 energy = light.color.rgb * light.color.w * reach;
+		terms.diffuse += energy * nl;
+		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
+	}
+
+	uint cluster = fragment_cluster(frame, screen_position, position);
+	uint packed = frame[0].cluster_grid.w == 0u ? 0x80000000u : frame[0].cluster_counts[cluster];
+	bool overflow = (packed & 0x80000000u) != 0u;
+	uint local_count = overflow ? count : packed;
+
+	for (uint local = 0u; local < local_count; local++)
+	{
+		uint i = overflow ? local : frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + local];
+		Light light = frame[0].lights[i];
+
+		if (light.meta.z != LIGHT_POINT && light.meta.z != LIGHT_SPOT) continue;
+
+		float reach;
+		float3 toward = light_toward(light.direction, position, reach);
+		if (light.meta.z == LIGHT_SPOT) reach *= spot_reach(light, toward);
+
+		float nl = max(dot(normal, toward), 0.0);
+		if (nl * reach <= 0.0) continue;
+
+		float3 energy = light.color.rgb * light.color.w * reach;
+		terms.diffuse += energy * nl;
+		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
+	}
+
+	return terms;
+}
