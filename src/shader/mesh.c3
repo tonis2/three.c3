@@ -19,11 +19,15 @@ import shady;
 macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vertex_code = "")
 {
 	ShaderSource[] sources = {
-		// The library first: `Surface`, `Vertex`, the two body declarations and
-		// the built-in look. It is generated code and carries the `three.` name
-		// the rest of the prologue does, which is how a diagnostic tells it from
-		// the body below.
+		// The library first: the lighting `shade_lights` reads, the pose and
+		// the flag bits, the texture array a map lives in, and then the
+		// record and built-in look in `three.material`. The order is the
+		// dependency order - `material.shady` reads the flags `skinning.shady`
+		// declares and the `Map` `surface.shady` declares, and a constant is
+		// not a forward reference the way a function is.
 		{ "three.lighting", shader_source("lighting.shady", tmem)!! },
+		{ "skinning", shader_source("skinning.shady", tmem)!! },
+		{ "three.surface", shader_source("surface.shady", tmem)!! },
 		{ "three.material", shader_source("material.shady", tmem)!! },
 
 		// **The body is its own region.** `append_shader_source` brackets it
@@ -35,7 +39,6 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 		{ "material", fragment_code },
 		{ "vertex", vertex_code.len > 0 ? vertex_code : IDENTITY_DISPLACE_SHADY },
 
-		{ "skinning", shader_source("skinning.shady", tmem)!! },
 		{ "mesh", shader_source("mesh.shady", tmem)!! },
 	};
 

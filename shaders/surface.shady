@@ -1,0 +1,156 @@
+// The device-wide texture array and the maps a material wears, ported from
+// `surface.slang`'s body-facing half.
+//
+// **Every image a material reads lives in one descriptor array**, owned by the
+// texture registry and bound once as set 1 - `src/gpu/texture_table.c3`. A
+// material carries indices into it in its own draw record rather than a
+// descriptor set of its own, which is what removes the per-stage sampler
+// ceiling that used to cap a stack at twelve maps.
+//
+// `Map` is what a name in a body means: a `uint` and four methods, so a body
+// still writes `noise_map.Sample(uv)` and still hands a name to
+// `stochastic_sample(image, uv)` by parameter. A slot nothing filled holds the
+// reserved 1x1 white, so there is nothing here to test for.
+//
+// `NonUniformResourceIndex` is inside the methods rather than at the call
+// sites: two lanes of one quad may be shading two different materials, so the
+// index is not uniform across the wave, and a body reading a map inside a
+// branch that differs between lanes must not have to know that.
+
+Sampler2D three_textures[] @set(1) @binding(0);
+
+// The row of `DrawRecord.texture_index` the base colour map sits at. The row is
+// what a material's own maps are named by - the number each used to be bound at
+// - and the rest of the rows are a script's declared textures, numbered from
+// `MATERIAL_BINDING_FIRST`.
+const uint SLOT_BASE_COLOR = 0;
+
+// `material.stochastic`: sample the base map through `stochastic_sample` so a
+// tiled surface stops having a period.
+const uint FLAG_STOCHASTIC = 256;
+
+struct Map
+{
+	uint at;
+}
+
+fn Map map_at(uint at)
+{
+	Map m;
+	m.at = at;
+	return m;
+}
+
+fn uint Map.slot(&self)
+{
+	return push.draw[0].texture_index[self.at];
+}
+
+fn float4 Map.Sample(&self, float2 uv)
+{
+	return three_textures[NonUniformResourceIndex(self.slot())].Sample(uv);
+}
+
+fn float4 Map.SampleGrad(&self, float2 uv, float2 gx, float2 gy)
+{
+	return three_textures[NonUniformResourceIndex(self.slot())].SampleGrad(uv, gx, gy);
+}
+
+fn float4 Map.SampleLevel(&self, float2 uv, float lod)
+{
+	return three_textures[NonUniformResourceIndex(self.slot())].SampleLevel(uv, lod);
+}
+
+fn float4 Map.SampleBias(&self, float2 uv, float bias)
+{
+	return three_textures[NonUniformResourceIndex(self.slot())].SampleBias(uv, bias);
+}
+
+// A stable hash of a lattice cell, for the tile offsets below. Two numbers out
+// because a tile's offset is a point in the image, not a scalar.
+fn float2 hash_cell(float2 p)
+{
+	float2 q = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+	return frac(sin(q) * 43758.5453);
+}
+
+// The three corners of the triangular lattice cell a uv falls in, and how much
+// of each it is - barycentric, so the three weights sum to exactly 1.
+//
+// Skewed rather than square: a square lattice blends four tiles and its seams
+// line up into a visible grid, which is the thing being got rid of. A triangular
+// one blends three and its seams meet at 120 degrees, which the eye does not
+// assemble into anything.
+fn void triangle_cell(
+	float2 uv,
+	out float3 weights,
+	out float2 corner_a,
+	out float2 corner_b,
+	out float2 corner_c)
+{
+	// 2 * sqrt(3): the cell size, in the uv the caller already tiled. A few
+	// cells per repeat of the image is what breaks the repeat without blending
+	// so much of the image together that it turns to soup.
+	float2 grid = uv * 3.4641016;
+
+	// `surface.slang` writes this as a row-list `float2x2(1, 0, -0.57735027,
+	// 1.15470054)`; shady's constructor takes columns, so the same matrix is its
+	// two column vectors. A verbatim four-scalar port would not compile here,
+	// and one written as the transpose would skew the other way.
+	const float2x2 TO_SKEWED = float2x2(float2(1.0, -0.57735027), float2(0.0, 1.15470054));
+	float2 skewed = mul(TO_SKEWED, grid);
+
+	float2 base = floor(skewed);
+	float3 part = float3(frac(skewed), 0.0);
+	part.z = 1.0 - part.x - part.y;
+
+	// Which of the two triangles of the skewed cell this is, and the corners
+	// wind the same way either side so the weights stay a partition of unity
+	// across the diagonal.
+	if (part.z > 0.0)
+	{
+		weights = float3(part.z, part.y, part.x);
+		corner_a = base;
+		corner_b = base + float2(0.0, 1.0);
+		corner_c = base + float2(1.0, 0.0);
+	}
+	else
+	{
+		weights = float3(-part.z, 1.0 - part.y, 1.0 - part.x);
+		corner_a = base + float2(1.0, 1.0);
+		corner_b = base + float2(1.0, 0.0);
+		corner_c = base + float2(0.0, 1.0);
+	}
+}
+
+// One texture, sampled so that it stops repeating.
+//
+// Three taps of the same image at three per-cell random offsets, blended by the
+// barycentric weight of a triangular lattice over the uv. Two neighbouring
+// repeats of the image read different parts of it, so the eye has no period to
+// find, and no second image and no authoring is involved.
+//
+// **`SampleGrad` and not `Sample`, and this is the whole of whether it works.**
+// The offsets are per cell and jump at every cell boundary, so the derivatives
+// the hardware would compute for itself are enormous exactly along the seams -
+// which selects the smallest mip there and draws a blurred line around every
+// cell. The gradients handed in are the *un-jittered* ones, which is what the
+// surface actually has.
+//
+// A flat image comes back exactly as it was, whatever the offsets do, because
+// the weights sum to one. That is the property the test pins.
+fn float4 stochastic_sample(Map image, float2 uv)
+{
+	float3 weights;
+	float2 a;
+	float2 b;
+	float2 c;
+	triangle_cell(uv, weights, a, b, c);
+
+	float2 dx = ddx(uv);
+	float2 dy = ddy(uv);
+
+	return weights.x * image.SampleGrad(uv + hash_cell(a), dx, dy)
+	     + weights.y * image.SampleGrad(uv + hash_cell(b), dx, dy)
+	     + weights.z * image.SampleGrad(uv + hash_cell(c), dx, dy);
+}

@@ -2,11 +2,10 @@
 //
 // This is the first slice of it: a surface is lit by the punctual lights the
 // cluster pass left it - directionals from the frame's own list, points and
-// spots from this fragment's cluster. What is **not** here yet, and each is its
-// own piece of work rather than an omission to be discovered later:
+// spots from this fragment's cluster, each with its own shadow. What is **not**
+// here yet, and each is its own piece of work rather than an omission to be
+// discovered later:
 //
-//  - **shadows**, so every light reaches a fragment that a wall should have
-//    stopped. `shared_point_shadow_factor` is where they go;
 //  - **area lights**, the rectangle and disk kinds, whose LTC matrices are the
 //    bulk of the original;
 //  - **baked light**, the lightmap's diffuse and the dynamic-lights-only rule
@@ -28,6 +27,25 @@ const uint LIGHT_SPOT        = 4u;
 // `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
 // direct diffuse in its tile. Nothing reads the lightmap yet, so nothing skips.
 const uint LIGHT_BAKED = 0x40000u;
+
+// Whether this light's direct diffuse may be in a receiver's lightmap. A
+// receiver without a tile shades it in real time as though it were never baked.
+fn bool light_is_baked(Light light)
+{
+	return (light.meta.w & LIGHT_BAKED) != 0u;
+}
+
+// The shadow atlas through a depth-compare sampler, and the same image through
+// the *static* compare sampler a baked receiver reads so that the tile's own
+// shadows are the ones it was baked with. The engine binds both every draw, in
+// the frame's set - see `render/pass.c3` - and both carry the 1x1 white when no
+// shadow pass ran, which the comparison reads as "fully lit" by construction.
+//
+// **The binding numbers are the engine's, not ones this file invented.** A port
+// that renumbered them would leave the pass writing textures the module never
+// reads, and nothing in either suite would say so.
+Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);
+Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);
 
 // A point or spot's cone, in cosine space: 1 inside, 0 outside, smooth between.
 fn float spot_reach(Light light, float3 toward)
@@ -58,6 +76,209 @@ fn float3 light_toward(float4 packed, float3 position, out float reach)
 	float edge = saturate(1.0 - pow(distance / packed.w, 4.0));
 	reach = edge * edge / square;
 	return offset / distance;
+}
+
+// --- Shadows -----------------------------------------------------------------
+//
+// The sun's shadow, ported from `lighting.slang`'s shared block. One lookup and
+// the comparison sampler that makes it four texels of hardware filtering.
+//
+// A view knows what it drew: `params.x` is one texel in its uv, `params.y` the
+// script's depth bias, `params.z` the normal offset in world units, and
+// `params.w` how much of the shadow to apply - zero in a frame with no shadow
+// pass, which is the branch that answers "lit" without a tap.
+//
+// **The receiver-plane gradient is why this reads `plane_*` rather than taking
+// derivatives.** A tap's expected depth is the depth of the plane the fragment
+// lies on at that tap's ndc position, and the plane's slope in ndc falls out of
+// the view's frame constants instead of out of a derivative taken inside a
+// light-dependent branch.
+
+// `cached` picks the static atlas, which a baked receiver compares against so
+// that a moving caster's shadow shows up as the delta between the two maps.
+// Spelled as a branch rather than a ternary: a sampled image is opaque, and the
+// two samplers are two values SPIR-V cannot `select` between.
+fn float shadow_compare(bool cached, float2 uv, float reference)
+{
+	if (cached) return shadow_atlas_static_compare.SampleCmpLevelZero(uv, reference);
+	return shadow_atlas_compare.SampleCmpLevelZero(uv, reference);
+}
+
+// How much of one light's shadow reaches this point: 1 fully lit, 0 fully
+// shadowed. Four texel centres, each compared at the receiver plane's own depth
+// there and blended by where the fragment sits between them.
+fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, bool cached)
+{
+	if (index == 0xffffffffu) return 1.0;
+	ShadowGpuView view = push.frame[0].shadow_views[index];
+	if (view.params.w <= 0.0) return 1.0;
+
+	// The projection's four columns, read rather than multiplied: a column is
+	// what `view_projection[i]` means here, and Slang's `vp[i][j]` was a *row*
+	// - the two spellings index opposite things, which a verbatim port would
+	// transpose in silence.
+	float4x4 vp = view.view_projection;
+	float4 cx = vp[0];
+	float4 cy = vp[1];
+	float4 cz = vp[2];
+	float4 clip = cx * position.x + cy * position.y + cz * position.z + vp[3];
+	if (clip.w <= 0.0) return 1.0;
+
+	if (view.params.z != 0.0)
+	{
+		float distance = view.params.z;
+		if (distance < 0.0)
+		{
+			// Convert receiver texels to world units at this exact perspective
+			// depth. This keeps the offset useful far from a local light without
+			// making it enormous close to the light.
+			float2 ndc = clip.xy / clip.w;
+			float inv_w = 1.0 / clip.w;
+			float2 sx = (cx.xy - ndc * cx.w) * inv_w;
+			float2 sy = (cy.xy - ndc * cy.w) * inv_w;
+			float2 sz = (cz.xy - ndc * cz.w) * inv_w;
+			float ndc_per_world = sqrt(max(max(dot(sx, sx), dot(sy, sy)), dot(sz, sz)));
+			distance = (-view.params.z) * (2.0 * view.params.x) / max(ndc_per_world, 1e-6);
+		}
+		clip += distance * (cx * normal.x + cy * normal.y + cz * normal.z);
+		if (clip.w <= 0.0) return 1.0;
+	}
+
+	float3 ndc = clip.xyz / clip.w;
+	float2 local = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+	if (ndc.z < 0.0 || ndc.z > 1.0 || any(local < 0.0) || any(local > 1.0)) return 1.0;
+
+	float2 texel = view.params.x * view.atlas.xy;
+	// Half a texel in from the tile, so a tap never reaches a neighbouring
+	// view's depth.
+	float2 lo = view.atlas.zw + texel * 0.5;
+	float2 hi = view.atlas.zw + view.atlas.xy - texel * 0.5;
+
+	// The receiver plane's depth slope in ndc: the cofactor rows in
+	// `plane_*.xyz` and the inverse-transposed w row in their w, which is the
+	// rank-one update of the projection's 3x3.
+	float inv_w = 1.0 / clip.w;
+	float4 plane_x = push.frame[0].shadow_views[index].plane_x;
+	float4 plane_y = push.frame[0].shadow_views[index].plane_y;
+	float4 plane_z = push.frame[0].shadow_views[index].plane_z;
+	float3 plane_w = float3(plane_x.w, plane_y.w, plane_z.w);
+	float3 plane_n = float3(dot(plane_x.xyz, normal), dot(plane_y.xyz, normal), dot(plane_z.xyz, normal));
+	float3 plane_ndc = plane_n * (1.0 - dot(ndc, plane_w)) + plane_w * dot(ndc, plane_n);
+	float2 gradient = abs(plane_ndc.z) * (inv_w * inv_w) > 1e-8
+		? -plane_ndc.xy / plane_ndc.z
+		: float2(0.0);
+
+	// Four taps, each landed on a texel centre so the hardware weighs one texel
+	// and the plane depth above is that texel's own depth.
+	const float2 adjacent[4] = {
+		float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0)
+	};
+	float2 texel_position = local / view.params.x - 0.5;
+	float2 fraction = frac(texel_position);
+	float2 base = floor(texel_position);
+	float samples[4];
+	[unroll] for (int i = 0; i < 4; i++)
+	{
+		float2 tap_local = clamp(
+			(base + adjacent[i] + 0.5) * view.params.x,
+			view.params.x * 0.5,
+			1.0 - view.params.x * 0.5
+		);
+		float2 tap_ndc = (tap_local - local) * float2(2.0, -2.0);
+		float reference = ndc.z + dot(gradient, tap_ndc) - view.params.y;
+		samples[i] = shadow_compare(cached, clamp(tap_local * view.atlas.xy + view.atlas.zw, lo, hi), reference);
+	}
+	float lit = lerp(
+		lerp(samples[0], samples[1], fraction.x),
+		lerp(samples[2], samples[3], fraction.x),
+		fraction.y
+	);
+	return lerp(1.0, lit, view.params.w);
+}
+
+fn float shadow_view_factor_filtered(uint index, float3 position, float3 normal)
+{
+	return shadow_view_factor_filtered_from(index, position, normal, false);
+}
+
+// One light's shadow, from the view it names. `Light.meta.y` is that view's
+// index, or 0xffffffff for a light with no view at all.
+fn float shadow_factor(float3 position, float3 normal)
+{
+	return shadow_view_factor_filtered(push.frame[0].lights[0].meta.y, position, normal);
+}
+
+// The same for a point, spot or area emitter: one view per light, and a point
+// light's six cube faces are six consecutive views, picked by which axis the
+// ray to the light leaves through. An area emitter has one view at its centre -
+// widening that silhouette invents a blocky penumbra rather than integrating
+// the area.
+fn float point_shadow_factor_from(uint index, Light light, float3 position, float3 normal, bool cached)
+{
+	uint view = light.meta.y;
+	if (view == 0xffffffffu) return 1.0;
+	if (light.meta.z == LIGHT_POINT)
+	{
+		float3 ray = position - light.direction.xyz;
+		float3 a = abs(ray);
+		uint face;
+		if (a.x >= a.y && a.x >= a.z) face = ray.x >= 0.0 ? 0u : 1u;
+		else if (a.y >= a.z) face = ray.y >= 0.0 ? 2u : 3u;
+		else face = ray.z >= 0.0 ? 4u : 5u;
+		view += face;
+	}
+	return shadow_view_factor_filtered_from(view, position, normal, cached);
+}
+
+fn float point_shadow_factor(uint index, Light light, float3 position, float3 normal)
+{
+	return point_shadow_factor_from(index, light, position, normal, false);
+}
+
+// Only the visibility a *moving* caster took away from a baked light, read as
+// the difference between the live atlas and the static one the bake recorded.
+//
+// The projected box is a cheap gate before the pair of lookups, and an area
+// emitter's view is one depth view at its centre - so the areas are skipped
+// here until their LTC fit is ported.
+fn float3 baked_dynamic_delta(FrameBlock* frame, float3 normal, float3 receiver_normal, float3 position)
+{
+	float3 delta = float3(0.0);
+	uint count = (uint)frame[0].lighting.y;
+	for (uint i = 0u; i < count; i++)
+	{
+		Light light = frame[0].lights[i];
+		if (!light_is_baked(light) || light.meta.y == 0xffffffffu) continue;
+
+		// A point light's six cube faces are six views.
+		uint parts = light.meta.z == LIGHT_POINT ? 6u : 1u;
+		bool inside = false;
+		for (uint part = 0u; part < parts && !inside; part++)
+		{
+			ShadowGpuView view = frame[0].shadow_views[light.meta.y + part];
+			float4 rect = view.dynamic_rect;
+			if (rect.z <= rect.x || rect.w <= rect.y) continue;
+			float4 clip = view.view_projection * float4(position, 1.0);
+			if (clip.w <= 0.0) continue;
+			float2 ndc = clip.xy / clip.w;
+			float2 uv = float2(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y);
+			inside = all(uv >= rect.xy) && all(uv <= rect.zw);
+		}
+		if (!inside) continue;
+
+		float live = point_shadow_factor_from(i, light, position, receiver_normal, false);
+		float cached = point_shadow_factor_from(i, light, position, receiver_normal, true);
+		float visibility = min(live - cached, 0.0);
+		if (visibility >= 0.0) continue;
+
+		if (light.meta.z == LIGHT_RECT || light.meta.z == LIGHT_DISK) continue;
+		float reach;
+		float3 toward = light_toward(light.direction, position, reach);
+		if (light.meta.z == LIGHT_SPOT) reach *= spot_reach(light, toward);
+		float nl = max(dot(normal, toward), 0.0);
+		delta += light.color.rgb * light.color.w * reach * nl * visibility;
+	}
+	return delta;
 }
 
 // This fragment's place in the cluster grid, from its screen position and its
@@ -119,10 +340,13 @@ fn LightTerms shade_lights(
 	float4 screen_position,
 	float3 position,
 	float3 normal,
+	float3 receiver_normal,
 	float3 albedo,
 	float roughness,
 	float metalness,
-	float reflectance)
+	float reflectance,
+	float sun_shadow,
+	bool skip_baked_diffuse)
 {
 	float3 view = normalize(frame[0].camera.xyz - position);
 	float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
@@ -147,8 +371,14 @@ fn LightTerms shade_lights(
 		float nl = max(dot(normal, toward), 0.0);
 		if (nl * reach <= 0.0) continue;
 
-		float3 energy = light.color.rgb * light.color.w * reach;
-		terms.diffuse += energy * nl;
+		// Only light zero is the sun the shadow map was fitted around; a second
+		// directional has a view of its own or none, which `point_shadow_factor`
+		// answers.
+		float visibility = i == 0u ? sun_shadow : point_shadow_factor(i, light, position, receiver_normal);
+		float3 energy = light.color.rgb * light.color.w * reach * visibility;
+		// A light map holds diffuse only, so a baked light's highlight stays in
+		// this real-time loop; only the diffuse half is the tile's.
+		if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;
 		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
 	}
 
@@ -171,8 +401,9 @@ fn LightTerms shade_lights(
 		float nl = max(dot(normal, toward), 0.0);
 		if (nl * reach <= 0.0) continue;
 
-		float3 energy = light.color.rgb * light.color.w * reach;
-		terms.diffuse += energy * nl;
+		float visibility = point_shadow_factor(i, light, position, receiver_normal);
+		float3 energy = light.color.rgb * light.color.w * reach * visibility;
+		if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;
 		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
 	}
 

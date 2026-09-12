@@ -13,13 +13,7 @@
 // which is one line in the original that reads something this file does not have
 // yet:
 //
-//  - **maps** (`SLOT_BASE_COLOR`, `map_at`, `texture_index`), and with them the
-//    alpha test: a material's texture is the record's next slice, and a cut-out
-//    is whether the surface is there at all;
-//  - **shadows** and the sun's visibility, so every light reaches a fragment a
-//    wall should have stopped;
-//  - **occlusion and crevice**, **baked light** and the lightmap, and
-//    **environment** reflection;
+//  - **baked light** and the lightmap, and **environment** reflection;
 //  - the **debug views** and **relief**, which are the body-facing extras rather
 //    than the look.
 
@@ -36,6 +30,24 @@
 fn float3 shade(Surface s) @required;
 fn void displace(inout Vertex v) @required;
 
+// The frame's own screen-space depth, at the binding the pass already writes.
+// It carries the 1x1 white when the occlusion pass did not run, and
+// `frame.ambient_occlusion.x` is zero then - which is the branch that answers
+// "no crevice" without a tap.
+Sampler2D ambient_occlusion_depth @set(0) @binding(4);
+
+// The sky the surfaces reflect, in every shader that shades one. Always bound
+// and always valid, white when the scene has no sky; what stops that white from
+// putting a mirror finish on every metal is `frame.environment.x`, which is
+// zero then. Equirectangular - latitude down, longitude across - so this is an
+// ordinary `Sampler2D` and the background's own rotation is `environment.y`.
+Sampler2D environment_map @set(0) @binding(2);
+
+// The baked static light cache: one atlas for the whole scene, indexed by this
+// copy's tile. `render/lightmap.c3` fills it, and a copy with no tile carries a
+// zero size that the vertex stage turned into the flag which stops the sample.
+Sampler2D lightmap_atlas @set(0) @binding(20);
+
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
 fn float3 srgb_to_linear(float3 c)
@@ -45,6 +57,111 @@ fn float3 srgb_to_linear(float3 c)
 		c.g <= 0.04045 ? c.g / 12.92 : pow((c.g + 0.055) / 1.055, 2.4),
 		c.b <= 0.04045 ? c.b / 12.92 : pow((c.b + 0.055) / 1.055, 2.4)
 	);
+}
+
+// How much of the sky this point can see, from the frame's screen-space depth,
+// so a crevice darkens the ambient floor and the world light and never the
+// lamps: an occlusion records the sky, and a lamp pointed into a crevice still
+// lights it.
+//
+// Twelve taps in screen space - the four axes and the eight diagonals - each
+// counted as blocking when it is in front of this fragment's normal and nearer
+// than the contact radius `settings.y`. `settings.x` scales the whole answer,
+// and zero there means no occlusion pass ran - the branch before the first tap.
+fn float crevice_occlusion(float3 position, float3 normal)
+{
+	float4 settings = push.frame[0].ambient_occlusion;
+	if (settings.x <= 0.0) return 1.0;
+
+	float4 clip = push.frame[0].view_projection * float4(position, 1.0);
+	float2 uv = float2(0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w);
+	if (clip.w <= 0.0) return 1.0;
+
+	float3 right = normalize((push.frame[0].inverse_view_projection * float4(1.0, 0.0, 0.0, 0.0)).xyz);
+	float3 up = normalize((push.frame[0].inverse_view_projection * float4(0.0, 1.0, 0.0, 0.0)).xyz);
+	float4 clip_right = push.frame[0].view_projection * float4(position + right * settings.y, 1.0);
+	float4 clip_up = push.frame[0].view_projection * float4(position + up * settings.y, 1.0);
+	float2 axis_x = float2(
+		0.5 * clip_right.x / clip_right.w + 0.5 - uv.x,
+		0.5 - 0.5 * clip_right.y / clip_right.w - uv.y
+	);
+	float2 axis_y = float2(
+		0.5 * clip_up.x / clip_up.w + 0.5 - uv.x,
+		0.5 - 0.5 * clip_up.y / clip_up.w - uv.y
+	);
+
+	const float2 taps[12] = {
+		float2(0.25, 0.0), float2(0.0, 0.25), float2(-0.25, 0.0), float2(0.0, -0.25),
+		float2(0.424, 0.424), float2(-0.424, 0.424), float2(-0.424, -0.424), float2(0.424, -0.424),
+		float2(1.0, 0.0), float2(0.0, 1.0), float2(-1.0, 0.0), float2(0.0, -1.0)
+	};
+	float blocked = 0.0;
+	for (uint i = 0; i < 12; i++)
+	{
+		float2 at = uv + axis_x * taps[i].x + axis_y * taps[i].y;
+		if (any(at <= float2(0.0)) || any(at >= float2(1.0))) continue;
+		float depth = ambient_occlusion_depth.SampleLevel(at, 0.0).r;
+		if (depth >= 0.999999) continue;
+		float4 world = push.frame[0].inverse_view_projection
+			* float4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, depth, 1.0);
+		if (abs(world.w) <= 1e-6) continue;
+		float3 delta = world.xyz / world.w - position;
+		float distance = length(delta);
+		if (distance > settings.y || distance <= 1e-5) continue;
+		blocked += step(settings.z, dot(normalize(normal), delta)) * (1.0 - distance / settings.y);
+	}
+	return 1.0 - settings.x * blocked / 12.0;
+}
+
+// A world direction to a texel of the equirectangular environment image, with
+// the frame's sky rotation applied. **The same mapping and the same rotation as
+// `sky.shady`**, which is the whole point of `environment.y` being a frame
+// field: a metal that reflected an unrotated sky while the background drew a
+// rotated one would be wrong in a way that only shows when somebody turns it.
+fn float2 environment_uv(float3 direction)
+{
+	const float ENVIRONMENT_PI = 3.14159265358979;
+	float angle = push.frame[0].environment.y;
+	float s = sin(angle);
+	float c = cos(angle);
+	float3 turned = float3(
+		c * direction.x - s * direction.z,
+		direction.y,
+		s * direction.x + c * direction.z
+	);
+	float u = atan2(turned.x, -turned.z) / (2.0 * ENVIRONMENT_PI) + 0.5;
+	float v = acos(clamp(turned.y, -1.0, 1.0)) / ENVIRONMENT_PI;
+	return float2(u, v);
+}
+
+// The environment's contribution to a surface, which is the reflection and
+// nothing else - the diffuse floor in this renderer is `three.light.ambient`,
+// and adding an irradiance term from the same image would light every existing
+// scene twice. `roughness` picks a mip rather than integrating a lobe, and
+// Schlick's Fresnel has roughness folded into the grazing term so a rough metal
+// does not turn into a mirror at the silhouette.
+fn float3 environment_light(
+	float3 normal,
+	float3 position,
+	float3 albedo,
+	float roughness,
+	float metalness,
+	float reflectance)
+{
+	float intensity = push.frame[0].environment.x;
+	if (intensity <= 0.0) return float3(0.0);
+
+	float3 view = normalize(push.frame[0].camera.xyz - position);
+	float3 reflected = reflect(-view, normal);
+
+	float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
+	float nv = max(dot(normal, view), 1e-4);
+	float3 grazing = max(float3(1.0 - roughness), f0);
+	float3 fresnel = f0 + (grazing - f0) * pow(1.0 - nv, 5.0);
+
+	float lod = clamp(roughness, 0.0, 1.0) * push.frame[0].environment.z;
+	float3 sky = environment_map.SampleLevel(environment_uv(reflected), lod).rgb;
+	return sky * fresnel * intensity;
 }
 
 // Everything a body is allowed to read and everything the built-in look reads.
@@ -57,6 +174,7 @@ struct Surface
 {
 	float3 albedo;         // base colour, times the map and the instance colour
 	float3 normal;         // normalized, world space, and already flipped for a back face
+	float3 receiver_normal;// the face this fragment is on, not the shading normal
 	float2 uv;             // after `uv_transform`, which is what a map is sampled with
 	float2 mesh_uv;        // the mesh's own uv, before it
 	float3 position;       // world space
@@ -76,6 +194,28 @@ struct Surface
 	// and never a storage. `material_uniforms` is the generator's one line from
 	// either storage to this field.
 	Uniforms uniforms;
+
+	// How much of the sun reaches this point: 1 in the open, 0 under something,
+	// and the values between are the taps disagreeing at the edge of a shadow.
+	// Folded into the direct light already, so a body does not have to read it
+	// to be shadowed - it is here for one that wants the shadow as something
+	// other than light.
+	float shadow;
+
+	// How much of the sky this point can see, from the depth buffer: 1 in the
+	// open, below 1 in a crevice. The port's carrier for the original's
+	// `g_crevice`, and it multiplies the ambient floor and the world light -
+	// never the direct light, which a lamp pointed into a crevice still
+	// delivers.
+	float crevice;
+
+	// This fragment's baked light, read once out of the atlas, and whether
+	// there was a tile to read it from. The port's carriers for the original's
+	// `g_lightmap` and `g_lightmapped`: zero and false on every dynamic
+	// receiver and on every mesh whose uvs could not carry a tile, which is
+	// what keeps a baked light shaded in real time where it was never baked.
+	float3 lightmap;
+	bool lightmapped;
 
 	float roughness;
 	float metalness;
@@ -129,26 +269,48 @@ fn float3 standard(Surface s)
 		s.screen_position,
 		s.position,
 		s.normal,
+		s.receiver_normal,
 		s.albedo,
 		s.roughness,
 		s.metalness,
-		s.reflectance
+		s.reflectance,
+		s.shadow,
+		s.lightmapped
 	);
 
-	// The original's three ambient pieces, with the two that need files this half
-	// does not have yet left at their identity: `lighting.x` is how much of the
-	// frame's ambient term reaches a surface - one minus it is how much is left
-	// for the lights to do - and `world.rgb` is the colour of the room the scene
-	// is in. Occlusion would scale both, and the environment is added beside them
-	// rather than inside.
-	float3 diffuse = push.frame[0].lighting.x
-		+ (1.0 - push.frame[0].lighting.x) * direct.diffuse
-		+ push.frame[0].world.rgb;
+	// The tile carries exactly the terms the loops skipped, so adding it here
+	// is what makes a baked light and a real-time one the same picture. The
+	// delta is what a *moving* caster took away from the bake.
+	float3 baked = float3(0.0);
+	if (s.lightmapped)
+	{
+		baked = max(
+			s.lightmap + baked_dynamic_delta(push.frame, s.normal, s.receiver_normal, s.position),
+			float3(0.0)
+		);
+	}
 
-	// Metalness takes the diffuse away and the environment would give it back as a
-	// reflection; with no environment ported yet a metal is simply darker, which
-	// is the honest half of that trade rather than a wrong answer.
-	return s.albedo * diffuse * (1.0 - s.metalness) + direct.specular + s.emissive;
+	// The original's three ambient pieces. `lighting.x` is how much of the
+	// frame's ambient term reaches a surface - one minus it is how much is left
+	// for the lights to do - and `world.rgb` is the colour of the room the
+	// scene is in. **The crevice multiplies both and neither of the two light
+	// terms**: an occlusion says how much sky a point can see and nothing about
+	// where a lamp is pointing, so folding it into the direct light would paint
+	// dirt on the lit side.
+	float ambient = push.frame[0].lighting.x;
+	float3 diffuse = ambient * s.crevice
+		+ (1.0 - ambient) * (direct.diffuse + baked)
+		+ push.frame[0].world.rgb * s.crevice;
+
+	// Metalness takes the diffuse away and the environment gives it back as a
+	// reflection, which is what makes a metal look like metal. The reflection
+	// takes the same crevice the ambient floor does - both are the sky - and
+	// the emissive is last, reached by nothing above it: a surface that gives
+	// off light gives it off in a crevice, in shadow and on a metal.
+	return s.albedo * diffuse * (1.0 - s.metalness)
+		+ direct.specular
+		+ environment_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance) * s.crevice
+		+ s.emissive;
 }
 
 // The fragment stage: build the record from the interpolated varyings, hand it
@@ -156,7 +318,7 @@ fn float3 standard(Surface s)
 // it is the material's opacity times this copy's, decided by whoever built the
 // material and whoever placed the instance, so a body cannot make geometry
 // invisible by accident.
-fn float4 mesh_fragment(VertexOutput input)
+fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 {
 	DrawRecord draw = push.draw[0];
 
@@ -165,11 +327,49 @@ fn float4 mesh_fragment(VertexOutput input)
 	s.normal = normalize(input.normal);
 	s.mesh_uv = input.uv;
 	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
+
+	// The material's base colour map, and the alpha test with it. **The alpha
+	// test is before the body**, not inside it: a cut-out is whether the surface
+	// is there at all, and a `shade` that never runs is also a `shade` that
+	// cannot be asked to decide. The threshold is `surface.w`, zero discards
+	// nothing, and the alpha is the map's times the material's rather than this
+	// copy's - a per-copy fade has to fade rather than dissolve, or the cut-out
+	// shadow, which has no per-copy colour, would cut a different shape.
+	if ((draw.flags & FLAG_HAS_UVS) != 0)
+	{
+		Map base_color_map = map_at(SLOT_BASE_COLOR);
+		float4 base = (draw.flags & FLAG_STOCHASTIC) != 0
+			? stochastic_sample(base_color_map, s.uv)
+			: base_color_map.Sample(s.uv);
+		if (base.a * draw.base_color.a < draw.surface.w) discard;
+		s.albedo *= base.rgb;
+	}
+
 	s.position = input.world;
 	s.color = input.color;
 	s.vertex_color = input.vertex_color;
 	s.variant = min(input.variant, draw.material_rows - 1u);
 	s.uniforms = material_uniforms();
+
+	// Read once and left in two places: on the surface for a body that wants
+	// it, and in the direct light `standard` sums. The receiver normal beside it
+	// is the original's `g_receiver_normal` - the face this fragment is on,
+	// which a point light's shadow asks about, rather than a shading normal a
+	// map may have tilted.
+	s.shadow = shadow_factor(s.position, s.normal);
+	float3 face_normal = normalize(cross(ddx(s.position), ddy(s.position)));
+	s.receiver_normal = dot(face_normal, s.normal) < 0.0 ? -face_normal : face_normal;
+	s.crevice = crevice_occlusion(s.position, s.normal);
+
+	// **Front faces only.** A double-sided surface is shaded with its normal
+	// turned toward the eye, so a leaf card lit from one side and seen from the
+	// other is a different answer at the same point of the same triangle - and
+	// the tile holds the one the bake rasterised, which is the front. A back
+	// face falls back to the whole real-time loop, which is right rather than
+	// merely safe.
+	s.lightmapped = front_facing && input.lightmap.z > 0.5;
+	s.lightmap = float3(0.0);
+	if (s.lightmapped) s.lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
 
 	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
 	// a second clamp here would be a second place for the range to be decided.

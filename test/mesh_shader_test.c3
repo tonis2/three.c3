@@ -19,13 +19,13 @@
  take an explicit override.
 
  **The comparison is byte equality, not resemblance**, and it is only meaningful
- on a frame this half can reproduce whole: maps, shadows, occlusion, the lightmap,
- the environment and the debug views are not in `material.shady` yet, so the
- fixture leaves every one of them inert - no shadow views, no ambient occlusion,
- no lightmap, no environment - and spends the unported features nowhere. What it
- does spend is the ported half: a bent, turned, scaled skinned character, a uv
- carrying box with a uv variant table, the sun plus two clustered point lights
- with different colours, and a specular material.
+ on a frame this half can reproduce whole: occlusion, the lightmap, the
+ environment and the debug views are not in `material.shady` yet, so the fixture
+ leaves those inert - no ambient occlusion, no lightmap, no environment - and
+ spends the unported features nowhere. What it does spend is the ported half: a
+ bent, turned, scaled skinned character, a uv carrying box with a uv variant
+ table, the sun's shadow, the sun plus two clustered point lights with different
+ colours, and a specular material.
 *>
 module three_tests::mesh_shader;
 
@@ -67,7 +67,23 @@ fn String scene_source()
 		box.material = null;
 		box.variant = 1;
 
+		// A floor under both, so the sun's shadow has something to land on
+		// that faces the light: without one the casters shadow empty space and
+		// the comparison would be green with the lookup never read.
+		const ground = new three.Mesh(new three.PlaneGeometry(14, 14));
+		ground.rotation.x = -Math.PI / 2;
+		ground.position.y = -1.0;
+		ground.static = true;
+		ground.material = null;
+		scene.add(ground);
+
 		three.light.set([0.3, 1.0, 0.2], 0.6);
+		// The sun's shadow is on, so the ported lookup is inside the compared
+		// bytes: the character and the box both stand in the sun's way.
+		three.light.shadow = true;
+		// The screen-space crevice too, which needs the depth prepass the same
+		// frame and darkens the ambient terms where the floor meets a caster.
+		three.light.occlusion = true;
 		three.light.ambient = 0.04;
 		three.lights.add({ position: [2.5, 3.0, 1.0], range: 14, intensity: 40, color: 0xff7040 });
 		three.lights.add({ position: [-2.0, 1.2, 2.5], range: 10, intensity: 25, color: 0x4080ff });
@@ -110,6 +126,10 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
+	// The sun's 16 MB depth and static atlases, reserved before anything else
+	// fragments the warmed pages - the shadow has to actually run for this
+	// comparison to spend it.
+	device::reserve_sun_shadow_pages(renderer);
 	defer three::shader_overrides_clear();
 	defer renderer.scene_cache_disabled = false;
 	renderer.scene_cache_disabled = true;
@@ -198,6 +218,50 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 
 	image::Image through_slang = renderer.capture()!!;
 	defer through_slang.free();
+
+	// **The control.** If the sun's shadow were inert, the comparison below
+	// would be green with the ported lookup never running - which is the way a
+	// byte comparison fails quietly. Turning the shadow off has to change the
+	// frame, and the count is the proof it was on.
+	three::RunResult unshadowed = runtime.run("three.light.shadow = false; return 1;");
+	defer unshadowed.free();
+	test::@check(unshadowed.ok, "the shadow could be turned off: %s", unshadowed.error);
+	image::Image without_shadow = renderer.capture()!!;
+	defer without_shadow.free();
+
+	sz shadow_bytes = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != without_shadow.pixels[at]) shadow_bytes++;
+	}
+	test::@check(shadow_bytes > 0,
+		"the fixture's shadow reaches the frame: %d of %d bytes differ without it",
+		shadow_bytes, through_slang.pixels.len);
+
+	three::RunResult reshadowed = runtime.run("three.light.shadow = true; return 1;");
+	defer reshadowed.free();
+	test::@check(reshadowed.ok, "and back on: %s", reshadowed.error);
+
+	// The same control for the crevice: off has to change the frame, or the
+	// ported occlusion never ran inside the comparison either.
+	three::RunResult unoccluded = runtime.run("three.light.occlusion = false; return 1;");
+	defer unoccluded.free();
+	test::@check(unoccluded.ok, "the occlusion could be turned off: %s", unoccluded.error);
+	image::Image without_occlusion = renderer.capture()!!;
+	defer without_occlusion.free();
+
+	sz occlusion_bytes = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != without_occlusion.pixels[at]) occlusion_bytes++;
+	}
+	test::@check(occlusion_bytes > 0,
+		"the fixture's crevice reaches the frame: %d of %d bytes differ without it",
+		occlusion_bytes, through_slang.pixels.len);
+
+	three::RunResult reoccluded = runtime.run("three.light.occlusion = true; return 1;");
+	defer reoccluded.free();
+	test::@check(reoccluded.ok, "and back on: %s", reoccluded.error);
 
 	foreach (&material : renderer.pass.materials)
 	{
