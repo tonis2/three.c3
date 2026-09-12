@@ -1,5 +1,6 @@
 <*
- A script's uniforms, as a struct a body reads.
+ A script's uniforms, as a struct a body reads, and the one function that hands
+ the set to `Surface.uniforms` from whichever storage it got.
 
  A material declares its uniforms at runtime - name, component count, and how
  many rows a table column has - and a body reads them as fields:
@@ -7,12 +8,22 @@
      s.uniforms.tint
      s.uniforms.colors[s.variant]
 
+ **One storage per material, and the spelling does not move with it.** A set that
+ fits the push block is a `Uniforms` member of it and `material_uniforms` returns
+ `push.uniforms`; a set that spilled is the *same struct* in a device buffer and
+ the push block carries a pointer, so the function returns
+ `push.material_table[0]`. The struct is marked `@address` only when spilled,
+ because that is what lets the push block point at it - a pointer to a plain
+ struct is not a device address (shady refuses it at the declaration).
+
 *>
 module three;
 
-fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms)
+fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms, bool spilled = false)
 {
-	out.append_string("struct Uniforms\n{\n");
+	out.append_string("struct Uniforms");
+	if (spilled) out.append_string(" @address");
+	out.append_string("\n{\n");
 	if (uniforms.len == 0)
 	{
 		// **A material with no uniforms still has the type.** `Surface.uniforms`
@@ -36,6 +47,23 @@ fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms)
 			out.appendf("[%d]", uniform.rows)!!;
 		}
 		out.append_string(";\n");
+	}
+	out.append_string("}\n");
+
+	// The seam `shaders/material.shady` fills `Surface.uniforms` through. A
+	// load from the block and a load from the buffer are one line here, so no
+	// body - and no `#define` - ever chooses a storage.
+	out.append_string("\nfn Uniforms material_uniforms()\n{\n");
+	if (spilled)
+	{
+		// The push block's pointer member needs the `[0]` index; shady lowers it
+		// to a device-address load, and a spilled set is a row copy rather than a
+		// second layout.
+		out.append_string("\treturn push.material_table[0];\n");
+	}
+	else
+	{
+		out.append_string("\treturn push.uniforms;\n");
 	}
 	out.append_string("}\n");
 }

@@ -285,13 +285,18 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// material, because whether a name collides must not depend on how many other
 	// uniforms happened to be declared beside it.
 	"material_table",
-	"MaterialTable", // What the shady path declares around a material's uniforms: the struct a body
-	// reads them through, and the padding field that lets a material with no
-	// uniforms keep the same `Surface`. Reserved before the switchover rather than
-	// at it, because a name is reservable exactly once - `MATERIAL_ROWS` is already
-	// in this list below.
+	"MaterialTable", // What the generators declare around a material's uniforms - `MaterialTable` for
+	// the Slang template and `Uniforms` for the shady generator, the struct a body
+	// reads them through. `material_unused` is the padding field that lets a
+	// material with no uniforms keep the same `Surface`, `material_table` is the
+	// pointer a spilled set hangs off, and `material_uniforms` is the function
+	// that fills `Surface.uniforms` from whichever storage the set got. Reserved
+	// before the switchover rather than at it, because a name is reservable exactly
+	// once - `MATERIAL_ROWS` is already in this list below.
 	"Uniforms",
-	"material_unused", // The shadow lookup: the reserved sampler at binding 1, the function that
+	"material_unused",
+	"material_uniforms",
+	// The shadow lookup: the reserved sampler at binding 1, the function that
 	// reads it, and the one global in the template. `g_shadow` is the one worth
 	// naming out loud — a uniform of that name would shadow the value `lambert`
 	// folds into the direct light, and the body would compile and come out lit.
