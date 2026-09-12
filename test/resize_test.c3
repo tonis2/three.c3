@@ -118,6 +118,43 @@ fn void the_swapchain_survives_awkward_sizes_minimise_and_restore() @test
 	}
 	test::@check(presented >= 6, "live resizing starved presentation: only %d of 12 frames", presented);
 
+	$if env::LINUX:
+		if (window.src.backend == c3w::BackendType.WAYLAND)
+		{
+			c3w::WaylandWindow* backend = (c3w::WaylandWindow*)window.src.backend_data;
+			if (backend.viewport != null)
+			{
+				pump(&renderer, &window, 3);
+				vk::SwapchainKHR original = renderer.viewer.handle;
+				vk::Image target = renderer.target.color;
+				uint[2] flags = { 4, 3 }; // activated, resizing
+				c3w::WLArray states = { .size = 8, .data = &flags };
+				// Feed the same toplevel events as a border drag, without automating
+				// the desktop pointer. Rendering must reuse both GPU allocations.
+				for (int i = 0; i < 12; i++)
+				{
+					c3w::topSurfaceConfigure(backend, backend.top_level, 900 + i * 8, 600 + i * 4, &states);
+					window.refresh_size();
+					three::want_surface(&renderer, &window);
+					renderer.frame()!!;
+					test::@check(renderer.viewer.handle == original, "corner drag rebuilt the swapchain");
+					test::@check(renderer.target.color == target, "corner drag rebuilt the render target");
+				}
+				// A release with "you choose" dimensions still uses the last drag size.
+				c3w::topSurfaceConfigure(backend, backend.top_level, 0, 0, null);
+				window.refresh_size();
+				three::want_surface(&renderer, &window);
+				renderer.frame()!!;
+				test::@check(renderer.viewer.extent.width == (uint)(988 * backend.buffer_scale),
+					"release did not apply the final width");
+				test::@check(renderer.viewer.extent.height == (uint)(644 * backend.buffer_scale),
+					"release did not apply the final height");
+				io::printn("  (Wayland corner drag: 12 updates, no swapchain or target replacements; final size applied)");
+			}
+			else { io::printn("  (corner preview skipped: compositor has no wp_viewporter)"); }
+		}
+	$endif
+
 	// Minimised, the surface reports a zero extent and there is nothing to
 	// build a swapchain for. The frame path has to notice and skip rather than
 	// spin on an acquire that keeps failing.
