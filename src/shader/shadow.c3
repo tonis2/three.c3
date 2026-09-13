@@ -24,8 +24,8 @@ import shady;
 macro ShaderDef shadow_def()
 {
 	ShaderSource[] sources = {
-		{ "skinning", shader_source("skinning.shady", tmem)!! },
-		{ "shadow", shader_source("shadow.shady", tmem)!! },
+		{ .name = "skinning", .file = ShaderFile.SKINNING_SHADY },
+		{ .name = "shadow", .file = ShaderFile.SHADOW_SHADY },
 	};
 
 	return (ShaderDef) { .name = "shadow", .sources = sources };
@@ -34,9 +34,9 @@ macro ShaderDef shadow_def()
 macro ShaderDef shadow_cutout_def()
 {
 	ShaderSource[] sources = {
-		{ "skinning", shader_source("skinning.shady", tmem)!! },
-		{ "shadow", shader_source("shadow.shady", tmem)!! },
-		{ "shadow_cutout", shader_source("shadow_cutout.shady", tmem)!! },
+		{ .name = "skinning", .file = ShaderFile.SKINNING_SHADY },
+		{ .name = "shadow", .file = ShaderFile.SHADOW_SHADY },
+		{ .name = "shadow_cutout", .file = ShaderFile.SHADOW_CUTOUT_SHADY },
 	};
 
 	return (ShaderDef) { .name = "shadow_cutout", .sources = sources };

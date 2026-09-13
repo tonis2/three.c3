@@ -1,0 +1,174 @@
+// The LTC half of the area-light algorithm: the fit table, the two reads that
+// replace the quadrature, and the context they build once per fragment.
+//
+// It is a file of `lighting` - the shared half's module - so the declarations
+// `lighting.shady` carries are defined by what this file writes; `module
+// lighting;` is the whole of the claim. The table's binding is declared here
+// and not in the shared file: the numeric file has no descriptor to bind, and
+// a spec constant cannot remove one.
+//
+// `frame.lighting.w` says whether the table is on the device at all. Zero -
+// no table, or a frame that asked for the reference - falls back to the
+// quadrature, which is the honest answer rather than a degraded one.
+
+module lighting;
+
+import "lighting.shady";
+
+// The area-light fit, at the binding the Slang templates reserve for it. Rows
+// 0-63 hold the fitted inverse and rows 64-127 the directional albedo.
+Sampler2D ltc_lut @set(0) @binding(19);
+
+// The fit's frame, cached across the area lights in one fragment's cluster:
+// it depends on the surface and the view and not on the emitter, so every
+// emitter after the first reuses it. The reference module's `AreaCache` is a
+// different struct - `shade_lights` names the type and never a field.
+struct AreaCache
+{
+	float3 row0;
+	float3 row1;
+	float3 row2;
+	float3 fresnel;
+}
+
+struct AreaLtcContext
+{
+	// The fit's own frame: x along the view's tangential part, z the normal.
+	float3 row0;
+	float3 row1;
+	float3 row2;
+	float3 fresnel;
+}
+
+fn AreaLtcContext area_ltc_context(float3 normal, float3 view, float3 f0, float f90, float alpha, float nv)
+{
+	AreaLtcContext context;
+	float3 tangential = view - normal * dot(view, normal);
+	float len2 = dot(tangential, tangential);
+	float3 t1 = len2 > 1e-8
+		? tangential * rsqrt(len2)
+		: normalize(abs(normal.z) < 0.999 ? cross(normal, float3(0.0, 0.0, 1.0)) : float3(1.0, 0.0, 0.0));
+	float3 t2 = cross(normal, t1);
+
+	float2 uv = float2(sqrt(alpha), sqrt(saturate(1.0 - nv))) * LTC_LUT_SCALE + LTC_LUT_BIAS;
+	float4 m = ltc_lut.SampleLevel(float2(uv.x, uv.y * 0.5), 0.0);
+	float4 albedo = ltc_lut.SampleLevel(float2(uv.x, 0.5 + uv.y * 0.5), 0.0);
+
+	// The three rows of the fitted inverse already multiplied by the frame, so
+	// a corner is three dot products rather than a change of basis and a
+	// matrix.
+	context.row0 = m.x * t1 + m.y * normal;
+	context.row1 = t2;
+	context.row2 = m.z * t1 + m.w * normal;
+	context.fresnel = f0 * albedo.x + (float3(f90) - f0) * albedo.y;
+	return context;
+}
+
+fn float3 area_ltc_specular(AreaShape shape, AreaLtcContext context)
+{
+	AreaShape local;
+	local.scale = 0.0;
+	[unroll] for (uint i = 0u; i < 6u; i++)
+	{
+		float3 c = shape.corner[i];
+		local.corner[i] = normalize(float3(dot(context.row0, c), dot(context.row1, c), dot(context.row2, c)));
+	}
+	float form = ltc_clipped(local, float3(0.0, 0.0, 1.0));
+	return shape.scale * form * context.fresnel;
+}
+
+// Both lobes for one area light, for a caller that shades a light on its own.
+// `standard` walks the cluster instead and caches the context across lights.
+fn AreaTerms area_terms(Light light, float3 position, float3 normal, float3 view, float3 f0, float f90, float a2, float k, float nv)
+{
+	AreaTerms terms;
+	terms.diffuse = 0.0;
+	terms.specular = float3(0.0);
+	AreaShape shape = area_shape(light, position, normal);
+	if (shape.scale <= 0.0) return terms;
+	if (push.frame[0].lighting.w <= 0.0)
+	{
+		terms = area_reference_terms(light, position, normal, view, f0, f90, a2, k, nv);
+		terms.diffuse = area_polygon_diffuse(shape, normal);
+		return terms;
+	}
+	AreaLtcContext context = area_ltc_context(normal, view, f0, f90, k * 2.0, nv);
+	terms.diffuse = area_polygon_diffuse(shape, normal);
+	terms.specular = light.color.rgb * area_ltc_specular(shape, context);
+	return terms;
+}
+
+// The same pair with the polygon and the fit context already known: what a
+// fragment with several area lights pays once for the shape and the two table
+// reads, then reuses under each emitter.
+fn AreaTerms area_terms_cached(Light light, AreaShape shape, float3 normal, AreaLtcContext context, bool diffuse)
+{
+	AreaTerms terms;
+	terms.diffuse = 0.0;
+	terms.specular = float3(0.0);
+	if (diffuse) terms.diffuse = area_polygon_diffuse(shape, normal);
+	terms.specular = light.color.rgb * area_ltc_specular(shape, context);
+	return terms;
+}
+
+fn float area_diffuse(Light light, float3 position, float3 normal)
+{
+	AreaShape shape = area_shape(light, position, normal);
+	if (shape.scale <= 0.0) return 0.0;
+	return area_polygon_diffuse(shape, normal);
+}
+
+fn float3 area_specular(Light light, float3 position, float3 normal, float3 view, float3 f0, float f90, float a2, float k, float nv)
+{
+	if (push.frame[0].lighting.w <= 0.0)
+		return area_reference_specular(light, position, normal, view, f0, f90, a2, k, nv);
+	AreaShape shape = area_shape(light, position, normal);
+	if (shape.scale <= 0.0) return float3(0.0);
+	AreaLtcContext context = area_ltc_context(normal, view, f0, f90, k * 2.0, nv);
+	return light.color.rgb * area_ltc_specular(shape, context);
+}
+
+// The one seam the two algorithms differ at: the shared light walk asks the
+// module for one emitter's terms, and this answer is the fitted one, with the
+// numeric quadrature kept as the per-frame fallback for a device without the
+// table.
+fn AreaTerms area_light_terms(
+	Light light,
+	float3 position,
+	float3 normal,
+	float3 view,
+	float3 f0,
+	float f90,
+	float a2,
+	float k,
+	float nv,
+	inout AreaCache cache,
+	inout bool ready)
+{
+	AreaTerms terms;
+	terms.diffuse = 0.0;
+	terms.specular = float3(0.0);
+	if (push.frame[0].lighting.w <= 0.0)
+	{
+		return area_reference_terms(light, position, normal, view, f0, f90, a2, k, nv);
+	}
+	AreaShape shape = area_shape(light, position, normal);
+	if (shape.scale <= 0.0) return terms;
+	if (!ready)
+	{
+		AreaLtcContext context = area_ltc_context(normal, view, f0, f90, k * 2.0, nv);
+		cache.row0 = context.row0;
+		cache.row1 = context.row1;
+		cache.row2 = context.row2;
+		cache.fresnel = context.fresnel;
+		ready = true;
+	}
+	AreaLtcContext context;
+	context.row0 = cache.row0;
+	context.row1 = cache.row1;
+	context.row2 = cache.row2;
+	context.fresnel = cache.fresnel;
+	terms.diffuse = area_polygon_diffuse(shape, normal);
+	terms.specular = light.color.rgb * area_ltc_specular(shape, context);
+	return terms;
+}

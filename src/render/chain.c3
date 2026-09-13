@@ -575,6 +575,132 @@ fn String tonemap_body(ToneMap mode)
 	}
 }
 
+<*
+ The same three curves in shady's spelling, for the shady half of the switch.
+
+ Two differences, and both are language rather than maths. `exposure` is a
+ bare name under Slang's `#define` and `p.uniforms.exposure` under the
+ generator's struct. And a matrix literal is transposed between the two:
+ Slang's `float3x3(a, b, c)` fills rows, shady's fills columns, so shady reads
+ the same literal with `mul(c, M)` instead of `mul(M, c)` — those two agree on
+ the same components without either body transposing a value.
+
+ The matrix constants also move inside `post`: shady's module-level constants
+ are scalars only, so a `float3x3` cannot sit above a function.
+*>
+const String TONEMAP_BODY_SHADY = `fn float3 post(Post p)
+{
+	return p.color;
+}`;
+
+const String TONEMAP_AGX_BODY_SHADY = `fn float3 agx_contrast(float3 x)
+{
+	float3 x2 = x * x;
+	float3 x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
+fn float3 post(Post p)
+{
+	float3x3 srgb_to_rec2020 = float3x3(
+		float3(0.6274, 0.3293, 0.0433),
+		float3(0.0691, 0.9195, 0.0113),
+		float3(0.0164, 0.0880, 0.8956));
+	float3x3 rec2020_to_srgb = float3x3(
+		float3(1.6605, -0.5876, -0.0728),
+		float3(-0.1246, 1.1329, -0.0083),
+		float3(-0.0182, -0.1006, 1.1187));
+	float3x3 inset = float3x3(
+		float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
+		float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
+		float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
+	float3x3 outset = float3x3(
+		float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
+		float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
+		float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
+
+	float3 c = p.color * p.uniforms.exposure;
+	c = mul(c, srgb_to_rec2020);
+	c = mul(c, inset);
+	// -12.47393 EV to +4.026069 EV, which is the 16.5-stop window AgX is defined
+	// over. The floor keeps log2(0) out of it.
+	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
+	c = agx_contrast(c);
+	c = mul(c, outset);
+	c = pow(max(c, 0.0), 2.2);
+	c = mul(c, rec2020_to_srgb);
+	// Still linear: the attachment encodes. The clamp is what a UNORM does to the
+	// out-of-gamut values the rotation back to sRGB can produce.
+	return clamp(c, 0.0, 1.0);
+}`;
+
+const String TONEMAP_AGX_BLENDER_BODY_SHADY = `const float AGX_PIVOT_X = 0.6186810;
+const float AGX_PIVOT_Y = 0.4886874;
+const float AGX_SLOPE = 2.4290370;
+const float AGX_TOE_POWER = 1.7141845;
+const float AGX_SHOULDER_POWER = 1.4540615;
+const float AGX_TOE_SCALE = 0.5357367;
+const float AGX_SHOULDER_SCALE = 0.7450037;
+
+// The segment, and the reason the negative half is kept rather than clamped: at
+// any x one of the two calls below has a negative argument, and the max inside the
+// power keeps that branch finite so the select can throw it away. Clamping the
+// argument itself would fold the wrong branch onto the pivot instead.
+fn float3 agx_segment(float3 u, float power)
+{
+	return u * pow(1.0 + pow(max(u, 0.0), power), -1.0 / power);
+}
+
+fn float3 agx_contrast(float3 x)
+{
+	float3 toe = AGX_PIVOT_Y - AGX_TOE_SCALE
+		* agx_segment((AGX_PIVOT_X - x) * (AGX_SLOPE / AGX_TOE_SCALE), AGX_TOE_POWER);
+	float3 shoulder = AGX_PIVOT_Y + AGX_SHOULDER_SCALE
+		* agx_segment((x - AGX_PIVOT_X) * (AGX_SLOPE / AGX_SHOULDER_SCALE), AGX_SHOULDER_POWER);
+	return lerp(shoulder, toe, step(x, float3(AGX_PIVOT_X)));
+}
+
+fn float3 post(Post p)
+{
+	float3x3 srgb_to_rec2020 = float3x3(
+		float3(0.6274, 0.3293, 0.0433),
+		float3(0.0691, 0.9195, 0.0113),
+		float3(0.0164, 0.0880, 0.8956));
+	float3x3 rec2020_to_srgb = float3x3(
+		float3(1.6605, -0.5876, -0.0728),
+		float3(-0.1246, 1.1329, -0.0083),
+		float3(-0.0182, -0.1006, 1.1187));
+	float3x3 inset = float3x3(
+		float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
+		float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
+		float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
+	float3x3 outset = float3x3(
+		float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
+		float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
+		float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
+
+	float3 c = p.color * p.uniforms.exposure;
+	c = mul(c, srgb_to_rec2020);
+	c = mul(c, inset);
+	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
+	c = agx_contrast(c);
+	c = mul(c, outset);
+	c = pow(max(c, 0.0), 2.2);
+	c = mul(c, rec2020_to_srgb);
+	return clamp(c, 0.0, 1.0);
+}`;
+
+// The body one mode compiles through shady.
+fn String tonemap_body_shady(ToneMap mode)
+{
+	switch (mode)
+	{
+		case AGX: return TONEMAP_AGX_BODY_SHADY;
+		case AGX_BLENDER: return TONEMAP_AGX_BLENDER_BODY_SHADY;
+		default: return TONEMAP_BODY_SHADY;
+	}
+}
+
 // What AgX's exposure uniform is called, in the body and in the push block.
 const String TONEMAP_EXPOSURE = "exposure";
 
@@ -615,7 +741,8 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 	{
 		String source    = post_source(tonemap_body(mode), declared, tmem)!;
 		ShaderModule mod = compile_shader(
-			ShaderPass.TONEMAP, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
+			ShaderPass.TONEMAP, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..],
+			body: tonemap_body(mode), body_shady: tonemap_body_shady(mode), uniforms: declared)!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
 		self.tonemap.pipeline.init_post(gpu, &mod, target.color_format)!;

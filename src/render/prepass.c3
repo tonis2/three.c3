@@ -40,7 +40,8 @@ struct DepthPrepass
 }
 
 <*
- Compiles `shaders/shadow.slang` and builds one depth-only pipeline from it.
+ Compiles the depth program — `shaders/shadow.slang`, or the shady def when the
+ switch says so — and builds one depth-only pipeline from it.
 
  Shared with `ShadowMap.build_pipeline` and `ShadowMap.build_cutout_pipeline`,
  which is the whole reason it is a free function: the shadow map and the prepass
@@ -53,23 +54,30 @@ struct DepthPrepass
 fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format format,
 	bool cutout = false, bool dynamic_cull = false)
 {
-	String source = shader_source("shadow.slang", mem)!;
+	String source = shader_source(ShaderFile.SHADOW_SLANG, mem)!;
 	defer source.free(mem);
 
 	// `#line 1` after the define so a Slang diagnostic still names the line the
-	// file has.
+	// file has. The define is the Slang half's switch; the shady half takes the
+	// cut-out def, which is its own module with the same pair of stages.
 	DString variant;
 	variant.init(mem);
 	defer variant.free();
 	if (cutout) variant.append_string("#define THREE_SHADOW_CUTOUT 1\n#line 1\n");
 	variant.append_string(source);
 
-	ShaderModule mod = compile_shader(
-		cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW,
-		variant.str_view(),
-		"shadow.slang",
-		cutout ? SHADOW_CUTOUT_ENTRIES[..] : SHADOW_ENTRIES[..]
-	)!;
+	ShaderPass pass = cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW;
+	// Entry names are how the host tells stages apart, and they differ between
+	// the implementations: the shady cut-out module carries `shadow.shady`'s
+	// depth-only `vertexMain` beside its own `cutoutVertexMain`. The list the
+	// pipeline is built from is the list the module is held to and linked under.
+	ShaderEntry[] entries = cutout
+		? (shader_compiler(pass) == ShaderCompiler.SHADY
+			? SHADOW_CUTOUT_SHADY_ENTRIES[..]
+			: SHADOW_CUTOUT_ENTRIES[..])
+		: SHADOW_ENTRIES[..];
+
+	ShaderModule mod = compile_shader(pass, variant.str_view(), ShaderFile.SHADOW_SLANG.name, entries)!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -77,7 +85,7 @@ fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format forma
 		return SHADER_MISSING_ENTRY_POINT~;
 	}
 
-	pipeline.init_shadow(gpu, &mod, format, cutout: cutout, dynamic_cull: dynamic_cull)!;
+	pipeline.init_shadow(gpu, &mod, format, entries, dynamic_cull: dynamic_cull)!;
 }
 
 <*

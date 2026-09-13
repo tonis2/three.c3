@@ -219,18 +219,18 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 		test::@check(false, "and a second");
 	}
 
-	String source = three::shader_source("mesh.slang", mem)!!;
+	String source = three::shader_source(three::ShaderFile.MESH_SLANG, mem)!!;
 	defer source.free(mem);
 
 	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
 	three::ShaderModule slang_mod = three::compile_shader(
-		three::ShaderPass.MESH, source, "mesh.slang", three::MESH_ENTRIES[..])!!;
+		three::ShaderPass.MESH, source, three::ShaderFile.MESH_SLANG.name, three::MESH_ENTRIES[..])!!;
 	defer slang_mod.free();
 	test::@check(slang_mod.ok, "the Slang draw path compiles: %s", slang_mod.diagnostic);
 
 	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SHADY);
 	three::ShaderModule shady_mod = three::compile_shader(
-		three::ShaderPass.MESH, source, "mesh.slang", three::MESH_ENTRIES[..])!!;
+		three::ShaderPass.MESH, source, three::ShaderFile.MESH_SLANG.name, three::MESH_ENTRIES[..])!!;
 	defer shady_mod.free();
 	test::@check(shady_mod.ok, "the shady draw path compiles: %s", shady_mod.diagnostic);
 
@@ -406,17 +406,178 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 }
 
 <*
- A script's material still goes through Slang when the draw path is flipped.
+ The numeric area reference through both compilers, compared as pixels.
+
+ The fitted draw path already compares byte for byte next door; this is the
+ variant the fit is measured against, and it is a module of its own because it
+ declares no fit table. Slang gets `mesh.slang` with `THREE_AREA_REFERENCE` -
+ the original's own spelling - and shady gets `mesh_def`'s reference variant.
+ Both live in this process and both feed a pipeline the fixture's default
+ material draws through.
+
+ Two controls sit beside the equality, because equality alone cannot say the
+ fixture spent the reference: turning the area light off has to change the
+ frame, and the fitted module has to draw a *different* frame. The two
+ integrations are supposed to agree within the fit's error rather than exactly,
+ so a variant that silently drew the fit would pass the comparison and fail
+ this control.
+*>
+fn void the_area_reference_is_the_same_pixels_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	device::reserve_sun_shadow_pages(renderer);
+	defer three::shader_overrides_clear();
+	defer renderer.scene_cache_disabled = false;
+	renderer.scene_cache_disabled = true;
+	renderer.clear = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(scene_source());
+	defer built.free();
+	test::@check(built.ok, "the fixture built: %s", built.error);
+
+	String source = three::shader_source(three::ShaderFile.MESH_SLANG, mem)!!;
+	defer source.free(mem);
+	DString reference_source;
+	reference_source.tinit(source.len + 64);
+	defer reference_source.free();
+	reference_source.append_string("#define THREE_AREA_REFERENCE 1\n#line 1\n");
+	reference_source.append_string(source);
+
+	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
+	three::ShaderModule slang_mod = three::compile_shader(
+		three::ShaderPass.MESH, reference_source.str_view(), three::ShaderFile.MESH_SLANG.name, three::MESH_ENTRIES[..])!!;
+	three::shader_overrides_clear();
+	defer slang_mod.free();
+	test::@check(slang_mod.ok, "the Slang reference draw path compiles: %s", slang_mod.diagnostic);
+
+	three::shader_override(three::ShaderPass.MESH_REFERENCE, three::ShaderCompiler.SHADY);
+	three::ShaderModule shady_mod = three::compile_shader(
+		three::ShaderPass.MESH_REFERENCE, "", "three.mesh_reference", three::MESH_ENTRIES[..])!!;
+	three::shader_overrides_clear();
+	defer shady_mod.free();
+	test::@check(shady_mod.ok, "the shady reference draw path compiles: %s", shady_mod.diagnostic);
+	test::@check(shady_mod.layout.binding_of("ltc_lut") == null,
+		"and declares no fit table");
+
+	three::MeshPipeline slang_pipe;
+	slang_pipe.init(&renderer.gpu, &renderer.target, &slang_mod, three::SOLID_STATE)!!;
+	defer slang_pipe.free(&renderer.gpu);
+	three::MeshPipeline shady_pipe;
+	shady_pipe.init(&renderer.gpu, &renderer.target, &shady_mod, three::SOLID_STATE)!!;
+	defer shady_pipe.free(&renderer.gpu);
+
+	// The fixture draws with the pass's built-in pipeline; moving those
+	// pointers for a capture is the whole swap, and they go back below.
+	sz moved = swap_materials(renderer, renderer.pass.pipeline, &slang_pipe);
+	test::@check(moved > 0, "the fixture draws with the built-in pipeline, %d materials moved", moved);
+
+	image::Image through_slang = renderer.capture()!!;
+	defer through_slang.free();
+
+	swap_materials(renderer, &slang_pipe, &shady_pipe);
+	image::Image through_shady = renderer.capture()!!;
+	defer through_shady.free();
+
+	swap_materials(renderer, &shady_pipe, renderer.pass.pipeline);
+
+	// The same scene through the fitted module: the reference is only worth
+	// comparing if the fixture can tell the two integrations apart at all.
+	image::Image through_fit = renderer.capture()!!;
+	defer through_fit.free();
+
+	sz fit_bytes = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != through_fit.pixels[at]) fit_bytes++;
+	}
+	test::@check(fit_bytes > 0,
+		"the fixture tells the two integrations apart: %d of %d bytes differ",
+		fit_bytes, through_slang.pixels.len);
+
+	// The area light itself is inside the compared bytes: with it off, the
+	// reference frame has to change. A scene whose numeric path never ran would
+	// compare equal to itself.
+	three::RunResult unlit = runtime.run("area.intensity = 0; return 1;");
+	defer unlit.free();
+	test::@check(unlit.ok, "the area light could be turned off: %s", unlit.error);
+	swap_materials(renderer, renderer.pass.pipeline, &slang_pipe);
+	image::Image without_area = renderer.capture()!!;
+	defer without_area.free();
+	swap_materials(renderer, &slang_pipe, renderer.pass.pipeline);
+
+	sz area_bytes = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != without_area.pixels[at]) area_bytes++;
+	}
+	test::@check(area_bytes > 0,
+		"the fixture's area light reaches the reference frame: %d of %d bytes differ without it",
+		area_bytes, through_slang.pixels.len);
+
+	three::RunResult relit = runtime.run("area.intensity = 60; return 1;");
+	defer relit.free();
+	test::@check(relit.ok, "and back on: %s", relit.error);
+
+	sz lit = 0;
+	uint colours = 0;
+	frame_spread(&through_slang, &lit, &colours);
+	test::@check(lit > (sz)W * H / 8,
+		"the compared frame draws geometry: %d of %d pixels are not the clear", lit, W * H);
+	test::@check(colours > 64,
+		"and is not one flat colour: %d distinct colours", colours);
+
+	sz differing = 0;
+	sz first = through_slang.pixels.len;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] == through_shady.pixels[at]) continue;
+		if (differing == 0) first = at;
+		differing++;
+	}
+	test::@check(differing == 0,
+		"the numeric area reference is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
+		differing, through_slang.pixels.len, first, first / 4 % W, first / 4 / W);
+
+	// **The engine's own door.** Coming after the comparison on purpose: the
+	// proof has to be the byte count, and a wiring fault that aborts the test
+	// earlier would hide it. `three.pass.area_reference` is what the cluster
+	// suite's agreement test draws the numeric side with, so the frame it
+	// produces has to be the module this test compiled rather than a second way
+	// to integrate. The lazy build and the selection are both asked.
+	renderer.pass.area_reference = true;
+	image::Image through_flag = renderer.capture()!!;
+	defer through_flag.free();
+	test::@check(renderer.pass.reference_ready, "the flag built the reference pipelines");
+	test::@check(renderer.pass.draw_pipeline(renderer.pass.pipeline) == renderer.pass.reference_pipeline,
+		"and the built-in draw path now binds the reference module's pipeline");
+	renderer.pass.area_reference = false;
+
+	sz flag_differing = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != through_flag.pixels[at]) flag_differing++;
+	}
+	test::@check(flag_differing == 0,
+		"the engine's own reference frame is the module's, %d of %d bytes differ",
+		flag_differing, through_slang.pixels.len);
+}
+
+<*
+ A script's material is not the draw path's own.
 
  **The trap this suite exists beside.** `MeshPass.init` and
- `MeshPass.create_material` used to be one pass row, so flipping the draw path
- would have routed every `shade()` body through the shady module - which has no
- script compiler yet, and would have drawn the default look while the body sat
- unread. The row split (`MESH` against `MESH_MATERIAL`) is what this checks end
- to end, with `MESH` forced to shady for the run: the body returns a colour no
- light can produce, and the frame has to show it.
+ `MeshPass.create_material` are two pass rows, so a script's `shade()` body
+ must not be routed through the def's built-in body. The draw path is forced
+ to shady for the run as it already is in the table, and the material row's
+ own module is what has to find the body: the body returns a colour no light
+ can produce, and the frame has to show it.
 *>
-fn void a_script_body_still_compiles_through_slang() @test
+fn void a_script_body_is_not_the_draw_paths_body() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
@@ -434,7 +595,7 @@ fn void a_script_body_still_compiles_through_slang() @test
 		const scene = new three.Scene();
 		const plane = new three.Mesh(
 			new three.PlaneGeometry(8, 8),
-			new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return float3(0.0, 0.0, 1.0); }" })
+			new three.ShaderMaterial({ fragment: "fn float3 shade(Surface s) { return float3(0.0, 0.0, 1.0); }" })
 		);
 		scene.add(plane);
 		three.camera.frameAll();
@@ -455,4 +616,220 @@ fn void a_script_body_still_compiles_through_slang() @test
 	}
 	test::@check(blue > (sz)W * H / 4,
 		"the body's flat blue is in the frame: %d of %d pixels", blue, W * H);
+}
+
+<*
+ A scripted material through both compilers, compared as pixels.
+
+ `MESH_MATERIAL` is on shady; this is the assembly's own comparison: the same
+ declared uniforms, the same declared texture and the same shading written twice
+ - once in each spelling - drawn in one process. The template side names its
+ compiler, the def side takes the row's own answer, and what the comparison
+ proves is that a script's body, its uniform set and its texture rows reach the
+ frame through the def exactly as they do through the template.
+*>
+fn void a_scripted_material_is_the_same_pixels_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+	renderer.scene_cache_disabled = true;
+	renderer.clear = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+	three::MaterialUniform[1] uniforms = { { "tint", 4, 1 } };
+	three::MaterialTexture[1] textures = { { "noise_map" } };
+
+	String through_template = `
+float3 shade(Surface s)
+{
+	return standard(s) * tint.rgb + noise_map.Sample(s.uv).rgb * 0.5;
+}
+`;
+	String through_def = `
+fn float3 shade(Surface s)
+{
+	return standard(s) * s.uniforms.tint.rgb + noise_map().Sample(s.uv).rgb * 0.5;
+}
+`;
+
+	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SLANG);
+	uint from_slang = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target, through_template, uniforms[..],
+		three::SIDE_DOUBLE, three::BLENDING_NONE, textures[..]
+	)!!;
+	three::shader_overrides_clear();
+	uint from_shady = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target, through_def, uniforms[..],
+		three::SIDE_DOUBLE, three::BLENDING_NONE, textures[..]
+	)!!;
+	three::shader_overrides_clear();
+
+	// Two bodies, so two modules: a cache hit here would compare one build with
+	// itself, and the compiler override alone would not say so.
+	test::@check(
+		renderer.pass.material(from_slang).pipeline != renderer.pass.material(from_shady).pipeline,
+		"the two spellings are two pipelines"
+	);
+
+	char[4] pixels = { 30, 220, 60, 255 };
+	image::Image one = {
+		.width = 1,
+		.height = 1,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		// No allocator, left at the zero fill: `Image.free` frees nothing
+		// without one, which is what makes a stack array safe here.
+		.pixels = pixels[..],
+	};
+	int image = renderer.pass.assets.claim_texture(&renderer.gpu, one)!!;
+	renderer.pass.set_material_texture(&renderer.gpu, from_slang, "noise_map", image)!!;
+	renderer.pass.set_material_texture(&renderer.gpu, from_shady, "noise_map", image)!!;
+	renderer.pass.material(from_slang).set_uniform("tint", (float[]) { 0.2, 0.4, 0.8, 1.0 })!!;
+	renderer.pass.material(from_shady).set_uniform("tint", (float[]) { 0.2, 0.4, 0.8, 1.0 })!!;
+
+	three::AssetId quad = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(quad, 0);
+	renderer.pass.scene.set_material(node, from_slang);
+	renderer.pass.frame_camera();
+	renderer.pass.lighting = {
+		.count = 1,
+		.ambient = 1,
+		.lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } },
+	};
+
+	image::Image through_slang = renderer.capture()!!;
+	defer through_slang.free();
+
+	// The fixture has to be a drawn surface, or two matching clear frames would
+	// pass this comparison for the wrong reason.
+	sz lit = 0;
+	for (sz at = 0; at + 2 < through_slang.pixels.len; at += 4)
+	{
+		if ((int)through_slang.pixels[at] + (int)through_slang.pixels[at + 1] + (int)through_slang.pixels[at + 2] > 30) lit++;
+	}
+	test::@check(lit > (sz)W * H / 4, "the fixture draws a surface: %d of %d pixels", lit, W * H);
+
+	renderer.pass.scene.set_material(node, from_shady);
+	image::Image through_shady = renderer.capture()!!;
+	defer through_shady.free();
+
+	sz differing = 0;
+	sz first = through_slang.pixels.len;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] == through_shady.pixels[at]) continue;
+		if (differing == 0) first = at;
+		differing++;
+	}
+	test::@check(differing == 0,
+		"a scripted material is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
+		differing, through_slang.pixels.len, first, first / 4 % W, first / 4 / W);
+}
+
+<*
+ A relief body through both compilers, compared as pixels.
+
+ The fixture is a height map that moves the uv and a body that paints the move
+ itself, so a sign, a transpose or a dropped fade is a different picture rather
+ than a different shading. A third frame with the parallax call replaced by the
+ flat uv proves the fixture can see relief at all: equality through the two
+ compilers is meaningless if the height map moved nothing.
+*>
+fn void a_relief_body_is_the_same_pixels_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+	renderer.scene_cache_disabled = true;
+	renderer.clear = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+	three::MaterialTexture[1] textures = { { "height_map" } };
+
+	String through_template = `
+float3 shade(Surface s)
+{
+	float2 puv = parallax_uv(s, s.uv, height_map.Sample(s.uv).r, 0.4);
+	return float3((puv - s.uv) * 20.0 + 0.5, 0.0);
+}
+`;
+	String through_def = `
+fn float3 shade(Surface s)
+{
+	float2 puv = parallax_uv(s, s.uv, height_map().Sample(s.uv).r, 0.4);
+	return float3((puv - s.uv) * 20.0 + 0.5, 0.0);
+}
+`;
+	String through_flat = `
+fn float3 shade(Surface s)
+{
+	return float3(0.5, 0.0, 0.0);
+}
+`;
+
+	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SLANG);
+	uint from_slang = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target, through_template, {}, three::SIDE_DOUBLE,
+		three::BLENDING_NONE, textures[..]
+	)!!;
+	three::shader_overrides_clear();
+	uint from_shady = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target, through_def, {}, three::SIDE_DOUBLE,
+		three::BLENDING_NONE, textures[..]
+	)!!;
+	uint from_flat = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target, through_flat, {}, three::SIDE_DOUBLE, three::BLENDING_NONE
+	)!!;
+	three::shader_overrides_clear();
+
+	char[16] pixels = {
+		0, 0, 0, 255,   255, 0, 0, 255,
+		255, 0, 0, 255, 0, 0, 0, 255,
+	};
+	image::Image height = {
+		.width = 2,
+		.height = 2,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		.pixels = pixels[..],
+	};
+	int map = renderer.pass.assets.claim_texture(&renderer.gpu, height)!!;
+	renderer.pass.set_material_texture(&renderer.gpu, from_slang, "height_map", map)!!;
+	renderer.pass.set_material_texture(&renderer.gpu, from_shady, "height_map", map)!!;
+
+	three::AssetId quad = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(quad, 0);
+	renderer.pass.scene.set_material(node, from_slang);
+	renderer.pass.frame_camera();
+	image::Image through_slang = renderer.capture()!!;
+	defer through_slang.free();
+
+	renderer.pass.scene.set_material(node, from_shady);
+	image::Image through_shady = renderer.capture()!!;
+	defer through_shady.free();
+
+	renderer.pass.scene.set_material(node, from_flat);
+	image::Image flat = renderer.capture()!!;
+	defer flat.free();
+
+	// The fixture can see relief: the moved uv and the flat one are not the
+	// same frame.
+	sz moved = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != flat.pixels[at]) moved++;
+	}
+	test::@check(moved > (sz)W * H / 4,
+		"the height map moves the uv over a quarter of the frame: %d of %d bytes", moved, through_slang.pixels.len);
+
+	sz differing = 0;
+	sz first = through_slang.pixels.len;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] == through_shady.pixels[at]) continue;
+		if (differing == 0) first = at;
+		differing++;
+	}
+	test::@check(differing == 0,
+		"a relief body is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
+		differing, through_slang.pixels.len, first, first / 4 % W, first / 4 / W);
 }

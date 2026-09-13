@@ -35,11 +35,11 @@ const String MESH_PATH = "shaders/mesh.slang";
  Anything that *compiles* comes through here, because the file on its own is a
  template with a marker line in it and `mapped_normal_frame` defined nowhere.
  Anything that reads the file as *text* — the declaration checks below, which cut
- a struct out of it and compile that alone — uses `load_source`, because what
+ a struct out of it and compile that alone — uses `read_source`, because what
  they are holding `material.slang` and `shadow.slang` against is what is written
  in the file rather than what was spliced into it.
 *>
-fn String? mesh_module() => three::shader_source("mesh.slang", mem);
+fn String? mesh_module() => three::shader_source(three::ShaderFile.MESH_SLANG, mem);
 
 <*
  A shader with one binding of every kind this pass can translate, in two sets.
@@ -156,9 +156,9 @@ fn void the_mesh_shader_compiles_from_a_string() @test
 *>
 fn void standard_lighting_reuses_visibility_and_area_samples() @test
 {
-	String lighting_path = three::find_shader("lighting.slang", mem)!!;
+	String lighting_path = three::find_shader(three::ShaderFile.LIGHTING_SLANG, mem)!!;
 	defer lighting_path.free(mem);
-	String lighting = three::load_source(lighting_path)!!;
+	String lighting = three::read_source(lighting_path)!!;
 	defer lighting.free(mem);
 
 	String standard = function_body(lighting, "SharedLightTerms shared_standard_lights");
@@ -218,16 +218,16 @@ fn void standard_lighting_reuses_visibility_and_area_samples() @test
 		"the shared path adds neither a per-light array nor a sampled binding"
 	);
 
-	String[2] names = { "mesh.slang", "material.slang" };
+	three::ShaderFile[2] names = { three::ShaderFile.MESH_SLANG, three::ShaderFile.MATERIAL_SLANG };
 	foreach (name : names)
 	{
 		@pool()
 		{
 			String path = three::find_shader(name, tmem)!!;
-			String template = three::load_source(path, tmem)!!;
+			String template = three::read_source(path, tmem)!!;
 			test::@check(
 				occurrence_count(template, "shared_standard_lights(") == 1,
-				"%s sends its built-in standard shading through one shared walk", name
+				"%s sends its built-in standard shading through one shared walk", name.name
 			);
 		};
 	}
@@ -594,7 +594,7 @@ fn void the_mesh_push_block_matches_the_struct() @test
 *>
 fn void the_draw_record_matches_the_shader() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = three::read_source(MESH_PATH)!!;
 	defer source.free(mem);
 
 	sz? start = source.index_of("struct Draw");
@@ -701,7 +701,7 @@ fn void the_draw_record_matches_the_shader() @test
 *>
 fn void the_frame_block_matches_the_shader() @test
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = three::read_source(MESH_PATH)!!;
 	defer source.free(mem);
 
 	sz? light_start = source.index_of("struct Light");
@@ -787,7 +787,7 @@ fn void the_frame_block_matches_the_shader() @test
 *>
 macro @check_storage_record($Type, String header, String expression)
 {
-	String source = three::load_source(MESH_PATH)!!;
+	String source = three::read_source(MESH_PATH)!!;
 	defer source.free(mem);
 	sz? start = source.index_of(header);
 	test::@check(@ok(start), "mesh shader declares %s", header);
@@ -835,21 +835,21 @@ fn void storage_light_and_shadow_records_match_c3() @test
 fn void every_shader_declares_the_same_contract() @test
 {
 	String[3] paths = { MESH_PATH, "", "" };
-	String material_path = three::find_shader("material.slang", mem)!!;
+	String material_path = three::find_shader(three::ShaderFile.MATERIAL_SLANG, mem)!!;
 	defer material_path.free(mem);
-	String shadow_path = three::find_shader("shadow.slang", mem)!!;
+	String shadow_path = three::find_shader(three::ShaderFile.SHADOW_SLANG, mem)!!;
 	defer shadow_path.free(mem);
 	paths[1] = material_path;
 	paths[2] = shadow_path;
 
-	String mesh = three::load_source(paths[0])!!;
+	String mesh = three::read_source(paths[0])!!;
 	defer mesh.free(mem);
 
 	String[6] structs = { "struct Instance", "struct Light", "struct ShadowGpuView", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
 
 	for (uint file = 1; file < 3; file++)
 	{
-		String other = three::load_source(paths[file])!!;
+		String other = three::read_source(paths[file])!!;
 		defer other.free(mem);
 
 		foreach (header : structs)
@@ -1300,12 +1300,12 @@ fn void a_transparent_variant_of_one_source_is_one_compile() @test
 		// One string, used twice. Two spellings of the same body would be two
 		// modules whatever the blend did, and this check would pass against a
 		// cache that had stopped sharing anything.
-		String body = `float3 shade(Surface s) { return s.albedo * 0.5; }`;
+		String body = `fn float3 shade(Surface s) { return s.albedo * 0.5; }`;
 		uint opaque = pass.create_material(gpu, target, body, {}, three::SIDE_FRONT, three::BLENDING_NONE)!!;
 		uint glass = pass.create_material(gpu, target, body, {}, three::SIDE_FRONT, three::BLENDING_NORMAL)!!;
 
 		test::@check(pass.pipelines.compiles - compiles == 1,
-			"one Slang call for both, got %d", (int)(pass.pipelines.compiles - compiles));
+			"one compile for both, got %d", (int)(pass.pipelines.compiles - compiles));
 		test::@check(pass.pipelines.builds - builds == 2,
 			"and two VkPipelines over it, got %d", (int)(pass.pipelines.builds - builds));
 

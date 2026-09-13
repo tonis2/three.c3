@@ -65,7 +65,7 @@ fn float4 fragmentMain(VertexOutput input) @fragment
 *>
 macro String emitted_module(String name, String text)
 {
-	ShaderSource[] sources = { { name, text } };
+	ShaderSource[] sources = { { .name = name, .source = text } };
 	ShaderDef def = { .name = "sky", .sources = sources };
 
 	DString out;
@@ -195,7 +195,7 @@ fn void a_compute_stage_carries_its_thread_counts() @test
 	// the entry point is - not in a table on the C3 side that would have to be
 	// kept in step with it.
 	ShaderSource[] sources = {
-		{ "cluster", `
+		{ .name = "cluster", .source = `
 struct ComputeIn
 {
 	uint3 id @builtin(global_invocation_id);
@@ -544,24 +544,31 @@ fn void the_ported_mesh_is_lit() @test
 		"the frame depth the crevice reads is declared at the engine's own binding");
 	test::@check(source.contains("s.crevice = occlusion * crevice_occlusion(s.position, geometric);"),
 		"the surface carries the crevice the ambient terms scale by");
-	test::@check(source.contains("float3 diffuse = ambient * s.crevice")
-		&& source.contains("+ push.frame[0].world.rgb * s.crevice;"),
+	test::@check(source.contains("float3 diffuse = ambient * visibility")
+		&& source.contains("+ push.frame[0].world.rgb * visibility;"),
 		"and the ambient floor and the world light are what it multiplies");
 	test::@check(source.contains("Sampler2D lightmap_atlas @set(0) @binding(20);"),
 		"the baked atlas is declared at the engine's own binding");
-	test::@check(source.contains("s.lightmapped = front_facing && input.lightmap.z > 0.5;")
+	test::@check(source.contains("s.lightmapped = !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;")
 		&& source.contains("lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb"),
-		"front faces with a tile read it once, and back faces fall back to real time");
+		"front faces with a tile read it once, back faces fall back to real time, and a lightmap bake reads nothing");
+	test::@check(source.contains("fn float3 lambert(Surface s, float3 normal, float occlusion)")
+		&& source.contains("fn float3 lambert(Surface s, float3 normal)")
+		&& source.contains("fn float3 specular(Surface s)"),
+		"the script-facing diffuse and highlight are in the module a body is spliced into");
+	test::@check(source.contains("fn float3 baked_diffuse(FrameBlock* frame, float3 normal, float3 receiver_normal, float3 position)")
+		&& source.contains("return baked_diffuse(push.frame, normal, s.receiver_normal, s.position);"),
+		"and the lightmap bake answers with the baked lights' direct diffuse");
 	test::@check(source.contains("if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;"),
 		"a baked light's diffuse is skipped where the tile carries it and its highlight is not");
-	test::@check(source.contains("baked_dynamic_delta(push.frame, s.normal, s.receiver_normal, s.position)"),
+	test::@check(source.contains("baked_dynamic_delta(push.frame, normal, s.receiver_normal, s.position)"),
 		"and the moving-caster delta is added beside the tile");
 	test::@check(source.contains("Sampler2D environment_map @set(0) @binding(2);"),
 		"the environment is declared at the engine's own binding");
 	test::@check(source.contains("environment_map.SampleLevel(environment_uv(reflected), lod).rgb"),
 		"and the reflection samples it through the same mapping the sky background draws with");
-	test::@check(source.contains("+ environment_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance) * s.crevice"),
-		"the reflection is added beside the direct term and scaled by the crevice");
+	test::@check(source.contains("+ environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * visibility"),
+		"the reflection is added beside the direct term and scaled by the visibility");
 	test::@check(source.contains("Sampler2D shadow_atlas @set(0) @binding(17);"),
 		"the unfiltered shadow map the shadowMap view draws is declared at its reserved binding");
 	test::@check(source.contains("if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);"),
@@ -576,6 +583,45 @@ fn void the_ported_mesh_is_lit() @test
 	path::mkdir("build/shaderdef", recursive: true)!!;
 	file::save("build/shaderdef/mesh_lit.shady", source)!!;
 	check_compiles(source, "the generated lit mesh module");
+}
+
+<*
+ The reference variant: the built-in module with the numeric quadrature in place
+ of the LTC fit, and no fit table in it.
+
+ **The resource difference is the point.** The fitted module declares binding 19
+ and the numeric one must not: a device with no table has to be able to draw the
+ reference, and the variant is a module rather than a spec constant exactly
+ because a constant cannot take a binding away. Kong compiles and validates this
+ text beside the fitted module's.
+*>
+fn void the_ported_mesh_reference_module_is_generated() @test
+{
+	DString uniforms;
+	uniforms.tinit(128);
+	three::append_shady_uniforms(&uniforms, {});
+
+	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), built_in: true, reference: true);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("fn AreaTerms area_light_terms("),
+		"the shared light walk's area seam is carried");
+	test::@check(source.contains("return area_reference_terms(light, position, normal, view, f0, f90, a2, k, nv);"),
+		"and the numeric half answers with the quadrature rather than the fit");
+	test::@check(source.contains("fn float area_diffuse(Light light, float3 position, float3 normal)\n{\n\treturn area_reference_diffuse(light, position, normal);"),
+		"the baked-diffuse answer is the numeric one too");
+	test::@check(!source.contains("ltc_lut") && !source.contains("area_ltc_context"),
+		"and the module carries neither the fit table nor the code that reads it");
+	test::@check(source.contains("struct AreaCache") && source.contains("inout bool ready"),
+		"the seam's cache is the one the numeric half defines, not the fit's");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/mesh_reference.shady", source)!!;
+	check_compiles(source, "the generated numeric-reference mesh module");
 }
 
 <*
@@ -666,6 +712,107 @@ fn void a_body_reading_its_uniforms_compiles_in_both_shapes() @test
 
 	check_compiles(pushed_source, "the same body over the push block");
 	check_compiles(spilled_source, "and over the table buffer");
+}
+
+<*
+ The relief helpers a `LayeredMaterial` body calls, compiled rather than only
+ asserted on: `parallax_shift` solves the screen-space frame, the two steps move
+ the uv, `base_albedo` rebuilds the colour at the moved uv and `mapped_normal`
+ decodes a texel through the same frame.
+*>
+macro String relief_shade()
+{
+	return `
+fn float3 shade(Surface s)
+{
+	float2 pshift = parallax_shift(s, ddx(s.uv), ddy(s.uv), 0.05);
+	float bh = base_height_map().Sample(s.uv).r;
+	float2 puv = parallax_step(s.uv, pshift, bh, 0.05);
+	float2 puv2 = parallax_uv(s, s.uv, bh, 0.05);
+	float2 muv = parallax_step(s.mesh_uv, parallax_mesh_shift(pshift), bh, 0.05);
+	float3 c = base_albedo(s, puv) + float3(puv2.x - puv.x, muv.y, 0.0);
+	float3 n = mapped_normal(s, normal_map().Sample(puv).rgb);
+	return standard(s, c, n, 0.8);
+}
+`;
+}
+
+fn void a_relief_body_compiles_against_the_material_half() @test
+{
+	MaterialTexture[2] textures = { { "base_height_map" }, { "normal_map" } };
+	DString declared;
+	declared.tinit(256);
+	three::append_shady_textures(&declared, textures[..], three::MATERIAL_BINDING_FIRST, true);
+
+	DString uniforms;
+	uniforms.tinit(256);
+	three::append_shady_uniforms(&uniforms, {});
+
+	three::ShaderDef def = three::mesh_def(relief_shade(), uniforms.str_view(), textures: declared.str_view());
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("fn float3 standard(Surface s, float3 albedo, float3 normal, float ao)"),
+		"the four-argument built-in look is the half's own");
+	test::@check(source.contains("fn float3 standard(Surface s, float3 albedo, float3 normal)"),
+		"and the shorter overload a layered body calls");
+	test::@check(source.contains("fn float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)")
+		&& source.contains("fn float2 parallax_step(float2 uv, float2 shift, float height, float depth)")
+		&& source.contains("fn float2 parallax_uv(Surface s, float2 uv, float height, float depth)")
+		&& source.contains("fn float2 parallax_mesh_shift(float2 shift)"),
+		"with the relief solve and the steps");
+	test::@check(source.contains("fn float3 base_albedo(Surface s, float2 uv)")
+		&& source.contains("fn float3 mapped_normal(Surface s, float3 texel)"),
+		"and the two helpers that rebuild what the moved uv changed");
+	test::@check(source.contains("\tfloat height;"),
+		"the surface carries the height channel a bake writes");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/material_relief.shady", source)!!;
+	check_compiles(source, "the layered relief body");
+}
+
+<*
+ The bake variant: the same body and files with `MATERIAL_BAKE` on, which is the
+ whole of the difference between baking a script's material and drawing it. The
+ triangle is placed by the mesh's own uv and every lit term answers its identity,
+ so the file gets the body's colour and nothing else.
+*>
+fn void the_bake_module_shades_unlit_and_places_by_uv() @test
+{
+	MaterialTexture[1] textures = { { "noise_map" } };
+	DString declared;
+	declared.tinit(128);
+	three::append_shady_textures(&declared, textures[..], three::MATERIAL_BINDING_FIRST, true);
+
+	DString uniforms;
+	uniforms.tinit(128);
+	three::append_shady_uniforms(&uniforms, {});
+
+	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), textures: declared.str_view(), bake: true);
+
+	DString out;
+	out.tinit(32768);
+	three::append_shader_def(&out, def, three::MeshPush);
+	String source = out.str_view();
+
+	test::@check(source.contains("const bool MATERIAL_BAKE = true;"),
+		"the module says it is a bake");
+	test::@check(source.contains("if (MATERIAL_BAKE) return albedo;"),
+		"the built-in look answers the body's colour and nothing else");
+	test::@check(source.contains("if (MATERIAL_BAKE) return float3(0.0);"),
+		"and the reflection is off");
+	test::@check(source.contains("float2 bake_uv = v.uv;")
+		&& source.contains("output.sv_position = float4(bake_uv * 2.0 - 1.0, 0.0, 1.0);"),
+		"the geometry half places the triangle by the mesh's own uv");
+	test::@check(source.contains("#line 1 \"material\""), "with the body still its own region");
+
+	path::mkdir("build/shaderdef", recursive: true)!!;
+	file::save("build/shaderdef/material_bake.shady", source)!!;
+	check_compiles(source, "the generated bake module");
 }
 
 <*
@@ -948,7 +1095,7 @@ fn float3 shade(Surface s)
 
 fn void the_ported_mesh_module_is_generated() @test
 {
-	String geometry = three::load_source("shaders/mesh.shady")!!;
+	String geometry = three::read_source("shaders/mesh.shady")!!;
 	defer geometry.free(mem);
 
 	DString uniforms;
@@ -992,7 +1139,7 @@ fn void the_ported_mesh_module_is_generated() @test
 	// The port itself.
 	test::@check(source.contains("fn void mesh_vertex(VertexIn input, out VertexOutput output)"),
 		"the vertex path survived the port");
-	test::@check(source.contains("pose_vertex(draw, instance, input.vid, input.iid, position, normal);"),
+	test::@check(source.contains("pose_vertex(draw, instance, input.vid, input.iid, position, normal, local);"),
 		"and calls the pose the shadow pass calls");
 	test::@check(source.contains("fn void pose_vertex("), "which is carried as a source block of its own");
 	test::@check(source.contains("output.uv = variant_uv(output.uv, draw.uv_variants[variant]);"),
@@ -1052,7 +1199,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 
 	// The port itself, which both modules share.
 	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid)"), "the body survived the port");
-	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal);"),
+	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_local);"),
 		"the pose is the shared block's, not a copy of it");
 	test::@check(source.contains("(pose * float4(position, 1.0)).xyz")
 		&& source.contains("draw.posed[iid * draw.skin_stride + vid]"),
@@ -1152,4 +1299,96 @@ fn void the_ported_cluster_module_is_generated() @test
 
 	path::mkdir("build/shaderdef", recursive: true)!!;
 	file::save("build/shaderdef/cluster.shady", source)!!;
+}
+
+<*
+ A script's `shade()` through the switch: the body is spliced as its own region,
+ the uniforms are fields of the struct the push block carries, and a declared
+ texture is a `Map` row rather than a descriptor.
+*>
+fn void a_scripted_material_compiles_through_the_switch() @test
+{
+	three::MaterialUniform[] uniforms = {
+		{ "tint", 4, 1 },
+		{ "colors", 4, 4 },
+	};
+	three::MaterialTexture[1] textures = { { "noise_map" } };
+
+	// The row is held on Slang until the material half carries relief and the
+	// bake half; the assembly itself is what this asks about.
+	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SHADY);
+	defer three::shader_overrides_clear();
+
+	three::ShaderModule mod = three::compile_shader(
+		three::ShaderPass.MESH_MATERIAL, "", "three.material", three::MESH_ENTRIES[..],
+		body: `fn float3 shade(Surface s)
+{
+	return s.uniforms.tint.rgb * s.uniforms.colors[s.variant].rgb * noise_map().Sample(s.uv).rgb;
+}
+`,
+		uniforms: uniforms[..],
+		textures: textures[..],
+	)!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "a scripted material compiles through shady: %s", mod.diagnostic);
+
+	// The uniform fields, by the names the script declared.
+	test::@check(mod.layout.field_of("tint") != null && mod.layout.field_of("colors") != null,
+		"the declared uniforms are fields of the push block");
+	test::@check(mod.layout.push_size > three::MATERIAL_PUSH_START,
+		"and the block is bigger than the walk alone");
+
+	// The texture is a row of the device-wide table, so it is not a descriptor.
+	test::@check(mod.layout.binding_of("noise_map") == null,
+		"a declared texture is not a descriptor of its own");
+	test::@check(mod.layout.field_of("noise_map") == null, "nor a push field");
+}
+
+fn void a_scripted_post_compiles_through_the_switch() @test
+{
+	three::MaterialUniform[1] uniforms = { { "gain", 1, 1 } };
+	three::MaterialTexture[1] textures = { { "tint_map" } };
+
+	three::ShaderModule mod = three::compile_shader(
+		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..],
+		body: `fn float3 post(Post p)
+{
+	return tint_map.Sample(p.uv).rgb * p.uniforms.gain;
+}
+`,
+		uniforms: uniforms[..],
+		textures: textures[..],
+	)!!;
+	defer mod.free();
+
+	test::@check(mod.ok, "a scripted post compiles through shady: %s", mod.diagnostic);
+
+	three::ShaderBinding* tint = mod.layout.binding_of("tint_map");
+	test::@check(tint != null && tint.set == 0 && tint.binding == three::POST_BINDING_FIRST,
+		"its texture is a binding beside the four reserved ones");
+	test::@check(mod.layout.field_of("gain") != null, "and its uniform is a push field");
+}
+
+fn void a_scripted_body_error_names_the_scripts_own_line() @test
+{
+	three::MaterialUniform[] uniforms = { { "tint", 4, 1 } };
+	// The row is held on Slang until the material half carries relief and the
+	// bake half; the assembly itself is what this asks about.
+	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SHADY);
+	defer three::shader_overrides_clear();
+
+	three::ShaderModule mod = three::compile_shader(
+		three::ShaderPass.MESH_MATERIAL, "", "three.material", three::MESH_ENTRIES[..],
+		body: `fn float3 shade(Surface s)
+{
+	return s.uniforms.tint.rgb * notAFunction(s.uv);
+}
+`,
+		uniforms: uniforms
+	)!!;
+	defer mod.free();
+
+	test::@check(!mod.ok, "the fault is reported");
+	test::@check(mod.diagnostic.contains("material:3:"), "at the body's own line: %s", mod.diagnostic);
 }

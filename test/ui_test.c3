@@ -328,7 +328,7 @@ fn void the_overlay_is_silent_over_a_post_chain() @test
 	{
 		if (!renderer.gpu.validation) return;
 
-		renderer.post.set(&renderer.gpu, &renderer.target, `float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 
 		image::Image warmup = renderer.capture()!!;
 		warmup.free();

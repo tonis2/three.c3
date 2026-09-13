@@ -1243,7 +1243,7 @@ fn void a_mesh_takes_its_material_in_the_constructor() @test
 		three::RunResult result = run.run(`
 			const mat = new three.ShaderMaterial({
 				uniforms: { tint: [1, 0, 0] },
-				fragment: "float3 shade(Surface s) { return tint * lambert(s.normal); }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint * lambert(s, s.normal); }",
 			});
 			const scene = new three.Scene();
 			const ball = new three.Mesh(new three.SphereGeometry(1), mat);
@@ -1493,7 +1493,7 @@ fn void a_table_too_large_for_the_push_block_still_reaches_the_shader() @test
 
 			globalThis.mat = new three.ShaderMaterial({
 				uniforms: { palette },
-				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }",
 			});
 
 			globalThis.scene = new three.Scene();
@@ -1563,7 +1563,7 @@ fn void a_variant_picks_a_row_of_the_material_table() @test
 			const kit = three.load("test/fixtures/textured.glb");
 			globalThis.mat = new three.ShaderMaterial({
 				uniforms: { palette: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] },
-				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }",
 			});
 
 			globalThis.scene = new three.Scene();
@@ -1637,7 +1637,7 @@ fn void a_table_row_can_be_written_on_its_own() @test
 			const kit = three.load("test/fixtures/textured.glb");
 			globalThis.mat = new three.ShaderMaterial({
 				uniforms: { palette: [[1, 0, 0], [1, 0, 0]] },
-				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }",
 			});
 			globalThis.scene = new three.Scene();
 			const quad = new three.Mesh(kit.mesh("quad_left"), globalThis.mat);
@@ -1791,16 +1791,16 @@ fn void a_ragged_table_is_refused_by_name() @test
 			// floats wide, and a plain uniform beside a table is ordinary.
 			refuse(() => new three.ShaderMaterial({
 				uniforms: { palette: [[1, 0, 0], [0, 1, 0]], sheen: [[0.1], [0.2], [0.3]] },
-				fragment: "float3 shade(Surface s) { return palette[s.variant] * sheen[s.variant]; }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant] * s.uniforms.sheen[s.variant]; }",
 			}));
 			refuse(() => new three.ShaderMaterial({
 				uniforms: { palette: [[1, 0, 0], [0, 1]] },
-				fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }",
 			}));
 			refuse(() => {
 				const mat = new three.ShaderMaterial({
 					uniforms: { palette: [[1, 0, 0], [0, 1, 0]] },
-					fragment: "float3 shade(Surface s) { return palette[s.variant]; }",
+					fragment: "fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }",
 				});
 				mat.uniforms.palette[5] = [0, 0, 1];
 			});
@@ -2304,7 +2304,7 @@ fn void an_agent_written_shader_reaches_the_screen() @test
 
 		three::RunResult after = run.run(`
 			globalThis.quad.material = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(1.0, 0.0, 0.0); }"
+				fragment: "fn float3 shade(Surface s) { return float3(1.0, 0.0, 0.0); }"
 			});
 			three.render(globalThis.scene);
 		`);
@@ -2353,7 +2353,7 @@ fn void a_uniform_is_what_the_pixels_are() @test
 			const quad = new three.Mesh(kit.mesh("quad_left"));
 			globalThis.mat = new three.ShaderMaterial({
 				uniforms: { tint: [1, 0, 0] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 			quad.material = globalThis.mat;
 			globalThis.scene.add(quad);
@@ -2414,7 +2414,7 @@ fn void two_materials_at_once_each_get_their_own_shader() @test
 			const left = new three.Mesh(kit.mesh("quad_left"));
 			left.material = new three.ShaderMaterial({
 				uniforms: { tint: [1, 0, 0] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 
 			// A *different body*, not just a different uniform. Two materials
@@ -2424,7 +2424,7 @@ fn void two_materials_at_once_each_get_their_own_shader() @test
 			const right = new three.Mesh(kit.mesh("quad_right"));
 			right.material = new three.ShaderMaterial({
 				uniforms: { level: 1 },
-				fragment: "float3 shade(Surface s) { return float3(0.0, level, 0.0); }"
+				fragment: "fn float3 shade(Surface s) { return float3(0.0, s.uniforms.level, 0.0); }"
 			});
 
 			scene.add(left, right);
@@ -2468,9 +2468,9 @@ fn void a_bad_material_throws_with_the_line_the_agent_wrote() @test
 				new three.ShaderMaterial({
 					uniforms: { tint: [1, 0, 0] },
 					fragment: [
-						"float3 shade(Surface s)",
+						"fn float3 shade(Surface s)",
 						"{",
-						"    return s.albedo * tintt;",
+						"    return s.albedo * s.uniforms.tintt;",
 						"}"
 					].join("\n")
 				});
@@ -2503,7 +2503,7 @@ fn void a_material_without_a_device_says_so() @test
 	{
 		three::RunResult result = run.run(`
 			try {
-				new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return s.albedo; }" });
+				new three.ShaderMaterial({ fragment: "fn float3 shade(Surface s) { return s.albedo; }" });
 				return "no throw";
 			} catch (e) { return e.message; }
 		`);
@@ -2530,7 +2530,7 @@ fn void an_undeclared_uniform_cannot_be_assigned() @test
 		three::RunResult result = run.run(`
 			const mat = new three.ShaderMaterial({
 				uniforms: { tint: [1, 0, 0] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 			const said = [];
 			try { mat.uniforms.tnit = [0, 1, 0]; said.push("no throw"); }
@@ -2563,7 +2563,7 @@ fn void a_material_survives_a_new_scene() @test
 			const kit = three.load("test/fixtures/textured.glb");
 			const mat = new three.ShaderMaterial({
 				uniforms: { tint: [0.2, 0.4, 0.8] },
-				fragment: "float3 shade(Surface s) { return tint * s.albedo; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint * s.albedo; }"
 			});
 
 			const first = new three.Scene();
@@ -2613,7 +2613,7 @@ fn void two_materials_over_one_mesh_are_two_draws() @test
 
 			const mat = new three.ShaderMaterial({
 				uniforms: { k: 0.5 },
-				fragment: "float3 shade(Surface s) { return s.albedo * k; }"
+				fragment: "fn float3 shade(Surface s) { return s.albedo * s.uniforms.k; }"
 			});
 			b.material = mat;
 			const split = three.stats();
@@ -2818,7 +2818,7 @@ fn void a_shader_material_can_wear_a_map() @test
 			const scene = new three.Scene();
 			const mat = new three.ShaderMaterial({
 				uniforms: { boost: 3.0 },
-				fragment: "float3 shade(Surface s) { return s.albedo * boost; }",
+				fragment: "fn float3 shade(Surface s) { return s.albedo * s.uniforms.boost; }",
 			});
 			mat.map = three.texture("test/fixtures/checker.png");
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
@@ -3329,7 +3329,7 @@ fn void consecutive_push_descriptor_draws_each_keep_their_own_state() @test
 				m.position.set(i * 1.2, 0, 0);
 				m.material = new three.ShaderMaterial({
 					uniforms: { tint: c },
-					fragment: "float3 shade(Surface s) { return tint; }"
+					fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 				});
 				scene.add(m);
 			});
@@ -5063,7 +5063,7 @@ fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 		three::RunResult result = run.run(`
 			for (let i = 0; i < 12; i++) {
 				const mat = new three.ShaderMaterial({
-					fragment: "float3 shade(Surface s) { return s.albedo * " + (i + 1) + ".0; }"
+					fragment: "fn float3 shade(Surface s) { return s.albedo * " + (i + 1) + ".0; }"
 				});
 				mat.dispose();
 			}
@@ -5106,7 +5106,7 @@ fn void a_disposed_material_handle_throws() @test
 	{
 		three::RunResult result = run.run(`
 			const mat = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return s.albedo; }"
+				fragment: "fn float3 shade(Surface s) { return s.albedo; }"
 			});
 			const said = [];
 			mat.dispose();
@@ -5154,7 +5154,7 @@ fn void a_mesh_keeps_drawing_with_a_disposed_material() @test
 	{
 		three::RunResult result = run.run(`
 			const mat = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(1, 0, 0); }"
+				fragment: "fn float3 shade(Surface s) { return float3(1, 0, 0); }"
 			});
 			const scene = new three.Scene();
 			const mesh = new three.Mesh(new three.BoxGeometry(1, 1, 1), mat);
@@ -6118,7 +6118,7 @@ fn void a_post_pass_reaches_the_screen() @test
 			"the fixture is a red wall, got %d red pixels", count_near(&plain, red, 0, 0));
 
 		three::RunResult posted = run.run(`
-			const post = three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			const post = three.setPost({ fragment: "fn float3 post(Post p) { return p.color.bgr; }" });
 			three.render(globalThis.scene, three.camera);
 			return post.fragment;
 		`);
@@ -6189,13 +6189,13 @@ fn void a_script_can_chain_passes_and_keep_every_handle() @test
 			// On globalThis because the second script below has to reach them:
 			// each run_script is its own function scope.
 			const first = globalThis.first = three.setPost({
-				fragment: "float3 post(Post p) { return p.color.bgr * gain; }",
+				fragment: "fn float3 post(Post p) { return p.color.bgr * p.uniforms.gain; }",
 				uniforms: { gain: 1 },
 			});
 			// The same uniform name in both, so the check below is the staleness
 			// one for both handles rather than an undeclared-name refusal for one.
 			const second = globalThis.second = three.addPass({
-				fragment: "float3 post(Post p) { return float3(p.color.r * gain, 0, 0); }",
+				fragment: "fn float3 post(Post p) { return float3(p.color.r * p.uniforms.gain, 0, 0); }",
 				uniforms: { gain: 1 },
 			});
 
@@ -6227,13 +6227,13 @@ fn void a_script_can_chain_passes_and_keep_every_handle() @test
 		// failure path, which is `set`'s and needs saying once for each door.
 		three::RunResult refused = run.run(`
 			try {
-				three.addPass({ fragment: "float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
+				three.addPass({ fragment: "fn float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
 				return "no throw";
 			} catch (e) { return e.message; }
 		`);
 		defer refused.free();
 		test::@check(refused.ok, "the refusal script succeeded: %s", refused.error);
-		test::@check(refused.value.contains("post:3"),
+		test::@check(refused.value.contains("post_body:3"),
 			"a bad addPass body throws at the line the agent wrote: %s", refused.value);
 
 		three::RunResult again = run.run(`three.render(globalThis.scene, three.camera);`);
@@ -6248,7 +6248,7 @@ fn void a_script_can_chain_passes_and_keep_every_handle() @test
 		// handles have to know it.
 		three::RunResult replaced = run.run(`
 			const said = [];
-			three.setPost({ fragment: "float3 post(Post p) { return p.color; }" });
+			three.setPost({ fragment: "fn float3 post(Post p) { return p.color; }" });
 			for (const [what, h] of [["first", globalThis.first], ["second", globalThis.second]]) {
 				if (!h) { said.push(what + ": MISSING"); continue; }
 				try { h.uniforms.gain = 2; said.push(what + ": no throw"); }
@@ -6296,7 +6296,7 @@ fn void clearing_the_post_pass_restores_the_frame() @test
 		int red = encode_srgb(primitive_linear(0));
 
 		three::RunResult cleared = run.run(`
-			three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			three.setPost({ fragment: "fn float3 post(Post p) { return p.color.bgr; }" });
 			three.render(globalThis.scene, three.camera);
 			const answer = three.setPost(null);
 			three.render(globalThis.scene, three.camera);
@@ -6359,7 +6359,7 @@ fn void post_uniforms_are_live_between_frames() @test
 
 		three::RunResult first = run.run(`
 			globalThis.post = three.setPost({
-				fragment: "float3 post(Post p) { return p.color * gain; }",
+				fragment: "fn float3 post(Post p) { return p.color * p.uniforms.gain; }",
 				uniforms: { gain: 1 }
 			});
 			three.render(globalThis.scene, three.camera);
@@ -6430,9 +6430,9 @@ fn void a_bad_post_shader_throws_the_diagnostic() @test
 		test::@check(built.ok, "the scene was built: %s", built.error);
 
 		three::RunResult result = run.run(`
-			const good = three.setPost({ fragment: "float3 post(Post p) { return p.color.bgr; }" });
+			const good = three.setPost({ fragment: "fn float3 post(Post p) { return p.color.bgr; }" });
 			try {
-				three.setPost({ fragment: "float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
+				three.setPost({ fragment: "fn float3 post(Post p)\n{\n\treturn notAFunction(p.uv);\n}" });
 				return "no throw";
 			} catch (e) {
 				good.uniforms;
@@ -6445,7 +6445,7 @@ fn void a_bad_post_shader_throws_the_diagnostic() @test
 		test::@check(!result.value.contains("no throw"),
 			"a body calling a function that does not exist was accepted");
 		test::@check(
-			result.value.contains("post:3") || result.value.contains("post(3)"),
+			result.value.contains("post_body:3") || result.value.contains("post_body(3)"),
 			"the throw does not carry the Slang text: %s",
 			result.value
 		);
@@ -6481,7 +6481,7 @@ fn void a_post_spec_that_is_not_one_is_refused() @test
 	@with_js(; three::JsRuntime* run)
 	{
 		three::RunResult result = run.run(`
-			const body = "float3 post(Post p) { return p.color; }";
+			const body = "fn float3 post(Post p) { return p.color; }";
 			const said = [];
 			const refuse = (what, spec) => {
 				try { three.setPost(spec); said.push(what + ": no throw"); }
@@ -6556,11 +6556,11 @@ fn void a_replaced_post_handle_is_refused() @test
 		three::RunResult result = run.run(`
 			const said = [];
 			const first = three.setPost({
-				fragment: "float3 post(Post p) { return p.color * gain; }",
+				fragment: "fn float3 post(Post p) { return p.color * p.uniforms.gain; }",
 				uniforms: { gain: 1 }
 			});
 			const second = three.setPost({
-				fragment: "float3 post(Post p) { return p.color * gain * 0.5; }",
+				fragment: "fn float3 post(Post p) { return p.color * p.uniforms.gain * 0.5; }",
 				uniforms: { gain: 1 }
 			});
 
@@ -6842,25 +6842,20 @@ fn void a_textures_load_options_are_refused() @test
 }
 
 <*
- A compile error on a generated line says so, and names the uniforms.
+ A uniform's name cannot collide with the author's own vocabulary.
 
- **The third silent failure, and it is silent in a different way**: the message
- arrives, it is precise, and it describes a line the author never wrote. Every
- uniform is spliced in as `#define <name> (push.<name>)` across the whole module,
- so a helper's parameter named after a uniform is rewritten and the error lands
- on the `#define` — `plan.md` §18.5 has the instance, reported as
- `error[E20001]: unexpected token --> three.material:512:16 | #define t (push.t)`.
+ **The class of silent failure the preprocessor used to cause, and why it is
+ gone.** Every uniform was once spliced in as `#define <name> (push.<name>)`
+ across the whole module, so a helper's parameter named after a uniform was
+ rewritten and the error landed on a `#define` the author never wrote. The body
+ reads its uniforms through a typed field now (`s.uniforms.tint`), so a local or
+ a parameter called `t` beside a uniform called `t` is just a name in the
+ author's own scope.
 
- The refusals in `material_source.c3` cannot reach this: they check the uniform's
- name against the *shader's* vocabulary, and this is the author's own vocabulary
- colliding with the uniform, which would need the body parsed to see. So the
- diagnostic is kept whole and a sentence is added after it.
-
- What is asserted is the sentence and the *list*, not the wording of Slang's own
- half — the list is what turns "something is wrong on line 512" into "you called
- something `t` and `t` is one of yours".
+ What is asserted is that the material with both compiles and that nothing was
+ reported: the record the old path refused is the picture this one has to draw.
 *>
-fn void a_uniform_name_collision_explains_itself() @test
+fn void a_uniform_name_collision_cannot_reach_the_body() @test
 {
 	@with_gpu_js(; three::JsRuntime* run)
 	{
@@ -6869,22 +6864,17 @@ fn void a_uniform_name_collision_explains_itself() @test
 			try {
 				new three.ShaderMaterial({
 					uniforms: { t: 0, tint: [1, 1, 1] },
-					fragment: 'float wobble(float t) { return sin(t); }'
-						+ ' float3 shade(Surface s) { return tint * wobble(s.position.x); }',
+					fragment: 'fn float wobble(float t) { return sin(t); }'
+						+ ' fn float3 shade(Surface s) { return s.uniforms.tint * wobble(s.position.x); }',
 				});
 			} catch (e) { threw = e.message; }
-			return {
-				threw: threw.length > 0,
-				generated: threw.includes('that line is generated, not yours'),
-				lists: threw.includes('(t, tint)'),
-			};
+			return { threw: threw.length > 0, message: threw };
 		`);
 		defer result.free();
 
 		test::@check(result.ok, "the script ran: %s", result.error);
-		test::@check(result.value.contains(`"threw":true`), "the collision was refused: %s", result.value);
-		test::@check(result.value.contains(`"generated":true`), "and said the line is not the author's: %s", result.value);
-		test::@check(result.value.contains(`"lists":true`), "and named the uniforms: %s", result.value);
+		test::@check(result.value.contains(`"threw":false`),
+			"a parameter named after a uniform is the author's own name now: %s", result.value);
 	};
 }
 

@@ -567,7 +567,7 @@ fn void combined_area_lobes_match_the_separate_helpers_across_views() @test
 		});
 		globalThis.separate = new three.ShaderMaterial({
 			color: 0xb07040, roughness: 0.3, metalness: 0.4, reflectance: 0.8,
-			fragment: "float3 shade(Surface s) { return s.albedo * lambert(s.normal) * (1.0 - s.metalness) + specular(s); }"
+			fragment: "fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal) * (1.0 - s.metalness) + specular(s); }"
 		});
 		globalThis.areaPlane = new three.Mesh(new three.PlaneGeometry(12, 9), combined);
 		scene.add(areaPlane);
@@ -1025,7 +1025,7 @@ fn void all_dynamic_shadow_tiles_reuse_rigid_casters_and_clear_departures() @tes
 		fullCacheFloor.rotation.x=-Math.PI/2;scene.add(fullCacheFloor);
 		globalThis.fullCacheMaterial=new three.ShaderMaterial({
 			uniforms:{level:.2},
-			fragment:'float3 shade(Surface s){return float3(level,level,level);}'
+			fragment:'fn float3 shade(Surface s){return float3(s.uniforms.level,s.uniforms.level,s.uniforms.level);}'
 		});
 		globalThis.fullCacheBox=new three.Mesh(new three.BoxGeometry(1,1,1),fullCacheMaterial);
 		fullCacheBox.position.set(0,1,0);scene.add(fullCacheBox);

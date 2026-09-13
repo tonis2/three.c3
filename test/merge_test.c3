@@ -692,7 +692,7 @@ fn void merge_refuses_two_materials_a_helper_only_subtree_two_parents_and_differ
 			});
 
 			const material = new three.ShaderMaterial({
-				fragment: 'float3 shade(Surface s) { return s.albedo; }',
+				fragment: 'fn float3 shade(Surface s) { return s.albedo; }',
 				variants: 2,
 			});
 			const differingVariant = refuse(() => {

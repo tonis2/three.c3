@@ -93,7 +93,7 @@ fn void the_emitted_declarations_are_what_the_shaders_declare() @test
 {
 	String abi = abi_source(three::MeshPush);
 
-	String mesh = three::load_source("shaders/mesh.slang")!!;
+	String mesh = three::read_source("shaders/mesh.slang")!!;
 	defer mesh.free(mem);
 	same_declaration(abi, mesh, "struct Light", "struct Light", "Light");
 	same_declaration(abi, mesh, "struct ShadowGpuView", "struct ShadowGpuView", "ShadowGpuView");
@@ -103,19 +103,19 @@ fn void the_emitted_declarations_are_what_the_shaders_declare() @test
 	same_declaration(abi, mesh, "struct FrameBlock", "struct FrameBlock", "FrameBlock");
 	same_declaration(abi_source(three::MeshPush), mesh, "struct MeshPush", "struct PushData", "MeshPush");
 
-	String skin = three::load_source("shaders/skin.slang")!!;
+	String skin = three::read_source("shaders/skin.slang")!!;
 	defer skin.free(mem);
 	same_declaration(abi_source(three::SkinPush), skin, "struct SkinPush", "struct SkinPush", "SkinPush");
 
-	String cluster = three::load_source("shaders/cluster.slang")!!;
+	String cluster = three::read_source("shaders/cluster.slang")!!;
 	defer cluster.free(mem);
 	same_declaration(abi_source(three::ClusterPush), cluster, "struct ClusterPush", "struct ClusterPush", "ClusterPush");
 
-	String sky = three::load_source("shaders/sky.slang")!!;
+	String sky = three::read_source("shaders/sky.slang")!!;
 	defer sky.free(mem);
 	same_declaration(abi_source(three::SkyPush), sky, "struct SkyPush", "struct SkyPush", "SkyPush");
 
-	String shadow = three::load_source("shaders/shadow.slang")!!;
+	String shadow = three::read_source("shaders/shadow.slang")!!;
 	defer shadow.free(mem);
 	same_declaration(abi_source(three::ShadowPush), shadow, "struct ShadowPush", "struct PushData", "ShadowPush");
 }

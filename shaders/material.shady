@@ -12,10 +12,8 @@
 // What is here is the record, the standard look, and the body-facing extras.
 // The built-in look reads the same four extra maps `mesh.slang` does - normal,
 // metallic-roughness, occlusion and emissive - under the same uvs test as the
-// base one. What is **not** here:
-//
-//  - **relief** (`Surface.height`), which nothing writes yet;
-//  - the bake and lightmap variants, which are separate modules.
+// base one. The relief helpers and the `standard` overloads a layered body
+// calls are here too; the lightmap variant is a separate module.
 
 // **The material's own functions, and the only things this file needs from
 // outside.** Everything below is the built-in look; a material replaces exactly
@@ -83,6 +81,10 @@ fn float3 srgb_to_linear(float3 c)
 // and zero there means no occlusion pass ran - the branch before the first tap.
 fn float crevice_occlusion(float3 position, float3 normal)
 {
+	// An occlusion pass records how much sky a *frame's* pixels can see; a bake
+	// writes a texture looked at from everywhere, so the crevice is open. A
+	// lightmap bake has no depth prepass either - `THREE_NO_AO` in the original.
+	if (MATERIAL_BAKE || MATERIAL_LIGHTMAP_BAKE) return 1.0;
 	float4 settings = push.frame[0].ambient_occlusion;
 	if (settings.x <= 0.0) return 1.0;
 
@@ -161,6 +163,9 @@ fn float3 environment_light(
 	float metalness,
 	float reflectance)
 {
+	// A bake is unlit: a reflection is a fact about where the camera is, and a
+	// baked image is looked at from everywhere.
+	if (MATERIAL_BAKE) return float3(0.0);
 	float intensity = push.frame[0].environment.x;
 	if (intensity <= 0.0) return float3(0.0);
 
@@ -206,6 +211,10 @@ fn float shadow_debug_depth(float2 local)
 fn bool debug_view(float3 position, float3 normal, out float3 answer)
 {
 	answer = float3(0.0);
+	// A bake is not a frame and must not follow `three.debug.view`: an export
+	// run while somebody was looking at the shadow factor would write the
+	// shadow factor into the file.
+	if (MATERIAL_BAKE) return false;
 	float mode = push.frame[0].debug.x;
 	if (mode < 0.5) return false;
 
@@ -252,6 +261,11 @@ struct Surface
 	float2 uv;             // after `uv_transform`, which is what a map is sampled with
 	float2 mesh_uv;        // the mesh's own uv, before it
 	float3 position;       // world space
+	// Where this **copy** is: the instance's world origin, one value for the
+	// whole copy and the seed every per-copy trick wants. Read off the model
+	// matrix in the vertex stage, so it is the copy's origin under any scale,
+	// rotation or translation.
+	float3 origin;
 	float4 color;          // this copy's colour, raw
 	float4 vertex_color;   // the mesh's COLOR_0, white where the file had none
 
@@ -299,6 +313,13 @@ struct Surface
 	float3 lightmap;
 	bool lightmapped;
 
+	// How far this point stands out of the surface the mesh has, and **0.5 is
+	// that surface**: half the range stands proud of it and half sinks in, which
+	// is the convention `parallax_uv` reads a height map by. 0.5 everywhere
+	// today, because nothing writes it yet - a body with a height map of its own
+	// samples it itself. The field is here for the channel a bake writes.
+	float height;
+
 	float roughness;
 	float metalness;
 	float reflectance;
@@ -339,6 +360,20 @@ struct Vertex
 	uint variant;    // already clamped to the rows the material declared
 	uint index;      // `SV_VertexID`, the per-vertex seed a scatter keys on
 	Uniforms uniforms; // what the script declared, as `Surface.uniforms` reads it
+
+	// ---- inputs, not read back ----
+
+	// Object space, exactly as the mesh stores it: the bind pose before either
+	// skinning path ran, so a displacement that should scale with the mesh - a
+	// wave along a plane's own length rather than along the world's X - is a
+	// function of this.
+	float3 local;
+	// This copy's world origin, read off the model matrix before `displace` and
+	// the same for every vertex of the copy.
+	float3 origin;
+	// Game clock seconds. An input like `local`: a body that writes it does not
+	// change `Surface.time`.
+	float time;
 }
 
 // The look a material has before anyone says otherwise, and the pieces a body
@@ -349,15 +384,36 @@ struct Vertex
 // something: `(1 - metalness)` because a metal's colour comes back through a
 // reflection, and the specular term is a highlight on top of a body rather than
 // part of its colour.
-fn float3 standard(Surface s)
+//
+// **The four-argument form is the whole function**, and the shorter overloads
+// are that with a colour, a normal or an occlusion the body worked out for
+// itself. `ao` multiplies the ambient floor, the world light and the
+// environment reflection and nothing else - an occlusion records how much of
+// the sky a crevice can see and says nothing about where a lamp is pointing -
+// exactly as `crevice` does, which is why the two multiply the same terms.
+fn float3 standard(Surface s, float3 albedo, float3 normal, float ao)
 {
+	// A lightmap bake stores the direct diffuse of the baked lights and nothing
+	// else: no albedo, no highlight, no ambient floor. It is the one variant
+	// whose answer is a different function rather than a different factor.
+	if (MATERIAL_LIGHTMAP_BAKE)
+	{
+		return baked_diffuse(push.frame, normal, s.receiver_normal, s.position);
+	}
+
+	// A bake is unlit: the colour and not the colour times `1 - metalness`,
+	// because a metal's colour comes back through a reflection a bake has no
+	// environment for. The occlusion is a fact about the light rather than
+	// about the colour, so it stays out too.
+	if (MATERIAL_BAKE) return albedo;
+
 	LightTerms direct = shade_lights(
 		push.frame,
 		s.screen_position,
 		s.position,
-		s.normal,
+		normal,
 		s.receiver_normal,
-		s.albedo,
+		albedo,
 		s.roughness,
 		s.metalness,
 		s.reflectance,
@@ -372,7 +428,7 @@ fn float3 standard(Surface s)
 	if (s.lightmapped)
 	{
 		baked = max(
-			s.lightmap + baked_dynamic_delta(push.frame, s.normal, s.receiver_normal, s.position),
+			s.lightmap + baked_dynamic_delta(push.frame, normal, s.receiver_normal, s.position),
 			float3(0.0)
 		);
 	}
@@ -380,24 +436,267 @@ fn float3 standard(Surface s)
 	// The original's three ambient pieces. `lighting.x` is how much of the
 	// frame's ambient term reaches a surface - one minus it is how much is left
 	// for the lights to do - and `world.rgb` is the colour of the room the
-	// scene is in. **The crevice multiplies both and neither of the two light
-	// terms**: an occlusion says how much sky a point can see and nothing about
-	// where a lamp is pointing, so folding it into the direct light would paint
-	// dirt on the lit side.
+	// scene is in. **The visibility multiplies both and neither of the two
+	// light terms**: an occlusion says how much sky a point can see and nothing
+	// about where a lamp is pointing, so folding it into the direct light would
+	// paint dirt on the lit side.
 	float ambient = push.frame[0].lighting.x;
-	float3 diffuse = ambient * s.crevice
+	float visibility = ao * s.crevice;
+	float3 diffuse = ambient * visibility
 		+ (1.0 - ambient) * (direct.diffuse + baked)
-		+ push.frame[0].world.rgb * s.crevice;
+		+ push.frame[0].world.rgb * visibility;
 
 	// Metalness takes the diffuse away and the environment gives it back as a
 	// reflection, which is what makes a metal look like metal. The reflection
-	// takes the same crevice the ambient floor does - both are the sky - and
+	// takes the same visibility the ambient floor does - both are the sky - and
 	// the emissive is last, reached by nothing above it: a surface that gives
 	// off light gives it off in a crevice, in shadow and on a metal.
-	return s.albedo * diffuse * (1.0 - s.metalness)
+	return albedo * diffuse * (1.0 - s.metalness)
 		+ direct.specular
-		+ environment_light(s.normal, s.position, s.albedo, s.roughness, s.metalness, s.reflectance) * s.crevice
+		+ environment_light(normal, s.position, albedo, s.roughness, s.metalness, s.reflectance) * visibility
 		+ s.emissive;
+}
+
+// The colour and the normal the body worked out for itself, with the surface's
+// occlusion folded in whole.
+fn float3 standard(Surface s, float3 albedo, float3 normal)
+{
+	return standard(s, albedo, normal, 1.0);
+}
+
+// The pair read per texel rather than per material, which is the other half of
+// shading a packed ORM map: green is roughness and blue is metalness.
+fn float3 standard(Surface s, float3 albedo, float3 normal, float roughness, float metalness)
+{
+	s.roughness = roughness;
+	s.metalness = metalness;
+	return standard(s, albedo, normal, 1.0);
+}
+
+// All three channels of an ORM at once: green, blue, red, in the order the
+// packing puts them.
+fn float3 standard(Surface s, float3 albedo, float3 normal, float roughness, float metalness, float ao)
+{
+	s.roughness = roughness;
+	s.metalness = metalness;
+	return standard(s, albedo, normal, ao);
+}
+
+// The built-in shading, whole: exactly what a mesh with no ShaderMaterial draws.
+fn float3 standard(Surface s)
+{
+	return standard(s, s.albedo, s.normal, 1.0);
+}
+
+// The direct light reaching this point, as a colour, so a body can have the
+// built-in diffuse without reproducing it: `return s.albedo * lambert(s, s.normal);`
+// is the matte half of what `standard` returns, and every body written before
+// the specular term existed asked for exactly it.
+//
+// **The surface is the first parameter, and that is the port's whole spelling
+// change.** The original read the fragment's position, its shadow, its crevice
+// and its lightmap out of file-scope values; shady has no module-level state, so
+// those values travel on `Surface` - the same carrier `standard` already reads -
+// and the normal stays a parameter because a body with a mapped normal passes
+// the one it built. `lambert(s, s.normal)` is the whole of what a body spells.
+//
+// A colour rather than a factor, every light rather than the sun, the shadow
+// folded into the direct term and the lightmap's own diffuse added beside it -
+// all for the reasons the original's header gives. `occlusion` multiplies the
+// ambient floor and the world light and nothing else, so `lambert(s, n, ao)` is
+// what a body with an occlusion map of its own writes.
+fn float3 lambert(Surface s, float3 normal, float occlusion)
+{
+	// The identity, so a bake of `s.albedo * lambert(s, s.normal)` is the albedo
+	// and nothing else.
+	if (MATERIAL_BAKE) return float3(1.0);
+
+	LightTerms direct = shade_lights(
+		push.frame,
+		s.screen_position,
+		s.position,
+		normal,
+		s.receiver_normal,
+		s.albedo,
+		s.roughness,
+		s.metalness,
+		s.reflectance,
+		s.shadow,
+		s.lightmapped
+	);
+
+	float3 baked = float3(0.0);
+	if (s.lightmapped)
+	{
+		baked = max(
+			s.lightmap + baked_dynamic_delta(push.frame, normal, s.receiver_normal, s.position),
+			float3(0.0)
+		);
+	}
+
+	float ambient = push.frame[0].lighting.x;
+	float visibility = occlusion * s.crevice;
+	return ambient * visibility
+		+ (1.0 - ambient) * (direct.diffuse + baked)
+		+ push.frame[0].world.rgb * visibility;
+}
+
+// The same light with nothing occluding it, which is every body ever written
+// here: `lambert(s, s.normal)` is the line in `getApiDocs` and in every material
+// this project ships, once the surface it reads and the normal it takes are
+// spelled as arguments.
+fn float3 lambert(Surface s, float3 normal)
+{
+	return lambert(s, normal, 1.0);
+}
+
+// This surface's highlight, so a body can have one without reproducing the four
+// terms inside `shade_lights`. `s.roughness`, `s.metalness` and `s.reflectance`
+// are what it reads, and a material nobody set them on answers zero.
+fn float3 specular(Surface s)
+{
+	// A highlight is a fact about where the camera is, and a baked texture is
+	// looked at from everywhere. The lightmap bake keeps the highlight live,
+	// exactly as the original did: it bakes diffuse only.
+	if (MATERIAL_BAKE) return float3(0.0);
+	LightTerms direct = shade_lights(
+		push.frame,
+		s.screen_position,
+		s.position,
+		s.normal,
+		s.receiver_normal,
+		s.albedo,
+		s.roughness,
+		s.metalness,
+		s.reflectance,
+		s.shadow,
+		s.lightmapped
+	);
+	return direct.specular;
+}
+
+// The base colour, sampled somewhere other than where the fragment stage
+// sampled it.
+//
+// `s.albedo` is `base_color` times this copy's colour times the base colour map
+// at `s.uv`, assembled before the body runs. A body that *moves* the uv -
+// parallax is the one that does - needs that same product at the uv it moved
+// to, and cannot scale its way there from `s.albedo`: the texel that went into
+// the product is not recoverable from it. So this is the fragment stage's own
+// two lines again, with a uv of the caller's choosing.
+fn float3 base_albedo(Surface s, float2 uv)
+{
+	DrawRecord draw = push.draw[0];
+	float3 albedo = draw.base_color.rgb * srgb_to_linear(s.color.rgb);
+	if ((draw.flags & FLAG_HAS_UVS) != 0)
+	{
+		Map base_color_map = map_at(SLOT_BASE_COLOR);
+		albedo *= (draw.flags & FLAG_STOCHASTIC) != 0
+			? stochastic_sample(base_color_map, uv).rgb
+			: base_color_map.Sample(uv).rgb;
+	}
+	return albedo;
+}
+
+// A tangent-space normal map applied to a surface that carries no tangents -
+// the `Surface` spelling of `mapped_normal_frame`. **Fragment stage only**:
+// `ddx`/`ddy` do not exist in a vertex shader, so calling this from a `vertex:`
+// body is a compile error rather than a wrong picture.
+fn float3 mapped_normal(Surface s, float3 texel)
+{
+	return mapped_normal_frame(s.normal, s.position, s.uv, texel);
+}
+
+// Where to sample a surface with a height map on it, so that its relief reads
+// as relief instead of as a picture of one.
+//
+// Parallax mapping: the ray the camera sent hit the *displaced* surface before
+// it reached the flat one the mesh has, so the texel belonging to this pixel is
+// not the one under it. One step, no march - which is the version that costs a
+// handful of instructions and shifts a texture convincingly, and is not the
+// version that occludes or self-shadows.
+//
+// `depth` is in metres, and the screen-space steps of the world position and of
+// the uv are the same two steps measured two ways, so dividing one by the other
+// leaves how far a unit of u and a unit of v reach across this surface. A
+// `bump.distance` of 0.1 therefore means a tenth of a metre of relief whatever
+// the mesh is tiled at. `height` is the map's red channel, and `parallax_step`
+// reads 0.5 as the plane the mesh already has.
+//
+// It fades out where nobody can see it: once the deepest relief on the surface
+// would move the texel less than half a pixel, the whole effect is a sub-pixel
+// slide and the solve answers zero. The overload below takes the uv gradients
+// instead of computing them, for a caller whose uv has a `frac` in it - across
+// such a seam `ddx(uv)` is a whole tile wide, and the unwrapped gradients are
+// what the surface actually has.
+fn float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)
+{
+	// Where the texture slides to is a fact about where the camera is, and a
+	// baked image is looked at from everywhere.
+	if (MATERIAL_BAKE) return float2(0.0, 0.0);
+	if (depth == 0.0) return float2(0.0, 0.0);
+
+	float3 n = normalize(s.normal);
+	float3 view = normalize(push.frame[0].camera.xyz - s.position);
+
+	float3 dp_dx = ddx(s.position);
+	float3 dp_dy = ddy(s.position);
+
+	// The view flattened into the surface. Its length is the sine of the angle
+	// to the normal, which is the offset limiting everybody uses: head-on it is
+	// zero and nothing moves, and at a grazing angle it is one rather than the
+	// infinity a divide by `dot(view, n)` would give - and that infinity is the
+	// texture sliding off the model at the silhouette.
+	float3 along = view - n * dot(view, n);
+
+	// Half the depth is as far as a texel can travel - the map runs either side
+	// of the plane the mesh has - and this is that distance against the world
+	// size of one pixel.
+	float pixel = max(max(length(dp_dx), length(dp_dy)), 1e-9);
+	float fade = saturate(0.5 * depth * length(along) / pixel - 0.5);
+	if (fade <= 0.0) return float2(0.0, 0.0);
+
+	float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
+	if (abs(det) < 1e-12) return float2(0.0, 0.0);
+
+	// The world directions one unit of u and one unit of v run along, by
+	// solving the two screen steps against each other.
+	float3 du = (dp_dx * duv_dy.y - dp_dy * duv_dx.y) / det;
+	float3 dv = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / det;
+	float du2 = dot(du, du);
+	float dv2 = dot(dv, dv);
+	if (du2 <= 0.0 || dv2 <= 0.0) return float2(0.0, 0.0);
+
+	return fade * float2(dot(along, du) / du2, dot(along, dv) / dv2);
+}
+
+// The same shift, read in the mesh's own uv - `material.repeat` is all that
+// stands between the two, so a stack whose mask is sampled at `s.mesh_uv` does
+// not solve the frame a second time to place it.
+fn float2 parallax_mesh_shift(float2 shift)
+{
+	float2 repeat = push.draw[0].uv_transform.xy;
+	return shift / float2(repeat.x == 0.0 ? 1.0 : repeat.x, repeat.y == 0.0 ? 1.0 : repeat.y);
+}
+
+// One height map's step along a shift already solved. **0.5 is the plane the
+// mesh already has**: half the map stands out of it and half sinks in, so a
+// stack that turns parallax on does not slide as a whole.
+fn float2 parallax_step(float2 uv, float2 shift, float height, float depth)
+{
+	return uv + (height - 0.5) * depth * shift;
+}
+
+fn float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float height, float depth)
+{
+	return parallax_step(uv, parallax_shift(s, duv_dx, duv_dy, depth), height, depth);
+}
+
+// The same, with the gradients the hardware computes - which is every caller
+// whose uv is continuous, and is what a body writes.
+fn float2 parallax_uv(Surface s, float2 uv, float height, float depth)
+{
+	return parallax_uv(s, uv, ddx(uv), ddy(uv), height, depth);
 }
 
 // The fragment stage: build the record from the interpolated varyings, hand it
@@ -432,10 +731,14 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// it came, `n.l` is negative and the surface is black; worse, the shadow
 	// lookup lifts its sample along this normal and so lifts it *into* the slab.
 	float3 geometric = normalize(input.normal);
-	if (!front_facing) geometric = -geometric;
+	// **A bake is not flipped.** That pass rasterises in uv space, where a
+	// triangle's winding is its uv island's and says nothing about which way
+	// the surface faces. The same holds for the lightmap bake.
+	if (!MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE && !front_facing) geometric = -geometric;
 	s.normal = geometric;
 
 	s.position = input.world;
+	s.origin = input.origin;
 	s.color = input.color;
 	s.mesh_uv = input.uv;
 	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
@@ -550,7 +853,11 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// the tile holds the one the bake rasterised, which is the front. A back
 	// face falls back to the whole real-time loop, which is right rather than
 	// merely safe.
-	s.lightmapped = front_facing && input.lightmap.z > 0.5;
+	//
+	// **And not at all in a lightmap bake**: the atlas is the render target
+	// there, so reading it would be a feedback loop - the original's
+	// `THREE_NO_LIGHTMAP`.
+	s.lightmapped = !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;
 	s.lightmap = float3(0.0);
 	if (s.lightmapped) s.lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
 
@@ -561,6 +868,9 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	s.metalness = surface.y;
 	s.reflectance = surface.z;
 	s.emissive = emissive;
+	// The plane the mesh already has. Nothing writes relief into this yet, and
+	// 0.5 is the neutral a body stepping its own height map reads.
+	s.height = 0.5;
 	s.time = push.frame[0].lighting.z;
 	s.screen_position = input.sv_position;
 

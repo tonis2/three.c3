@@ -364,7 +364,7 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 			"the relief reaches the mesh's uv without a second solve: %s",
 			answer
 		);
-		test::@check(answer.contains("float4 mask = layer_mask.Sample(muv);"), "the mask is sampled once: %s", answer);
+		test::@check(answer.contains("float4 mask = layer_mask().Sample(muv);"), "the mask is sampled once: %s", answer);
 		test::@check(answer.contains("float w0 = mask.r;"), "layer 0 reads red: %s", answer);
 		test::@check(answer.contains("float w2 = 1.0 - mask.b;"), "and layer 2 reads blue, inverted: %s", answer);
 
@@ -388,7 +388,7 @@ fn void an_imported_stack_generates_the_shader_it_describes() @test
 		// shader carries: the fixture's strength 0.5 times its distance 0.1. Sampled
 		// into a local because the mask's uv is solved from the same height.
 		test::@check(
-			answer.contains("float bh = base_height_map.Sample(s.uv).r;"),
+			answer.contains("float bh = base_height_map().Sample(s.uv).r;"),
 			"the base height is read once: %s",
 			answer
 		);
@@ -508,7 +508,7 @@ fn void the_colour_attribute_reaches_the_pixels() @test
 			const asset = three.load("test/fixtures/layered.glb");
 			const scene = new three.Scene();
 			const paint = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return s.vertex_color.rgb; }",
+				fragment: "fn float3 shade(Surface s) { return s.vertex_color.rgb; }",
 			});
 			for (const name of ["terrain", "weathered", "plain"]) {
 				const mesh = new three.Mesh(asset.mesh(name));
@@ -564,7 +564,7 @@ fn void an_unpainted_mesh_reads_a_vertex_mask_as_zero() @test
 			const scene = new three.Scene();
 			scene.background = 0x3366ff;
 			const weights = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return s.vertex_mask.rgb; }",
+				fragment: "fn float3 shade(Surface s) { return s.vertex_mask.rgb; }",
 			});
 			for (const name of ["terrain", "weathered", "plain"]) {
 				const mesh = new three.Mesh(asset.mesh(name));
@@ -1113,7 +1113,7 @@ fn void an_animated_layer_is_live_and_a_baked_one_says_why_not() @test
 				tint: mat.layers[0].tint,
 				// The baked one is a literal in the source and the live one is not.
 				literal: mat.fragment.includes("float3(0.0, 1.0, 0.0)"),
-				uniform: mat.fragment.includes("layer0_params.rgb"),
+				uniform: mat.fragment.includes("s.uniforms.layer0_params.rgb"),
 				baked,
 			});
 		`)!!;
@@ -1176,7 +1176,7 @@ fn void a_layer_tiles_its_detail_and_not_its_mask() @test
 		defer answer.free(mem);
 
 		test::@check(
-			answer.contains("layer_mask.Sample(s.mesh_uv)"),
+			answer.contains("layer_mask().Sample(s.mesh_uv)"),
 			"the mask is sampled at the mesh's own uv, with no `material.repeat` on it: %s",
 			answer
 		);
@@ -1450,14 +1450,14 @@ fn void a_layer_states_its_own_surface_and_its_own_relief() @test
 		// sampled outside that tiling would be relief at the wrong frequency.
 		test::@check(answer.contains("float2 uv0 = s.uv;"), "the layer's uv is a variable: %s", answer);
 		test::@check(
-			answer.contains("uv0 = parallax_step(uv0, pshift, layer0_height.Sample(uv0).r, 0.02);"),
+			answer.contains("uv0 = parallax_step(uv0, pshift, layer0_height().Sample(uv0).r, 0.02);"),
 			"which its height map then moves, by strength times distance: %s",
 			answer
 		);
 		// And everything after it samples the moved one.
-		test::@check(answer.contains("layer0_map.Sample(uv0)"), "the colour follows the relief: %s", answer);
+		test::@check(answer.contains("layer0_map().Sample(uv0)"), "the colour follows the relief: %s", answer);
 		test::@check(
-			answer.contains("float2 mr0 = layer0_surface.Sample(uv0).gb;"),
+			answer.contains("float2 mr0 = layer0_surface().Sample(uv0).gb;"),
 			"and so does the pair's map, packed glTF's way: %s",
 			answer
 		);

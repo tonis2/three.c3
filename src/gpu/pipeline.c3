@@ -187,6 +187,21 @@ const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
 	{ "fragmentMain", slang::STAGE_FRAGMENT },
 };
 
+<*
+ The cut-out module's own entry names, for the shady side.
+
+ The vertex entry is spelled differently because the shady module carries
+ `shaders/shadow.shady` whole: its depth-only `vertexMain` is in the module too,
+ and two entry points of one stage cannot share a name. Entry names are how the
+ host tells the stages apart, so the pipeline is held to and linked under the
+ names `shaders/shadow_cutout.shady` declares and never picks up the shared
+ depth-only entry by mistake.
+*>
+const ShaderEntry[*] SHADOW_CUTOUT_SHADY_ENTRIES = {
+	{ "cutoutVertexMain", slang::STAGE_VERTEX },
+	{ "fragmentMain", slang::STAGE_FRAGMENT },
+};
+
 // The workgroup size `skin.slang` declares. Here so the dispatch and the shader
 // cannot drift: one thread per (instance, vertex), rounded up to whole groups,
 // and the shader drops the tail itself.
@@ -1161,7 +1176,7 @@ fn void? check_entry_points(ShaderModule* mod, ShaderEntry[] entries = MESH_ENTR
  The one thing that varies here is which push contract the shader is held to.
 
  @param fields : `MESH_PUSH_FIELDS or POST_PUSH_FIELDS — see check_push_block.`
- @param entries : `Which entry points the module must contain. Defaults to the two a shading pipeline has; the shadow pass passes SHADOW_ENTRIES, which is a vertex stage alone.`
+ @param entries : `Which entry points the module must contain. Defaults to the two a shading pipeline has; the shadow pass passes one of the SHADOW_ENTRIES lists, which are a vertex stage alone or a cut-out's vertex and fragment pair.`
  @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout.`
  @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs.`
  @return ? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this creates one.`
@@ -1585,18 +1600,17 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 }
 
 <*
- Builds the shadow pass's pipeline from a compiled `shaders/shadow.slang`.
+ Builds the shadow pass's pipeline from a compiled depth shader.
 
  The third constructor on this type, and the one that draws no colour at all. It
  shares `build_layouts` with the other two and differs in five places, each of
  which would be a validation error or a wrong picture if it did not:
 
  - One shader stage, or two. A depth-only pipeline is allowed to have no fragment
- shader, so `SHADOW_ENTRIES` is what `build_layouts` is held to instead of
- `MESH_ENTRIES` and a module without a `fragmentMain` is not refused. `cutout`
- is the other half: `material.alphaTest` needs somewhere to `discard`, so that
- variant is held to `SHADOW_CUTOUT_ENTRIES` and gets the fragment stage and the
- one sampler that goes with it.
+ shader, so the entry list passed in is what `build_layouts` is held to instead
+ of `MESH_ENTRIES` and a module without a fragment entry is not refused.
+ `material.alphaTest` needs somewhere to `discard`, so that variant's list
+ carries both stages and the one sampler that goes with them.
  - No colour attachment, and a depth format that is not the target's. The shadow
  map is its own image at its own extent, and dynamic rendering checks the
  declared formats against the attachments the pass actually begins with.
@@ -1615,32 +1629,35 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  buffers, which is what makes a skinned character's shadow the shadow of the
  pose it is actually in.
 
- @param mod : `A module from compile_shader containing vertexMain, and fragmentMain too when cutout is set. Its layout is copied, not moved.`
- @param cutout : `Whether this is the alpha-tested variant — a fragment stage that discards, and the base colour map bound at 0. False builds the pipeline every ordinary caster shares.`
+ @param mod : `A module from compile_shader containing the entry points the entries parameter names. Its layout is copied, not moved.`
+ @param entries : `The stages the module must contain and the names it is linked under: the SHADOW_ENTRIES list alone for the depth-only path, the cut-out's pair when it carries a fragment stage. The two spellings of the cut-out vertex entry are the lists above.`
  @param depth_format : `The atlas format, chosen for both depth attachment and sampling.`
- @return ? SHADER_MISSING_ENTRY_POINT : `The module has no vertexMain.`
- @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.slang and nothing else.`
+ @return ? SHADER_MISSING_ENTRY_POINT : `The module is missing one of the entries it was held to.`
+ @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.shady and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
-	bool cutout = false, bool dynamic_cull = false)
+	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false)
 {
-	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], cutout ? SHADOW_CUTOUT_ENTRIES[..] : SHADOW_ENTRIES[..])!;
+	// The list is both the contract the module is held to and the names its
+	// stages are created under: one place, so the pipeline cannot check for one
+	// entry and link another.
+	bool cutout = entries.len > 1;
+	self.build_layouts(gpu, mod, MESH_PUSH_FIELDS[..], entries)!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
 	// One stage, or two for a cut-out. The array is two long either way and the
-	// slice below is what decides — a second `VkPipelineShaderStageCreateInfo`
-	// array would be a second place for the vertex entry's name to be spelled.
+	// slice below is what decides.
 	vk::PipelineShaderStageCreateInfo[2] stages = {
 		vk::pipelineShaderStageCreateInfo()
 		.setStage(SHADER_STAGE_VERTEX_BIT)
 		.setMod(module_handle)
-		.setName("vertexMain"),
+		.setName(entries[0].name),
 		vk::pipelineShaderStageCreateInfo()
 		.setStage(SHADER_STAGE_FRAGMENT_BIT)
 		.setMod(module_handle)
-		.setName("fragmentMain"), };
+		.setName(cutout ? entries[1].name : entries[0].name), };
 
 	// Depth alone. `setColorAttachmentFormats` is not called rather than being
 	// called with an empty slice, for the reason `init_post` leaves the depth
@@ -1935,7 +1952,12 @@ fn CachedModule*? PipelineCache.module_for(
 	String source,
 	String name,
 	ShaderPass pass,
-	String* diagnostic)
+	String* diagnostic,
+	String body = "",
+	MaterialUniform[] uniforms = {},
+	MaterialTexture[] textures = { },
+	String vertex = "",
+	bool bake = false)
 {
 	ulong hash = content_hash((char[])source);
 
@@ -1953,7 +1975,10 @@ fn CachedModule*? PipelineCache.module_for(
 	// line is unchanged by which side answered, the diagnostic included: a stored
 	// module carries the warning it was compiled with.
 	bool ran         = false;
-	ShaderModule mod = compile_shader(pass, source, name, MESH_ENTRIES[..], &ran)!;
+	ShaderModule mod = compile_shader(
+		pass, source, name, MESH_ENTRIES[..], &ran,
+		body: body, uniforms: uniforms, textures: textures, vertex: vertex, bake: bake
+	)!;
 	if (ran)
 	{
 		self.compiles++;
@@ -2011,12 +2036,19 @@ fn MeshPipeline*? PipelineCache.acquire(
 	PipelineState state,
 	ShaderPass pass,
 	String* diagnostic = null,
-	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..]
-)
+	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..],
+	// The script's half, for `MESH_MATERIAL`: the body to splice and the
+	// declarations the def emits around it. Empty for every built-in pass,
+	// which compiles the same source through either compiler.
+	String body = "",
+	MaterialUniform[] uniforms = {},
+	MaterialTexture[] textures = { },
+	String vertex = "",
+	bool bake = false)
 {
 	// The module first, and by source alone. A state this cache has not seen before
 	// must not reach Slang: `CachedModule` has the measurement.
-	CachedModule* compiled = self.module_for(source, name, pass, diagnostic)!;
+	CachedModule* compiled = self.module_for(source, name, pass, diagnostic, body, uniforms, textures, vertex, bake)!;
 
 	foreach (entry : self.entries)
 	{

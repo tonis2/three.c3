@@ -546,7 +546,7 @@ fn void a_helper_refuses_a_shader_material() @test
 			const grid = new three.GridHelper(10, 10);
 			const mat = new three.ShaderMaterial({
 				uniforms: { k: 1 },
-				fragment: "float3 shade(Surface s) { return float3(k, 0, 0); }"
+				fragment: "fn float3 shade(Surface s) { return float3(s.uniforms.k, 0, 0); }"
 			});
 			try { grid.material = mat; return 'no throw'; }
 			catch (e) { return e.message; }

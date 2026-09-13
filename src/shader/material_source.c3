@@ -215,10 +215,6 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
 *>
 const uint MATERIAL_TEXTURE_LIMIT = DRAW_TEXTURE_INDICES - MATERIAL_BINDING_FIRST;
 
-// The template, looked up the same way `mesh.slang` is — `shaders/` first, then
-// `build/shaders/`, both relative to the working directory.
-const String MATERIAL_TEMPLATE = "material.slang";
-
 <*
  What the agent's own lines are called in a diagnostic.
 
@@ -344,6 +340,7 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// and decides for itself, which is why the fold is not always on.
 	"FLAG_COLORS_ARE_MASK",
 	"MATERIAL_BUILT_IN",
+	"MATERIAL_BAKE",
 	"MATERIAL_ROWS", // The device-wide texture array and what a declared texture is: the array,
 	// the type each name is given, the accessor the template's own maps go
 	// through, and the row `material.map` sits at.
@@ -367,7 +364,14 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"FLAG_HAS_METALNESS_ROUGHNESS_MAP",
 	"FLAG_HAS_OCCLUSION_MAP",
 	"FLAG_HAS_EMISSIVE_MAP",
-	"mapped_normal_frame",
+	"mapped_normal_frame", // The relief helpers a layered body calls, and the `Surface` spelling of
+	// the base colour and the mapped normal beside them.
+	"base_albedo",
+	"mapped_normal",
+	"parallax_shift",
+	"parallax_mesh_shift",
+	"parallax_step",
+	"parallax_uv",
 	// The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
@@ -554,7 +558,7 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 	{
 		if (fragment.trim().len == 0)
 		{
-			material_note("material: the fragment body is empty; it must define `float3 shade(Surface s)`");
+			material_note("material: the fragment body is empty; it must define `fn float3 shade(Surface s)`");
 			return MATERIAL_BODY_EMPTY~;
 		}
 
@@ -720,7 +724,7 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
  else beside it, the same way `mesh.slang` does. Nothing is compiled here and no
  GPU is involved.
 
- @param fragment : `The agent's body. Must define float3 shade(Surface s); everything else is theirs.`
+ @param fragment : `The agent's body. Must define fn float3 shade(Surface s) for the shady path, or float3 shade(Surface s) for the Slang one; everything else is theirs.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
  @param bake : `Assemble the unlit, uv-space variant instead — see //@bake in material.slang. The exporter's, and nothing else's.`
@@ -745,7 +749,7 @@ fn String? material_source(
 {
 	validate_material(fragment, uniforms, textures)!;
 	return assemble_shader(
-		MATERIAL_TEMPLATE,
+		ShaderFile.MATERIAL_SLANG,
 		fragment,
 		uniforms,
 		textures,

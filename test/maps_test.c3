@@ -501,7 +501,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 		uint compiled = renderer.pass.create_material(
 			&renderer.gpu,
 			&renderer.target,
-			"float3 shade(Surface s) { return noise_map.Sample(s.uv).rgb; }",
+			"fn float3 shade(Surface s) { return noise_map().Sample(s.uv).rgb; }",
 			{ },
 			three::SIDE_FRONT,
 			three::BLENDING_NONE,
@@ -584,7 +584,7 @@ fn void the_built_in_shaders_own_names_are_not_a_door() @test
  rather than the agreement: neither template contains the maths, the shared file
  does, and what reaches Slang has it.
 
- `load_source` is the file as written and `shader_source` is the file as
+ `read_source` is the file as written and `shader_source` is the file as
  compiled — the difference between the two *is* the splice.
 *>
 fn void one_tangent_frame_reaches_both_shaders() @test
@@ -593,33 +593,33 @@ fn void one_tangent_frame_reaches_both_shaders() @test
 	// maths rather than finding a call to it.
 	String maths = "float3 dp_dy_perp = cross(dp_dy, n);";
 
-	String shared = three::shader_source("surface.slang", mem)!!;
+	String shared = three::shader_source(three::ShaderFile.SURFACE_SLANG, mem)!!;
 	defer shared.free(mem);
 	test::@check(shared.contains(maths), "the shared block is where the frame is built");
 
-	String[2] names = { "mesh.slang", "material.slang" };
+	three::ShaderFile[2] names = { three::ShaderFile.MESH_SLANG, three::ShaderFile.MATERIAL_SLANG };
 	foreach (name : names)
 	{
 		@pool()
 		{
 			String path = three::find_shader(name, tmem)!!;
-			String file = three::load_source(path, tmem)!!;
+			String file = three::read_source(path, tmem)!!;
 			test::@check(
 				!file.contains(maths),
 				"%s does not carry its own copy of the frame",
-				name
+				name.name
 			);
-			test::@check(has_marker_line(file), "%s asks for the shared block", name);
+			test::@check(has_marker_line(file), "%s asks for the shared block", name.name);
 			String compiled = three::shader_source(name, tmem)!!;
 			test::@check(
 				compiled.contains(maths) && !has_marker_line(compiled),
 				"and what is compiled has it spliced in: %s",
-				name
+				name.name
 			);
 			test::@check(
 				compiled.contains("mapped_normal_frame"),
 				"%s can call mapped_normal_frame",
-				name
+				name.name
 			);
 		};
 	}

@@ -99,9 +99,14 @@ fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 p
 // character's: the model matrix is the caller's, because a shadow has no use for
 // a normal and a draw has no use for a light's clip space. `iid` is needed for
 // the pre-skinned path, whose buffer holds one posed copy per instance.
-fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal)
+//
+// `local` is the bind pose the draw path's `Vertex.local` hands a script: the
+// morphed position before either skinning path runs, so a displacement sized by
+// the mesh's own length does not slide across the surface when a character moves.
+fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal, out float3 local)
 {
 	apply_morph(draw, instance, vid, position, normal);
+	local = position;
 
 	// The two ways a vertex gets posed, in the same order and with the same
 	// exclusivity the draw path states: one flag or the other, never both. An `if`

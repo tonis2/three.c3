@@ -808,8 +808,16 @@ fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_
 			material.declared_textures, material.vertex, lightmap: true);
 		if (try source)
 		{
+			// The script's own half is passed beside the assembled source: the
+			// lightmap row assembles its module around the body, the same way
+			// the material row does, and only the selected compiler reads it.
 			ShaderModule mod = compile_shader(
-				ShaderPass.LIGHTMAP_MATERIAL, source, "three.lightmap", MESH_ENTRIES[..])!;
+				ShaderPass.LIGHTMAP_MATERIAL, source, "three.lightmap", MESH_ENTRIES[..],
+				body: material.fragment,
+				uniforms: material.declared_uniforms,
+				textures: material.declared_textures,
+				vertex: material.vertex
+			)!;
 			defer mod.free();
 			if (mod.ok)
 			{
@@ -839,7 +847,7 @@ fn void? Lightmap.ensure_pipeline(&self, Gpu* gpu)
 
 	@pool()
 	{
-		String source = shader_source("mesh.slang", tmem)!;
+		String source = shader_source(ShaderFile.MESH_SLANG, tmem)!;
 		DString variant;
 		variant.tinit(source.len + 128);
 		// `#line 1` after the defines so a Slang diagnostic still names the line the
@@ -851,7 +859,7 @@ fn void? Lightmap.ensure_pipeline(&self, Gpu* gpu)
 		variant.append_string(source);
 
 		ShaderModule mod = compile_shader(
-			ShaderPass.LIGHTMAP, variant.str_view(), "mesh.slang", MESH_ENTRIES[..])!;
+			ShaderPass.LIGHTMAP, variant.str_view(), ShaderFile.MESH_SLANG.name, MESH_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok)
 		{

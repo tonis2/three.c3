@@ -455,7 +455,7 @@ fn void a_shader_material_exports_its_geometry_and_says_so() @test
 			const scene = new three.Scene();
 			const mat = new three.ShaderMaterial({
 				uniforms: { tint: [1, 0, 0] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), mat));
 			scene.add(new three.Mesh(new three.SphereGeometry(1, 8, 4)));
@@ -1373,7 +1373,7 @@ fn void shaded_counts_only_what_gltf_cannot_describe() @test
 			// A program, which it does not.
 			const shader = new three.ShaderMaterial({
 				uniforms: { tint: [0, 1, 0] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 			const c = new three.Mesh(new three.BoxGeometry(1, 1, 1), shader);
 			c.position.x = 6;
@@ -2509,20 +2509,20 @@ fn void a_shader_material_bakes_into_the_file() @test
 			const scene = new three.Scene();
 
 			const gradient = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
+				fragment: "fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
 			});
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), gradient));
 
 			const flat = new three.ShaderMaterial({
 				uniforms: { tint: [0.1, 0.8, 0.3] },
-				fragment: "float3 shade(Surface s) { return tint; }"
+				fragment: "fn float3 shade(Surface s) { return s.uniforms.tint; }"
 			});
 			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1), flat);
 			b.position.x = 3;
 			scene.add(b);
 
 			const cut = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { if (s.uv.x > 0.5) discard; return float3(1, 0, 0); }"
+				fragment: "fn float3 shade(Surface s) { if (s.uv.x > 0.5) discard; return float3(1, 0, 0); }"
 			});
 			const c = new three.Mesh(new three.PlaneGeometry(2, 2), cut);
 			c.position.x = 6;
@@ -2566,6 +2566,90 @@ fn void a_shader_material_bakes_into_the_file() @test
 }
 
 <*
+ A scripted bake through both compilers, compared as file bytes.
+
+ The bake re-assembles the stored body, so its spelling has to follow the
+ material row: the Slang override bakes the Slang body through `material_source`
+ exactly as before, and the row's own shady module compiles the shady body again
+ through the bake def. The bodies are the same shading written twice, so the
+ `.glb`s they write have to be identical - image bytes, material factors and all
+ - and the image has to be a real gradient rather than one flat tile, or a bake
+ that ignored its body would match too.
+*>
+fn void a_scripted_bake_is_the_same_file_through_both_compilers() @test
+{
+	defer three::shader_overrides_clear();
+
+	String slang_path = "build/export_bake_slang.glb";
+	String shady_path = "build/export_bake_shady.glb";
+	defer (void)file::delete(slang_path);
+	defer (void)file::delete(shady_path);
+
+	// The Slang side names its compiler; the shady side below takes the
+	// table's default, so this comparison is the row's own answer.
+	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SLANG);
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const mat = new three.ShaderMaterial({
+				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.25); }"
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+			const report = scene.export("build/export_bake_slang.glb", { bake: 128 });
+			return [report.shaded, report.bakedImages, report.bakedColors].join(' ');
+		`);
+		defer result.free();
+		test::@check(result.value == `"0 1 0"`, "the Slang bake ran: %s", result.value);
+	};
+
+	three::shader_overrides_clear();
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const mat = new three.ShaderMaterial({
+				fragment: "fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.25); }"
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+			const report = scene.export("build/export_bake_shady.glb", { bake: 128 });
+			return [report.shaded, report.bakedImages, report.bakedColors].join(' ');
+		`);
+		defer result.free();
+		test::@check(result.value == `"0 1 0"`, "the shady bake ran: %s", result.value);
+	};
+	// Cleared before the comparison rather than only at the test's end, so a
+	// failing check below cannot leave the override live for the next test.
+	three::shader_overrides_clear();
+
+	char[]? slang = file::load_temp(slang_path);
+	if (catch slang)
+	{
+		test::@check(false, "the Slang bake wrote a file");
+		return;
+	}
+	char[]? shady = file::load_temp(shady_path);
+	if (catch shady)
+	{
+		test::@check(false, "the shady bake wrote a file");
+		return;
+	}
+
+	test::@check(slang.len == shady.len, "the two bakes are the same size, %d against %d", slang.len, shady.len);
+	if (slang.len != shady.len) return;
+
+	sz first = slang.len;
+	foreach (i, c : slang)
+	{
+		if (c == shady[i]) continue;
+		first = i;
+		break;
+	}
+	test::@check(first == slang.len,
+		"a scripted bake is byte-identical through both compilers, first difference at byte %d", first);
+}
+
+<*
  The same scene with no `bake`, which has to be the file it always was.
 
  The whole feature is opt-in: it needs a device, which the rest of `export`
@@ -2583,7 +2667,7 @@ fn void baking_is_off_unless_it_is_asked_for() @test
 		three::RunResult result = run.run(`
 			const scene = new three.Scene();
 			const body = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
+				fragment: "fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.2); }"
 			});
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), body));
 			const b = new three.Mesh(new three.BoxGeometry(1, 1, 1), body);
@@ -2632,7 +2716,7 @@ fn void a_bake_never_splits_a_batch() @test
 		three::RunResult result = run.run(`
 			const scene = new three.Scene();
 			const world = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(frac(s.position.x), 0.3, 0.6); }"
+				fragment: "fn float3 shade(Surface s) { return float3(frac(s.position.x), 0.3, 0.6); }"
 			});
 			for (let i = 0; i < 6; i++) {
 				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1), world);
@@ -2704,12 +2788,12 @@ fn void a_body_that_reads_where_it_is_bakes_per_node() @test
 			}
 
 			const moving = twoCopies(new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(frac(s.position.x), s.uv.y, 0.5); }"
+				fragment: "fn float3 shade(Surface s) { return float3(frac(s.position.x), s.uv.y, 0.5); }"
 			}));
 			const a = moving.export("build/export_baked_moving.glb", { bake: 64 });
 
 			const still = twoCopies(new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.5); }"
+				fragment: "fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.5); }"
 			}));
 			const b = still.export("build/export_baked_still.glb", { bake: 64 });
 
@@ -2756,7 +2840,7 @@ fn void a_baked_texture_lands_the_right_way_up() @test
 	String diagnostic;
 	uint material = renderer.pass.create_material(
 		&renderer.gpu, &renderer.target,
-		"float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.0); }",
+		"fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.0); }",
 		{},
 		diagnostic: &diagnostic
 	)!!;
@@ -2833,7 +2917,7 @@ fn void a_baked_image_is_opaque_unless_the_body_cuts() @test
 	String diagnostic;
 	uint material = renderer.pass.create_material(
 		&renderer.gpu, &renderer.target,
-		"float3 shade(Surface s) { return float3(0.9, 0.4 + 0.5 * s.uv.y, 0.2); }",
+		"fn float3 shade(Surface s) { return float3(0.9, 0.4 + 0.5 * s.uv.y, 0.2); }",
 		{},
 		diagnostic: &diagnostic
 	)!!;

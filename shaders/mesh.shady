@@ -42,6 +42,9 @@ struct VertexOutput
 	float4 color;
 	float4 vertex_color;
 	float3 lightmap;
+	// This copy's world origin, flat because it is one value for the copy and
+	// interpolating a constant is three multiplies a frame to arrive back at it.
+	float3 origin @flat;
 	float4 sv_position @position;
 
 	// This copy's variant, the row a material's uniform tables are indexed by.
@@ -117,7 +120,11 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	float4 vertex_color = float4(1.0, 1.0, 1.0, 1.0);
 	if ((draw.flags & FLAG_HAS_COLORS) != 0) vertex_color = draw.colors[input.vid];
 
-	pose_vertex(draw, instance, input.vid, input.iid, position, normal);
+	// The bind pose, kept before either skinning path runs: this is what
+	// `Vertex.local` hands a body, so a displacement sized by the mesh's own
+	// length does not slide across the surface when the character moves.
+	float3 local;
+	pose_vertex(draw, instance, input.vid, input.iid, position, normal, local);
 
 	Vertex v;
 	v.position = position;
@@ -131,28 +138,66 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	// clamps again rather than trusting this, because a body may write it.
 	v.variant = min(instance.variant, draw.material_rows - 1u);
 	v.index = input.vid;
+	v.local = local;
+	// Read off the model matrix, before `displace`, so a body that moves the
+	// vertex still knows where the copy it belongs to stands.
+	v.origin = (instance.model * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+	v.time = push.frame[0].lighting.z;
 	// The same seam `mesh_fragment` fills `Surface.uniforms` through, so a
 	// vertex body and a fragment body read one storage with one spelling.
 	v.uniforms = material_uniforms();
 
+	// **The mesh's own TEXCOORD_0, kept before `displace` can rewrite it.** The
+	// uv the body samples with is whatever it ends up as - a vertex body
+	// computing `v.uv` from `v.local` is the ordinary case - but a bake stores
+	// its answer at the layout the exported file carries, which is the
+	// attribute as the mesh holds it. Rasterising into the computed one writes
+	// a picture the file then indexes with different coordinates.
+	float2 bake_uv = v.uv;
+
 	displace(v);
 
-	// Model first, camera second, and the normal by the instance's normal matrix
-	// rather than by the model: a non-uniform scale on a copy would otherwise tilt
-	// the surface away from the light that lights it. Both read the displaced
-	// values, so a body that moved a vertex moved what is lit and what is drawn.
+	// The mesh's own TEXCOORD_0, before `variant_uv` moves it - the coordinate the
+	// bake rasterised in, and so the only one that indexes the tile. Kept before
+	// `displace`, because a body may rewrite `v.uv`.
+	float2 lightmap_uv = float2(0.0, 0.0);
+	if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];
+
+	// Model first, camera second, and the normal by the instance's normal
+	// matrix rather than by the model: a non-uniform scale on a copy would
+	// otherwise tilt the surface away from the light that lights it. Both read
+	// the displaced values, so a body that moved a vertex moved what is lit and
+	// what is drawn.
 	float4 world = instance.model * float4(v.position, 1.0);
-	output.sv_position = push.frame[0].view_projection * world;
+	if (MATERIAL_BAKE)
+	{
+		// A bake rasterises in **uv space**: the triangle is placed by where it
+		// lands in the texture and everything else crosses into the fragment
+		// stage exactly as it would in a frame. The viewport is unflipped for
+		// this, because uv (0,0) is the top-left texel of an image.
+		output.sv_position = float4(bake_uv * 2.0 - 1.0, 0.0, 1.0);
+	}
+	else if (MATERIAL_LIGHTMAP_BAKE)
+	{
+		// A lightmap bake rasterises in the chart's own coordinate rather than
+		// in the mesh's uv: the tile is indexed by `TEXCOORD_0`'s generated
+		// layout, which is a different stream from the one a body samples with.
+		output.sv_position = float4(lightmap_uv * 2.0 - 1.0, 0.0, 1.0);
+	}
+	else
+	{
+		output.sv_position = push.frame[0].view_projection * world;
+	}
 	output.world = world.xyz;
 	output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;
 	output.color = v.color;
 	output.vertex_color = v.vertex_color;
 	output.variant = v.variant;
+	// Straight from the gather and not recomputed: a body may write `v.origin`,
+	// and a value that could be changed in the vertex stage and silently was not
+	// in the fragment one is a disagreement worth not having.
+	output.origin = v.origin;
 
-	// The mesh's own TEXCOORD_0, before `variant_uv` moves it - the coordinate the
-	// bake rasterised in, and so the only one that indexes the tile.
-	float2 lightmap_uv = float2(0.0, 0.0);
-	if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];
 	output.lightmap = float3(
 		instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
 		instance.lightmap.z > 0.0 ? 1.0 : 0.0

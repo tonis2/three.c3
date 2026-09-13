@@ -705,7 +705,7 @@ fn void a_generated_shape_unloads_like_a_file() @test
 *>
 fn String shading_body(uint n, alloc::Allocator allocator)
 {
-	return string::format(allocator, "float3 shade(Surface s) { return s.albedo * %d.0; }", n + 1);
+	return string::format(allocator, "fn float3 shade(Surface s) { return s.albedo * %d.0; }", n + 1);
 }
 
 <*
@@ -1115,9 +1115,9 @@ fn void a_material_gives_back_the_textures_its_samplers_held() @test
 			material = pass.create_material(
 				&renderer.gpu,
 				&renderer.target,
-				`float3 shade(Surface s)
+				`fn float3 shade(Surface s)
 				{
-				    return noise_map.Sample(s.uv).rgb * ramp_map.Sample(s.uv).rgb;
+				    return noise_map().Sample(s.uv).rgb * ramp_map().Sample(s.uv).rgb;
 				}`,
 				{},
 				three::SIDE_FRONT,
