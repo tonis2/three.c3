@@ -321,7 +321,9 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// it, and the delta a moving caster took away from the bake.
 	"lightmap_atlas",
 	"light_is_baked",
-	"baked_dynamic_delta", // The sky the same way: the reserved sampler at binding 2, the term that
+	"baked_dynamic_delta", // The area-light fit: the sampler at binding 19, read only when the frame
+	// says the table is on the device.
+	"ltc_lut", // The sky the same way: the reserved sampler at binding 2, the term that
 	// reads it and the mapping that term projects a direction through. A body
 	// naming any of the three would compile against its own and the reflection
 	// would resolve the binding to a texture the pass never wrote.
@@ -354,7 +356,19 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	"stochastic_sample",
 	"hash_cell",
 	"triangle_cell",
-	"FLAG_STOCHASTIC", // The three push fields the mesh contract pins, and the record the third of
+	"FLAG_STOCHASTIC",
+	// The built-in look's other four maps: the rows they sit at, the bits that
+	// say a material named one, and the frame the normal is rebuilt in.
+	"SLOT_NORMAL",
+	"SLOT_METALNESS_ROUGHNESS",
+	"SLOT_OCCLUSION",
+	"SLOT_EMISSIVE",
+	"FLAG_HAS_NORMAL_MAP",
+	"FLAG_HAS_METALNESS_ROUGHNESS_MAP",
+	"FLAG_HAS_OCCLUSION_MAP",
+	"FLAG_HAS_EMISSIVE_MAP",
+	"mapped_normal_frame",
+	// The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which
 	// no longer share a scope with a uniform — they stay refused because the

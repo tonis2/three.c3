@@ -10,10 +10,10 @@
 // declarations.
 //
 // What is here is the record, the standard look, and the body-facing extras.
-// What is **not**:
+// The built-in look reads the same four extra maps `mesh.slang` does - normal,
+// metallic-roughness, occlusion and emissive - under the same uvs test as the
+// base one. What is **not** here:
 //
-//  - the built-in path's other maps - normal, metallic-roughness, occlusion and
-//    emissive - which `mesh.slang` reads under the same uv test as the base one;
 //  - **relief** (`Surface.height`), which nothing writes yet;
 //  - the bake and lightmap variants, which are separate modules.
 
@@ -284,11 +284,11 @@ struct Surface
 	// other than light.
 	float shadow;
 
-	// How much of the sky this point can see, from the depth buffer: 1 in the
-	// open, below 1 in a crevice. The port's carrier for the original's
-	// `g_crevice`, and it multiplies the ambient floor and the world light -
-	// never the direct light, which a lamp pointed into a crevice still
-	// delivers.
+	// How much of the sky this point can see: 1 in the open, below 1 in a
+	// crevice. The port's carrier for the original's `g_crevice`, with the
+	// material's occlusion map already folded in there, and it multiplies the
+	// ambient floor, the world light and the environment reflection - never the
+	// direct light, which a lamp pointed into a crevice still delivers.
 	float crevice;
 
 	// This fragment's baked light, read once out of the atlas, and whether
@@ -419,29 +419,105 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// constant the def emits for this pass and a scripted module is unchanged.
 	if (MATERIAL_BUILT_IN && (draw.flags & FLAG_COLORS_ARE_MASK) == 0)
 		s.albedo *= input.vertex_color.rgb;
-	s.normal = normalize(input.normal);
+
+	// The normal the mesh has, kept apart from the one a map bends: the shadow
+	// lookup and the crevice are done with *this* one, so a per-texel offset
+	// cannot move the sample point with the relief and put acne back where the
+	// offset exists to take it away.
+	//
+	// **A back face is shaded with its normal turned toward the eye**, which is
+	// Blender's rule and every other renderer's. Only a double-sided material
+	// rasterises one - `material.side` picks the cull mode - and the face the
+	// eye can see is by definition the lit side of a leaf or a sheet. Taken as
+	// it came, `n.l` is negative and the surface is black; worse, the shadow
+	// lookup lifts its sample along this normal and so lifts it *into* the slab.
+	float3 geometric = normalize(input.normal);
+	if (!front_facing) geometric = -geometric;
+	s.normal = geometric;
+
+	s.position = input.world;
+	s.color = input.color;
 	s.mesh_uv = input.uv;
 	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
 
-	// The material's base colour map, and the alpha test with it. **The alpha
-	// test is before the body**, not inside it: a cut-out is whether the surface
-	// is there at all, and a `shade` that never runs is also a `shade` that
-	// cannot be asked to decide. The threshold is `surface.w`, zero discards
-	// nothing, and the alpha is the map's times the material's rather than this
-	// copy's - a per-copy fade has to fade rather than dissolve, or the cut-out
-	// shadow, which has no per-copy colour, would cut a different shape.
+	// The record's material fields, before the maps multiply into them. One
+	// scope for the four map reads and the alpha test, so a mesh with no uvs
+	// skips the lot and a map can only bend what is already there.
+	float4 surface = draw.surface;
+	float occlusion = 1.0;
+	float3 emissive = draw.emissive.rgb;
+
+	// **One test for every map.** A map is a picture laid on a surface by its
+	// uvs, and a mesh with none - a convex hull, a debug line - has nowhere to
+	// put any of them.
 	if ((draw.flags & FLAG_HAS_UVS) != 0)
 	{
+		// Read once: every map below goes through the same sampler as the
+		// albedo or none of them does. Uniform across the draw - a bit off the
+		// bucket's record - so the derivatives inside `stochastic_sample` are
+		// as well defined as the ones a plain `Sample` takes.
+		bool scattered = (draw.flags & FLAG_STOCHASTIC) != 0;
+
+		// The material's base colour map, and the alpha test with it. **The
+		// alpha test is before the body**, not inside it: a cut-out is whether
+		// the surface is there at all, and a `shade` that never runs is also a
+		// `shade` that cannot be asked to decide. The threshold is `surface.w`,
+		// zero discards nothing, and the alpha is the map's times the
+		// material's rather than this copy's - a per-copy fade has to fade
+		// rather than dissolve, or the cut-out shadow, which has no per-copy
+		// colour, would cut a different shape.
 		Map base_color_map = map_at(SLOT_BASE_COLOR);
-		float4 base = (draw.flags & FLAG_STOCHASTIC) != 0
+		float4 base = scattered
 			? stochastic_sample(base_color_map, s.uv)
 			: base_color_map.Sample(s.uv);
 		if (base.a * draw.base_color.a < draw.surface.w) discard;
 		s.albedo *= base.rgb;
+
+		if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
+		{
+			Map normal_map = map_at(SLOT_NORMAL);
+			float3 texel = scattered
+				? stochastic_sample(normal_map, s.uv).rgb
+				: normal_map.Sample(s.uv).rgb;
+			s.normal = mapped_normal_frame(geometric, s.position, s.uv, texel);
+		}
+
+		// glTF's channels: green is roughness, blue is metalness. **Multiplied
+		// into the material's own two rather than replacing them**, so a file's
+		// factors and its map compose. This renderer's default metalness is 0,
+		// so a map on a material nobody set `metalness` on is multiplied away;
+		// `material.metalness = 1` is what lets the map's blue speak.
+		if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
+		{
+			Map metalness_roughness_map = map_at(SLOT_METALNESS_ROUGHNESS);
+			float2 pair = scattered
+				? stochastic_sample(metalness_roughness_map, s.uv).gb
+				: metalness_roughness_map.Sample(s.uv).gb;
+			surface.x *= pair.x;
+			surface.y *= pair.y;
+		}
+
+		if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
+		{
+			Map occlusion_map = map_at(SLOT_OCCLUSION);
+			occlusion = scattered
+				? stochastic_sample(occlusion_map, s.uv).r
+				: occlusion_map.Sample(s.uv).r;
+		}
+
+		// The map multiplies the factor, which is glTF's rule and the same one
+		// the metallic-roughness pair follows: a material with a map and no
+		// `emissive` colour set glows black, because the factor it is
+		// multiplied by is zero.
+		if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
+		{
+			Map emissive_map = map_at(SLOT_EMISSIVE);
+			emissive *= scattered
+				? srgb_to_linear(stochastic_sample(emissive_map, s.uv).rgb)
+				: srgb_to_linear(emissive_map.Sample(s.uv).rgb);
+		}
 	}
 
-	s.position = input.world;
-	s.color = input.color;
 	s.vertex_color = input.vertex_color;
 	// The mask reading of the same varying, and the one place the two differ: a
 	// mesh with no COLOR_0 has painted nothing, so every weight read off it is 0
@@ -457,11 +533,16 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// it, and in the direct light `standard` sums. The receiver normal beside it
 	// is the original's `g_receiver_normal` - the face this fragment is on,
 	// which a point light's shadow asks about, rather than a shading normal a
-	// map may have tilted.
-	s.shadow = shadow_factor(s.position, s.normal);
+	// map may have tilted. All three use the *geometric* normal, the one before
+	// the normal map, exactly as `mesh.slang` does.
+	s.shadow = shadow_factor(s.position, geometric);
 	float3 face_normal = normalize(cross(ddx(s.position), ddy(s.position)));
-	s.receiver_normal = dot(face_normal, s.normal) < 0.0 ? -face_normal : face_normal;
-	s.crevice = crevice_occlusion(s.position, s.normal);
+	s.receiver_normal = dot(face_normal, geometric) < 0.0 ? -face_normal : face_normal;
+	// The occlusion map folds into the crevice rather than into a field of its
+	// own: both answer "how much of the sky this point sees", `standard`
+	// multiplies the same three terms by it, and the direct light is untouched
+	// by either.
+	s.crevice = occlusion * crevice_occlusion(s.position, geometric);
 
 	// **Front faces only.** A double-sided surface is shaded with its normal
 	// turned toward the eye, so a leaf card lit from one side and seen from the
@@ -475,10 +556,11 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 
 	// Straight off the record, unclamped: `setSurface` clamps at the boundary, so
 	// a second clamp here would be a second place for the range to be decided.
-	s.roughness = draw.surface.x;
-	s.metalness = draw.surface.y;
-	s.reflectance = draw.surface.z;
-	s.emissive = draw.emissive.rgb;
+	// The metallic-roughness map has already multiplied into the first two.
+	s.roughness = surface.x;
+	s.metalness = surface.y;
+	s.reflectance = surface.z;
+	s.emissive = emissive;
 	s.time = push.frame[0].lighting.z;
 	s.screen_position = input.sv_position;
 

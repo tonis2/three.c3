@@ -524,16 +524,25 @@ fn void the_ported_mesh_is_lit() @test
 		"the base colour map is reached by its row through `Map`");
 	test::@check(source.contains("if (base.a * draw.base_color.a < draw.surface.w) discard;"),
 		"and the alpha test is before the body, on the map's alpha times the material's");
+	test::@check(source.contains("if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)")
+		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, s.uv, texel);"),
+		"a normal map bends the shading normal through the shared frame, not the geometric one");
+	test::@check(source.contains("surface.x *= pair.x;") && source.contains("surface.y *= pair.y;"),
+		"the metallic-roughness map multiplies the material's own roughness and metalness");
+	test::@check(source.contains("occlusion = scattered"),
+		"the occlusion map reaches the crevice the ambient terms scale by");
+	test::@check(source.contains("emissive *= scattered"),
+		"and the emissive map multiplies what the record set");
 	test::@check(source.contains("Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);")
 		&& source.contains("Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);"),
 		"the shadow atlases are declared at the bindings the pass already writes");
-	test::@check(source.contains("s.shadow = shadow_factor(s.position, s.normal);"),
-		"the surface carries the sun's visibility, read once");
+	test::@check(source.contains("s.shadow = shadow_factor(s.position, geometric);"),
+		"the surface carries the sun's visibility, read once from the geometric normal");
 	test::@check(source.contains("float visibility = i == 0u ? sun_shadow : point_shadow_factor(i, light, position, receiver_normal);"),
 		"and the direct light folds it in, the sun from the surface and every other light from its own view");
 	test::@check(source.contains("Sampler2D ambient_occlusion_depth @set(0) @binding(4);"),
 		"the frame depth the crevice reads is declared at the engine's own binding");
-	test::@check(source.contains("s.crevice = crevice_occlusion(s.position, s.normal);"),
+	test::@check(source.contains("s.crevice = occlusion * crevice_occlusion(s.position, geometric);"),
 		"the surface carries the crevice the ambient terms scale by");
 	test::@check(source.contains("float3 diffuse = ambient * s.crevice")
 		&& source.contains("+ push.frame[0].world.rgb * s.crevice;"),

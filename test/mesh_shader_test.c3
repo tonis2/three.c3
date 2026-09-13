@@ -14,11 +14,9 @@
  The module is compiled directly rather than through `MeshPass.init`, so both
  compilers' modules exist in one process at once, and the scene cache is off so
  a cache hit cannot hand the first compiler's frame back to compare with itself.
- The table's `MESH` row is wired to this def but its default is still Slang: the
- material half is whole, but the lighting half has no area lights, and the bake
- suite spends them, so the row stays held until that lands. Both compiles here
- therefore take an explicit override.
-
+ The table's `MESH` row is on shady; this test still compiles both halves
+ explicitly, because the Slang module has to exist beside it for the comparison.
+ 
  **The comparison is byte equality, not resemblance**, and it is only meaningful
  on a frame this half can reproduce whole: the lightmap and the environment are
  not in the fixture - no lightmap uvs, no sky - so they stay at their ported
@@ -26,7 +24,7 @@
  spend is the whole of what the half carries: a bent, turned, scaled skinned
  character, a uv carrying box with a uv variant table, a card whose COLOR_0 is a
  painted layer mask, the sun's shadow, the sun plus two clustered point lights
- with different colours, a specular material, and both debug views as frames of
+ and a clustered rectangle, a specular material, and both debug views as frames of
  their own.
 *>
 module three_tests::mesh_shader;
@@ -116,6 +114,12 @@ fn String scene_source()
 		three.light.ambient = 0.04;
 		three.lights.add({ position: [2.5, 3.0, 1.0], range: 14, intensity: 40, color: 0xff7040 });
 		three.lights.add({ position: [-2.0, 1.2, 2.5], range: 10, intensity: 25, color: 0x4080ff });
+		// A rectangle, so the LTC fit is inside the compared bytes too: its
+		// diffuse is the polygon form factor and its specular comes from the
+		// two table reads, which a point light never reaches. Held by name so
+		// the control below can switch it off.
+		globalThis.area = three.lights.add({ shape: 'rectangle', position: [-0.6, 2.4, 0.4], right: [1, 0, 0], up: [0, 0, -1],
+			width: 2.4, height: 1.4, range: 18, color: 0x66cc88, intensity: 60 });
 		three.camera.frameAll();
 		three.camera.orbit(0.4, 0.5, three.camera.distance);
 		return 1;
@@ -303,6 +307,27 @@ fn void the_draw_path_is_the_same_pixels_through_both_compilers() @test
 	three::RunResult reoccluded = runtime.run("three.light.occlusion = true; return 1;");
 	defer reoccluded.free();
 	test::@check(reoccluded.ok, "and back on: %s", reoccluded.error);
+
+	// The same control for the area emitter: zeroing it has to change the
+	// frame, or the LTC fit was never inside the comparison either.
+	three::RunResult unlit_area = runtime.run("area.intensity = 0; return 1;");
+	defer unlit_area.free();
+	test::@check(unlit_area.ok, "the area light could be turned off: %s", unlit_area.error);
+	image::Image without_area = renderer.capture()!!;
+	defer without_area.free();
+
+	sz area_bytes = 0;
+	for (sz at = 0; at < through_slang.pixels.len; at++)
+	{
+		if (through_slang.pixels[at] != without_area.pixels[at]) area_bytes++;
+	}
+	test::@check(area_bytes > 0,
+		"the fixture's area light reaches the frame: %d of %d bytes differ without it",
+		area_bytes, through_slang.pixels.len);
+
+	three::RunResult relit_area = runtime.run("area.intensity = 60; return 1;");
+	defer relit_area.free();
+	test::@check(relit_area.ok, "and back on: %s", relit_area.error);
 
 	swap_materials(renderer, &slang_pipe, &shady_pipe);
 	image::Image through_shady = renderer.capture()!!;
