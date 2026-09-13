@@ -25,9 +25,26 @@ Sampler2D three_textures[] @set(1) @binding(0);
 // `MATERIAL_BINDING_FIRST`.
 const uint SLOT_BASE_COLOR = 0;
 
+// The built-in draw path's other four maps, by the row each sits at - the
+// numbers the bindings used before the texture array moved them into
+// `DrawRecord.texture_index`. Normal and metallic-roughness are data rather
+// than pictures, so both are uploaded linear; emissive is a colour and is not.
+const uint SLOT_NORMAL = 5;
+const uint SLOT_METALNESS_ROUGHNESS = 6;
+const uint SLOT_OCCLUSION = 7;
+const uint SLOT_EMISSIVE = 8;
+
 // `material.stochastic`: sample the base map through `stochastic_sample` so a
 // tiled surface stops having a period.
 const uint FLAG_STOCHASTIC = 256;
+
+// Which of those maps a material named. One bit each rather than a texel test:
+// every map is always bound and every unfilled slot is the 1x1 white, so the
+// flag is what says whether the white means "identity" or "no map".
+const uint FLAG_HAS_NORMAL_MAP = 32;
+const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64;
+const uint FLAG_HAS_OCCLUSION_MAP = 128;
+const uint FLAG_HAS_EMISSIVE_MAP = 512;
 
 struct Map
 {
@@ -153,4 +170,54 @@ fn float4 stochastic_sample(Map image, float2 uv)
 	return weights.x * image.SampleGrad(uv + hash_cell(a), dx, dy)
 	     + weights.y * image.SampleGrad(uv + hash_cell(b), dx, dy)
 	     + weights.z * image.SampleGrad(uv + hash_cell(c), dx, dy);
+}
+
+// A tangent-space normal map applied to a surface that carries no tangents.
+//
+// **The meshes have positions, normals and uvs and nothing else.** There is no
+// TANGENT stream and a generated primitive never had one to lose, so the frame
+// is rebuilt per pixel from the screen-space derivatives of the world position
+// and the uv - the standard cotangent-frame construction. It costs four
+// derivatives and two cross products, and it works on any textured mesh rather
+// than only on one whose exporter wrote tangents.
+//
+// `texel` is the map's rgb exactly as sampled; the decode from [0,1] to a
+// direction happens here. **The map has to be uploaded linear**: through an sRGB
+// view the stored 0.5 that means "no tilt" arrives at 0.21, so every surface
+// leans the same way. Two things this cannot do, both inherited from having no
+// baked tangents: mirrored uv islands come out mirrored rather than flipped,
+// and a face with degenerate uvs has no frame at all, so the interpolated
+// normal comes back unchanged rather than a NaN.
+fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 texel)
+{
+	float3 n = normalize(normal);
+
+	float3 dp_dx = ddx(position);
+	float3 dp_dy = ddy(position);
+	float2 duv_dx = ddx(uv);
+	float2 duv_dy = ddy(uv);
+
+	// The tangent and bitangent that carry those uv derivatives, solved in the
+	// plane perpendicular to the interpolated normal - so the frame agrees with
+	// the normal the mesh already has rather than replacing it.
+	float3 dp_dy_perp = cross(dp_dy, n);
+	float3 dp_dx_perp = cross(n, dp_dx);
+	float3 tangent = dp_dy_perp * duv_dx.x + dp_dx_perp * duv_dy.x;
+	float3 bitangent = dp_dy_perp * duv_dx.y + dp_dx_perp * duv_dy.y;
+
+	float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
+	// No uv gradient, so there is no frame to build and nothing sensible to
+	// return but the normal that was already there. `rsqrt(0)` is an infinity
+	// and the pixel after it is a NaN.
+	if (longest <= 0.0) return n;
+
+	// One scale for both axes rather than normalizing each: the two are the same
+	// skew seen along two directions, and scaling them apart squares it.
+	float scale = rsqrt(longest);
+	float3 direction = texel * 2.0 - 1.0;
+	return normalize(
+		tangent * (direction.x * scale)
+		+ bitangent * (direction.y * scale)
+		+ n * direction.z
+	);
 }

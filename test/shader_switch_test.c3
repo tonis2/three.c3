@@ -31,11 +31,11 @@ fn void every_pass_has_a_table_row_and_a_name() @test
 }
 
 <*
- The default the flips leave behind: cluster, skin, shadow and sky are on shady;
- the draw path is wired but held on Slang by the lighting half's missing area
- lights, and no other row moved.
+ The default the flips leave behind: cluster, skin, shadow, sky and the built-in
+ draw path are on shady; a script's material body stays on Slang until the shady
+ generator can assemble one, and no other row moved.
 *>
-fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
+fn void the_table_flips_cluster_skin_shadow_sky_and_the_draw_path() @test
 {
 	test::@check(three::shader_compiler(three::ShaderPass.CLUSTER) == three::ShaderCompiler.SHADY,
 		"cluster compiles through shady");
@@ -45,11 +45,10 @@ fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 		"shadow compiles through shady");
 	test::@check(three::shader_compiler(three::ShaderPass.SKY) == three::ShaderCompiler.SHADY,
 		"sky compiles through shady");
-	// Wired in `compile_shader`, held here because the material half is whole but
-	// the lighting half still lacks the area lights (kinds 2 and 3 and their LTC
-	// fit), which the bake tests spend - see the table's own comment.
-	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SLANG,
-		"the draw path is still compiled by Slang");
+	test::@check(three::shader_compiler(three::ShaderPass.MESH) == three::ShaderCompiler.SHADY,
+		"the built-in draw path compiles through shady");
+	// The scripted half is its own row: there is no shady assembly of a body and
+	// its uniforms yet, so `MESH_MATERIAL` stays on Slang.
 	test::@check(three::shader_compiler(three::ShaderPass.MESH_MATERIAL) == three::ShaderCompiler.SLANG,
 		"and a script's material body with it");
 	foreach (i, row : three::PASS_COMPILERS)
@@ -58,6 +57,7 @@ fn void the_table_flips_cluster_skin_shadow_and_sky_and_nothing_else() @test
 		if ((three::ShaderPass)i == three::ShaderPass.SKIN) continue;
 		if ((three::ShaderPass)i == three::ShaderPass.SHADOW) continue;
 		if ((three::ShaderPass)i == three::ShaderPass.SKY) continue;
+		if ((three::ShaderPass)i == three::ShaderPass.MESH) continue;
 		test::@check(row.compiler == three::ShaderCompiler.SLANG,
 			"%s is still compiled by Slang", row.name);
 	}
@@ -176,8 +176,8 @@ fn void the_cluster_call_site_reaches_both_compilers() @test
 }
 
 <*
- The draw path's row reaches the shady def when a run asks it to, even though the
- table holds it on Slang until the lighting half carries the area lights.
+ The draw path's row reaches the shady def - by the table's own default now, and
+ the same way whatever a run overrides it to.
 
  The module is the built-in one's: the geometry and material halves, the
  `standard(s)` body a material nobody wrote gets, and the walk of `MeshPush`. Its

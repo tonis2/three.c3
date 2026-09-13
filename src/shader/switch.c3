@@ -64,17 +64,15 @@ struct PassCompiler
 <*
  Which implementation compiles each pass.
 
- `MESH` is the built-in draw path - `MeshPass.init`'s four pipelines - and it is
- *wired but held on Slang*: `shaders/material.shady` now carries the built-in
- look, the base colour map and alpha test, shadows, occlusion, the lightmap, the
- environment, the debug views and the vertex colours, but `lighting.shady` has
- no area lights - kinds 2 and 3 and their LTC fit - and the bake tests spend
- them, so flipping the row today fails `three_tests::bake` (and traps). The row
- moves when the lighting half is whole. `MESH_MATERIAL` is the same files
- assembled around a script's `shade()` body, which the shady half cannot take
- yet - there is no shady assembly of a script's uniforms and body - so it stays
- on Slang. Every other row is still Slang, and each names the def that will
- replace it. See the file header for what a flip takes.
+ `MESH` is the built-in draw path - `MeshPass.init`'s four pipelines - and it
+ is on shady: `lighting.shady` carries the punctual and area lights with the LTC
+ fit, and `material.shady` the built-in look, the base colour map and alpha
+ test, shadows, occlusion, the lightmap, the environment, the debug views and
+ the vertex colours. `MESH_MATERIAL` is the same files assembled around a
+ script's `shade()` body, which the shady half cannot take yet - there is no
+ shady assembly of a script's uniforms and body - so it stays on Slang. Every
+ other row is still Slang, and each names the def that will replace it. See the
+ file header for what a flip takes.
 *>
 const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
 	[ShaderPass.CLUSTER] = { .compiler = ShaderCompiler.SHADY, .name = "cluster", .def = "cluster_def" },
@@ -82,7 +80,7 @@ const PassCompiler[ShaderPass.COUNT] PASS_COMPILERS = {
 	[ShaderPass.SHADOW] = { .compiler = ShaderCompiler.SHADY, .name = "shadow", .def = "shadow_def" },
 	[ShaderPass.SHADOW_CUTOUT] = { .compiler = ShaderCompiler.SLANG, .name = "shadow_cutout", .def = "shadow_cutout_def" },
 	[ShaderPass.SKY] = { .compiler = ShaderCompiler.SHADY, .name = "sky", .def = "sky_def" },
-	[ShaderPass.MESH] = { .compiler = ShaderCompiler.SLANG, .name = "mesh", .def = "mesh_def" },
+	[ShaderPass.MESH] = { .compiler = ShaderCompiler.SHADY, .name = "mesh", .def = "mesh_def" },
 	[ShaderPass.MESH_MATERIAL] = { .compiler = ShaderCompiler.SLANG, .name = "material", .def = "mesh_def" },
 	[ShaderPass.POST] = { .compiler = ShaderCompiler.SLANG, .name = "post", .def = "post_def" },
 	[ShaderPass.TONEMAP] = { .compiler = ShaderCompiler.SLANG, .name = "tonemap", .def = "post_def" },
