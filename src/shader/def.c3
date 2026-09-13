@@ -20,12 +20,13 @@ module three;
 import shady;
 
 <*
- A piece of the module's text, and what a diagnostic should call it.
+ A region of a module's text: a shipped file, or text a caller supplies.
 *>
 struct ShaderSource
 {
-	String name;
-	String source;
+	String name;      // what diagnostics call the region: `#line 1 "sky"`
+	ShaderFile file;  // the shipped file, or `ShaderFile.NONE` for spliced text
+	String source;    // the spliced text, when there is no file
 }
 
 <*
@@ -120,7 +121,7 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 	// pointer to it, when the set spilled.
 	if (def.uniforms.len > 0)
 	{
-		append_shader_source(out, { "uniforms", def.uniforms }, restore);
+		append_shader_source(out, { .name = "uniforms", .source = def.uniforms }, restore);
 		append_push_block(out, $Type, def.uniforms_spilled
 			? string::tformat("Uniforms* %s", MATERIAL_TABLE_FIELD)
 			: "Uniforms uniforms");
@@ -130,5 +131,19 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 		append_push_block(out, $Type);
 	}
 
-	foreach (source : def.sources) append_shader_source(out, source, restore);
+	foreach (source : def.sources)
+	{
+		// An empty region says nothing and needs no `#line` of its own: a def
+		// carries the regions a script may fill whether or not it filled them.
+		if (source.file == ShaderFile.NONE)
+		{
+			if (source.source.len == 0) continue;
+			append_shader_source(out, source, restore);
+			continue;
+		}
+
+		// Read here rather than when the def was written, so a disk edit is seen
+		// by the next compile without the def changing.
+		append_shader_source(out, { .name = source.name, .source = load_source(source.file, tmem)!! }, restore);
+	}
 }

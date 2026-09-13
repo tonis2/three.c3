@@ -255,14 +255,41 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 			);
 			if (try source)
 			{
-				MeshPipeline*? made = self.pass.pipelines.acquire(
-					self.gpu,
-					&self.target,
-					source,
-					"three.bake",
-					BAKE_STATE,
-					ShaderPass.LIGHTMAP_MATERIAL
-				);
+				// The bake follows the compiler that owns the stored body: on
+				// Slang it is the old re-assembly compiled through the material
+				// row's Slang side, and on shady the same row compiles the body
+				// again with `bake: true` - a module of its own, because uv-space
+				// placement and an unlit surface are the bake's interface.
+				MeshPipeline*? made;
+				if (shader_compiler(ShaderPass.MESH_MATERIAL) == ShaderCompiler.SHADY)
+				{
+					made = self.pass.pipelines.acquire(
+						self.gpu,
+						&self.target,
+						source,
+						"three.bake",
+						BAKE_STATE,
+						ShaderPass.MESH_MATERIAL,
+						body: material.fragment,
+						uniforms: material.declared_uniforms,
+						textures: material.declared_textures,
+						vertex: material.vertex,
+						bake: true
+					);
+				}
+				else
+				{
+					// `source` is already the whole assembled bake module, so
+					// this is the same row with its Slang side answering.
+					made = self.pass.pipelines.acquire(
+						self.gpu,
+						&self.target,
+						source,
+						"three.bake",
+						BAKE_STATE,
+						ShaderPass.MESH_MATERIAL
+					);
+				}
 				if (try made) built = made;
 			}
 		};
@@ -350,6 +377,18 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
 		{
 			samplers.add(LIGHTMAP_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		// The ported bake keeps its declarations where the Slang one let the
+		// linker drop them, so the two frame images the unlit path never
+		// samples still need a descriptor: an unwritten one is undefined even
+		// when no load reaches it.
+		if (pipeline_declares_binding(pipeline, ENVIRONMENT_BINDING))
+		{
+			samplers.add(ENVIRONMENT_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
+		}
+		if (pipeline_declares_binding(pipeline, AMBIENT_OCCLUSION_BINDING))
+		{
+			samplers.add(AMBIENT_OCCLUSION_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
 		}
 		samplers.push(cmd, pipeline);
 

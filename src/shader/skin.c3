@@ -13,7 +13,7 @@ import shady;
 macro ShaderDef skin_def()
 {
 	ShaderSource[] sources = {
-		{ "skin", shader_source("skin.shady", tmem)!! },
+		{ .name = "skin", .file = ShaderFile.SKIN_SHADY },
 	};
 
 	return (ShaderDef) { .name = "skin", .sources = sources };

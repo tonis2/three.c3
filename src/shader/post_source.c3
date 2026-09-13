@@ -70,11 +70,6 @@ $assert POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].offset + POST_PUSH_FIELDS[POS
 	== POST_PUSH_START : "`info` moved; post uniforms no longer start where post.slang puts them";
 $assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET : "the post uniform budget and the push budget disagree";
 
-// The template, looked up the same way `mesh.slang` and `material.slang` are —
-// `shaders/` first, then `build/shaders/`, both relative to the working
-// directory.
-const String POST_TEMPLATE = "post.slang";
-
 // What the agent's own lines are called in a diagnostic: `post:3:24` is a
 // coordinate in the string the agent typed.
 const String POST_BODY_NAME = "post";
@@ -396,7 +391,7 @@ fn String? post_source(
 	// marker, because a post pass's three vertices are `SV_VertexID` arithmetic
 	// with no geometry behind them and nothing an agent could usefully move.
 	return assemble_shader(
-		POST_TEMPLATE,
+		ShaderFile.POST_SLANG,
 		fragment,
 		uniforms,
 		textures,

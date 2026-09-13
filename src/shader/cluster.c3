@@ -12,7 +12,7 @@ import shady;
 macro ShaderDef cluster_def()
 {
 	ShaderSource[] sources = {
-		{ "cluster", shader_source("cluster.shady", tmem)!! },
+		{ .name = "cluster", .file = ShaderFile.CLUSTER_SHADY },
 	};
 
 	return (ShaderDef) { .name = "cluster", .sources = sources };

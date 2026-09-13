@@ -484,7 +484,7 @@ function windowGradients(layer, surface, i) {
 	];
 }
 
-// The whole material, as Slang.
+// The whole material, as shady.
 //
 // Returns the source and the sampler table beside it, because the two are
 // decided together: a layer with no normal map declares no normal sampler, and a
@@ -504,8 +504,8 @@ function emit(base, layers) {
 	const stats = { layers: layers.length, samplers: 0, parallaxSolves: 0, taps: 0, sampleGradTaps: 0 };
 
 	// **Every texture read this body makes is written here and nowhere else.**
-	// What a sampler is spelled like — `name.Sample(uv)` today, an index into one
-	// device-wide array tomorrow — is one decision, and a generated body that
+	// What a sampler is spelled like — `name().Sample(uv)` today, an index into
+	// one device-wide array tomorrow — is one decision, and a generated body that
 	// named samplers in eleven places would be eleven edits to move. It is also
 	// where the tap count comes from, which is the number that describes what a
 	// stack costs a pixel.
@@ -514,9 +514,9 @@ function emit(base, layers) {
 	// for itself — a `frac` seam, or a uv only part of the quad computed.
 	function read(name, at, grads) {
 		stats.taps++;
-		if (grads === undefined) return `${name}.Sample(${at})`;
+		if (grads === undefined) return `${name}().Sample(${at})`;
 		stats.sampleGradTaps++;
-		return `${name}.SampleGrad(${at}, ${grads[0]}, ${grads[1]})`;
+		return `${name}().SampleGrad(${at}, ${grads[0]}, ${grads[1]})`;
 	}
 
 	// Cleared rather than added to, because `emit` runs more than once on the same
@@ -559,7 +559,7 @@ function emit(base, layers) {
 	// same chain.
 	const anySurface = base.metallicRoughness !== null || layers.some(l => surfaces(l));
 
-	body.push('float3 shade(Surface s)');
+	body.push('fn float3 shade(Surface s)');
 	body.push('{');
 
 	// The uv everything on this surface is sampled at.
@@ -782,7 +782,7 @@ function emit(base, layers) {
 		if (layer.animated) {
 			uniforms[`layer${i}_params`] = [...layer.tint, layer.opacity];
 			layer.samplers.params = `layer${i}_params`;
-			w = `(${w}) * layer${i}_params.a`;
+			w = `(${w}) * s.uniforms.layer${i}_params.a`;
 		} else if (layer.opacity !== 1) {
 			w = `(${w}) * ${num(layer.opacity, `${layer.label}: opacity`)}`;
 		}
@@ -819,7 +819,7 @@ function emit(base, layers) {
 		if (paints) {
 			const parts = [];
 			if (layer.animated) {
-				parts.push(`layer${i}_params.rgb`);
+				parts.push(`s.uniforms.layer${i}_params.rgb`);
 			} else if (layer.tint.some(c => c !== 1)) {
 				parts.push(vec3(layer.tint, `${layer.label}: tint`));
 			}
@@ -921,11 +921,10 @@ function emit(base, layers) {
 	// environment reflection and into nothing else — its header says why.
 	const shaded = ao === '1.0' ? 'standard(s, c, n)' : `standard(s, c, n, ${ao})`;
 	if (anyEmissive) {
-		body.push('    #ifdef THREE_LIGHTMAP_BAKE');
-		body.push(`    return ${shaded};`);
-		body.push('    #else');
+		// The lightmap stores the direct diffuse of the baked lights and
+		// nothing else, so the stack's own glow stays out of that variant.
+		body.push(`    if (MATERIAL_LIGHTMAP_BAKE) return ${shaded};`);
 		body.push(`    return ${shaded} + e;`);
-		body.push('    #endif');
 	} else {
 		body.push(`    return ${shaded};`);
 	}

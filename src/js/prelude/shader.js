@@ -194,7 +194,7 @@ export function texturesProxy(owner, declared, what) {
 //
 // Three.js's ShaderMaterial takes a whole vertex and fragment program and a
 // uniforms object of `{ value }` wrappers. This takes a fragment *function* —
-// `float3 shade(Surface s)` — and a flat uniforms object, because three.c3
+// `fn float3 shade(Surface s)` — and a flat uniforms object, because three.c3
 // supplies the vertex stage, the Surface, the descriptor layout and the push
 // block. That is what `plan.md` §4 calls tier 2, and it is what removes almost
 // every Vulkan failure mode while keeping the property that makes Three.js
@@ -210,7 +210,7 @@ export class ShaderMaterial extends Material {
 		}
 		const { uniforms = {}, textures = {}, vertex = '', bounds = 0, side = FrontSide } = options;
 		if (vertex !== '' && typeof vertex !== 'string') {
-			throw new TypeError('`vertex` wants a Slang body — void displace(inout Vertex v) { ... }');
+			throw new TypeError('`vertex` wants a shady body — fn void displace(inout Vertex v) { ... }');
 		}
 		// **The fragment body is optional once there is a vertex one**, and
 		// defaults to the shading the built-in shader does. A material that
@@ -219,7 +219,7 @@ export class ShaderMaterial extends Material {
 		// left to whoever is generating the script to remember.
 		const fragment = (typeof options.fragment === 'string' && options.fragment.trim().length > 0)
 			? options.fragment
-			: (vertex ? 'float3 shade(Surface s) { return standard(s); }' : options.fragment);
+			: (vertex ? 'fn float3 shade(Surface s) { return standard(s); }' : options.fragment);
 		if (typeof fragment !== 'string' || fragment.trim().length === 0) {
 			throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
 		}

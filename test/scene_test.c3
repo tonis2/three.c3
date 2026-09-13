@@ -1667,8 +1667,8 @@ fn void two_draws_with_different_textures_do_not_bleed() @test
 // Unlit and flat on purpose: the light is straight down the view axis at full
 // ambient, so the quad is exactly its own colour and a pixel test is about where
 // the geometry is rather than about how it is shaded.
-const String FLAT_GREEN = `float3 shade(Surface s) { return float3(0.1, 0.95, 0.2); }`;
-const String SHIFT_X = `void displace(inout Vertex v) { v.position.x += shift; }`;
+const String FLAT_GREEN = `fn float3 shade(Surface s) { return float3(0.1, 0.95, 0.2); }`;
+const String SHIFT_X = `fn void displace(inout Vertex v) { v.position.x += v.uniforms.shift; }`;
 
 <*
  The mean x of everything that drew, as a fraction of the frame's width, and how

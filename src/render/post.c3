@@ -493,8 +493,14 @@ fn PostStage*? PostPass.build_stage(
 		// Through the disk cache, so the second run of a script that sets the same
 		// body pays no Slang call at all. The assembled source is the key, so live
 		// editing needs no invalidation path: a different body is a different key.
+		// The body, the declared uniforms and the declared textures ride along
+		// for the shady def, which splices the body and emits the two regions a
+		// script reads through. `source` stays for the row's other compiler: a
+		// Slang override assembles the same body into `post.slang` and ignores
+		// these. A scripted body is written in shady's spelling.
 		ShaderModule mod = compile_shader(
-			ShaderPass.POST, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..])!;
+			ShaderPass.POST, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..],
+			body: fragment, uniforms: uniforms, textures: textures)!;
 		defer mod.free();
 
 		// Handed over before the `ok` check: a successful compile can still warn,

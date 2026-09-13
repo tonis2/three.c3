@@ -1078,7 +1078,7 @@ fn void a_body_that_reads_the_clock_is_drawn_until_the_clock_stops() @test
 	{
 		@ok(run, `
 			box.material = new three.ShaderMaterial({
-				fragment: 'float3 shade(Surface s) { return float3(sin(s.time), 0.2, 0.3); }'
+				fragment: 'fn float3 shade(Surface s) { return float3(sin(s.time), 0.2, 0.3); }'
 			});
 		`);
 		@idle_frame(renderer);

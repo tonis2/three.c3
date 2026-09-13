@@ -343,12 +343,12 @@ fn void the_sky_is_the_same_pixels_through_both_compilers() @test
 	renderer.pass.scene.look.sky.rotation = 0.6f;
 	renderer.pass.scene.look.sky.background_intensity = 0.9f;
 
-	String source = three::shader_source("sky.slang", mem)!!;
+	String source = three::shader_source(three::ShaderFile.SKY_SLANG, mem)!!;
 	defer source.free(mem);
 
 	three::shader_override(three::ShaderPass.SKY, three::ShaderCompiler.SLANG);
 	three::ShaderModule slang_mod = three::compile_shader(
-		three::ShaderPass.SKY, source, "sky.slang", three::MESH_ENTRIES[..])!!;
+		three::ShaderPass.SKY, source, three::ShaderFile.SKY_SLANG.name, three::MESH_ENTRIES[..])!!;
 	defer slang_mod.free();
 	test::@check(slang_mod.ok, "the Slang sky compiles: %s", slang_mod.diagnostic);
 
@@ -359,7 +359,7 @@ fn void the_sky_is_the_same_pixels_through_both_compilers() @test
 
 	three::shader_override(three::ShaderPass.SKY, three::ShaderCompiler.SHADY);
 	three::ShaderModule shady_mod = three::compile_shader(
-		three::ShaderPass.SKY, source, "sky.slang", three::MESH_ENTRIES[..])!!;
+		three::ShaderPass.SKY, source, three::ShaderFile.SKY_SLANG.name, three::MESH_ENTRIES[..])!!;
 	defer shady_mod.free();
 	test::@check(shady_mod.ok, "the shady sky compiles: %s", shady_mod.diagnostic);
 

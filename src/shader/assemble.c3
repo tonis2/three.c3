@@ -360,7 +360,7 @@ fn uint append_lines(DString* out, String text) @private
  generate, because the messages are the half a caller acts on and they are not
  shared.
 
- @param template_name : `A file name, looked up by shader_source — the search path first, then the copy embedded in the binary.`
+ @param file : `The template: a ShaderFile member, looked up by shader_source — the search path first, then the copy embedded in the binary.`
  @param fragment : `The agent's body, appended verbatim between the two #line directives.`
  @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Their binding indices are generated from that order — see MATERIAL_BINDING_FIRST.`
@@ -374,7 +374,7 @@ fn uint append_lines(DString* out, String text) @private
  @return ? SHADER_NOT_FOUND : `The template is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
 *>
 fn String? assemble_shader(
-	String template_name,
+	ShaderFile file,
 	String fragment,
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures,
@@ -397,7 +397,7 @@ fn String? assemble_shader(
 		// restores are absolute against the module being generated, so a `#line`
 		// spliced into the middle of the template would leave the preamble
 		// numbered two ways.
-		String template = shader_source(template_name, tmem, renumbered: true)!;
+		String template = shader_source(file, tmem, renumbered: true)!;
 
 		DString out;
 		out.tinit(template.len + 1024);
@@ -433,7 +433,7 @@ fn String? assemble_shader(
 				// for: a material's images are slots of the device-wide array, so the
 				// fragment stage declares `MATERIAL_FRAME_SAMPLERS` whatever a stack
 				// asked for.
-				if (template_name == MATERIAL_TEMPLATE && vertex.len > 0)
+				if (file == ShaderFile.MATERIAL_SLANG && vertex.len > 0)
 				{
 					out.append_string("#define THREE_NO_AO 1");
 					out.append_char('\n');
@@ -612,7 +612,7 @@ fn String? assemble_shader(
 					// declared a texture called `t1` used to rewrite `surface.slang`'s
 					// own tangent-frame local. A global is shadowed by a local instead.
 					// A post pass still has samplers of its own.
-					if (template_name == MATERIAL_TEMPLATE)
+					if (file == ShaderFile.MATERIAL_SLANG)
 					{
 						out.appendf("static const Map %s = { %du };", texture.name, binding_first + (uint)i)!!;
 					}

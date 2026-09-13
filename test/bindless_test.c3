@@ -270,10 +270,10 @@ fn void nineteen_declared_textures_each_land_in_their_own_slot() @test
 				const v = i * 12;
 				textures['t' + i] = new three.DataTexture(new Uint8Array([v, 0, 0, 255]), 1, 1,
 					{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false });
-				checks += 'ok = ok && abs(t' + i + '.Sample(s.uv).r - ' + (v / 255).toFixed(6) + ') < 0.01;';
+				checks += 'ok = ok && abs(t' + i + '().Sample(s.uv).r - ' + (v / 255).toFixed(6) + ') < 0.01;';
 			}
 			const material = new three.ShaderMaterial({ textures, fragment:
-				'float3 shade(Surface s) { bool ok = true;' + checks + ' return ok ? float3(0,1,0) : float3(1,0,0); }' });
+				'fn float3 shade(Surface s) { bool ok = true;' + checks + ' return ok ? float3(0,1,0) : float3(1,0,0); }' });
 			const scene = new three.Scene();
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), material));
 			three.light.set([0, 0, 1], 1);

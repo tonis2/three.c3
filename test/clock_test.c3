@@ -730,7 +730,7 @@ fn void the_post_clock_is_the_game_clock() @test
 	renderer.post.set(
 		&renderer.gpu,
 		&renderer.target,
-		`float3 post(Post p) { return float3(p.time, p.time, p.time); }`,
+		`fn float3 post(Post p) { return float3(p.time, p.time, p.time); }`,
 		{}
 	)!!;
 

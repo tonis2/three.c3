@@ -3,10 +3,12 @@
 
  `shaders/mesh.shady` is the module: the stage interface the two halves share,
  the declaration of the material half, the entry points, and the geometry code.
- The material half is `shaders/lighting.shady` and `shaders/material.shady`, and
- the one part of it that has an author - the script's `shade()` body - arrives as
- text and gets a source region of its own, so a fault in it is reported at the
- line the script wrote rather than at a line in the assembled module.
+ The material half is `shaders/lighting.shady`, one of its two area algorithm
+ files (`lighting_ltc.shady` or `lighting_reference.shady`), and
+ `shaders/material.shady`; the one part of it that has an author - the script's
+ `shade()` body - arrives as text and gets a source region of its own, so a
+ fault in it is reported at the line the script wrote rather than at a line in
+ the assembled module.
 
  The pose is `shaders/skinning.shady`, shared with the shadow pass so a character
  cannot be lit in one place and shadowed in another, and the push block is
@@ -18,23 +20,52 @@
  instead, which decides. The def writes that choice out as `MATERIAL_BUILT_IN`
  above the half that reads it, so it is part of the module's text and therefore
  of its pipeline's identity.
+
+`reference` replaces the area-light algorithm: the same files with the numeric
+quadrature instead of the LTC fit, and without the fit table's descriptor. It
+is a def-level variant rather than a constant because the two modules do not
+declare the same resources.
 *>
 module three;
 
 import shady;
 
-macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vertex_code = "", bool built_in = false)
+macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vertex_code = "", bool built_in = false, String textures = "", bool bake = false, bool lightmap = false, bool reference = false)
 {
 	ShaderSource[] sources = {
-		// The library first: the lighting `shade_lights` reads, the pose and
-		// the flag bits, the texture array a map lives in, and then the
-		// record and built-in look in `three.material`. The order is the
-		// dependency order - `material.shady` reads the flags `skinning.shady`
-		// declares and the `Map` `surface.shady` declares, and a constant is
-		// not a forward reference the way a function is.
-		{ "three.lighting", shader_source("lighting.shady", tmem)!! },
-		{ "skinning", shader_source("skinning.shady", tmem)!! },
-		{ "three.surface", shader_source("surface.shady", tmem)!! },
+		// The lighting library first: the shared half and the one area
+		// algorithm file that imports it. The def names a single file - the LTC
+		// fit or the numeric reference - because that file's
+		// `import "lighting.shady";` brings the shared half with it, and both
+		// carry `module lighting;`, so the tail defines the declarations the
+		// shared half writes. The two answer files differ by a descriptor, and
+		// a spec constant cannot remove one, which is why the answer is not a
+		// branch in the shared half.
+		{ .name = "three.lighting", .file = reference
+			? ShaderFile.LIGHTING_REFERENCE_SHADY
+			: ShaderFile.LIGHTING_LTC_SHADY },
+
+		// The pose and the flag bits, and then the record and built-in look in
+		// `three.material`. The order is the dependency order - `material.shady`
+		// reads the flags `skinning.shady` declares and the `Map`
+		// `surface.shady` declares, and these constants are not forward
+		// references the way a function is: `surface.shady` reads the lightmap
+		// variant, so the switches stand above it.
+		{ .name = "skinning", .file = ShaderFile.SKINNING_SHADY },
+
+		// The bake and lightmap variants' own switches. A bake rasterises the
+		// mesh in uv space and shades it unlit; a lightmap bake rasterises it
+		// in its chart and stores the baked lights' direct diffuse. Each is a
+		// module of its own - and the halves read these rather than a `#ifdef`
+		// neither language has.
+		{ .name = "three.bake", .source = bake
+			? "const bool MATERIAL_BAKE = true;\n"
+			: "const bool MATERIAL_BAKE = false;\n" },
+		{ .name = "three.lightmap", .source = lightmap
+			? "const bool MATERIAL_LIGHTMAP_BAKE = true;\n"
+			: "const bool MATERIAL_LIGHTMAP_BAKE = false;\n" },
+
+		{ .name = "three.surface", .file = ShaderFile.SURFACE_SHADY },
 
 		// **The one line that tells the material half which program it is.**
 		// The built-in draw path's fragment stage applies COLOR_0 to the albedo
@@ -43,11 +74,16 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 		// the body chooses. A plain constant rather than a spec constant: these
 		// are two texts with different pipelines, so the pipeline cache stays
 		// keyed by the source that produced it.
-		{ "three.builtin", built_in
+		{ .name = "three.builtin", .source = built_in
 			? "const bool MATERIAL_BUILT_IN = true;\n"
 			: "const bool MATERIAL_BUILT_IN = false;\n" },
 
-		{ "three.material", shader_source("material.shady", tmem)!! },
+		{ .name = "three.material", .file = ShaderFile.MATERIAL_SHADY },
+
+		// The names a script's textures are read by. A function per texture, so
+		// the name is a `Map` built from `map_at` - a material's images are rows
+		// of the device-wide table and never descriptors of their own.
+		{ .name = "material_textures", .source = textures },
 
 		// **The body is its own region.** `append_shader_source` brackets it
 		// with `#line 1 "material"`, so a fault in it names `material` and the
@@ -55,13 +91,17 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 		// into. The vertex body is the second one, and a material that wrote
 		// none gets the empty function, so the call in `mesh.shady` is
 		// unconditional and there is no second vertex path.
-		{ "material", fragment_code },
-		{ "vertex", vertex_code.len > 0 ? vertex_code : IDENTITY_DISPLACE_SHADY },
+		{ .name = "material", .source = fragment_code },
+		{ .name = "vertex", .source = vertex_code.len > 0 ? vertex_code : IDENTITY_DISPLACE_SHADY },
 
-		{ "mesh", shader_source("mesh.shady", tmem)!! },
+		{ .name = "mesh", .file = ShaderFile.MESH_SHADY },
 	};
 
-	return (ShaderDef) { .name = "mesh", .uniforms = uniforms, .sources = sources };
+	return (ShaderDef) {
+		.name = reference ? "mesh_reference" : (bake ? "mesh_bake" : "mesh"),
+		.uniforms = uniforms,
+		.sources = sources,
+	};
 }
 
 <*

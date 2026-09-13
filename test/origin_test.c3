@@ -66,12 +66,12 @@ macro @with_pass(; @body(three::Renderer* renderer))
 // A body that paints its copy's x, mapped into 0..1 over a few units either side
 // of the origin so the answer is a grey and not a clipped one.
 const String PAINT_ORIGIN_X =
-	"float3 shade(Surface s) { float k = saturate(s.origin.x * 0.125 + 0.5); return float3(k, k, k); }";
+	"fn float3 shade(Surface s) { float k = saturate(s.origin.x * 0.125 + 0.5); return float3(k, k, k); }";
 
 // The same, from the vertex stage — written into the copy's colour, which the
 // fragment stage carries whatever the body does afterwards.
 const String CARRY_ORIGIN_FROM_VERTEX =
-	"void displace(inout Vertex v) { float k = saturate(v.origin.x * 0.125 + 0.5); v.color = float4(k, k, k, 1.0); }";
+	"fn void displace(inout Vertex v) { float k = saturate(v.origin.x * 0.125 + 0.5); v.color = float4(k, k, k, 1.0); }";
 
 fn uint painted_material(three::Renderer* renderer, String fragment, String vertex = "")
 {
@@ -198,7 +198,7 @@ fn void a_vertex_body_reads_the_origin() @test
 	{
 		uint material = painted_material(
 			renderer,
-			"float3 shade(Surface s) { return s.color.rgb; }",
+			"fn float3 shade(Surface s) { return s.color.rgb; }",
 			CARRY_ORIGIN_FROM_VERTEX
 		);
 		plane_at(renderer, material, -1.1f);

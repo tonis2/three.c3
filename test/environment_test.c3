@@ -501,7 +501,7 @@ fn void the_frame_is_cleared_to_the_background_that_was_set() @test
 
 // A fragment body that ignores everything and answers with one colour, so a
 // pixel test is about which faces were drawn and not about lighting.
-const String FLAT_RED = `float3 shade(Surface s) { return float3(1.0, 0.0, 0.0); }`;
+const String FLAT_RED = `fn float3 shade(Surface s) { return float3(1.0, 0.0, 0.0); }`;
 
 fn void a_material_keeps_its_front_faces_unless_told_otherwise() @test
 {
@@ -509,7 +509,7 @@ fn void a_material_keeps_its_front_faces_unless_told_otherwise() @test
 	{
 		three::RunResult result = run.run(`
 			new three.Scene();
-			const m = new three.ShaderMaterial({ fragment: 'float3 shade(Surface s) { return float3(1, 0, 0); }' });
+			const m = new three.ShaderMaterial({ fragment: 'fn float3 shade(Surface s) { return float3(1, 0, 0); }' });
 			return [m.side === three.FrontSide, three.FrontSide, three.BackSide, three.DoubleSide];
 		`);
 		defer result.free();
@@ -529,7 +529,7 @@ fn void an_unknown_side_is_refused_by_name() @test
 	{
 		three::RunResult result = run.run(`
 			new three.Scene();
-			const body = 'float3 shade(Surface s) { return float3(1, 0, 0); }';
+			const body = 'fn float3 shade(Surface s) { return float3(1, 0, 0); }';
 			const said = [];
 			try { new three.ShaderMaterial({ fragment: body, side: 7 }); } catch (e) { said.push(e.message); }
 			const m = new three.ShaderMaterial({ fragment: body });
@@ -568,7 +568,7 @@ fn void backside_is_what_makes_a_dome_visible_from_inside() @test
 			const scene = new three.Scene();
 			scene.background = 0x000000;
 			globalThis.sky = new three.ShaderMaterial({
-				fragment: 'float3 shade(Surface s) { return float3(1, 0, 0); }',
+				fragment: 'fn float3 shade(Surface s) { return float3(1, 0, 0); }',
 			});
 			scene.add(new three.Mesh(new three.SphereGeometry(10, 32, 16), globalThis.sky));
 			// Inside it: the eye is 4 units from the centre of a sphere of radius 10.
@@ -636,7 +636,7 @@ fn void flipping_a_side_costs_no_compile_and_no_pipeline() @test
 		three::RunResult made = run.run(`
 			new three.Scene();
 			globalThis.m = new three.ShaderMaterial({
-				fragment: 'float3 shade(Surface s) { return float3(1, 0, 0); }',
+				fragment: 'fn float3 shade(Surface s) { return float3(1, 0, 0); }',
 			});
 			return 1;
 		`);
@@ -782,7 +782,7 @@ fn void an_occlusion_darkens_the_ambient_and_not_the_sun() @test
 	{
 		three::RunResult result = run.run(`
 			globalThis.shaded = (ao) => new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return standard(s, s.albedo, s.normal, " + ao + "); }",
+				fragment: "fn float3 shade(Surface s) { return standard(s, s.albedo, s.normal, " + ao + "); }",
 			});
 			globalThis.scene = new three.Scene();
 			globalThis.plane = new three.Mesh(new three.PlaneGeometry(2, 2), shaded("1.0"));

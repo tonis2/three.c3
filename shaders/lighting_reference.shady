@@ -1,0 +1,51 @@
+// The numeric half of the area-light algorithm: the four-by-four midpoint
+// quadrature over the emitter's own parameter square, the disk keeping the
+// samples inside it.
+//
+// It is a file of `lighting` - the shared half's module - so the declarations
+// `lighting.shady` carries are defined by what this file writes; `module
+// lighting;` is the whole of the claim. This is the reference the LTC fit is
+// measured against rather than a second approximation: the two differ only in
+// how they integrate the same emitter, share the range window, and are expected
+// to agree wherever the fit is allowed to be a fit.
+//
+// It declares no descriptor of its own. The fit table is the only resource the
+// two algorithms disagree about, and a module that carries this file must not
+// carry it: the point of the variant is a draw path a device with no table can
+// run, and a spec constant cannot remove a binding.
+
+module lighting;
+
+import "lighting.shady";
+
+// The shared light walk names this type and never one of its fields, so the
+// numeric module has no context to keep. One field because an empty struct is
+// not worth betting a driver on.
+struct AreaCache
+{
+	float unused;
+}
+
+// One emitter's terms by quadrature. The window and the per-sample weights are
+// `area_reference_terms`'s - the same function this module keeps as its only
+// area integration, rather than a second copy of it.
+fn AreaTerms area_light_terms(
+	Light light,
+	float3 position,
+	float3 normal,
+	float3 view,
+	float3 f0,
+	float f90,
+	float a2,
+	float k,
+	float nv,
+	inout AreaCache cache,
+	inout bool ready)
+{
+	return area_reference_terms(light, position, normal, view, f0, f90, a2, k, nv);
+}
+
+fn float area_diffuse(Light light, float3 position, float3 normal)
+{
+	return area_reference_diffuse(light, position, normal);
+}

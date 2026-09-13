@@ -17,7 +17,7 @@ import shady;
 macro ShaderDef sky_def()
 {
 	ShaderSource[] sources = {
-		{ "sky", shader_source("sky.shady", tmem)!! },
+		{ .name = "sky", .file = ShaderFile.SKY_SHADY },
 	};
 
 	return (ShaderDef) { .name = "sky", .sources = sources };

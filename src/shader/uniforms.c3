@@ -2,6 +2,10 @@
  A script's uniforms, as a struct a body reads, and the one function that hands
  the set to `Surface.uniforms` from whichever storage it got.
 
+ The same file also emits a script's *textures*, because they are the other half
+ of the same sentence: the declarations a body reads by name, generated from the
+ list a script gave.
+
  A material declares its uniforms at runtime - name, component count, and how
  many rows a table column has - and a body reads them as fields:
 
@@ -85,4 +89,34 @@ fn String shady_float_type(uint components) @private
 		case 4: return "float4";
 	}
 	return "float";
+}
+
+<*
+ A script's declared textures, emitted where the def that splices the body can
+ see them.
+
+ Two shapes, because the two kinds of shader store an image differently. A
+ material's images are rows of the device-wide table - one `uint` index each,
+ carried in `DrawRecord.texture_index` - so a name is a function returning the
+ `Map` the body samples, built with the same `map_at` the engine's own maps use:
+ there is no second descriptor scheme and no new binding. A post pass's images
+ are descriptors of its own set, so a name is the sampler itself and the body
+ reads it exactly as it did against the Slang template.
+
+ `first` is the row or binding the first declared texture gets; declaration order
+ is the numbering, so nothing outside the list remembers a number.
+*>
+fn void append_shady_textures(DString* out, MaterialTexture[] textures, uint first, bool material)
+{
+	foreach (i, texture : textures)
+	{
+		if (material)
+		{
+			out.appendf("fn Map %s()\n{\n\treturn map_at(%du);\n}\n", texture.name, first + (uint)i)!!;
+		}
+		else
+		{
+			out.appendf("Sampler2D %s @set(0) @binding(%d);\n", texture.name, first + (uint)i)!!;
+		}
+	}
 }

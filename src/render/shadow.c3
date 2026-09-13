@@ -812,23 +812,24 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 
  Later than `build_pipeline` and for a stricter reason than "shadows may never be
  switched on": most scenes that *do* use shadows still have no cut-out in them, so
- this is a Slang compile and a `VkPipeline` charged to the first frame in which
+ this is a compile and a `VkPipeline` charged to the first frame in which
  something actually asks. `MeshPass.plan_shadow` is what asks, and it asks from
  the same place `ensure_static` is called from — between frames.
 
- ## The define, and why it is a second compile
+ ## A second compile, not a second program
 
- `shaders/shadow.slang` guards its sampler, its varying and its fragment stage
- behind `THREE_SHADOW_CUTOUT`, and this prepends the definition. Two compiles
- rather than one module with two programs, because reflection reports the *linked
- program*: a sampler declared anywhere in the source would land in the layout of
- the pipeline every ordinary caster shares, and a declared binding that nothing
- writes is undefined behaviour rather than an unused slot.
+ The shady half is its own module (`shaders/shadow_cutout.shady`, carried beside
+ `shadow.shady`'s pose by `shadow_cutout_def`), and the Slang half is
+ `shaders/shadow.slang` compiled again with `THREE_SHADOW_CUTOUT` defined.
+ Two compiles rather than one module with two programs, because reflection
+ reports the *linked program*: a sampler declared anywhere in the source would
+ land in the layout of the pipeline every ordinary caster shares, and a declared
+ binding that nothing writes is undefined behaviour rather than an unused slot.
 
- `#line 1` after the define, so a Slang diagnostic still names the line the file
- has. `shader/assemble.c3` solves the same problem the other way — it swaps a
- marker line for the define, keeping the line count — and either is fine; this
- file has no marker to swap.
+ On the Slang side the define is prepended with `#line 1` after it, so a
+ diagnostic still names the line the file has; `shader/assemble.c3` solves the
+ same problem the other way — it swaps a marker line for the define, keeping the
+ line count. Either is fine, and the shady side has no preprocessor to feed.
 
  @return ? SHADER_MISSING_ENTRY_POINT : `The cut-out variant would not compile. The diagnostic is printed, for build_pipeline's reason.`
 *>

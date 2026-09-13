@@ -49,11 +49,23 @@ macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
 // The smallest body that is a post pass: hand the frame back unchanged.
 const String IDENTITY = `float3 post(Post p) { return p.color; }`;
 
+// The same body in the spelling the engine's defs splice - `fn` for the
+// function, `p.uniforms` for the uniform set. The direct-assembly tests above
+// keep the Slang spelling because `post_source` still assembles it.
+const String IDENTITY_SHADY = `fn float3 post(Post p) { return p.color; }`;
+
 // Three lines, so line 3 is a line an agent can point at. `notAFunction` is not
 // declared anywhere, which is a Slang error and not a preprocessor one — the
 // distinction matters, because a preprocessor error is reported against the
 // physical file and would pass this check for the wrong reason.
 const String BAD_BODY = `float3 post(Post p)
+{
+	return notAFunction(p.uv);
+}`;
+
+// The same, for the runtime path: the fault is the body's own line under the
+// def's `post_body` region.
+const String BAD_BODY_SHADY = `fn float3 post(Post p)
 {
 	return notAFunction(p.uv);
 }`;
@@ -595,7 +607,7 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
 		// is the assembler's own argument for taking no `#line` with it. Walking
 		// the raw file instead would expect a `//@shared` line in the output and
 		// find sixty lines of Slang.
-		String template = three::shader_source("material.slang", tmem, renumbered: true)!!;
+		String template = three::shader_source(three::ShaderFile.MATERIAL_SLANG, tmem, renumbered: true)!!;
 
 		List{String} want;
 		want.tinit(512);
@@ -764,7 +776,7 @@ fn void an_identity_post_pass_leaves_the_frame_where_it_was() @test
 			top, bottom
 		);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 
 		image::Image posted = renderer.capture()!!;
 		defer posted.free();
@@ -806,7 +818,7 @@ fn void a_post_pass_reaches_the_pixels_and_clearing_puts_them_back() @test
 		test::@check(red_before > blue_before + 20.0,
 			"the fixture's top band is not red enough to see a swap: red %f, blue %f", red_before, blue_before);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, `float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 
 		image::Image swapped = renderer.capture()!!;
 		defer swapped.free();
@@ -865,7 +877,7 @@ fn void a_post_uniform_is_live_between_frames() @test
 		renderer.post.set(
 			&renderer.gpu,
 			&renderer.target,
-			`float3 post(Post p) { return p.color * gain; }`,
+			`fn float3 post(Post p) { return p.color * p.uniforms.gain; }`,
 			uniforms[..]
 		)!!;
 
@@ -925,13 +937,13 @@ fn void a_second_post_shader_retires_the_first() @test
 	{
 		asymmetric_scene(renderer);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 		image::Image first = renderer.capture()!!;
 		defer first.free();
 
 		sz queued_before = renderer.gpu.deletions.pipelines.len();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, `float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 		test::@check(
 			renderer.gpu.deletions.pipelines.len() == queued_before + 1,
 			"the second set queued %d pipelines",
@@ -975,13 +987,13 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
 	{
 		asymmetric_scene(renderer);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, `float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 		image::Image good = renderer.capture()!!;
 		defer good.free();
 
 		String diagnostic;
 		fault refused = @catch(
-			renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY, {}, diagnostic: &diagnostic)
+			renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY_SHADY, {}, diagnostic: &diagnostic)
 		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
@@ -991,7 +1003,7 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
 		);
 		test::@check(diagnostic.len > 0, "the caller got no diagnostic at all");
 		test::@check(
-			diagnostic.contains("post:3") || diagnostic.contains("post(3)"),
+			diagnostic.contains("post_body:3") || diagnostic.contains("post_body(3)"),
 			"and it does not name the agent's own line: %s",
 			diagnostic
 		);
@@ -1059,7 +1071,7 @@ fn void the_post_pass_is_silent_under_validation() @test
 
 		renderer.gpu.begin_capture();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 		image::Image one = renderer.capture()!!;
 		one.free();
 		image::Image two = renderer.capture()!!;
@@ -1076,7 +1088,7 @@ fn void the_post_pass_is_silent_under_validation() @test
 		image::Image bare = renderer.capture()!!;
 		bare.free();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, `float3 post(Post p) { return p.color.bgr; }`, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 		image::Image three_ = renderer.capture()!!;
 		three_.free();
 
@@ -1253,7 +1265,7 @@ fn void a_post_texture_reaches_the_pixels_and_can_be_swapped() @test
 		renderer.post.set(
 			&renderer.gpu,
 			&renderer.target,
-			`float3 post(Post p) { return tint_map.Sample(float2(0.5, 0.5)).rgb; }`,
+			`fn float3 post(Post p) { return tint_map.Sample(float2(0.5, 0.5)).rgb; }`,
 			{},
 			textures[..],
 			&renderer.pass.assets
@@ -1330,9 +1342,9 @@ fn void a_chain_runs_its_passes_in_order() @test
 		asymmetric_scene(renderer);
 
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
+			`fn float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
 		uint second = renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
+			`fn float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
 
 		test::@check(second == 1, "the second pass took index 1, got %d", second);
 		test::@check(renderer.post.count() == 2, "and the chain is two long, got %d", renderer.post.count());
@@ -1348,9 +1360,9 @@ fn void a_chain_runs_its_passes_in_order() @test
 		// The same two bodies the other way round, which is the whole control: if
 		// order did not reach the GPU these two frames would be the same picture.
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
+			`fn float3 post(Post p) { return p.color * float3(0, 1, 1); }`, {})!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
+			`fn float3 post(Post p) { return p.color + float3(0.25, 0, 0); }`, {})!!;
 
 		image::Image reversed = renderer.capture()!!;
 		defer reversed.free();
@@ -1392,7 +1404,7 @@ fn void a_later_pass_reads_the_scene_and_not_only_its_predecessor() @test
 		defer plain.free();
 
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return float3(0, 0, 0); }`, {})!!;
+			`fn float3 post(Post p) { return float3(0, 0, 0); }`, {})!!;
 
 		image::Image blacked = renderer.capture()!!;
 		defer blacked.free();
@@ -1400,7 +1412,7 @@ fn void a_later_pass_reads_the_scene_and_not_only_its_predecessor() @test
 			"the first pass really did destroy the frame: %f", band_mean(&blacked, 2, true));
 
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.scene; }`, {})!!;
+			`fn float3 post(Post p) { return p.scene; }`, {})!!;
 
 		image::Image restored = renderer.capture()!!;
 		defer restored.free();
@@ -1440,14 +1452,14 @@ fn void the_chain_carries_values_above_one_between_passes() @test
 	{
 		asymmetric_scene(renderer);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 		image::Image once = renderer.capture()!!;
 		defer once.free();
 
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * 16.0; }`, {})!!;
+			`fn float3 post(Post p) { return p.color * 16.0; }`, {})!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * 0.0625; }`, {})!!;
+			`fn float3 post(Post p) { return p.color * 0.0625; }`, {})!!;
 
 		image::Image amplified = renderer.capture()!!;
 		defer amplified.free();
@@ -1524,7 +1536,7 @@ fn void the_post_depth_is_in_world_units() @test
 		renderer.post.set(
 			&renderer.gpu,
 			&renderer.target,
-			`float3 post(Post p) { return float3(p.depth < cut ? 1.0 : 0.0, 0.0, 0.0); }`,
+			`fn float3 post(Post p) { return float3(p.depth < p.uniforms.cut ? 1.0 : 0.0, 0.0, 0.0); }`,
 			uniforms[..]
 		)!!;
 
@@ -1631,11 +1643,11 @@ fn void a_pass_reads_a_pass_that_is_not_its_predecessor() @test
 		renderer.gpu.begin_capture();
 
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return float3(1.0, 0.0, 0.0); }`, {})!!;
+			`fn float3 post(Post p) { return float3(1.0, 0.0, 0.0); }`, {})!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return float3(0.0, 1.0, 0.0); }`, {})!!;
+			`fn float3 post(Post p) { return float3(0.0, 1.0, 0.0); }`, {})!!;
 		uint combine = renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color + p.tap; }`, {}, {}, 0)!!;
+			`fn float3 post(Post p) { return p.color + p.tap; }`, {}, {}, 0)!!;
 		test::@check(combine == 2, "the combine landed at %d rather than 2", combine);
 
 		image::Image shot = renderer.capture()!!;
@@ -1658,7 +1670,7 @@ fn void a_pass_reads_a_pass_that_is_not_its_predecessor() @test
 		// picture that can be produced.
 		String reason;
 		fault missing = @catch(renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.tap; }`, {}, {}, 9, &reason));
+			`fn float3 post(Post p) { return p.tap; }`, {}, {}, 9, &reason));
 		defer if (reason.ptr != null) reason.free(mem);
 		test::@check(missing == three::POST_TAP_UNKNOWN,
 			"a pass reading pass 9 of a three-pass chain was accepted");
@@ -1711,11 +1723,11 @@ fn void a_chain_is_silent_under_validation() @test
 		renderer.gpu.begin_capture();
 
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * 1.5; }`, {})!!;
+			`fn float3 post(Post p) { return p.color * 1.5; }`, {})!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color.bgr; }`, {})!!;
+			`fn float3 post(Post p) { return p.color.bgr; }`, {})!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return (p.color + p.scene) * 0.5; }`, {})!!;
+			`fn float3 post(Post p) { return (p.color + p.scene) * 0.5; }`, {})!!;
 
 		image::Image one = renderer.capture()!!;
 		one.free();
@@ -1731,7 +1743,7 @@ fn void a_chain_is_silent_under_validation() @test
 		// grows inside one captured span — the ping-pong image that pass 3 was
 		// writing is left in SHADER_READ_ONLY by the frame before and must be
 		// re-opened from UNDEFINED by the frame after.
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 		image::Image shrunk = renderer.capture()!!;
 		shrunk.free();
 
@@ -1769,9 +1781,9 @@ fn void each_stage_has_its_own_uniform_block() @test
 		// Pass 1 scales, pass 2 scales again. With one shared block the second
 		// write would overwrite the first and both passes would use it.
 		renderer.post.set(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * gain; }`, gain[..])!!;
+			`fn float3 post(Post p) { return p.color * p.uniforms.gain; }`, gain[..])!!;
 		renderer.post.add(&renderer.gpu, &renderer.target,
-			`float3 post(Post p) { return p.color * gain; }`, gain[..])!!;
+			`fn float3 post(Post p) { return p.color * p.uniforms.gain; }`, gain[..])!!;
 
 		// 4 then 0.25 is the identity; a shared block would make it 0.25 twice
 		// (a sixteenth of the frame) or 4 twice (a clipped white one).
@@ -1781,7 +1793,7 @@ fn void each_stage_has_its_own_uniform_block() @test
 		image::Image scaled = renderer.capture()!!;
 		defer scaled.free();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
 		image::Image plain = renderer.capture()!!;
 		defer plain.free();
 
@@ -2171,5 +2183,198 @@ fn void the_background_goes_through_the_tonemap() @test
 			"and AgX moves it — got %d,%d,%d",
 			(int)toned[0], (int)toned[1], (int)toned[2]
 		);
+	};
+}
+
+// ============================================================================
+// Both compilers, one process
+//
+// Slang and shady are expected to produce different SPIR-V; what has to be
+// identical is the frame. The scene cache is off in both checks below, because
+// the scene recording is what caches: with it on, the second capture would hand
+// back the first compiler's frame and compare it with itself.
+// ============================================================================
+
+<*
+ The same three-tap vertical blur, written once per compiler.
+
+ `fn` is the only difference: Slang's function syntax needs none and shady's
+ needs it, and a body is otherwise the same text.
+*>
+macro String blur_body_slang(float radius)
+{
+	return string::tformat(
+		`float3 post(Post p)
+{
+	float2 step = float2(0.0, %f / p.resolution.y);
+	return (prev.Sample(p.uv + step).rgb + prev.Sample(p.uv).rgb + prev.Sample(p.uv - step).rgb) / 3.0;
+}`,
+		radius
+	);
+}
+
+macro String blur_body_shady(float radius)
+{
+	return string::tformat(
+		`fn float3 post(Post p)
+{
+	float2 step = float2(0.0, %f / p.resolution.y);
+	return (prev.Sample(p.uv + step).rgb + prev.Sample(p.uv).rgb + prev.Sample(p.uv - step).rgb) / 3.0;
+}`,
+		radius
+	);
+}
+
+<*
+ Every reserved sampler a post pipeline reads is in its layout, by name.
+
+ The bindings are derived from the module rather than from a table, so this is
+ the adapter's own claim asked at both compilers' door - and the four together
+ are what makes the check not pass for a module that happens to declare one.
+*>
+fn void check_post_bindings(three::PostStage* stage)
+{
+	String[4] names = { "prev", "scene", "depth_buffer", "tap_image" };
+	foreach (i, name : names)
+	{
+		three::ShaderBinding* binding = stage.pipeline.shader.binding_of(name);
+		test::@check(
+			binding != null && binding.set == 0 && binding.binding == (uint)i
+				&& binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			"%s is set 0 binding %d as a combined image sampler",
+			name, (int)i
+		);
+	}
+}
+
+// The bytes of two frames of the same size, and which of them differ.
+fn void check_same_pixels(image::Image* a, image::Image* b, String what)
+{
+	sz differing = 0;
+	sz first = a.pixels.len;
+	for (sz at = 0; at < a.pixels.len; at++)
+	{
+		if (a.pixels[at] == b.pixels[at]) continue;
+		if (differing == 0) first = at;
+		differing++;
+	}
+	test::@check(
+		differing == 0,
+		"%s: %d of %d bytes differ, first at byte %d (pixel %d, %d)",
+		what, differing, a.pixels.len, first, first / 4 % W, first / 4 / W
+	);
+}
+
+<*
+ A scripted post pass is the same pixels through both compilers.
+
+ Both pipelines are built by `PostPass.set` in one process, one override apart,
+ so the comparison covers what the engine does with a body and not only what the
+ compiler emits: the four reserved descriptors derived from the module, the
+ push block, the chain's images and the positive post viewport.
+
+ The effect is a vertical three-tap blur, and the fixture is two bands meeting
+ across the middle. A frame that is one colour, or a horizontal blur, would make
+ the two compilers' frames equal for reasons that have nothing to do with the
+ port - so the fixture's asymmetry and the blur's reach are both asserted.
+*>
+fn void the_post_pass_is_the_same_pixels_through_both_compilers() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		defer three::shader_overrides_clear();
+		renderer.scene_cache_disabled = true;
+
+		asymmetric_scene(renderer);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		float top = band_mean(&plain, 0, true);
+		float bottom = band_mean(&plain, 2, false);
+		test::@check(
+			math::abs(top - bottom) > 20.0,
+			"the fixture is not asymmetric enough to catch a flip: top red %f, bottom blue %f",
+			top, bottom
+		);
+
+		three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SLANG);
+		renderer.post.set(&renderer.gpu, &renderer.target, blur_body_slang(8.0), {})!!;
+		check_post_bindings(renderer.post.stages[0]);
+		image::Image through_slang = renderer.capture()!!;
+		defer through_slang.free();
+
+		renderer.post.clear(&renderer.gpu);
+		three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SHADY);
+		renderer.post.set(&renderer.gpu, &renderer.target, blur_body_shady(8.0), {})!!;
+		check_post_bindings(renderer.post.stages[0]);
+		image::Image through_shady = renderer.capture()!!;
+		defer through_shady.free();
+
+		// A blur that reached nothing would leave both frames the plain one, and a
+		// comparison of two identical frames is the failure this whole file
+		// exists to not mistake for a pass.
+		test::@check(
+			worst_channel_delta(&plain, &through_slang) > 0,
+			"the blur did not reach the frame: %d levels",
+			worst_channel_delta(&plain, &through_slang)
+		);
+
+		check_same_pixels(&through_slang, &through_shady, "the post pass is byte-identical through both compilers");
+	};
+}
+
+<*
+ The engine's own post pass, the same pixels through both compilers.
+
+ `TONEMAP` is the post preamble with a body the engine owns, so unlike a
+ script's it can be written in both spellings - `tonemap_body` and
+ `tonemap_body_shady` - and compared. All three modes, because each is a
+ different body: the identity has no uniform, both curves read `exposure`, and
+ the curves' matrix literals are the half the two languages spell differently.
+
+ Parked on the other mode before each selection, so choosing one always
+ recompiles and the override is what compiled the frame being captured.
+*>
+fn void the_tonemap_is_the_same_pixels_through_both_compilers() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		defer three::shader_overrides_clear();
+		renderer.scene_cache_disabled = true;
+
+		asymmetric_scene(renderer);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+		float top = band_mean(&plain, 0, true);
+		float bottom = band_mean(&plain, 2, false);
+		test::@check(
+			math::abs(top - bottom) > 20.0,
+			"the fixture is not asymmetric enough for a matrix to tint: top red %f, bottom blue %f",
+			top, bottom
+		);
+
+		three::ToneMap[3] modes = { three::ToneMap.NONE, three::ToneMap.AGX, three::ToneMap.AGX_BLENDER };
+		foreach (mode : modes)
+		{
+			three::ToneMap parked = mode == three::ToneMap.NONE ? three::ToneMap.AGX : three::ToneMap.NONE;
+			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, parked)!!;
+
+			three::shader_override(three::ShaderPass.TONEMAP, three::ShaderCompiler.SLANG);
+			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, mode)!!;
+			image::Image through_slang = renderer.capture()!!;
+			defer through_slang.free();
+
+			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, parked)!!;
+			three::shader_override(three::ShaderPass.TONEMAP, three::ShaderCompiler.SHADY);
+			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, mode)!!;
+			image::Image through_shady = renderer.capture()!!;
+			defer through_shady.free();
+
+			check_same_pixels(
+				&through_slang, &through_shady,
+				"the tonemap is byte-identical through both compilers"
+			);
+		}
 	};
 }

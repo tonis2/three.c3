@@ -469,12 +469,12 @@ fn void twelve_live_material_samplers_draw_and_keep_their_ambient_occlusion() @t
 			const tex = new three.DataTexture(new Uint8Array([255,255,255,255]), 1, 1);
 			const ts = {}; for (let i = 0; i < 12; i++) ts['t' + i] = tex;
 			const material = new three.ShaderMaterial({ textures: ts, fragment:
-				'float3 shade(Surface s) {'
-				+ 'float3 c=t0.Sample(s.uv).rgb*t1.Sample(s.uv).rgb*t2.Sample(s.uv).rgb;'
-				+ 'c*=t3.Sample(s.uv).rgb*t4.Sample(s.uv).rgb*t5.Sample(s.uv).rgb;'
-				+ 'c*=t6.Sample(s.uv).rgb*t7.Sample(s.uv).rgb*t8.Sample(s.uv).rgb;'
-				+ 'c*=t9.Sample(s.uv).rgb*t10.Sample(s.uv).rgb*t11.Sample(s.uv).rgb;'
-				+ 'return c*lambert(s.normal);}' });
+				'fn float3 shade(Surface s) {'
+				+ 'float3 c=t0().Sample(s.uv).rgb*t1().Sample(s.uv).rgb*t2().Sample(s.uv).rgb;'
+				+ 'c*=t3().Sample(s.uv).rgb*t4().Sample(s.uv).rgb*t5().Sample(s.uv).rgb;'
+				+ 'c*=t6().Sample(s.uv).rgb*t7().Sample(s.uv).rgb*t8().Sample(s.uv).rgb;'
+				+ 'c*=t9().Sample(s.uv).rgb*t10().Sample(s.uv).rgb*t11().Sample(s.uv).rgb;'
+				+ 'return c*lambert(s, s.normal);}' });
 			const scene = new three.Scene();
 			scene.add(new three.Mesh(new three.PlaneGeometry(2,2), material));
 			three.light.set([0,0,1], .3); three.camera.frameAll();

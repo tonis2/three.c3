@@ -147,6 +147,15 @@ struct MeshPass
 	// byte — and it happens once at startup.
 	MeshPipeline* alpha_pipeline;
 	MeshPipeline* additive_pipeline;
+	// The same four pipelines over the numeric area integration - `mesh_def`
+	// with `reference` on - which `area_reference` frames draw with. Built on
+	// the first frame that asks, so a process that never integrates numerically
+	// pays neither the compile nor the module with no fit table in it.
+	MeshPipeline* reference_pipeline;
+	MeshPipeline* reference_line_pipeline;
+	MeshPipeline* reference_alpha_pipeline;
+	MeshPipeline* reference_additive_pipeline;
+	bool reference_ready;
 	// `shaders/sky.slang` — a different template and so a second Slang call, not a
 	// fourth state over the mesh one. Null until `init` has run, and recorded only
 	// for a scene that has a background image. See `render/sky.c3`.
@@ -461,6 +470,9 @@ const uint NOT_DRAWN = uint::max;
 fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 {
 	self.pipelines.init();
+	// Nothing built yet; `ensure_reference_pipelines` sets this once a frame
+	// asks for the numeric draw path.
+	self.reference_ready = false;
 	// One entry per bucket, rewritten every frame. Sized like the instance array
 	// and for the same reason.
 	self.posed_offsets.init(mem, INITIAL_INSTANCES);
@@ -486,8 +498,8 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// path or from the copy in the binary, and what `acquire` wants it for is a
 		// cache key and a diagnostic label. A key that changed with where the file
 		// happened to be found would miss the cache for the same bytes.
-		String source = shader_source("mesh.slang", tmem)!;
-		String path   = "mesh.slang";
+		String source = shader_source(ShaderFile.MESH_SLANG, tmem)!;
+		String path   = ShaderFile.MESH_SLANG.name;
 		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE, ShaderPass.MESH)!;
 
 		// The line pipeline is the same shader over a different fixed-function state
@@ -512,12 +524,12 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 		// the three above. Built here for their reason: a scene that assigns a
 		// background should not pay a pipeline creation inside the frame that did
 		// it, and a scene that never assigns one records nothing.
-		String sky = shader_source("sky.slang", tmem)!;
+		String sky = shader_source(ShaderFile.SKY_SLANG, tmem)!;
 		self.sky_pipeline = self.pipelines.acquire(
 			gpu,
 			target,
 			sky,
-			"sky.slang",
+			ShaderFile.SKY_SLANG.name,
 			SKY_STATE,
 			ShaderPass.SKY,
 			contract: SKY_PUSH_FIELDS[..]
@@ -990,6 +1002,36 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 }
 
 <*
+ Builds the numeric-reference draw pipelines the first frame that asks for one.
+
+ `area_reference` is the built-in draw path's own switch, so what it needs is
+ the same four states over `mesh_def`'s reference variant. The cache key is a
+ name and not the Slang template: a shady def is its own text, and the module
+ cache identifies a module by the string it was compiled from - the LTC build of
+ the same files would answer for this one if they shared it.
+
+ A build that fails is a fault rather than a fallback to the fit: an
+ `area_reference` frame that silently drew the fitted path would make the
+ comparison it exists for a comparison of one picture with itself.
+*>
+fn void? MeshPass.ensure_reference_pipelines(&self, Gpu* gpu, Target* target)
+{
+	String key = "three.mesh_reference";
+	@pool()
+	{
+		self.reference_pipeline = self.pipelines.acquire(
+			gpu, target, key, key, SOLID_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_line_pipeline = self.pipelines.acquire(
+			gpu, target, key, key, LINE_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_alpha_pipeline = self.pipelines.acquire(
+			gpu, target, key, key, ALPHA_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_additive_pipeline = self.pipelines.acquire(
+			gpu, target, key, key, ADDITIVE_STATE, ShaderPass.MESH_REFERENCE)!;
+	};
+	self.reference_ready = true;
+}
+
+<*
  Records the draws.
 
  @param slot : `Which frame in flight this is. Selects the instance array and the draw records to write, and must be one whose fence has already been waited on.`
@@ -1004,6 +1046,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// uploads and nothing carried over from the last one.
 	self.frame_key = KEY_SEED;
 	if (!self.ready) return;
+	if (self.area_reference && !self.reference_ready) self.ensure_reference_pipelines(gpu, target)!;
 
 	// Before the draw list is built, so a material whose last node died in the same
 	// breath as the dispose does not have its pipeline held for one more frame than
@@ -1510,6 +1553,25 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 }
 
 <*
+ The pipeline a material's handle draws with.
+
+ In an `area_reference` frame the four built-in pipelines are answered with
+ their numeric-reference twins; everything else - a script's own module - is
+ unchanged. A twin exists only once a frame has asked for one, which is why a
+ missing one falls back rather than faulting: the flag can only be read after
+ `prepare` built them.
+*>
+fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
+{
+	if (!self.area_reference || !self.reference_ready) return pipeline;
+	if (pipeline == self.pipeline) return self.reference_pipeline;
+	if (pipeline == self.line_pipeline) return self.reference_line_pipeline;
+	if (pipeline == self.alpha_pipeline) return self.reference_alpha_pipeline;
+	if (pipeline == self.additive_pipeline) return self.reference_additive_pipeline;
+	return pipeline;
+}
+
+<*
  The draw commands, recorded inside the render pass.
 
  Everything this needs was resolved by `prepare` a moment ago and is on `self`.
@@ -1570,7 +1632,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
 		Material* material = self.material(bucket.material);
 		if (mesh == null || material == null) continue;
-		MeshPipeline* pipeline = material.pipeline;
+		MeshPipeline* pipeline = self.draw_pipeline(material.pipeline);
 
 		if (pipeline.handle != bound)
 		{
@@ -2242,10 +2304,10 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	self.cluster_overflow[slot].upload(&zero, uint::size);
 	if (!self.cluster_pipeline.ready)
 	{
-		String source = shader_source("cluster.slang", mem)!;
+		String source = shader_source(ShaderFile.CLUSTER_SLANG, mem)!;
 		defer source.free(mem);
 		ShaderModule mod = compile_shader(
-			ShaderPass.CLUSTER, source, "cluster.slang", CLUSTER_ENTRIES[..])!;
+			ShaderPass.CLUSTER, source, ShaderFile.CLUSTER_SLANG.name, CLUSTER_ENTRIES[..])!;
 		defer mod.free();
 		if (!mod.ok) { @advise("three: cluster shader: %s", mod.diagnostic); return SHADER_MISSING_ENTRY_POINT~; }
 		self.cluster_pipeline.init_cluster(gpu, &mod)!;
@@ -2868,11 +2930,11 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 *>
 fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 {
-	String source = shader_source("skin.slang", mem)!;
+	String source = shader_source(ShaderFile.SKIN_SLANG, mem)!;
 	defer source.free(mem);
 
 	ShaderModule mod = compile_shader(
-		ShaderPass.SKIN, source, "skin.slang", SKIN_ENTRIES[..])!;
+		ShaderPass.SKIN, source, ShaderFile.SKIN_SLANG.name, SKIN_ENTRIES[..])!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -2946,8 +3008,12 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
  over one pipeline are two buckets with different bytes.
 
  Its own pass row (`MESH_MATERIAL`) rather than the built-in draw path's: the
- body is Slang until the material half takes one, so flipping the built-in
- material must not route a script through the shady half.
+ body, the declared uniforms and the declared textures go to the row's compiler
+ as the script's half, so flipping the built-in material must not route a script
+ through the def's default body. The row is still on Slang - the assembly is
+ wired and a shady override compiles it - because every script body, `layers.js`
+ and the test fixtures alike, is still written in the Slang spelling; the relief
+ helpers and the baked module that used to hold it are in.
 
  The diagnostic is handed back rather than printed: a bad shader has to throw a
  JS error carrying the Slang text. It is set on success too, because a warning
@@ -2962,7 +3028,7 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Baked into the pipeline, so it cannot change afterwards.`
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_material_texture per name, because that is where the references are taken.`
- @param vertex : `A void displace(inout Vertex v) body, or empty for a material that does not move its geometry.`
+ @param vertex : `A fn void displace(inout Vertex v) body - the Slang spelling on the Slang path - or empty for a material that does not move its geometry.`
  @param bounds : `How far that body can move a vertex, world units. Grows the box the frustum is tested against — see Material.bounds.`
  @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
@@ -2993,7 +3059,11 @@ fn uint? MeshPass.create_material(
 			"three.material",
 			state_for_blend(blend),
 			ShaderPass.MESH_MATERIAL,
-			diagnostic
+			diagnostic,
+			body: fragment,
+			uniforms: uniforms,
+			textures: textures,
+			vertex: vertex
 		)!;
 
 		// The reference `acquire` handed out is the material's from here — no
@@ -3821,5 +3891,10 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.alpha_pipeline = null;
 	self.additive_pipeline = null;
 	self.sky_pipeline = null;
+	self.reference_pipeline = null;
+	self.reference_line_pipeline = null;
+	self.reference_alpha_pipeline = null;
+	self.reference_additive_pipeline = null;
+	self.reference_ready = false;
 	self.ready = false;
 }

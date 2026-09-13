@@ -24,6 +24,9 @@
    colour pass.
  - The depth map itself is required to be **byte-identical through both shader
    compilers**, with a bent, turned, translated skinned caster in it.
+ - The cut-out variant's map is required to be byte-identical too, with one card
+   keeping every texel and one cutting all of them, so the discard is the thing
+   being compared.
 *>
 module three_tests::shadow;
 
@@ -273,12 +276,12 @@ fn void the_params_are_the_switch() @test
 *>
 fn void the_shadow_shader_is_the_mesh_contract() @test
 {
-	String path = three::find_shader("shadow.slang", mem)!!;
+	String path = three::find_shader(three::ShaderFile.SHADOW_SLANG, mem)!!;
 	defer path.free(mem);
-	String source = three::load_source(path)!!;
+	String source = three::read_source(path)!!;
 	defer source.free(mem);
 
-	three::ShaderModule mod = three::compile_slang(source, "shadow.slang", three::SHADOW_ENTRIES[..])!!;
+	three::ShaderModule mod = three::compile_slang(source, three::ShaderFile.SHADOW_SLANG.name, three::SHADOW_ENTRIES[..])!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -770,6 +773,129 @@ fn void the_depth_map_is_the_same_bytes_through_both_compilers() @test
 		first_difference / texel / renderer.pass.shadow_manager.atlas.width);
 }
 
+<*
+ The cut-out depth map through both compilers, compared as bytes rather than
+ pixels.
+
+ **The fragment half of the same claim**: the depth-only comparison above never
+ runs a fragment stage, so it says nothing about the sampler, the uv or the
+ discard. Here the casters are cards with an alpha mask, and two copies are in
+ one map: one whose sheet is opaque everywhere and one whose sheet is clear
+ everywhere, both with `alphaTest` on so both go through the cut-out pipeline.
+ The first has to keep every texel and the second has to cut all of them in both
+ compilers, so the whole atlas — the kept card's depths, the cut card's absence
+ and the clear value between them — is the comparison.
+
+ Two copies in one frame rather than one copy in two frames, because the
+ alternative to a correct discard is visible in either direction: a shader that
+ never cuts leaves the second card's depth in the map, and one that always cuts
+ takes the first card's out.
+
+ The view caches are dropped and the cut-out pipeline is retired between the
+ captures, so the second compiler is not reading the first's map; the scene cache
+ is off for the same reason. `draws` and `cutout_ready` are required after each
+ capture, and the Slang map is required to hold more than the clear value, so an
+ empty or all-cut map cannot pass in silence.
+*>
+fn void the_cutout_depth_map_is_the_same_bytes_through_both_compilers() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer three::shader_overrides_clear();
+	renderer.scene_cache_disabled = true;
+	defer renderer.scene_cache_disabled = false;
+
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		// Four texels, nearest filtered: the alpha is read exactly where the uv
+		// says, with no mip or gamma between it and the threshold.
+		function sheet(alpha) {
+			return new three.DataTexture(new Uint8Array([
+				255, 255, 255, alpha,  255, 255, 255, alpha,
+				255, 255, 255, alpha,  255, 255, 255, alpha,
+			]), 2, 2, {
+				colorSpace: three.LinearSRGBColorSpace,
+				generateMipmaps: false,
+				filter: three.NearestFilter,
+			});
+		}
+		const shape = new three.PlaneGeometry(6, 6);
+		const keeps = new three.MeshLambertMaterial({ map: sheet(255), alphaTest: 0.5 });
+		const cuts  = new three.MeshLambertMaterial({ map: sheet(0), alphaTest: 0.5 });
+		const whole = new three.Mesh(shape, keeps);
+		whole.position.set(-5, 6, 0);
+		scene.add(whole);
+		const gone = new three.Mesh(shape, cuts);
+		gone.position.set(5, 6, 0);
+		scene.add(gone);
+		three.light.set([0.2, 1.0, 0.3], 0.5);
+		three.light.shadow = { enabled: true, size: 512 };
+		three.camera.frameAll();
+		three.camera.orbit(0.3, 0.7, three.camera.distance);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the cut-out shadow scene built: %s", built.error);
+
+	three::shader_override(three::ShaderPass.SHADOW_CUTOUT, three::ShaderCompiler.SLANG);
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.shadows.cutout_ready, "the Slang frame used the cut-out pipeline");
+	test::@check(renderer.pass.shadows.draws > 0, "and drew the map");
+	char[] slang = read_shadow_depth(renderer);
+	defer alloc::free(mem, slang);
+
+	// The kept copy has to have written depth: a map that is only the clear value
+	// would compare equal through any two compilers, however wrong they are.
+	bool cast = false;
+	if (slang.len >= 4)
+	{
+		uint first = *(uint*)slang.ptr;
+		for (sz at = 4; at + 4 <= slang.len; at += 4)
+		{
+			if (*(uint*)(slang.ptr + at) != first) { cast = true; break; }
+		}
+	}
+	test::@check(cast, "the kept copy is in the map and not only the clear value");
+
+	three::shader_override(three::ShaderPass.SHADOW_CUTOUT, three::ShaderCompiler.SHADY);
+	// The pipeline holds the Slang module's SPIR-V; the next draw has to build
+	// one from the shady module instead, which is also where the cut-out's own
+	// vertex entry lives.
+	if (renderer.pass.shadows.cutout_ready)
+	{
+		renderer.pass.shadows.cutout_pipeline.free(&renderer.gpu);
+		renderer.pass.shadows.cutout_ready = false;
+	}
+	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
+	{
+		if (!renderer.pass.shadow_view_set.views[at].live) continue;
+		renderer.pass.shadow_view_set.views[at].live_valid = false;
+		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
+	}
+	renderer.capture()!!.free();
+	test::@check(renderer.pass.shadows.cutout_ready, "the shady frame used the cut-out pipeline");
+	test::@check(renderer.pass.shadows.draws > 0, "and drew the map");
+	char[] shady = read_shadow_depth(renderer);
+	defer alloc::free(mem, shady);
+
+	test::@check(slang.len == shady.len,
+		"both maps are the same size, %d against %d bytes", slang.len, shady.len);
+	sz texel = shadow_depth_texel(renderer.pass.shadow_manager.atlas.format);
+	sz first_difference = slang.len;
+	for (sz at = 0; at < slang.len && at < shady.len; at++)
+	{
+		if (slang[at] != shady[at]) { first_difference = at; break; }
+	}
+	test::@check(first_difference == slang.len,
+		"the cut-out depth map is byte-identical through both compilers, first difference at byte %d (texel %d, %d)",
+		first_difference,
+		first_difference / texel % renderer.pass.shadow_manager.atlas.width,
+		first_difference / texel / renderer.pass.shadow_manager.atlas.width);
+}
+
 // ============================================================================
 // Materials
 // ============================================================================
@@ -827,7 +953,7 @@ fn void a_shader_material_draws_the_same_shadowed_frame() @test
 			String plain_source = scene.treplace("MATERIAL", "new three.MeshLambertMaterial()");
 			String custom_source = scene.treplace(
 				"MATERIAL",
-				`new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return s.albedo * lambert(s.normal); }" })`
+				`new three.ShaderMaterial({ fragment: "fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }" })`
 			);
 
 			three::RunResult plain = run.run(plain_source);
@@ -914,7 +1040,7 @@ fn void a_body_of_standard_draws_the_built_in_frame() @test
 			String custom_source = scene.treplace(
 				"MATERIAL",
 				string::tformat(
-					`new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return standard(s); }", %s })`,
+					`new three.ShaderMaterial({ fragment: "fn float3 shade(Surface s) { return standard(s); }", %s })`,
 					surface
 				)
 			);
@@ -2667,8 +2793,8 @@ fn void a_point_shadow_keeps_alpha_mask_holes() @test
 
  The other half of `ShadowMap.cutout_pipeline`'s claim, and the reason it is a
  second pipeline rather than a sampler on the one every caster shares: a project
- that never sets `alphaTest` pays neither a Slang compile nor a `VkPipeline` nor a
- descriptor push. Asserted through `three.stats()`, which counts pipelines
+ that never sets `alphaTest` pays neither a second shader compile nor a
+ `VkPipeline` nor a descriptor push. Asserted through `three.stats()`, which counts pipelines
  already.
 *>
 fn void a_scene_with_no_cutout_builds_no_second_shadow_pipeline() @test
@@ -2955,7 +3081,7 @@ fn void a_shader_material_flips_its_back_face_too() @test
 
 			three::RunResult custom = run.run(scene.treplace(
 				"MATERIAL",
-				`new three.ShaderMaterial({ fragment: "float3 shade(Surface s) { return standard(s); }", side: three.DoubleSide })`
+				`new three.ShaderMaterial({ fragment: "fn float3 shade(Surface s) { return standard(s); }", side: three.DoubleSide })`
 			));
 			defer custom.free();
 			test::@check(custom.ok, "the ShaderMaterial scene built: %s", custom.error);
