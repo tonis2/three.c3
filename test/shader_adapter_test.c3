@@ -334,3 +334,27 @@ fn void a_broken_def_comes_back_as_a_diagnostic() @test
 	test::@check(mod.spirv.len == 0, "and produced no module");
 	test::@check(mod.diagnostic.contains("post_body:4"), "naming the body's own line: %s", mod.diagnostic);
 }
+
+<*
+ The tag the adapter embeds is the submodule's own pin.
+
+ The file it comes from is written by `project.json`'s `exec` hook at the start
+ of every trusted build, which is what keeps the cache identity and the compiler
+ together. A checkout with no submodule metadata says `shady:unknown` instead,
+ which names no compiler but still is a key.
+*>
+fn void the_compiler_tag_names_the_submodule_pin() @test
+{
+	char[256] buffer;
+	String? captured = process::run_capture_stdout(buffer[..], { "git", "-C", "lib/shady.c3l", "rev-parse", "HEAD" });
+	String pin = (captured ?? "").trim();
+	if (pin.len == 0)
+	{
+		test::@check(three::SHADY_COMPILER_TAG == "shady:unknown",
+			"no submodule pin here, so the tag names no compiler: %s", three::SHADY_COMPILER_TAG);
+		return;
+	}
+	test::@check(three::SHADY_COMPILER_TAG == string::tformat("shady:%s", pin),
+		"the embedded tag names the submodule pin: it says %s, the pin is shady:%s",
+		three::SHADY_COMPILER_TAG, pin);
+}

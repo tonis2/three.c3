@@ -44,10 +44,11 @@
  the compiler itself would mean re-reading tens of megabytes per process, and
  now that Slang is linked in there is no separate file to hash anyway.
 
- The shady half names the pin of `lib/shady.c3l` — `SHADY_COMPILER_TAG` in
- `shader/adapter.c3`. The pin itself is not visible to C3 at build time, so that
- constant is kept in step by hand, and `SHADER_CACHE_FORMAT_VERSION` below is
- the blunt lever for anything that slips past it.
+ The shady half names the pin of `lib/shady.c3l`: `project.json`'s `exec` hook
+ writes the submodule's HEAD into `build/shady_compiler_tag.txt` before every
+ trusted build, and `SHADY_COMPILER_TAG` in `shader/adapter.c3` embeds it. The
+ tag therefore moves with the pin by itself. A checkout with no submodule
+ metadata says `shady:unknown` instead.
 
  A build with no tag is still a key. Slang reports something like `unknown` for a
  compiler built from an untagged checkout, and two such builds are then
@@ -125,7 +126,8 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
  entries — it moves every module to a new filename and leaves the old ones to be
  deleted with the directory. It is also the lever for the cases the compiler
  identities cannot see: two untagged Slang builds reporting the same string, and
- a `SHADY_COMPILER_TAG` that did not move with its pin.
+ two shady builds whose checkouts carried no submodule metadata, both reporting
+ `shady:unknown`.
 
  2 added the compiler tag, above the arguments. 3 added `indirect` to a push
  field, which tells a uniform in the table buffer from one in the block — a
