@@ -1,5 +1,5 @@
 <*
- The Slang compile, kept between runs.
+ The shader compiles, kept between runs.
 
  A compile is about 17 ms and a session about 55 ms. `gpu/pipeline.c3`'s cache
  removes the second and later compiles *within* a process; it cannot remove the
@@ -8,26 +8,32 @@
  on screen.
 
  This sits at the *compile* level rather than under `PipelineCache`, so anything
- that compiles Slang shares it: the mesh pipeline, an agent's `ShaderMaterial`,
- the post pass. `compile_slang_cached` has `compile_slang`'s signature with one
- extra out-parameter.
+ that compiles shares it: the mesh pipeline, an agent's `ShaderMaterial`, the
+ post pass. `compile_slang_cached` has `compile_slang`'s signature with one
+ extra out-parameter, and `compile_shady_cached` — in `shader/adapter.c3` — is
+ the same door for the other compiler.
 
  ## The hash is a filter; the file is the check
 
  A 64-bit content hash names a *candidate*; identity decides. The file carries
- the full argument list and the full source, and a hash hit whose bytes differ
- from the request is not a hit — it is `invalid++`, a recompile, and an
- overwrite. Sources are a few kilobytes; a collision would hand a pipeline
- somebody else's shader, which renders something plausible and wrong.
+ the compiler identity, the arguments, the name, the spec values and the full
+ source, and a hash hit whose bytes differ from the request is not a hit — it is
+ `invalid++`, a recompile, and an overwrite. Sources are a few kilobytes; a
+ collision would hand a pipeline somebody else's shader, which renders something
+ plausible and wrong.
 
  Nothing here is trusted, including this process's own past. The loader
  bounds-checks every read, re-checks the SPIR-V magic number and word alignment
- that `compile_slang` checks on Slang's own output, and treats any disagreement
- as a miss. A truncated file — a torn write, a full disk, a killed process —
+ that the compile checks on its own output, and treats any disagreement as a
+ miss. A truncated file — a torn write, a full disk, a killed process —
  costs one recompile and is overwritten. It must never be a crash: the file is on
  disk between runs, so a bad one would otherwise be permanent.
 
  ## The compiler is in the key
+
+ Two compilers live in this binary and a pass can move between them, so the key
+ names the one that ran: `slang:<build tag>` for Slang and `shady:<pin>` for
+ shady.
 
  `slang::build_tag()` — `spGetBuildTagString`, the release tag baked into
  libslang at its own build — is hashed into the filename *and* written into the
@@ -38,9 +44,21 @@
  the compiler itself would mean re-reading tens of megabytes per process, and
  now that Slang is linked in there is no separate file to hash anyway.
 
+ The shady half names the pin of `lib/shady.c3l` — `SHADY_COMPILER_TAG` in
+ `shader/adapter.c3`. The pin itself is not visible to C3 at build time, so that
+ constant is kept in step by hand, and `SHADER_CACHE_FORMAT_VERSION` below is
+ the blunt lever for anything that slips past it.
+
  A build with no tag is still a key. Slang reports something like `unknown` for a
  compiler built from an untagged checkout, and two such builds are then
  indistinguishable here. The lever for that is the format version below.
+
+ ## The spec values are in the key
+
+ One module serves several pipelines with different `@spec` values, so the values
+ are part of the module's identity here. They are serialized as `(id, kind,
+ bits)` records sorted by id: equal value sets are one entry whatever order a
+ caller listed them in, and a changed value is an entry of its own.
 
  The *device* is deliberately not in the key: SPIR-V is portable, and
  `MeshPipeline.init` re-validates every loaded layout through `check_push_block`
@@ -55,8 +73,10 @@
  -----  ------------------------------------------------------------------
  4  magic — 'T3SC' as the four bytes T, 3, S, C
  4  SHADER_CACHE_FORMAT_VERSION
- blob  compiler — slang::build_tag()                  (identity, checked)
- blob  arguments — SLANG_ARGUMENTS joined with '\0'   (identity, checked)
+ blob  compiler — "slang:<tag>" or "shady:<pin>"      (identity, checked)
+ blob  arguments — the compiler's flags, joined '\0'  (identity, checked)
+ blob  name — the def or pass compiled                (identity, checked)
+ blob  specs — (id, kind, bits), sorted by id         (identity, checked)
  4  entry count
  per entry:
  blob        name
@@ -103,16 +123,61 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
 
  It is in the *key* as well as in the file, so a bump does not merely reject old
  entries — it moves every module to a new filename and leaves the old ones to be
- deleted with the directory. It is also the lever for the one case
- `slang::build_tag()` cannot see: two untagged compiler builds reporting the same
- string.
+ deleted with the directory. It is also the lever for the cases the compiler
+ identities cannot see: two untagged Slang builds reporting the same string, and
+ a `SHADY_COMPILER_TAG` that did not move with its pin.
 
  2 added the compiler tag, above the arguments. 3 added `indirect` to a push
  field, which tells a uniform in the table buffer from one in the block — a
  stored module without it comes back with every field looking pushed, and a
- spilled table's uniforms then have no names at all.
+ spilled table's uniforms then have no names at all. 4 added the compiler
+ prefix, the name and the spec values, so a module the other compiler or another
+ spec set built is a different entry and not a candidate at all.
 *>
-const uint SHADER_CACHE_FORMAT_VERSION = 3;
+const uint SHADER_CACHE_FORMAT_VERSION = 4;
+
+<*
+ What kind of value a spec constant holds.
+*>
+enum ShaderSpecKind : char
+{
+	BOOL,
+	INT,
+	UINT,
+	FLOAT,
+}
+
+<*
+ One spec-constant value a pipeline is specialized with.
+
+ `id` is the `@spec(id)` in the source and `bits` is the value's raw 32 bits — a
+ float's IEEE-754 pattern included — so a value list is compared and hashed
+ without knowing which type it holds.
+*>
+struct ShaderSpec
+{
+	uint id;
+	ShaderSpecKind kind;
+	uint bits;
+}
+
+<*
+ Everything that decides which module a file holds: what was compiled, by which
+ compiler, and with which spec values.
+
+ The compiler string is `slang:<build tag>` or `shady:<pin>` — see the header.
+ `name` and `source` identify the module; `entries` is the Slang path's requested
+ entry list, empty for shady whose source already carries them.
+*>
+struct ShaderCacheKey
+{
+	String compiler;
+	String arguments;
+	String name;
+	ShaderSpec[] specs;
+	ShaderEntry[] entries;
+	String source;
+}
 
 <*
  Where modules are kept when nothing says otherwise.
@@ -149,7 +214,7 @@ ShaderCacheStats cache_counters @local;
 *>
 struct ShaderCacheStats
 {
-	// Modules answered from disk. Slang did not run.
+	// Modules answered from disk. No compiler ran.
 	uint loads;
 	// Modules written. Only successful compiles are stored, so this is not
 	// `misses` after the fact — a broken shader is a miss and no store.
@@ -165,7 +230,7 @@ struct ShaderCacheStats
 <*
  Points the cache somewhere else, or turns it off.
 
- @param dir : `The directory to keep modules in. Empty disables the cache entirely — every compile goes to Slang and nothing is read or written.`
+ @param dir : `The directory to keep modules in. Empty disables the cache entirely — every compile runs and nothing is read or written.`
 *>
 fn void shader_cache_set_dir(String dir)
 {
@@ -187,10 +252,11 @@ fn void shader_cache_set_dir(String dir)
 <*
  A second directory to read from and never write to.
 
- What a bundle ships warm. A `.slangmod` is keyed on the source and the compiler
- tag and on nothing about the machine, so the modules a release was built with
- are the modules any machine running that release would compile for itself —
- measured on this desk, 3.5s of Slang against 1.6s with them present.
+ What a bundle ships warm. A `.slangmod` is keyed on the source, the name, the
+ spec values and the compiler identity — nothing about the machine — so the
+ modules a release was built with are the modules any machine running that
+ release would compile for itself — measured on this desk, 3.5s of Slang against
+ 1.6s with them present.
 
  Read-only is the whole point rather than a caution: an install directory is not
  writable everywhere, and the thing that *is* per-machine — the driver's pipeline
@@ -244,7 +310,7 @@ fn void cache_put_blob(DString* out, String bytes) @local
 }
 
 <*
- `SLANG_ARGUMENTS` as one blob, joined with a byte that cannot occur in a flag.
+ One compiler's flags as a single blob, joined with a byte no flag contains.
 
  Joined rather than length-prefixed one by one because this is compared whole:
  the question the loader asks is "were these the flags", not "which flag
@@ -253,11 +319,11 @@ fn void cache_put_blob(DString* out, String bytes) @local
 
  @return `Allocated from tmem; valid until the enclosing pool is released.`
 *>
-fn String cache_argument_blob() @local
+fn String shader_cache_argument_blob(String[] arguments)
 {
 	DString out;
 	out.tinit(256);
-	foreach (i, argument : SLANG_ARGUMENTS)
+	foreach (i, argument : arguments)
 	{
 		if (i > 0) out.append_char('\0');
 		out.append_string(argument);
@@ -265,35 +331,78 @@ fn String cache_argument_blob() @local
 	return out.str_view();
 }
 
+fn bool spec_before(ShaderSpec a, ShaderSpec b) @local
+{
+	if (a.id != b.id) return a.id < b.id;
+	if (a.kind != b.kind) return (char)a.kind < (char)b.kind;
+	return a.bits < b.bits;
+}
+
 <*
- The filename key: everything that decides what Slang would emit.
+ The spec values as canonical bytes: a count, then `(id, kind, bits)` records in
+ ascending id order, so the same set hashes the same however it was listed.
+
+ @return `Allocated from tmem; valid until the enclosing pool is released.`
+*>
+fn String cache_spec_blob(ShaderSpec[] specs) @local
+{
+	DString out;
+	out.tinit((sz)specs.len * 9 + 4);
+	cache_put_u32(&out, (uint)specs.len);
+	if (specs.len > 0)
+	{
+		ShaderSpec[] sorted = alloc::new_array(tmem, ShaderSpec, specs.len);
+		sorted[..] = specs[..];
+		for (usz i = 1; i < sorted.len; i++)
+		{
+			ShaderSpec moving = sorted[i];
+			usz at = i;
+			while (at > 0 && spec_before(moving, sorted[at - 1]))
+			{
+				sorted[at] = sorted[at - 1];
+				at--;
+			}
+			sorted[at] = moving;
+		}
+		foreach (spec : sorted)
+		{
+			cache_put_u32(&out, spec.id);
+			out.append_char((char)spec.kind);
+			cache_put_u32(&out, spec.bits);
+		}
+	}
+	return out.str_view();
+}
+
+<*
+ The filename key: everything that decides which module a file is.
 
  Not a checksum of the file — a hash of the *request*, so a lookup can be one
  `open` rather than a directory walk. It covers what the loader then verifies,
  plus the entry points.
-
- @param compiler : `slang::build_tag(). In the key so that an SDK upgrade moves every module rather than shadowing it.`
 *>
-fn ulong cache_key(String compiler, String args, String source, ShaderEntry[] entries) @local
+fn ulong cache_key(ShaderCacheKey key) @local
 {
-	DString key;
-	key.tinit(source.len + args.len + compiler.len + 128);
-	cache_put_u32(&key, SHADER_CACHE_FORMAT_VERSION);
+	DString payload;
+	payload.tinit(key.source.len + key.arguments.len + key.compiler.len + key.name.len + 256);
+	cache_put_u32(&payload, SHADER_CACHE_FORMAT_VERSION);
 	// Length-prefixed rather than joined with the arguments, so a tag ending in a
 	// flag-shaped suffix cannot spell the same bytes as a different tag and a
 	// different first argument.
-	cache_put_blob(&key, compiler);
-	key.append_string(args);
-	foreach (entry : entries)
+	cache_put_blob(&payload, key.compiler);
+	cache_put_blob(&payload, key.arguments);
+	cache_put_blob(&payload, key.name);
+	cache_put_blob(&payload, cache_spec_blob(key.specs));
+	foreach (entry : key.entries)
 	{
-		key.append_string(entry.name);
-		key.append_char('\0');
-		cache_put_u32(&key, entry.stage);
+		payload.append_string(entry.name);
+		payload.append_char('\0');
+		cache_put_u32(&payload, entry.stage);
 	}
-	key.append_string(source);
+	payload.append_string(key.source);
 	// FNV-1a, from `gpu/texture.c3`. Not cryptographic and does not need to be: a
 	// collision costs one identity check and one recompile.
-	return content_hash((char[])key.str_view());
+	return content_hash((char[])payload.str_view());
 }
 
 fn String cache_path(String dir, ulong key) @local => string::tformat("%s/%016x.slangmod", dir, key);
@@ -312,17 +421,19 @@ fn String cache_path(String dir, ulong key) @local => string::tformat("%s/%016x.
  Nothing here throws. A directory that cannot be created or a file that cannot be
  written costs one stderr line and 17 ms per run, and must not cost a render.
 *>
-fn void cache_store(String path, String compiler, String args, String source, ShaderModule* mod) @local
+fn void cache_store(String path, ShaderCacheKey key, ShaderModule* mod) @local
 {
 	@pool()
 	{
 		DString out;
-		out.tinit((sz)(mod.spirv.len + source.len + compiler.len + 1024));
+		out.tinit((sz)(mod.spirv.len + key.source.len + key.compiler.len + key.name.len + 1024));
 
 		cache_put_u32(&out, SHADER_CACHE_MAGIC);
 		cache_put_u32(&out, SHADER_CACHE_FORMAT_VERSION);
-		cache_put_blob(&out, compiler);
-		cache_put_blob(&out, args);
+		cache_put_blob(&out, key.compiler);
+		cache_put_blob(&out, key.arguments);
+		cache_put_blob(&out, key.name);
+		cache_put_blob(&out, cache_spec_blob(key.specs));
 
 		cache_put_u32(&out, (uint)mod.entries.len());
 		foreach (entry : mod.entries)
@@ -331,7 +442,7 @@ fn void cache_store(String path, String compiler, String args, String source, Sh
 			cache_put_u32(&out, entry.stage);
 		}
 
-		cache_put_blob(&out, source);
+		cache_put_blob(&out, key.source);
 		cache_put_blob(&out, (String)mod.spirv);
 		cache_put_blob(&out, mod.diagnostic);
 
@@ -459,15 +570,15 @@ fn bool cache_reject() @local
  could not be believed", and the tests need to tell those apart.
 
  The module is built only once every byte has been read and checked, so there is
- no half-allocated module to unwind. What it allocates and how is
- `compile_slang`'s answer exactly — `mem` for the SPIR-V, `.copy(mem)` for every
- string, `.init(mem, n)` for both lists — because `ShaderModule.free` is the only
- free either kind of module ever gets.
+ no half-allocated module to unwind. What it allocates and how is the compilers'
+ answer exactly — `mem` for the SPIR-V, `.copy(mem)` for every string,
+ `.init(mem, n)` for both lists — because `ShaderModule.free` is the only free a
+ module ever gets.
 
  @param [out] out : `Filled only on true. Untouched otherwise.`
- @return `True if out now holds a module Slang did not have to produce.`
+ @return `True if out now holds a module no compiler had to produce.`
 *>
-fn bool cache_load(String path, String compiler, String args, String source, ShaderModule* out, bool count_miss = true) @local
+fn bool cache_load(String path, ShaderCacheKey key, ShaderModule* out, bool count_miss = true) @local
 {
 	@pool()
 	{
@@ -486,9 +597,13 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 		// Identity, not the hash. See the header.
 		String stored_compiler = reader.blob();
 		String stored_args     = reader.blob();
+		String stored_name     = reader.blob();
+		String stored_specs    = reader.blob();
 		if (reader.bad) return cache_reject();
-		if (stored_compiler != compiler) return cache_reject();
-		if (stored_args != args) return cache_reject();
+		if (stored_compiler != key.compiler) return cache_reject();
+		if (stored_args != key.arguments) return cache_reject();
+		if (stored_name != key.name) return cache_reject();
+		if (stored_specs != cache_spec_blob(key.specs)) return cache_reject();
 
 		uint entry_count = reader.u32();
 		if (!reader.room_for(entry_count, 8)) return cache_reject();
@@ -510,7 +625,7 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 
 		// The second half of the identity check, and the expensive-looking one: a
 		// few kilobytes compared per lookup against 17 ms of Slang.
-		if (stored_source != source) return cache_reject();
+		if (stored_source != key.source) return cache_reject();
 
 		// Both of `compile_slang`'s checks on Slang's own output, asked again of a
 		// file that has been sitting on disk. Byte-wise rather than through a
@@ -598,6 +713,72 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
 }
 
 // ============================================================================
+// Lookup and store
+// ============================================================================
+
+<*
+ The module for this key, from the writable directory and then the prebake.
+
+ One lookup however many directories answer it: the writable directory's miss is
+ counted only when there is no prebake to look in, and `misses` stays "lookups
+ with no file to read". Nothing is copied across on a prebake hit — the file that
+ answered is as good where it is, and writing it into the user's cache would
+ double a bundle's modules on disk to save no work at all.
+
+ @param [out] out : `Filled only on true. Untouched otherwise.`
+ @return `True when out holds a module no compiler was asked for.`
+*>
+fn bool shader_cache_try_load(ShaderCacheKey key, ShaderModule* out)
+{
+	if (cache_dir.len == 0) return false;
+
+	@pool()
+	{
+		ulong hash = cache_key(key);
+		String path = cache_path(cache_dir, hash);
+		if (cache_load(path, key, out, count_miss: read_dir.len == 0))
+		{
+			@debug_log("shader cache: %s hit %s", key.name, path);
+			return true;
+		}
+
+		if (read_dir.len > 0)
+		{
+			String bundled = cache_path(read_dir, hash);
+			if (cache_load(bundled, key, out))
+			{
+				@debug_log("shader cache: %s hit %s (bundled)", key.name, bundled);
+				return true;
+			}
+		}
+
+		// The interesting half of the pair: a miss means a compiler runs, which is
+		// the difference between a startup measured in milliseconds and one
+		// measured in tenths of a second, and it is invisible from the outside.
+		// `%s miss` on every run is a key that is not stabilising.
+		@debug_log("shader cache: %s miss %s", key.name, path);
+		return false;
+	};
+}
+
+<*
+ Writes one compiled module under its key.
+
+ A failed module is refused here whatever the caller does — a cached failure
+ would be handed to the next caller as though it were a shader, and on disk they
+ would be handed it tomorrow as well. The store itself never throws; see
+ `cache_store`.
+*>
+fn void shader_cache_save(ShaderCacheKey key, ShaderModule* mod)
+{
+	if (cache_dir.len == 0 || !mod.ok) return;
+	@pool()
+	{
+		cache_store(cache_path(cache_dir, cache_key(key)), key, mod);
+	};
+}
+
+// ============================================================================
 // The entry point
 // ============================================================================
 
@@ -613,13 +794,19 @@ fn bool cache_load(String path, String compiler, String args, String source, Sha
  A failed compile is still not a fault and is still not stored. It comes back
  `ok: false` with the diagnostic attached.
 
- @param name : `What the source is called in diagnostics. Not a path, never opened, and not part of the key — two names over identical source are one module.`
+ @param name : `What the source is called in diagnostics. Not a path and never opened. Part of the key: it is the def or pass the module is built from.`
  @param entries : `The entry points to compile. Part of the key.`
  @param [out] compiled : `Set true when Slang actually ran, false when the module came off disk. PipelineCache.compiles counts this, so a compile keeps meaning Slang ran.`
+ @param specs : `The spec-constant values the pipelines over this module are specialized with. Part of the key, so no two value sets share an entry.`
  @return ? SLANG_UNAVAILABLE : `The session would not start. Only reachable on a miss.`
  @return ? SHADER_NOT_SPIRV : `Slang reported success and returned something that is not a module. Only reachable on a miss — a stored module that fails the same check is a miss, not a fault.`
 *>
-fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] entries, bool* compiled = null)
+fn ShaderModule? compile_slang_cached(
+	String source,
+	String name,
+	ShaderEntry[] entries,
+	bool* compiled = null,
+	ShaderSpec[] specs = { })
 {
 	if (compiled != null) *compiled = false;
 
@@ -631,45 +818,24 @@ fn ShaderModule? compile_slang_cached(String source, String name, ShaderEntry[] 
 
 	@pool()
 	{
-		String compiler = slang::build_tag();
-		String args     = cache_argument_blob();
-		ulong key       = cache_key(compiler, args, source, entries);
-		String path     = cache_path(cache_dir, key);
+		ShaderCacheKey key = {
+			.compiler = string::tformat("slang:%s", slang::build_tag()),
+			.arguments = shader_cache_argument_blob(SLANG_ARGUMENTS[..]),
+			.name = name,
+			.specs = specs,
+			.entries = entries,
+			.source = source,
+		};
 
-		// The writable directory first, and the miss counted only if there is
-		// nowhere else to look — a lookup is one lookup however many directories
-		// answer it, and `misses` is what the tests read as "Slang ran".
 		ShaderModule loaded;
-		if (cache_load(path, compiler, args, source, &loaded, count_miss: read_dir.len == 0))
-		{
-			@debug_log("shader cache: %s hit %s", name, path);
-			return loaded;
-		}
+		if (shader_cache_try_load(key, &loaded)) return loaded;
 
-		// Then the prebake. Nothing is copied across on a hit: the file that
-		// answered is as good where it is, and writing it into the user's cache
-		// would double a bundle's modules on disk to save no work at all.
-		if (read_dir.len > 0)
-		{
-			String bundled = cache_path(read_dir, key);
-			if (cache_load(bundled, compiler, args, source, &loaded))
-			{
-				@debug_log("shader cache: %s hit %s (bundled)", name, bundled);
-				return loaded;
-			}
-		}
-
-		// The interesting half of the pair: a miss means Slang runs, which is the
-		// difference between a startup measured in milliseconds and one measured in
-		// tenths of a second, and it is invisible from the outside. `%s miss` on
-		// every run is a key that is not stabilising.
-		@debug_log("shader cache: %s miss %s", name, path);
 		ShaderModule mod = compile_slang(source, name, entries)!;
 		if (compiled != null) *compiled = true;
 		// Overwrites whatever was there, which is the answer to every way a lookup
 		// can fail: a truncated file, a file from a format that no longer exists,
 		// and a hash collision all end here.
-		if (mod.ok) cache_store(path, compiler, args, source, &mod);
+		if (mod.ok) shader_cache_save(key, &mod);
 		return mod;
 	};
 }

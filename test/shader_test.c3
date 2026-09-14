@@ -1416,6 +1416,12 @@ const String CACHE_PIPELINE_DIR = "build/shader-cache-test/pipeline";
 const String CACHE_CORRUPT_DIR = "build/shader-cache-test/corrupt";
 const String CACHE_IDENTITY_DIR = "build/shader-cache-test/identity";
 const String CACHE_KEY_DIR = "build/shader-cache-test/key";
+const String CACHE_SPEC_DIR = "build/shader-cache-test/spec";
+const String CACHE_SOURCE_EDIT_DIR = "build/shader-cache-test/source-edit";
+const String CACHE_SHADY_DIR = "build/shader-cache-test/shady";
+const String CACHE_SHADY_FAILURE_DIR = "build/shader-cache-test/shady-failure";
+const String CACHE_FLIP_DIR = "build/shader-cache-test/flip";
+const String CACHE_COMPILER_DIR = "build/shader-cache-test/compiler";
 // The one directory in this list that must never exist. See
 // `a_disabled_cache_neither_reads_nor_writes`.
 const String CACHE_DISABLED_DIR = "build/shader-cache-test/disabled";
@@ -2344,6 +2350,338 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 		"the file built with other flags was refused: %d", three::shader_cache_stats().invalid);
 	test::@check(cached_modules(CACHE_KEY_DIR) == 1,
 		"and both refusals overwrote rather than accumulated: %d", (int)cached_modules(CACHE_KEY_DIR));
+}
+
+// The tiny source with one expression changed, so the two are the same shader
+// in every way a reader cares about and a different string to the key.
+const String CACHE_TINY_SOURCE_EDIT = `
+struct VOut { float4 sv_position : SV_Position; };
+[shader("vertex")]
+VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(float(vid) + 1.0, 0, 0, 1); return o; }
+`;
+
+// Two value sets that differ only under id 1, and the first listed the other
+// way round. A global for `BOTH_STAGES`' reason: a slice literal is backed by
+// the stack frame that made it.
+const three::ShaderSpec[2] SPEC_TAPS_4 = {
+	{ 1, three::ShaderSpecKind.UINT, 4 },
+	{ 2, three::ShaderSpecKind.BOOL, 1 },
+};
+const three::ShaderSpec[2] SPEC_TAPS_8 = {
+	{ 1, three::ShaderSpecKind.UINT, 8 },
+	{ 2, three::ShaderSpecKind.BOOL, 1 },
+};
+const three::ShaderSpec[2] SPEC_TAPS_4_REVERSED = {
+	{ 2, three::ShaderSpecKind.BOOL, 1 },
+	{ 1, three::ShaderSpecKind.UINT, 4 },
+};
+
+<*
+ One module, several value sets: the values are identity, not a comment.
+
+ The key hashes the values by id in a canonical order, so the same set listed
+ two ways is one entry and one changed value is another. Every file here is
+ Slang's and the source does not read a `@spec` constant — what is pinned is the
+ key, which has to separate the values before a pass can rely on the separation.
+*>
+fn void a_changed_spec_value_is_a_different_module() @test
+{
+	fresh_cache(CACHE_SPEC_DIR);
+
+	bool ran = false;
+	three::ShaderModule four = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4[..]
+	)!!;
+	defer four.free();
+	test::@check(ran, "the first value set compiled");
+	three::ShaderCacheStats after_first = three::shader_cache_stats();
+	test::@check(after_first.misses == 1 && after_first.stores == 1,
+		"with one miss and one store: %d/%d", after_first.misses, after_first.stores);
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule reversed = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4_REVERSED[..]
+	)!!;
+	defer reversed.free();
+	test::@check(!ran, "the same values listed the other way came off disk");
+	test::@check(three::shader_cache_stats().loads == 1, "which is a load");
+	test::@check(reversed.spirv == four.spirv, "and it is the same module");
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule eight = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_8[..]
+	)!!;
+	defer eight.free();
+	test::@check(ran, "one changed value is not the stored entry");
+	three::ShaderCacheStats changed = three::shader_cache_stats();
+	test::@check(changed.loads == 0 && changed.misses == 1 && changed.stores == 1,
+		"it is a miss and its own file: %d loads, %d misses, %d stores",
+		changed.loads, changed.misses, changed.stores);
+	test::@check(cached_modules(CACHE_SPEC_DIR) == 2,
+		"two value sets, two files: %d", (int)cached_modules(CACHE_SPEC_DIR));
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule again = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4[..]
+	)!!;
+	defer again.free();
+	test::@check(!ran && three::shader_cache_stats().loads == 1,
+		"and the first set is still its own entry");
+}
+
+<*
+ A changed source is a different module.
+
+ The hash names a candidate and the file checks the identity, but a lookup only
+ reaches that check when the hash moves: this asks for two sources under one
+ name and expects the second to be a miss with a file of its own. The source is
+ the same shader with one expression changed, so nothing about the name, the
+ entry list or the compiler explains the difference.
+*>
+fn void a_changed_source_is_a_different_module() @test
+{
+	fresh_cache(CACHE_SOURCE_EDIT_DIR);
+
+	bool ran = false;
+	three::ShaderModule first = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer first.free();
+	test::@check(ran && three::shader_cache_stats().stores == 1, "the first source was stored");
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule edited = three::compile_slang_cached(
+		CACHE_TINY_SOURCE_EDIT, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer edited.free();
+	test::@check(ran, "the edited source missed");
+	three::ShaderCacheStats stats = three::shader_cache_stats();
+	test::@check(stats.loads == 0 && stats.misses == 1 && stats.stores == 1,
+		"and was compiled into its own entry: %d loads, %d misses, %d stores",
+		stats.loads, stats.misses, stats.stores);
+	test::@check(cached_modules(CACHE_SOURCE_EDIT_DIR) == 2,
+		"two sources, two files: %d", (int)cached_modules(CACHE_SOURCE_EDIT_DIR));
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule again = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer again.free();
+	test::@check(!ran && three::shader_cache_stats().loads == 1,
+		"and the first source still comes off disk");
+}
+
+<*
+ The shady path is cached, and under a key of its own.
+
+ This is the wiring half: a pass on shady compiles once and loads afterwards,
+ exactly as a pass on Slang does. The second half is the values and the file
+ count — a different spec set is a second entry, not the entry that is already
+ there.
+*>
+fn void the_shady_path_is_cached_under_its_own_key() @test
+{
+	fresh_cache(CACHE_SHADY_DIR);
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
+	defer three::shader_overrides_clear();
+
+	bool ran = false;
+	three::ShaderModule first = three::compile_shader(
+		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer first.free();
+	test::@check(first.ok, "the shady cluster compiles: %s", first.diagnostic);
+	test::@check(ran, "the first compile ran shady");
+	three::ShaderCacheStats after_first = three::shader_cache_stats();
+	test::@check(after_first.misses == 1 && after_first.stores == 1,
+		"with one miss and one store: %d/%d", after_first.misses, after_first.stores);
+	test::@check(cached_modules(CACHE_SHADY_DIR) == 1,
+		"one module is on disk: %d", (int)cached_modules(CACHE_SHADY_DIR));
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule second = three::compile_shader(
+		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer second.free();
+	test::@check(!ran, "the second compile did not run shady");
+	test::@check(three::shader_cache_stats().loads == 1, "it came off disk");
+	test::@check(second.spirv == first.spirv, "and is the same module");
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule other = three::compile_shader(
+		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran,
+		specs: SPEC_TAPS_8[..]
+	)!!;
+	defer other.free();
+	test::@check(ran, "a different value set is not the stored entry");
+	test::@check(three::shader_cache_stats().stores == 1, "so it was stored under its own key");
+	test::@check(cached_modules(CACHE_SHADY_DIR) == 2,
+		"two value sets, two files: %d", (int)cached_modules(CACHE_SHADY_DIR));
+}
+
+<*
+ A broken shady compile is a miss and no store, like a broken Slang one.
+*>
+fn void a_broken_shady_compile_is_not_stored() @test
+{
+	fresh_cache(CACHE_SHADY_FAILURE_DIR);
+	three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SHADY);
+	defer three::shader_overrides_clear();
+
+	bool ran = false;
+	three::ShaderModule broken = three::compile_shader(
+		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..], &ran,
+		body: `fn float3 post(Post p) { return notAFunction(p.uv); }`
+	)!!;
+	defer broken.free();
+	test::@check(ran, "shady ran");
+	test::@check(!broken.ok, "and refused the body: %s", broken.diagnostic);
+	test::@check(three::shader_cache_stats().stores == 0,
+		"nothing was written: %d", three::shader_cache_stats().stores);
+	test::@check(cached_modules(CACHE_SHADY_FAILURE_DIR) == 0,
+		"and the directory is empty: %d", (int)cached_modules(CACHE_SHADY_FAILURE_DIR));
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule again = three::compile_shader(
+		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..], &ran,
+		body: `fn float3 post(Post p) { return notAFunction(p.uv); }`
+	)!!;
+	defer again.free();
+	test::@check(ran, "the retry reached shady too");
+	test::@check(three::shader_cache_stats().loads == 0, "and read nothing");
+}
+
+<*
+ A pass moved between the compilers is never served the other's module.
+
+ Both directions are asked and both are answered by the compiler actually
+ running: flipping to shady compiles rather than loading the entry Slang wrote,
+ and flipping back loads the Slang entry rather than the shady one. The
+ `compile_shader` calls pass the out-flag, which is what lets them report which
+ happened.
+*>
+fn void a_flipped_pass_never_reads_the_other_compilers_module() @test
+{
+	fresh_cache(CACHE_FLIP_DIR);
+
+	String source = three::shader_source(three::ShaderFile.CLUSTER_SLANG, mem)!!;
+	defer source.free(mem);
+
+	bool ran = false;
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
+	three::ShaderModule through_slang = three::compile_shader(
+		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer through_slang.free();
+	test::@check(through_slang.ok, "the Slang cluster compiles: %s", through_slang.diagnostic);
+	test::@check(ran && three::shader_cache_stats().stores == 1, "and was stored");
+
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
+	three::shader_cache_reset_stats();
+	three::ShaderModule through_shady = three::compile_shader(
+		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer through_shady.free();
+	test::@check(through_shady.ok, "the flipped pass compiles through shady: %s", through_shady.diagnostic);
+	test::@check(ran, "shady ran rather than answering with the Slang module");
+	test::@check(three::shader_cache_stats().loads == 0,
+		"and nothing was read: %d", three::shader_cache_stats().loads);
+
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
+	three::shader_cache_reset_stats();
+	three::ShaderModule back = three::compile_shader(
+		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer back.free();
+	test::@check(!ran, "flipping back read the Slang entry rather than compiling");
+	test::@check(three::shader_cache_stats().loads == 1, "which is a load");
+	test::@check(back.spirv == through_slang.spirv, "and it is the Slang module");
+}
+
+<*
+ The stored compiler identity is checked, in both directions.
+
+ The compile-level flip above is two different sources as well as two compilers,
+ so it cannot tell a key that names the compiler from one that does not. Here a
+ file found under the right name is made to claim the other compiler — the six
+ bytes of `slang:` and `shady:` are the same length, so nothing moves — and the
+ loader has to refuse it in each direction rather than believe it.
+*>
+fn void the_stored_compiler_identity_is_checked_in_both_directions() @test
+{
+	fresh_cache(CACHE_COMPILER_DIR);
+
+	bool ran = false;
+	three::ShaderModule reference = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer reference.free();
+	test::@check(ran && three::shader_cache_stats().stores == 1, "one Slang module was stored");
+
+	@pool()
+	{
+		String path = cached_module_path(CACHE_COMPILER_DIR);
+		test::@check(path.len > 0, "and it is findable");
+		char[] bytes = file::load(tmem, path)!!;
+		usz at = byte_offset(bytes, "slang:");
+		test::@check(at < bytes.len, "whose stored identity names Slang");
+		bytes[at] = 's';
+		bytes[at + 1] = 'h';
+		bytes[at + 2] = 'a';
+		bytes[at + 3] = 'd';
+		bytes[at + 4] = 'y';
+		bytes[at + 5] = ':';
+		file::save(path, bytes)!!;
+	};
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule answered = three::compile_slang_cached(
+		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	)!!;
+	defer answered.free();
+	test::@check(ran, "the Slang compile ran rather than trusting the file");
+	test::@check(three::shader_cache_stats().invalid == 1 && three::shader_cache_stats().loads == 0,
+		"the file claiming the other compiler was refused: %d invalid, %d loads",
+		three::shader_cache_stats().invalid, three::shader_cache_stats().loads);
+	test::@check(answered.spirv == reference.spirv, "and the clean module came back");
+
+	// The other direction: a shady file made to claim Slang.
+	fresh_cache(CACHE_COMPILER_DIR);
+	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
+	defer three::shader_overrides_clear();
+
+	three::ShaderModule shady_ref = three::compile_shader(
+		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer shady_ref.free();
+	test::@check(ran && three::shader_cache_stats().stores == 1, "one shady module was stored");
+
+	@pool()
+	{
+		String path = cached_module_path(CACHE_COMPILER_DIR);
+		test::@check(path.len > 0, "and it is findable");
+		char[] bytes = file::load(tmem, path)!!;
+		usz at = byte_offset(bytes, "shady:");
+		test::@check(at < bytes.len, "whose stored identity names shady");
+		bytes[at] = 's';
+		bytes[at + 1] = 'l';
+		bytes[at + 2] = 'a';
+		bytes[at + 3] = 'n';
+		bytes[at + 4] = 'g';
+		bytes[at + 5] = ':';
+		file::save(path, bytes)!!;
+	};
+
+	three::shader_cache_reset_stats();
+	three::ShaderModule again = three::compile_shader(
+		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
+	)!!;
+	defer again.free();
+	test::@check(ran, "the shady compile ran rather than trusting the file");
+	test::@check(three::shader_cache_stats().invalid == 1 && three::shader_cache_stats().loads == 0,
+		"the file claiming the other compiler was refused: %d invalid, %d loads",
+		three::shader_cache_stats().invalid, three::shader_cache_stats().loads);
+	test::@check(again.spirv == shady_ref.spirv, "and the clean module came back");
 }
 
 <*
