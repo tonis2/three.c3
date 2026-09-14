@@ -68,6 +68,21 @@ struct ShadyVariable
 }
 
 <*
+ The compiler's identity for the disk cache: which shady, exactly.
+
+ It is the submodule pin `git -C lib/shady.c3l rev-parse HEAD` reports. There is
+ no portable way for C3 to read a submodule pin at build time, so this constant
+ is the one cache identity a person has to move with the dependency;
+ `SHADER_CACHE_FORMAT_VERSION` is the lever when it slips.
+*>
+const String SHADY_COMPILER_TAG = "shady:2d60a5981af9bfb69ae822425eb6c8802deaf8e8";
+
+// The options `shady::compile` is called with. In the cache key beside the
+// source, so a change here cannot be shadowed by a module an earlier build
+// wrote.
+const String[*] SHADY_ARGUMENTS = { "scalar-layout" };
+
+<*
  Compiles a `ShaderDef` through shady.
 
  `$Type` is the push block: a type parameter rather than a field of `ShaderDef`
@@ -80,6 +95,29 @@ struct ShadyVariable
  refused the source. Owned and freed like any other ShaderModule.`
 *>
 macro ShaderModule compile_shady(ShaderDef def, $Type)
+{
+	return compile_shady_inner(def, $Type, null, { });
+}
+
+<*
+ `compile_shady`, with yesterday's answer if there is one.
+
+ Same module, same layout, same diagnostics, same ownership as the uncached
+ call. A cache that cannot be read, cannot be written, or does not agree byte for
+ byte with what was asked for is invisible here.
+
+ @param [out] compiled : `Set true when shady actually ran, false when the
+ module came off disk. PipelineCache counts this, so a compile keeps meaning the
+ compiler ran.`
+ @param specs : `The spec-constant values the pipelines over this module are
+ specialized with. Part of the cache key, so no two value sets share an entry.`
+*>
+macro ShaderModule compile_shady_cached(ShaderDef def, $Type, bool* compiled, ShaderSpec[] specs)
+{
+	return compile_shady_inner(def, $Type, compiled, specs);
+}
+
+macro ShaderModule compile_shady_inner(ShaderDef def, $Type, bool* compiled, ShaderSpec[] specs)
 {
 	DString source;
 	source.tinit(64 * 1024);
@@ -101,10 +139,52 @@ macro ShaderModule compile_shady(ShaderDef def, $Type)
 		$endif
 	$endforeach
 
-	ShaderModule mod = compile_shady_source(source.str_view(), def, walked.array_view(), (uint)$align);
+	ShaderModule mod = compile_shady_cached_source(
+		source.str_view(), def, walked.array_view(), (uint)$align, compiled, specs
+	);
 	walked.free();
 	source.free();
 	return mod;
+}
+
+<*
+ The compile itself, with the walked half already in hand and the cache in
+ front.
+*>
+fn ShaderModule compile_shady_cached_source(
+	String source,
+	ShaderDef def,
+	ShaderField[] walked,
+	uint walked_align,
+	bool* compiled,
+	ShaderSpec[] specs) @local
+{
+	if (compiled != null) *compiled = false;
+
+	if (shader_cache_dir().len == 0)
+	{
+		if (compiled != null) *compiled = true;
+		return compile_shady_source(source, def, walked, walked_align);
+	}
+
+	@pool()
+	{
+		ShaderCacheKey key = {
+			.compiler = SHADY_COMPILER_TAG,
+			.arguments = shader_cache_argument_blob(SHADY_ARGUMENTS[..]),
+			.name = def.name,
+			.specs = specs,
+			.source = source,
+		};
+
+		ShaderModule loaded;
+		if (shader_cache_try_load(key, &loaded)) return loaded;
+
+		ShaderModule mod = compile_shady_source(source, def, walked, walked_align);
+		if (compiled != null) *compiled = true;
+		if (mod.ok) shader_cache_save(key, &mod);
+		return mod;
+	};
 }
 
 <*

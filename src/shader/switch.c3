@@ -234,8 +234,11 @@ fn void? apply_shader_overrides(String shady, String slang)
  the scripted bake's second module: the material row compiles the same body with
  `MATERIAL_BAKE` on, which rasterises the mesh in uv space and shades it unlit,
  and it is the material row rather than one of its own because the body's
- spelling and the compiler are one decision. When `compiled` is given it answers
- whether a compiler actually ran, which is what `PipelineCache` counts.
+ spelling and the compiler are one decision. `specs` are the spec-constant
+ values the pipelines over this module are specialized with; they are part of the
+ disk cache key on both paths, so two value sets never share an entry. When
+ `compiled` is given it answers whether a compiler actually ran, which is what
+ `PipelineCache` counts.
 *>
 fn ShaderModule? compile_shader(
 	ShaderPass pass,
@@ -248,29 +251,28 @@ fn ShaderModule? compile_shader(
 	MaterialUniform[] uniforms = {},
 	MaterialTexture[] textures = { },
 	String vertex = "",
-	bool bake = false)
+	bool bake = false,
+	ShaderSpec[] specs = { })
 {
 	if (shader_compiler(pass) == ShaderCompiler.SHADY)
 	{
-		if (compiled != null) *compiled = true;
-
 		// One case per ported pass: the def, and the push block it walks.
 		switch (pass)
 		{
 			case ShaderPass.CLUSTER:
-				ShaderModule cluster = compile_shady(cluster_def(), ClusterPush);
+				ShaderModule cluster = compile_shady_cached(cluster_def(), ClusterPush, compiled, specs);
 				return cluster;
 			case ShaderPass.SKIN:
-				ShaderModule skin = compile_shady(skin_def(), SkinPush);
+				ShaderModule skin = compile_shady_cached(skin_def(), SkinPush, compiled, specs);
 				return skin;
 			case ShaderPass.SHADOW:
-				ShaderModule shadow = compile_shady(shadow_def(), ShadowPush);
+				ShaderModule shadow = compile_shady_cached(shadow_def(), ShadowPush, compiled, specs);
 				return shadow;
 			case ShaderPass.SHADOW_CUTOUT:
-				ShaderModule cutout = compile_shady(shadow_cutout_def(), ShadowPush);
+				ShaderModule cutout = compile_shady_cached(shadow_cutout_def(), ShadowPush, compiled, specs);
 				return cutout;
 			case ShaderPass.SKY:
-				ShaderModule sky = compile_shady(sky_def(), SkyPush);
+				ShaderModule sky = compile_shady_cached(sky_def(), SkyPush, compiled, specs);
 				return sky;
 			case ShaderPass.MESH:
 			{
@@ -282,9 +284,9 @@ fn ShaderModule? compile_shader(
 				DString emitted;
 				emitted.tinit(64);
 				append_shady_uniforms(&emitted, {});
-				ShaderModule mesh = compile_shady(
+				ShaderModule mesh = compile_shady_cached(
 					mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true),
-					MeshPush);
+					MeshPush, compiled, specs);
 				emitted.free();
 				return mesh;
 			}
@@ -297,9 +299,9 @@ fn ShaderModule? compile_shader(
 				DString emitted;
 				emitted.tinit(64);
 				append_shady_uniforms(&emitted, {});
-				ShaderModule reference = compile_shady(
+				ShaderModule reference = compile_shady_cached(
 					mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true, reference: true),
-					MeshPush);
+					MeshPush, compiled, specs);
 				emitted.free();
 				return reference;
 			}
@@ -314,9 +316,9 @@ fn ShaderModule? compile_shader(
 				DString emitted;
 				emitted.tinit(64);
 				append_shady_uniforms(&emitted, {});
-				ShaderModule lightmap = compile_shady(
+				ShaderModule lightmap = compile_shady_cached(
 					mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true, lightmap: true),
-					MeshPush);
+					MeshPush, compiled, specs);
 				emitted.free();
 				return lightmap;
 			}
@@ -356,7 +358,7 @@ fn ShaderModule? compile_shader(
 					lightmap: as_lightmap
 				);
 				def.uniforms_spilled = spilled;
-				ShaderModule mesh = compile_shady(def, MeshPush);
+				ShaderModule mesh = compile_shady_cached(def, MeshPush, compiled, specs);
 				declared.free();
 				emitted.free();
 				return mesh;
@@ -379,9 +381,9 @@ fn ShaderModule? compile_shader(
 				append_shady_textures(&declared, textures, POST_BINDING_FIRST, false);
 
 				String spliced = body_shady.len > 0 ? body_shady : body;
-				ShaderModule post = compile_shady(
+				ShaderModule post = compile_shady_cached(
 					post_def(spliced, emitted.str_view(), declared.str_view()),
-					PostPush);
+					PostPush, compiled, specs);
 				declared.free();
 				emitted.free();
 				return post;
@@ -393,5 +395,5 @@ fn ShaderModule? compile_shader(
 	}
 
 	if (compiled == null) return compile_slang(source, name, entries);
-	return compile_slang_cached(source, name, entries, compiled);
+	return compile_slang_cached(source, name, entries, compiled, specs);
 }
