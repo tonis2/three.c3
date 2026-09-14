@@ -70,12 +70,15 @@ struct ShadyVariable
 <*
  The compiler's identity for the disk cache: which shady, exactly.
 
- It is the submodule pin `git -C lib/shady.c3l rev-parse HEAD` reports. There is
- no portable way for C3 to read a submodule pin at build time, so this constant
- is the one cache identity a person has to move with the dependency;
- `SHADER_CACHE_FORMAT_VERSION` is the lever when it slips.
+ It embeds `build/shady_compiler_tag.txt`, written before every trusted build by
+ `scripts/shady_compiler_tag.c3` - the project's `exec` hook - from the submodule
+ pin `git -C lib/shady.c3l rev-parse HEAD`. So the tag moves with the dependency
+ and there is nothing hand-maintained to forget. A checkout with no submodule
+ metadata gets `shady:unknown`, which names no compiler but is stable;
+ `SHADER_CACHE_FORMAT_VERSION` is the lever when two such builds must be told
+ apart.
 *>
-const String SHADY_COMPILER_TAG = "shady:2d60a5981af9bfb69ae822425eb6c8802deaf8e8";
+const String SHADY_COMPILER_TAG = $embed("../../build/shady_compiler_tag.txt");
 
 // The options `shady::compile` is called with. In the cache key beside the
 // source, so a change here cannot be shadowed by a module an earlier build
