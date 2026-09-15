@@ -85,9 +85,9 @@ cd three.c3
 c3c build 
 ```
 
-`setup.sh` fetches, on macOS arm64, a Vulkan driver. It is a release asset rather
-than a committed binary, so a clone stays cheap. It is safe to re-run, and takes
-one step by name — `./setup.sh driver`.
+`setup.sh` fetches, on macOS arm64, the Vulkan loader and driver. They are
+release assets rather than committed binaries, so a clone stays cheap. It is
+safe to re-run, and takes one step by name — `./setup.sh driver`.
 
 For a release build: `c3c build --safe=no -O3`
 
