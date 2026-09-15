@@ -1,41 +1,17 @@
 <*
- A material, as a string: the agent's fragment body and everything Slang needs
- around it.
+ A material's declarations, checked before a module is generated around them.
 
  three.c3 supplies the vertex stage, the `Surface` struct, the descriptor layout
- and the uniform block; the agent writes the shading body. Nothing here compiles,
- creates a pipeline or touches the GPU — it reads `shaders/material.slang`,
- replaces three marker lines, and hands back a self-contained module.
+ and the uniform block; the agent writes the shading body and names the uniforms
+ and textures it reads. Nothing here compiles, creates a pipeline or touches the
+ GPU: what stays here is everything a *material* is — the uniform table, the
+ reserved names and the budget — and a refusal that says which name or byte
+ count is the problem.
 
- The marker walk itself lives in `shader/assemble.c3`, which `shaders/post.slang`
- goes through as well. What stays here is everything a *material* is: the mesh
- contract it appends to, the uniform table, the reserved names and the budget.
-
- ## Why the line numbers are the interesting part
-
- The agent writes four lines and gets back a four-hundred-line module. A
- diagnostic saying `material.slang:312` names a file the agent has never seen, at
- a line it did not write.
-
- So the body is bracketed by `#line` directives:
-
- #line 1 "material"
- float3 shade(Surface s)
- {
- return s.albedo * notAFunction(s.uv);
- }
- #line 141 "three.material"
-
- and Slang then reports `material:3:24`, echoing the agent's own text under the
- caret. The restore directive is not decoration either: on an arity or overload
- failure Slang emits a `note[E40011]: candidate:` record pointing back into the
- preamble, and `three.material:141` at least says plainly that the line is not
- the agent's. Suppressing that note would be worse — it is usually the half that
- says "expected 2".
-
- The three subtleties of `#line` — quoted filename required, the directive
- numbers the line *after* it, and the restore number has to be counted rather
- than computed — are stated where they are implemented, in `shader/assemble.c3`.
+ A body reaches its uniforms through `s.uniforms` and a declared texture by
+ name, both generated from these declarations, so a name that cannot be a field
+ or a global is refused here rather than as a compiler diagnostic inside code
+ the agent never wrote.
 *>
 module three;
 
@@ -227,16 +203,16 @@ const String MATERIAL_BODY_NAME = "material";
  What the agent's *vertex* lines are called in a diagnostic.
 
  A second name rather than a second file: both bodies are spliced into one module
- and Slang reports one coordinate, so `vertex:3:12` against `material:3:12` is
- the only thing that says which of the two an error is in.
+ under one compiler, so `vertex:3:12` against `material:3:12` is the only thing
+ that says which of the two an error is in.
 *>
 const String MATERIAL_VERTEX_NAME = "vertex";
 
 <*
  What everything three.c3 generated is called in a diagnostic.
 
- Deliberately self-describing rather than short. Slang's `candidate:` notes point
- into the preamble whatever the body did, and an agent that sees
+ Deliberately self-describing rather than short. A note from inside the generated
+ module names this file whatever the body did, and an agent that sees
  `three.material:141` can tell at a glance that the line is not one of its own.
 *>
 const String MATERIAL_PREAMBLE_NAME = "three.material";
@@ -244,21 +220,20 @@ const String MATERIAL_PREAMBLE_NAME = "three.material";
 <*
  Names a material uniform may not take.
 
- Two groups, refused for different reasons. The first is everything
- `shaders/material.slang` declares or names in a line the `#define`s can reach: a
- uniform called `shade` or `push` produces a substitution that breaks the
- template, and the resulting diagnostic points at generated code the agent cannot
- see. The second is Slang and HLSL's own vocabulary, where `#define float ...` is
- legal, silent, and turns the rest of the module into something no error message
- will explain.
+ Two groups, refused for different reasons. The first is everything the generated
+ module declares or names around the body - a uniform called `shade` or `push`
+ would collide with a declaration the agent cannot see, and the diagnostic that
+ follows would point there. The second is the language's own vocabulary, where a
+ uniform named `float` or `return` turns the rest of the module into something no
+ error message will explain.
 
- The list is not complete and cannot be — Slang's standard library is thousands
- of names, and reserving all of them would refuse `time` and `tint` along the
- way. It covers what the template touches and the keywords worth a sentence;
- anything past it fails as an ordinary Slang diagnostic at `material:<line>`,
- which is where the agent can act on it.
+ The list is not complete and cannot be: the language's vocabulary is long, and
+ reserving all of it would refuse `time` and `tint` along the way. It covers what
+ the generated module touches and the keywords worth a sentence; anything past it
+ fails as an ordinary compiler diagnostic at `material:<line>`, which is where
+ the agent can act on it.
 *>
-const String[*] MATERIAL_RESERVED @local = { // What the template declares.
+const String[*] MATERIAL_RESERVED @local = { // What the generated module declares.
 	"push",
 	"s",
 	"shade",
@@ -281,14 +256,12 @@ const String[*] MATERIAL_RESERVED @local = { // What the template declares.
 	// material, because whether a name collides must not depend on how many other
 	// uniforms happened to be declared beside it.
 	"material_table",
-	"MaterialTable", // What the generators declare around a material's uniforms - `MaterialTable` for
-	// the Slang template and `Uniforms` for the shady generator, the struct a body
-	// reads them through. `material_unused` is the padding field that lets a
-	// material with no uniforms keep the same `Surface`, `material_table` is the
-	// pointer a spilled set hangs off, and `material_uniforms` is the function
-	// that fills `Surface.uniforms` from whichever storage the set got. Reserved
-	// before the switchover rather than at it, because a name is reservable exactly
-	// once - `MATERIAL_ROWS` is already in this list below.
+	"MaterialTable", // What the generator declares around a material's uniforms - `Uniforms`, the
+	// struct a body reads them through. `material_unused` is the padding field
+	// that lets a material with no uniforms keep the same `Surface`,
+	// `material_table` is the pointer a spilled set hangs off, and
+	// `material_uniforms` is the function that fills `Surface.uniforms` from
+	// whichever storage the set got.
 	"Uniforms",
 	"material_unused",
 	"material_uniforms",
@@ -484,18 +457,17 @@ char[MATERIAL_DIAGNOSTIC_MAX] material_message @local;
 usz material_message_len @local;
 
 <*
- What the last `material_source` refused, in words.
+ What the last `validate_material` refused, in words.
 
- A value rather than a line on stderr, the same decision `compile_slang` made
- about Slang's diagnostics: the text has to be inside the thrown JS exception,
- and a script cannot read a file descriptor. A fault on its own says which rule
- was broken and nothing about which uniform broke it.
+ A value rather than a line on stderr: the text has to be inside the thrown JS
+ exception, and a script cannot read a file descriptor. A fault on its own says
+ which rule was broken and nothing about which uniform broke it.
 
  A fixed buffer rather than an allocation because the caller reads this on the
  failure path, where there is no owned value to free and no allocator in scope to
  free it with.
 
- @return `A view valid until the next call to material_source. Empty if the last call succeeded.`
+ @return `A view valid until the next call to validate_material. Empty if the last call succeeded.`
 *>
 fn String material_diagnostic() => (String)material_message[:material_message_len];
 
@@ -540,7 +512,7 @@ fn uint material_rows(MaterialUniform[] uniforms)
 }
 
 <*
- Everything that can be refused before a line of Slang is written.
+ Everything that can be refused before a module is generated.
 
  Order matters to the message rather than to the outcome: the body is checked
  first because a material with no body has nothing for the uniforms to be used
@@ -548,11 +520,11 @@ fn uint material_rows(MaterialUniform[] uniforms)
  useful once each of them is known to be a real uniform.
 
  @return ? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return ? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, or is not 1 to 4 floats wide.`
+ @return ? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the generated module already uses, is a keyword, is repeated, or is not 1 to 4 floats wide.`
  @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
  @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
 *>
-fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
+fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures)
 {
 	@pool()
 	{
@@ -714,53 +686,4 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 
 		material_note("");
 	};
-}
-
-<*
- Assembles the full Slang module for a material.
-
- The result is self-contained: it declares its own `PushData`, its own binding
- and both entry points, so it goes to `compile_slang` as a string with nothing
- else beside it, the same way `mesh.slang` does. Nothing is compiled here and no
- GPU is involved.
-
- @param fragment : `The agent's body. Must define fn float3 shade(Surface s) for the shady path, or float3 shade(Surface s) for the Slang one; everything else is theirs.`
- @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names.`
- @param textures : `Samplers the body wants, in declaration order. Bindings 1..N, generated from that order.`
- @param bake : `Assemble the unlit, uv-space variant instead — see //@bake in material.slang. The exporter's, and nothing else's.`
- @return `The whole module, allocated from allocator and owned by the caller.`
- @return ? MATERIAL_BODY_EMPTY : `The body is empty. material_diagnostic() has the sentence.`
- @return ? MATERIAL_NAME_INVALID : `A uniform or texture name, or a uniform width, is one this cannot generate. material_diagnostic() names it.`
- @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms do not fit in what the mesh contract leaves of the push block.`
- @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT. material_diagnostic() has the count.`
- @return ? SHADER_NOT_FOUND : `shaders/material.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
-*>
-fn String? material_source(
-	String fragment,
-	MaterialUniform[] uniforms,
-	alloc::Allocator allocator = mem, // After the allocator, which reads wrong and is deliberate: every caller that
-	// predates textures passes the allocator positionally, and putting this where
-	// it belongs would silently turn one of those into a texture list.
-	MaterialTexture[] textures = { },
-	String vertex = "",
-	bool bake = false,
-	bool lightmap = false
-)
-{
-	validate_material(fragment, uniforms, textures)!;
-	return assemble_shader(
-		ShaderFile.MATERIAL_SLANG,
-		fragment,
-		uniforms,
-		textures,
-		vertex,
-		MATERIAL_BODY_NAME,
-		MATERIAL_VERTEX_NAME,
-		MATERIAL_PREAMBLE_NAME,
-		MATERIAL_BINDING_FIRST,
-		allocator,
-		material_spills(uniforms),
-		bake,
-		lightmap
-	);
 }

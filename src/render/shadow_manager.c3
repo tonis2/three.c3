@@ -109,7 +109,7 @@ fn uint MeshPass.local_shadow_tile(&self, uint index)
 }
 
 // The window the shaders put on a light's inverse-square falloff, as they use
-// it — squared. `light_toward` in `surface.slang` and `shared_area_window`.
+// it — squared. `light_toward` and `area_window` in `shaders/lighting.shady`.
 fn float shadow_light_window(float distance, float range)
 {
 	if (range <= 0) return 1.0f;

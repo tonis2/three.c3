@@ -2,7 +2,7 @@
  Running a material's own shader somewhere the exporter can read the answer.
 
  `scene/export.c3` writes geometry and loses shading: a `ShaderMaterial` is a
- Slang pipeline and glTF describes surfaces, so every mesh drawn under one
+ shader program and glTF describes surfaces, so every mesh drawn under one
  exports with the base colour its geometry happened to carry. For a scene whose
  whole character is thirteen bodies that is a correct file in a single grey.
 
@@ -12,8 +12,8 @@
 
  ## Rasterised in uv space, not from a camera
 
- The mesh is drawn with its **uv as its clip position** — `shaders/material.slang`
- under `THREE_BAKE` — so a texel of the target is a point of the surface and the
+ The mesh is drawn with its **uv as its clip position** — `shaders/mesh.shady`
+ under `MATERIAL_BAKE` — so a texel of the target is a point of the surface and the
  fragment stage receives the world position, normal and uv that point really has.
  Not a photograph of the object and not an approximation: the same function on a
  grid.
@@ -28,12 +28,12 @@
  `Exporter.world_space_body` is where that is decided, and the rule there is that
  a bake never splits a batch.
 
- ## Unlit, and why that is a define rather than a second shader
+ ## Unlit, and why that is a constant rather than a second shader
 
  `standard(s, ...)` applies the frame's lighting, so a naive bake puts the sun
  and the shadows into the base colour and a glTF viewer lights the result a
  second time. Every function that adds light is therefore guarded on
- `THREE_BAKE`: `lambert` is the identity, the highlight is zero, `shadow_factor`
+ `MATERIAL_BAKE`: `lambert` is the identity, the highlight is zero, `shadow_factor`
  is 1, and `standard` answers with the albedo it was handed.
 
  The agent's body is unchanged and never sees the define, so this is one template
@@ -129,7 +129,7 @@ struct BakeRequest
 }
 
 // One material's bake pipeline, or the fact that it has none. Remembered either
-// way: a body that could not be assembled must not be handed to Slang once per
+// way: a body that could not be assembled must not be compiled once per
 // mesh that draws it.
 struct BakedPipeline @local
 {
@@ -245,51 +245,24 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 	{
 		@pool()
 		{
-			String? source = material_source(
-				material.fragment,
-				material.declared_uniforms,
-				tmem,
-				material.declared_textures,
-				material.vertex,
-				bake: true
-			);
-			if (try source)
+			// The material row's own def compiled with `bake: true` - a module of
+			// its own, because uv-space placement and an unlit surface are the
+			// bake's interface. A body already accepted by `create_material`
+			// passes validation; a refusal leaves the bake unbuilt rather than
+			// compiling around it.
+			if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures)))
 			{
-				// The bake follows the compiler that owns the stored body: on
-				// Slang it is the old re-assembly compiled through the material
-				// row's Slang side, and on shady the same row compiles the body
-				// again with `bake: true` - a module of its own, because uv-space
-				// placement and an unlit surface are the bake's interface.
-				MeshPipeline*? made;
-				if (shader_compiler(ShaderPass.MESH_MATERIAL) == ShaderCompiler.SHADY)
-				{
-					made = self.pass.pipelines.acquire(
-						self.gpu,
-						&self.target,
-						source,
-						"three.bake",
-						BAKE_STATE,
-						ShaderPass.MESH_MATERIAL,
-						body: material.fragment,
-						uniforms: material.declared_uniforms,
-						textures: material.declared_textures,
-						vertex: material.vertex,
-						bake: true
-					);
-				}
-				else
-				{
-					// `source` is already the whole assembled bake module, so
-					// this is the same row with its Slang side answering.
-					made = self.pass.pipelines.acquire(
-						self.gpu,
-						&self.target,
-						source,
-						"three.bake",
-						BAKE_STATE,
-						ShaderPass.MESH_MATERIAL
-					);
-				}
+				MeshPipeline*? made = self.pass.pipelines.acquire(
+					self.gpu,
+					&self.target,
+					BAKE_STATE,
+					ShaderPass.MESH_MATERIAL,
+					body: material.fragment,
+					uniforms: material.declared_uniforms,
+					textures: material.declared_textures,
+					vertex: material.vertex,
+					bake: true
+				);
 				if (try made) built = made;
 			}
 		};
@@ -338,7 +311,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		// here is the frame's images, which a bake mostly does not have.
 		SampledBindings samplers;
 		// Asked rather than assumed, and the answer is normally *no*: under
-		// `THREE_BAKE` nothing reads `shadow_map`, so Slang drops it and pushing a
+		// `MATERIAL_BAKE` nothing reads `shadow_map`, so the compiler drops it and pushing a
 		// write for a binding the layout does not declare would be a validation
 		// error. The white 1x1 is here for the compile that keeps it anyway.
 		if (pipeline_declares_binding(pipeline, SHADOW_BINDING))
@@ -363,7 +336,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
 				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
 		}
-		// Normally dropped by the linker: the bake defines `THREE_BAKE`, which is
+		// Normally dropped by the linker: the bake sets `MATERIAL_BAKE`, which is
 		// what makes the area integration numeric and leaves nothing reading the
 		// table. Here for the compile that keeps it, and the frame block's
 		// `lighting.w` is zero either way.
@@ -371,7 +344,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		{
 			samplers.add(LTC_LUT_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
 		}
-		// Dropped by the linker for `ltc_lut`'s reason — under `THREE_BAKE` nothing
+		// Dropped by the linker for `ltc_lut`'s reason — under `MATERIAL_BAKE` nothing
 		// shades, so nothing reads a lightmap either. Here for the compile that keeps
 		// it, and the instance's own tile is zero-sized either way.
 		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
@@ -454,7 +427,7 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 	MeshPipeline* pipeline = self.pipeline_for(request.material);
 	if (pipeline == null) return false;
 
-	// Read by almost nothing under `THREE_BAKE` — the lighting, the camera and the
+	// Read by almost nothing under `MATERIAL_BAKE` — the lighting, the camera and the
 	// shadow fit are all behind guards — and written in full anyway, so that a
 	// guard removed later fails by baking a lit surface rather than by reading
 	// through a null pointer.

@@ -31,7 +31,7 @@
  ## What a failure leaves behind
 
  Nothing. `PostPass.set` and `.add` build the new pipeline before they touch the
- chain, so a body that does not compile throws here with Slang's text and the
+ chain, so a body that does not compile throws here with the compiler's text and the
  frame keeps rendering through whatever was already running.
 *>
 module three;
@@ -264,9 +264,9 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 <*
  Turns a post sampler fault into a sentence an agent can act on.
 
- `material_texture_failure`'s two causes for the unknown-name case, which are the
- same two here: a name the body does not use, and a name the body declares and
- never samples, which Slang may drop before reflection sees it.
+ `material_texture_failure`'s unknown-name case, for the same reason: a sampler
+ is reached by the name the pass declares, so a name that is not in the
+ declaration list has nowhere to bind.
 *>
 fn String post_texture_failure(fault err, String name) @local
 {
@@ -274,8 +274,8 @@ fn String post_texture_failure(fault err, String name) @local
 	{
 		case MATERIAL_SAMPLER_UNKNOWN:
 			return string::tformat(
-				"this post shader has no sampler called '%s' — either the name is not the one the body uses, "
-					"or the body never samples it and Slang dropped it from the module",
+				"this post shader has no sampler called '%s' — the name is not one of the pass's "
+					"declared textures",
 				name
 			);
 		case MATERIAL_TEXTURE_UNKNOWN:
@@ -340,10 +340,10 @@ fn void js_set_post_texture(
  Turns a post fault into a sentence an agent can act on.
 
  `material_failure`'s three steps against the post pass's own diagnostic buffer:
- Slang's text if there is any, then whatever `post_source` refused in words, then
+ the compiler's text if there is any, then whatever `post_source` refused in words, then
  a sentence per fault for the ones that reach here with neither.
 
- The Slang text goes through verbatim because `#line` has already made its
+ The compiler's text goes through verbatim because `#line` has already made its
  coordinates the agent's own — `post:3:24` is line 3 of the body they typed.
 *>
 fn String post_failure(fault err, String diagnostic) @local
@@ -372,7 +372,7 @@ fn String post_failure(fault err, String diagnostic) @local
 		case POST_TOO_MANY_TEXTURES:
 			return string::tformat("a post pass may declare %d textures of its own", POST_TEXTURE_LIMIT);
 		case SHADER_COMPILE_FAILED:
-			return "the post shader failed to compile and Slang said nothing about why";
+			return "the post shader failed to compile and no diagnostic came back";
 		default:
 			return string::tformat("the post pass could not be built: %s", err);
 	}

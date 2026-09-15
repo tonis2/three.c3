@@ -28,7 +28,7 @@
 
  - the scene's shaders write linear floats and the `_SRGB` attachment encodes
  them, exactly as into `target.color`;
- - `prev.Sample()` in `post.slang` decodes back to linear, because a sampler
+ - `prev.Sample()` in `post.shady` decodes back to linear, because a sampler
  reads an `_SRGB` image as linear;
  - the body works in linear, the space every other shader here works in;
  - the pass writes `POST_CHAIN_FORMAT`, which is linear float and stores what it
@@ -80,7 +80,7 @@
  handful of passes, so a cache would be a map with a handful of keys in it; and
  the case a cache exists to make cheap — the same source coming back — is not the
  case a post shader is in, which is an agent editing a body and asking again. The
- compile is still cached on disk by `compile_slang_cached`.
+ compile is still cached on disk by `compile_shady_cached`.
 
  Swapping is `gpu.retire_pipeline` and nothing else: the old pipeline may be
  bound by frames still in flight.
@@ -263,7 +263,7 @@ fn usz PostPass.bytes(&self)
  Compiles a post shader and makes it the whole chain.
 
  The agent-facing contract, shaped like `MeshPass.create_material`: source,
- uniforms, and a diagnostic out-param that receives Slang's text on failure *and*
+ uniforms, and a diagnostic out-param that receives the compiler's text on failure *and*
  on success — a warning arrives with `ok == true`, and an agent who never sees a
  warning writes the same mistake twice.
 
@@ -285,14 +285,12 @@ fn usz PostPass.bytes(&self)
  @param uniforms : `Names and widths, appended to the push block after info. Reached from the body as bare names.`
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_texture per name.`
  @param assets : `Where the textures the *previous* chain held go back to. Null skips that release, which is only safe on a chain that never had any.`
- @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller. Null keeps the old behaviour of printing to stderr.`
+ @param [out] diagnostic : `The compiler's output verbatim, on failure and on warnings alike. Owned by the caller. Null keeps the old behaviour of printing to stderr.`
  @return ? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence, and it is copied into diagnostic too.`
  @return ? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
- @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more than the 112 bytes info leaves.`
- @return ? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path.`
- @return ? SHADER_COMPILE_FAILED : `Slang refused the assembled module. diagnostic has the text, with post:<line> coordinates on the agent's own lines.`
- @return ? SLANG_UNAVAILABLE : `The Slang session would not start. Nothing to do with this body.`
- @return ? PUSH_BLOCK_MISMATCH : `The module does not begin with a 16-byte info. Unreachable through post_source, and checked anyway — see MeshPipeline.init_post.`
+ @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more than the 104 bytes info leaves.`
+ @return ? SHADER_COMPILE_FAILED : `The compiler refused the module. diagnostic has the text, with post:<line> coordinates on the agent's own lines.`
+ @return ? PUSH_BLOCK_MISMATCH : `The module does not begin with a 16-byte info. Reachable from a hand-written shader, and checked anyway — see MeshPipeline.init_post.`
 *>
 fn void? PostPass.set(
 	&self,
@@ -344,12 +342,13 @@ fn void? PostPass.set(
  cycle or a dangling read with nothing sensible to bind.
 
  A body that reads `p.tap` having named nothing is *not* refused, and that
- asymmetry is deliberate. Binding 3 is declared by the template unconditionally —
- `fragmentMain` fills `p.tap` for every body, so Slang keeps the sampler whether
- or not the agent's lines mention it, and the reflected layout cannot tell the
- two apart. Rather than guess textually, the untapped case is *defined*: it binds
- image A, so `p.tap` is the rendered scene. That is what `p.scene` gives, and it
- matches the chain's existing rule for a source that is not distinct.
+ asymmetry is deliberate. Binding 3 is declared by the def unconditionally —
+ `fragmentMain` fills `p.tap` for every body, so the compiler keeps the sampler
+ whether or not the agent's lines mention it, and the reflected layout cannot
+ tell the two apart. Rather than guess textually, the untapped case is *defined*:
+ it binds image A, so `p.tap` is the rendered scene. That is what `p.scene`
+ gives, and it matches the chain's existing rule for a source that is not
+ distinct.
 
  @param tap : `Which earlier pass this one also reads, or -1 for none. Must be an index already in the chain.`
  @return `Which position in the chain this pass took. Stable until the chain is set or cleared.`
@@ -367,7 +366,8 @@ fn uint? PostPass.add(
 )
 {
 	// Before the compile, unlike the `tap`-is-unread check below, because this one
-	// needs nothing from the module and refusing early costs the caller no Slang.
+	// needs nothing from the module and refusing early costs the caller no
+	// compile.
 	if (tap < -1 || tap >= (int)self.stages.len())
 	{
 		if (diagnostic != null)
@@ -471,18 +471,15 @@ fn PostStage*? PostPass.build_stage(
 	String* diagnostic
 )
 {
-	// The refusals before Slang: they carry a sentence rather than a fault, and
-	// the caller asked for the text. Written here rather than left to
-	// `post_source` because `post_diagnostic()` is a view into a fixed buffer that
-	// the next call overwrites, and the caller's copy is not.
-	String? assembled = post_source(fragment, uniforms, mem, textures);
-	if (catch reason = assembled)
+	// The refusals before a module is generated: they carry a sentence rather than
+	// a fault, and the caller asked for the text. Copied out here rather than left
+	// to `post_diagnostic()`, which is a view into a fixed buffer the next call
+	// overwrites.
+	if (catch reason = validate_post(fragment, uniforms, textures))
 	{
 		if (diagnostic != null) *diagnostic = post_diagnostic().copy(mem);
 		return reason~;
 	}
-	String source = assembled;
-	defer source.free(mem);
 
 	self.ensure_images(gpu, target, stages)!;
 	self.ensure_tonemap(gpu, target)!;
@@ -491,15 +488,12 @@ fn PostStage*? PostPass.build_stage(
 	@pool()
 	{
 		// Through the disk cache, so the second run of a script that sets the same
-		// body pays no Slang call at all. The assembled source is the key, so live
-		// editing needs no invalidation path: a different body is a different key.
-		// The body, the declared uniforms and the declared textures ride along
-		// for the shady def, which splices the body and emits the two regions a
-		// script reads through. `source` stays for the row's other compiler: a
-		// Slang override assembles the same body into `post.slang` and ignores
-		// these. A scripted body is written in shady's spelling.
+		// body pays no compile at all. The body and its declarations are the key,
+		// so live editing needs no invalidation path: a different body is a
+		// different key. The def splices the body and emits the two regions a
+		// script reads through.
 		ShaderModule mod = compile_shader(
-			ShaderPass.POST, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..],
+			ShaderPass.POST,
 			body: fragment, uniforms: uniforms, textures: textures)!;
 		defer mod.free();
 
@@ -840,10 +834,10 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// against this pipeline's own layout.
 	// 
 	// Every write is checked against the reflected layout first, the two reserved
-	// bindings included. Slang may drop a sampler nothing reads, and a body that
-	// never touches `p.scene` gives it every reason to drop `scene`; a write to a
-	// binding the layout does not declare is a validation error. Everything from
-	// `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
+	// bindings included. The compiler may drop a sampler nothing reads, and a body
+	// that never touches `p.scene` gives it every reason to drop `scene`; a write
+	// to a binding the layout does not declare is a validation error. Everything
+	// from `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
 	SampledBindings samplers;
 	if (pipeline_declares_binding(&self.pipeline, 0)) samplers.add(0, sampled_with(io.sampler, io.prev));
 	if (pipeline_declares_binding(&self.pipeline, 1)) samplers.add(1, sampled_with(io.sampler, io.scene));
@@ -895,7 +889,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	vk::cmdPushConstants(cmd, self.pipeline.layout, self.pipeline.shader.stages, 0, push_size, &self.block);
 
 	// Three vertices, one instance, no vertex buffer and no index buffer. The
-	// triangle is `SV_VertexID` arithmetic in `shaders/post.slang`.
+	// triangle is `SV_VertexID` arithmetic in `shaders/post.shady`.
 	vk::cmdDraw(cmd, 3, 1, 0, 0);
 
 	vk::cmdEndRendering(cmd);

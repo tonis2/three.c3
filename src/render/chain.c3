@@ -188,7 +188,7 @@ struct PassIo
 	// side of a silhouette are metres apart and their average is a surface that is
 	// not there.
 	vk::Sampler depth_sampler;
-	// The camera's planes, for the linearisation in `post.slang`. Facts about the
+	// The camera's planes, for the linearisation in `post.shady`. Facts about the
 	// frame being recorded, like `extent` and `time`: a pass that read them from
 	// the camera itself could be recorded against a camera the frame was not
 	// drawn with.
@@ -423,7 +423,7 @@ const String TONEMAP_BODY = "float3 post(Post p) { return p.color; }";
  the display encode after this, exactly as it does under the identity.
 
  The matrices are three.js's, transposed: GLSL's `mat3(a, b, c)` takes columns
- and Slang's `float3x3(a, b, c)` takes rows, so every one of these is the
+ and the Slang-era `float3x3(a, b, c)` takes rows, so every one of these is the
  transpose of the literal in that file. `mul(M, v)` is then the row-times-column
  product the original wrote as `M * v`.
 
@@ -576,14 +576,15 @@ fn String tonemap_body(ToneMap mode)
 }
 
 <*
- The same three curves in shady's spelling, for the shady half of the switch.
+ The same three curves in shady's spelling, which is what the compiler is given.
 
- Two differences, and both are language rather than maths. `exposure` is a
- bare name under Slang's `#define` and `p.uniforms.exposure` under the
- generator's struct. And a matrix literal is transposed between the two:
- Slang's `float3x3(a, b, c)` fills rows, shady's fills columns, so shady reads
- the same literal with `mul(c, M)` instead of `mul(M, c)` — those two agree on
- the same components without either body transposing a value.
+ Two differences from the spelling above, and both are language rather than
+ maths. `exposure` was a bare name under the Slang-era `#define`, and it is
+ `p.uniforms.exposure` under the generator's struct. And a matrix literal is
+ transposed between the two: the old spelling's `float3x3(a, b, c)` fills rows,
+ shady's fills columns, so shady reads the same literal with `mul(c, M)` instead
+ of `mul(M, c)` — those two agree on the same components without either body
+ transposing a value.
 
  The matrix constants also move inside `post`: shady's module-level constants
  are scalars only, so a `float3x3` cannot sit above a function.
@@ -731,17 +732,16 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 	self.tonemap.pipeline = { };
 
 	ToneMap mode = self.tonemap_mode;
-	// Only the curves declare one. The identity would have Slang drop an unread
-	// uniform before reflection saw it, which is a push field that is there on one
-	// build and not on the next.
+	// Only the curves declare one. The identity would have the compiler drop an
+	// unread uniform before reflection saw it, which is a push field that is there
+	// on one build and not on the next.
 	MaterialUniform[1] uniforms = { { .name = TONEMAP_EXPOSURE, .components = 1, .rows = 1 } };
 	MaterialUniform[] declared = mode != ToneMap.NONE ? uniforms[..] : {};
 
 	@pool()
 	{
-		String source    = post_source(tonemap_body(mode), declared, tmem)!;
 		ShaderModule mod = compile_shader(
-			ShaderPass.TONEMAP, source, POST_PREAMBLE_NAME, MESH_ENTRIES[..],
+			ShaderPass.TONEMAP,
 			body: tonemap_body(mode), body_shady: tonemap_body_shady(mode), uniforms: declared)!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;

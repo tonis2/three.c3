@@ -1,8 +1,8 @@
 <*
  sRGB and linear conversion.
 
- Shaders decode per fragment on their own (`shaders/mesh.slang`,
- `shaders/material.slang`), so this file exists for the colours that never
+ Shaders decode per fragment on their own (`shaders/mesh.shady`,
+ `shaders/material.shady`), so this file exists for the colours that never
  reach one:
 
  - Clear colours. `vkCmdBeginRendering` writes them straight into an `_SRGB`

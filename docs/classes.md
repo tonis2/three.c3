@@ -566,7 +566,7 @@ The other half of the same sentence — see `roughnessMap`.
 new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, transparent, blending, opacity, roughness, metalness, reflectance })
 ```
 
-`fragment` is a Slang function `float3 shade(Surface s)` returning linear rgb.
+`fragment` is a function `float3 shade(Surface s)` returning linear rgb.
 
 `Surface` carries:
 
@@ -621,7 +621,7 @@ These are already in scope in a body:
   material. `standard(s, albedo, normal, roughness, metalness, ao)` is all three, which is a packed
   ORM map in the order it packs them:
 
-  ```slang
+  ```shady
   float3 orm = rust_orm.Sample(s.uv).rgb;
   float3 n = mapped_normal(s, rust_normal.Sample(s.uv).rgb);
   return standard(s, srgb_to_linear(rust.Sample(s.uv).rgb), n, orm.g, orm.b, orm.r);
@@ -658,7 +658,7 @@ These are already in scope in a body:
   projection into one strip of a trim sheet. `triplanar_weights(normal, sharpness)` is the blend on its
   own, for a body doing its own taps.
 
-  ```slang
+  ```shady
   float3 c = triplanar_sample(rock, s.position, s.normal, 0.5, 6.0).rgb;
   float3 n = triplanar_normal(rock_n, s.position, s.normal, 0.5, 6.0);
   return standard(s, c, n);
@@ -683,7 +683,7 @@ These are already in scope in a body:
   They work in a `vertex:` body too, unlike `mapped_normal` and `stochastic_sample`, because none of
   them reads a derivative.
 
-```slang
+```shady
 float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb);
 return s.albedo * lambert(n);
 ```
@@ -694,14 +694,14 @@ cannot see the seam of a mirrored uv island. Load the map with
 `{ colorSpace: three.LinearSRGBColorSpace }` — through the default sRGB the stored 0.5 that means "no
 tilt" arrives as 0.21, every surface leans the same way and the bumps go soft.
 
-It compiles on construction, so a bad shader throws here carrying the Slang diagnostic with the line
+It compiles on construction, so a bad shader throws here carrying the compiler's diagnostic with the line
 number you wrote. Needs a GPU device.
 
 `shade()` returns rgb and never alpha: how much of the surface shows is the material's opacity times
 this copy's `mesh.color` alpha, so a body cannot make geometry invisible by accident and a script can,
 deliberately. `discard` works in a body and is how a dissolve or a cutout is done.
 
-`vertex` is the other half: a Slang function `void displace(inout Vertex v)` that runs per vertex,
+`vertex` is the other half: a function `void displace(inout Vertex v)` that runs per vertex,
 before anything is projected. `Vertex` is the varyings — write `v.position` (world space, after the
 mesh's own transform) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
 `v.variant` to change what the fragment stage receives; `v.local` (object space), `v.index` (the
@@ -762,7 +762,7 @@ new three.LayeredMaterial({ map, normal, mask, height, bump, metalnessRoughnessM
 An ordered stack of materials blended over a base one — terrain splatting, weathering, decals.
 
 It is a ShaderMaterial whose `shade()` body is generated from the description, so everything a
-ShaderMaterial has it has, and `mat.fragment` is the Slang that was written for you — read it when a
+ShaderMaterial has it has, and `mat.fragment` is the shader source that was written for you — read it when a
 stack looks wrong.
 
 The base material is `map` plus the mesh's own base colour, exactly as without this: the layers are
@@ -898,7 +898,7 @@ stack with no layers left in it takes the same door.
 - `layers` — a view per enabled layer: `layers[i].map = tex` swaps an image, and `layers[i].tint` /
   `layers[i].opacity` read and write the ones declared animated
 - `name` — what a shed-map warning calls this material, and nothing else reads it
-- `fragment` — the generated Slang — read-only, and the thing to look at first
+- `fragment` — the generated shader source — read-only, and the thing to look at first
 - `stats` — what this stack costs, counted while the source was written:
   `{ layers, samplers, parallaxSolves, taps, sampleGradTaps }`. `taps` is texture reads per pixel,
   worst case, and is the number to compare between stacks — `three.stats()` cannot see a material

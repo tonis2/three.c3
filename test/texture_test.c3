@@ -409,7 +409,7 @@ fn void the_same_file_twice_is_one_upload_and_two_references() @test
  A material's map reaches the screen.
 
  A plane rather than the built-in triangle, because the triangle carries no uvs
- and `mesh.slang` samples only under `FLAG_HAS_UVS` — so this would pass on a
+ and `mesh.shady` reads the uv stream only under `FLAG_HAS_UVS` — so this would pass on a
  renderer that ignored the map entirely and drew the base colour, which is white.
  The checkerboard is the fixture that cannot be faked: a lost texture is flat
  white, and broken uvs are one flat sample. Neither puts magenta next to
@@ -780,7 +780,7 @@ fn void the_default_material_wears_no_texture_of_its_own() @test
 
  **The no-uv path is still reachable and is still not an error**: a glTF mesh with
  no `TEXCOORD_0` uploads with `has_uvs` false and draws its base colour, which is
- what `mesh.slang`'s branch is for. Nothing in the parametric or hull API can
+ what `mesh.shady`'s branch is for. Nothing in the parametric or hull API can
  produce one any more.
 *>
 fn void a_hull_wears_its_map() @test
@@ -1581,7 +1581,7 @@ fn void a_data_texture_takes_the_same_options() @test
 //
 // What the two gaps above were in the way of. There are no tangents on any mesh
 // here and nowhere to put them, so the frame is rebuilt per pixel from
-// derivatives — `mapped_normal` in `shaders/material.slang` — and what has to be
+// derivatives — `mapped_normal` in `shaders/material.shady` — and what has to be
 // proved is that the whole path works, not that the function compiles.
 // ============================================================================
 

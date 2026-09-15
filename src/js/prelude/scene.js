@@ -175,7 +175,7 @@ export class Scene extends Object3D {
 	// A Texture here is read as an **equirectangular** image: latitude down,
 	// longitude across, which is the projection every HDRI on the internet
 	// ships in. There is no CubeTexture in this project and
-	// `shaders/sky.slang`'s header has the argument for why one 2D image is the
+	// `shaders/sky.shady`'s header has the argument for why one 2D image is the
 	// whole feature rather than half of it.
 	//
 	// Assigning an image does not discard the colour and assigning `null` puts
@@ -361,7 +361,7 @@ export class Scene extends Object3D {
 	// - **Helpers and hidden subtrees.** The export is what the frame
 	//   shows; a `.glb` with the debug boxes baked in is a file nobody
 	//   wants. `skipped` counts them.
-	// - **ShaderMaterials.** A material here is a Slang pipeline and glTF
+	// - **ShaderMaterials.** A material here is a shader program and glTF
 	//   describes surfaces, not programs. Those meshes are in the file with
 	//   the base colour and texture their geometry carries, and `shaded`
 	//   counts how many lost a custom shader.

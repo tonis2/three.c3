@@ -816,20 +816,14 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
  something actually asks. `MeshPass.plan_shadow` is what asks, and it asks from
  the same place `ensure_static` is called from — between frames.
 
- ## A second compile, not a second program
+ ## A second module, not a second program
 
- The shady half is its own module (`shaders/shadow_cutout.shady`, carried beside
- `shadow.shady`'s pose by `shadow_cutout_def`), and the Slang half is
- `shaders/shadow.slang` compiled again with `THREE_SHADOW_CUTOUT` defined.
- Two compiles rather than one module with two programs, because reflection
- reports the *linked program*: a sampler declared anywhere in the source would
- land in the layout of the pipeline every ordinary caster shares, and a declared
- binding that nothing writes is undefined behaviour rather than an unused slot.
-
- On the Slang side the define is prepended with `#line 1` after it, so a
- diagnostic still names the line the file has; `shader/assemble.c3` solves the
- same problem the other way — it swaps a marker line for the define, keeping the
- line count. Either is fine, and the shady side has no preprocessor to feed.
+ The cut-out caster is its own module (`shaders/shadow_cutout.shady`, carried
+ beside `shadow.shady`'s pose by `shadow_cutout_def`). Two modules rather than
+ one with two programs, because reflection reports the *linked program*: a
+ sampler declared anywhere in the source would land in the layout of the
+ pipeline every ordinary caster shares, and a declared binding that nothing
+ writes is undefined behaviour rather than an unused slot.
 
  @return ? SHADER_MISSING_ENTRY_POINT : `The cut-out variant would not compile. The diagnostic is printed, for build_pipeline's reason.`
 *>
@@ -1075,7 +1069,7 @@ fn void ShadowMap.fit(
 }
 
 <*
- The four floats the frame block carries, as `shaders/mesh.slang` reads them.
+ The four floats the frame block carries, as `shaders/mesh.shady` reads them.
 
  All zero when the pass is not live, and `w` is the one that matters: the
  shader's first line is `if (params.w <= 0.0) return 1.0`, so a frame with no
