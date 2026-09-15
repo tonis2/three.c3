@@ -3,7 +3,7 @@
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::stochastic`
 
- `plan.md` §27, and `stochastic_sample` in `shaders/surface.slang` is the whole
+ `stochastic_sample` in `shaders/surface.shady` is the whole
  of the arithmetic: three taps of one image at three per-cell random offsets,
  blended by the barycentric weight of a triangular lattice over the uv.
 

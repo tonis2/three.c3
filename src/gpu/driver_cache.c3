@@ -2,7 +2,7 @@
  The other half of a shader's startup cost: the driver turning SPIR-V into a
  `VkPipeline`.
 
- `shader/disk_cache.c3` keeps the seventeen-millisecond half, the Slang compile.
+ `shader/disk_cache.c3` keeps the seventeen-millisecond half, the shader compile.
  This keeps the remaining millisecond per pipeline, by handing
  `createGraphicsPipelines` a `VkPipelineCache` warmed with the blob the driver
  produced last time.
@@ -31,7 +31,7 @@
 
  ## What it is worth here: nothing, measured
 
- On this machine, with the Slang half already warm either way:
+ On this machine, with the compile already warm either way:
 
  examples/chain.js   examples/village.js
  warm (blob on disk)       0.21 s              0.61-0.68 s
@@ -39,7 +39,7 @@
 
  Five runs and three runs; the difference is inside the noise. MoltenVK does not
  pay for pipeline creation the way a desktop driver does — it is a Metal pipeline
- built from MSL that Slang's SPIR-V has already been turned into, and the
+ built from MSL that the compiler's SPIR-V has already been turned into, and the
  expensive part of that is upstream, in the half `shader/disk_cache.c3` keeps.
 
  Kept anyway: the mechanism is where a desktop driver would need it, it is

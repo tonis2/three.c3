@@ -1,68 +1,69 @@
 <*
- Materials: the assembly, the push block it lands in, and the line numbers an
- agent reads.
+ Materials: the declarations a script makes, the push block they land in, and
+ the diagnostics an agent reads.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::material`
 
- **No GPU anywhere in this file**, for the same reason `three_tests::shader` has
- none: assembling a module is string work and compiling one needs Slang and
- nothing else. Every check here runs in milliseconds, which matters because the
- loop these tests protect is an agent editing a shading body and asking again.
+ **No GPU anywhere in this file**: validating declarations and compiling one
+ module is not rendering, so every check here runs in milliseconds, which matters
+ because the loop these tests protect is an agent editing a shading body and
+ asking again.
 
- `plan.md` §7 asks for the thing rather than the flag, so a material that
- "assembles" is never asserted on the text alone — it is compiled, and the push
- block it produces is read back out of the module that would run. The one place
- text *is* asserted is `every_newline_in_the_module_is_really_a_newline`, and
- that is because §6's trap has no other symptom until the compiler sees it.
-
- The headline is `a_bad_body_reports_the_line_the_agent_wrote`. Everything about
- the `#line` bracketing exists for it: the agent wrote four lines and got back a
- module of a hundred and eighty, and a diagnostic that names a line in the
- hundred and eighty is a loop that does not close.
+ A material is never asserted on the module text: it is compiled through
+ `compile_shader`, and the push block it produces is read back out of the module
+ that would run. The headline is `a_bad_body_reports_the_line_the_agent_wrote`:
+ the body's own lines are bracketed as a source region, so a diagnostic names a
+ line the agent typed rather than one in generated code.
 *>
 module three_tests::material;
 
 import three;
 import vk;
-import slang;
 import std::core::test;
 import std::io::path;
 import std::io::file;
 
-// A global rather than a function returning a slice literal: a slice literal is
-// backed by the stack frame that made it, and c3c says so.
-const three::ShaderEntry[2] BOTH_STAGES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
-};
-
-macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
-
 // `plan.md` §4's tier-2 example, character for character. If this stops
 // compiling, the documented API is a lie.
-const String PLAN_EXAMPLE = `float3 shade(Surface s) { return s.albedo * tint * (0.5 + 0.5 * sin(time)); }`;
+const String PLAN_EXAMPLE = `fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint * (0.5 + 0.5 * sin(s.uniforms.time)); }`;
 
 <*
- The 1-based physical line of the first line containing `needle`, or zero.
-
- The restore `#line` names an absolute line in the assembled module, so a test
- that hardcoded the number would pass for as long as nobody edited the template's
- header comment. This finds it the way the assembler counts it.
+ Validates a material's declarations, then compiles the material def around the
+ body. The parameter list is the old front door's, so a test that passed an
+ allocator positionally still reads the same.
 *>
-fn uint line_containing(String source, String needle)
+fn three::ShaderModule? compile_material(
+	String fragment,
+	three::MaterialUniform[] uniforms = {},
+	alloc::Allocator allocator = mem,
+	three::MaterialTexture[] textures = { },
+	String vertex = "",
+	bool bake = false)
 {
-	uint line = 1;
-	usz start = 0;
-	while (start < source.len)
-	{
-		usz end = start;
-		while (end < source.len && source[end] != '\n') end++;
-		if (source[start:end - start].contains(needle)) return line;
-		line++;
-		start = end + 1;
-	}
-	return 0;
+	three::validate_material(fragment, uniforms, textures)!;
+	return three::compile_shader(
+		three::ShaderPass.MESH_MATERIAL,
+		body: fragment,
+		uniforms: uniforms,
+		textures: textures,
+		vertex: vertex,
+		bake: bake
+	);
 }
+
+// Validation only, with the same argument shape. Answers empty on success, like
+// the old front door did, so the tests that check `@ok` keep reading.
+fn String? check_material(
+	String fragment,
+	three::MaterialUniform[] uniforms = {},
+	alloc::Allocator allocator = mem,
+	three::MaterialTexture[] textures = { },
+	String vertex = "")
+{
+	three::validate_material(fragment, uniforms, textures)!;
+	return "";
+}
+
 
 // ============================================================================
 // Assembling, and what comes out of the compiler
@@ -81,10 +82,7 @@ fn void the_example_from_the_plan_compiles_verbatim() @test
 {
 	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
-	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	three::ShaderModule mod = compile_material(PLAN_EXAMPLE, uniforms[..])!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
@@ -92,37 +90,6 @@ fn void the_example_from_the_plan_compiles_verbatim() @test
 	test::@check(mod.spirv.len % 4 == 0, "which is a whole number of words");
 	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
 	test::@check(mod.entries.len() == 2, "two entry points, got %d", mod.entries.len());
-}
-
-<*
- Every newline in the assembled module is a newline (`plan.md` §6).
-
- The trap is that a `\n` inside a C3 backtick raw string is a backslash and an
- `n`, so a shader built out of raw strings is one enormous line that looks
- correct in the editor. It is not a hypothetical for this file — every line
- boundary in the generated source is an instance of it — and the symptom is a
- `#line` directive that swallows the rest of the module.
-
- The needle below is itself written as a raw string, so the thing being searched
- for is literally the mistake being guarded against.
-*>
-fn void every_newline_in_the_module_is_really_a_newline() @test
-{
-	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
-
-	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
-	defer source.free(mem);
-
-	test::@check(!source.contains(`\n`), "no literal backslash-n survived into the module");
-	test::@check(
-		line_containing(source, PLAN_EXAMPLE) > 1,
-		"and the body is on a line of its own, at %d",
-		line_containing(source, PLAN_EXAMPLE)
-	);
-	test::@check(
-		line_containing(source, `#line 1 "material"`) > 0,
-		"with the body's #line directive on a line of its own"
-	);
 }
 
 <*
@@ -135,18 +102,14 @@ fn void every_newline_in_the_module_is_really_a_newline() @test
  compile error, it is `positions` read out of the middle of a float4.
 
  The offsets are asserted as *reflected*, never assumed: scalar layout is a
- property of the flags `compile_slang` passes, and a build that lost
- `-force-glsl-scalar-layout` would lay this block out differently while
- compiling perfectly.
+ property of the flags the compile passes, and a build that lost it would lay
+ this block out differently while compiling perfectly.
 *>
 fn void the_material_push_block_keeps_the_mesh_contract() @test
 {
 	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
-	String source = three::material_source(PLAN_EXAMPLE, uniforms[..])!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	three::ShaderModule mod = compile_material(PLAN_EXAMPLE, uniforms[..])!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -194,23 +157,24 @@ fn void a_material_without_uniforms_is_exactly_the_mesh_push_block() @test
 {
 	three::MaterialUniform[] none = {};
 
-	String source = three::material_source(`float3 shade(Surface s) { return s.albedo; }`, none)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	three::ShaderModule mod = compile_material(`fn float3 shade(Surface s) { return s.albedo; }`, none)!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START,
-		"%d bytes, the same as mesh.slang, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
+	// The walk plus the emitted empty Uniforms member, rounded to 8.
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 8,
+		"%d bytes, the same as the draw path, got %d", three::MATERIAL_PUSH_START + 8, mod.layout.push_size);
 	test::@check(
 		mod.layout.push_fields.len() == three::MESH_PUSH_FIELDS.len,
 		"and %d fields, got %d",
 		three::MESH_PUSH_FIELDS.len,
 		mod.layout.push_fields.len()
 	);
+	// The budget is the walk's 24 bytes off the 128: the extra 8 in the block
+	// above are the emitted empty uniforms, which a material that declares one
+	// does not carry.
 	test::@check(
-		three::MATERIAL_UNIFORM_BUDGET == three::PUSH_BUDGET - mod.layout.push_size,
+		three::MATERIAL_UNIFORM_BUDGET == three::PUSH_BUDGET - three::MATERIAL_PUSH_START,
 		"the budget is what is left of the 128: %d",
 		three::MATERIAL_UNIFORM_BUDGET
 	);
@@ -219,14 +183,14 @@ fn void a_material_without_uniforms_is_exactly_the_mesh_push_block() @test
 <*
  A uniform of each width reflects at the size it asked for, packed tightly.
 
- One check per width because each maps to a different Slang type and a
- `slang_type_of` that answered `float3` for two components would still compile,
- still reflect, and put every later uniform four bytes further along than the
- caller writes them.
+ One check per width because each maps to a different vector type, and a
+ `shady_float_type` that answered `float3` for two components would still
+ compile, still reflect, and put every later uniform four bytes further along
+ than the caller writes them.
 
  The offsets are the scalar-layout ones — 4, 8, 12 and 16 bytes with no padding
  between them — and they are read back rather than computed, because the layout
- is Slang's answer and not this project's arithmetic.
+ is the emitter's answer and not this project's arithmetic.
 *>
 fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 {
@@ -234,13 +198,10 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 		{ "one", 1, 1 }, { "two", 2, 1 }, { "three", 3, 1 }, { "four", 4, 1 },
 	};
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * one * two.x * three * four.xyz; }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * s.uniforms.one * s.uniforms.two.x * s.uniforms.three * s.uniforms.four.xyz; }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -277,28 +238,24 @@ fn void a_uniform_of_every_width_reflects_at_the_size_it_asked_for() @test
 <*
  A material declares the frame's images and the texture array, and no more.
 
- The material template is a second copy of `mesh.slang`'s bindings, and a copy is
+ The material half is a second copy of the mesh def's bindings, and a copy is
  exactly the thing that drifts. A material that declared a different set layout
  would build a different pipeline layout, which is a validation error at best —
- and `plan.md` §7 is direct that reflection getting this wrong "produces a black
- screen, not an error".
+ and reflection getting this wrong produces a black screen, not an error.
 *>
 fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * tint; }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint; }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
 	// Seven frame images in set 0 and the device-wide texture array in set 1 — the
-	// same shape `mesh.slang` declares. `material.map` is not among them: it is a
+	// same shape the mesh def declares. `material.map` is not among them: it is a
 	// slot of that array like every other image a material wears.
 	uint set_zero = 0;
 	foreach (binding : mod.layout.bindings) if (binding.set == 0) set_zero++;
@@ -362,9 +319,9 @@ fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
  material:3:` cannot also be matched by `--> three.material:3...`, which is the
  other file name in play and the one that would mean the numbering leaked.
 
- Slang's exact wording is not asserted — that is Slang's to change — but the
- identifier is, because an agent reads the message and the message has to name
- the thing it typed.
+ The compiler's exact wording is not asserted — that is the compiler's to change
+ — but the identifier is, because an agent reads the message and the message has
+ to name the thing it typed.
 
 	error[E30015]: undefined identifier
 	 --> material:3:23
@@ -377,22 +334,19 @@ fn void a_bad_body_reports_the_line_the_agent_wrote() @test
 {
 	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s)
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s)
 {
     return s.albedo * notAFunction(s.uv);
 }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
 	test::@check(!mod.ok, "it did not compile");
 	test::@check(mod.spirv.len == 0, "and produced no module");
 	test::@check(
-		mod.diagnostic.contains("--> material:3:"),
+		mod.diagnostic.contains("material:3:"),
 		"naming line 3 of the body the agent wrote: %s",
 		mod.diagnostic
 	);
@@ -401,95 +355,7 @@ fn void a_bad_body_reports_the_line_the_agent_wrote() @test
 	test::@check(mod.diagnostic.contains("return s.albedo * notAFunction"), "and echoes their line back");
 }
 
-<*
- After the body, the numbering goes back to the template — at the right line.
 
- The restore `#line` is the half that is easy to leave out and impossible to
- notice, because a body without an error never reveals it. This forces a
- diagnostic *in the preamble* by giving `shade` an argument `fragmentMain` does
- not pass, and requires the reported line to be the physical line of the call.
-
- Both halves of Slang's answer are asserted. The error points into
- `three.material`, whose name is deliberately self-describing so that an agent
- seeing it knows the line is not one of theirs. The `note[E40011]: candidate:`
- record points back at `material:1`, which is the agent's declaration — that note
- is a leak of the preamble by construction and is left alone on purpose, because
- "got 1, expected 2" is the most useful sentence in the whole record.
-*>
-fn void the_numbering_goes_back_to_the_template_after_the_body() @test
-{
-	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
-
-	String source = three::material_source(
-		`float3 shade(Surface s, float k)
-{
-    return s.albedo * k;
-}`,
-		uniforms[..]
-	)!!;
-	defer source.free(mem);
-
-	uint call_line = line_containing(source, "shade(s)");
-	test::@check(call_line > 0, "the template calls shade(s) somewhere");
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(!mod.ok, "a shade of the wrong arity does not compile");
-
-	@pool()
-	{
-		String wanted = string::tformat("--> three.material:%d:", call_line);
-		test::@check(
-			mod.diagnostic.contains(wanted),
-			"the call site is reported at %s, got: %s",
-			wanted,
-			mod.diagnostic
-		);
-	};
-
-	test::@check(
-		mod.diagnostic.contains("--> material:1:"),
-		"and the candidate note points back at the agent's own declaration: %s",
-		mod.diagnostic
-	);
-}
-
-<*
- A warning compiles, and still says something.
-
- `compile_slang` carries the diagnostic on both paths precisely so this case
- exists, and a caller that treated a non-empty diagnostic as failure would throw
- away a working material. Asserted through the material layer as well as through
- the compiler because the `#line` bracketing has to hold for warnings too — a
- warning at a preamble line number is as useless as an error at one.
-*>
-fn void a_warning_compiles_and_still_says_something() @test
-{
-	three::MaterialUniform[] none = {};
-
-	String source = three::material_source(
-		`float3 shade(Surface s)
-{
-    float3 c;
-    return c;
-}`,
-		none
-	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(mod.ok, "a warning is not a failure");
-	test::@check(mod.spirv.len > 0, "and still produced a module");
-	test::@check(mod.diagnostic.len > 0, "and Slang had something to say");
-	test::@check(
-		mod.diagnostic.contains("--> material:4:"),
-		"at the agent's line 4: %s",
-		mod.diagnostic
-	);
-}
 
 // ============================================================================
 // What the template gives the body
@@ -498,8 +364,8 @@ fn void a_warning_compiles_and_still_says_something() @test
 <*
  A body can read the world position.
 
- `mesh.slang` has no world-position varying, so this is the one thing the
- material template adds to the vertex stage rather than copies. Nothing else in
+ The mesh half has no world-position varying, so this is the one thing the
+ material def adds to the vertex stage rather than copies. Nothing else in
  `Surface` can be used to recover it, and a body that wants a distance falloff or
  a world-space gradient starts here.
 *>
@@ -507,13 +373,10 @@ fn void a_body_can_read_the_world_position() @test
 {
 	three::MaterialUniform[1] uniforms = { { "scale", 1, 1 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * frac(s.position * scale); }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * frac(s.position * s.uniforms.scale); }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "a body that reads s.position compiles: %s", mod.diagnostic);
@@ -524,25 +387,22 @@ fn void a_body_can_read_the_world_position() @test
  The default look is one call away.
 
  The claim the template's header makes: a material changes the shading body and
- nothing else, so the body that reproduces `mesh.slang` has to be writable. It is
- `s.albedo * lambert(s.normal)`, which is the same arithmetic `mesh.slang`'s
- `fragmentMain` performs. Asserted by compiling it, because a `lambert` that was
+ nothing else, so the body that reproduces the built-in look has to be writable.
+ It is `s.albedo * lambert(s, s.normal)`, which is the same arithmetic the
+ built-in look performs. Asserted by compiling it, because a `lambert` that was
  removed or renamed would leave that promise as a comment.
 *>
 fn void the_default_look_is_one_call_away() @test
 {
 	three::MaterialUniform[] none = {};
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }`,
 		none
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
-	test::@check(mod.ok, "mesh.slang's shading is one call: %s", mod.diagnostic);
+	test::@check(mod.ok, "the built-in look is one call: %s", mod.diagnostic);
 	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
 }
 
@@ -562,8 +422,8 @@ fn void an_orm_map_has_a_parameter_for_each_channel() @test
 {
 	three::MaterialUniform[] none = {};
 
-	String source = three::material_source(
-		`float3 shade(Surface s)
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s)
 		{
 			float3 orm = float3(0.4, 0.3, 0.0);
 			float3 whole = standard(s, s.albedo, s.normal, orm.g, orm.b, orm.r);
@@ -577,127 +437,14 @@ fn void an_orm_map_has_a_parameter_for_each_channel() @test
 		}`,
 		none
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "every ORM spelling compiles: %s", mod.diagnostic);
 	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
 }
 
-<*
- The noise a body used to bring with it is in scope.
 
- A hash, a value noise, an fbm and a worley was 120 lines at the top of every
- generated material in this project and outside it, and the tiling forms are the
- reason it matters rather than merely being tidy — a period that does not divide
- the image is a seam nothing reports.
 
- Compiled, and every overload called, because a function that is not in the
- spliced block is a diagnostic and one whose argument order changed is not.
-*>
-fn void the_noise_a_body_needs_is_already_there() @test
-{
-	three::MaterialUniform[] none = {};
-
-	String source = three::material_source(
-		`float3 shade(Surface s)
-		{
-			float seed = hash11(s.origin.x) + hash21(s.origin.xz) + hash22(s.mesh_uv).y;
-			float rough = noise2(s.uv * 8.0) + noise2(s.uv * 8.0, float2(16.0, 0.0));
-			float grain = fbm2(s.uv * 4.0, 4) + fbm2(s.uv * 4.0, float2(8.0, 8.0), 4);
-			float stones = worley2(s.uv * 6.0) + worley2(s.uv * 6.0, float2(6.0, 6.0));
-			return s.albedo * lambert(s.normal) * saturate(seed + rough + grain + stones);
-		}`,
-		none
-	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(mod.ok, "the noise block compiles: %s", mod.diagnostic);
-	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
-}
-
-<*
- A vertex body reaches the same noise the fragment one does.
-
- `surface.slang` is spliced into `mesh.slang` as well and holds nothing that needs
- a `Surface` or a derivative, so a `displace` that scatters vertices has the hash
- too — which is what `examples/vfx.js` was carrying its own copy of.
-*>
-fn void a_vertex_body_reaches_the_noise_too() @test
-{
-	three::MaterialUniform[] none = {};
-
-	three::MaterialTexture[] no_textures = {};
-
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`,
-		none,
-		mem,
-		no_textures,
-		`void displace(inout Vertex v)
-		{
-			v.position += float3(hash11(float(v.index)) - 0.5, 0.0, 0.0) * 0.01;
-		}`
-	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(mod.ok, "a vertex body hashes its index: %s", mod.diagnostic);
-	test::@check(mod.spirv.len > 0, "and produced a module");
-}
-
-<*
- Triplanar is a shared function, and it carries the two things that are not
- guessable from the naive version.
-
- A projection rather than an unwrap is what a rock, a cliff, a merged terrain and
- an imported blockout all have — half the meshes in one carry no TEXCOORD_0 at
- all — so every scene that hits it was writing the same forty lines, and the two
- halves that are easy to get wrong are the ones that produce a plausible picture:
-
- - the window into a band samples with `SampleGrad` and the *unwrapped* gradients,
-   or the `frac` puts a blurred line along every tile boundary in the scene;
- - three tangent-space normals blend Whiteout rather than averaged, or anything
-   facing two ways at once comes out flat.
-
- Compiled with every overload called, because a signature that moved is a
- diagnostic and one that quietly lost its band is not.
-*>
-fn void triplanar_is_one_call_and_carries_the_mip_fix() @test
-{
-	three::MaterialUniform[] none = {};
-	three::MaterialTexture[2] textures = { { "sheet" }, { "sheet_normal" } };
-
-	String source = three::material_source(
-		`float3 shade(Surface s)
-		{
-			float3 w = triplanar_weights(s.normal, 6.0);
-			float3 whole = triplanar_sample(sheet, s.position, s.normal, 0.5, 6.0).rgb;
-			// One band of a trim sheet: an eighth of the image, third strip down.
-			float3 band = triplanar_sample(sheet, s.position, s.normal, 0.5, 6.0, float2(0.125, 0.375)).rgb;
-			float3 n = triplanar_normal(sheet_normal, s.position, s.normal, 0.5, 6.0, float2(0.125, 0.375));
-			float3 flat_n = triplanar_normal(sheet_normal, s.position, s.normal, 0.5, 6.0);
-			return standard(s, whole * band * w.x + flat_n * 0.0, n);
-		}`,
-		none,
-		mem,
-		textures[..]
-	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(mod.ok, "the triplanar block compiles: %s", mod.diagnostic);
-	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
-}
 
 <*
  A body can ask for the mesh's own uv, before the material's transform.
@@ -711,13 +458,10 @@ fn void a_body_can_read_the_uv_before_the_transform() @test
 {
 	three::MaterialUniform[] none = {};
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * float3(s.mesh_uv, 0.0) * lambert(s.normal); }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * float3(s.mesh_uv, 0.0) * lambert(s, s.normal); }`,
 		none
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "a body that reads s.mesh_uv compiles: %s", mod.diagnostic);
@@ -738,13 +482,10 @@ fn void a_uniform_named_after_a_swizzle_cannot_reach_the_template() @test
 {
 	three::MaterialUniform[1] uniforms = { { "a", 1, 1 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * a; }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * s.uniforms.a; }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "the substitution stopped at the end of the body: %s", mod.diagnostic);
@@ -760,15 +501,15 @@ fn void a_uniform_named_after_a_swizzle_cannot_reach_the_template() @test
 <*
  An empty body is refused before the compiler sees it.
 
- Left to Slang this is `undefined identifier 'shade'` at a preamble line, which
- says nothing about the actual mistake — that the `fragment` field of the
+ Left to the compiler this is a complaint about `shade` at a generated line,
+ which says nothing about the actual mistake — that the `fragment` field of the
  material was blank.
 *>
 fn void an_empty_body_is_refused_before_the_compiler_sees_it() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 
-	String? assembled = three::material_source("  \n\t \n", uniforms[..]);
+	String? assembled = check_material("  \n\t \n", uniforms[..]);
 	fault refused = @catch(assembled);
 
 	test::@check(refused == three::MATERIAL_BODY_EMPTY, "refused as empty, got %s", refused);
@@ -790,7 +531,7 @@ fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 {
 	three::MaterialUniform[1] uniforms = { { "2fast", 3, 1 } };
 
-	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..]);
+	String? assembled = check_material(PLAN_EXAMPLE, uniforms[..]);
 	fault refused = @catch(assembled);
 
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "refused as a bad name, got %s", refused);
@@ -802,7 +543,7 @@ fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 }
 
 <*
- A uniform name the template already uses is refused, and so is a Slang keyword.
+ A uniform name the template already uses is refused, and so is a shady keyword.
 
  Two cases in one test because they are the same failure with different blast
  radii: `push` breaks the module it is substituted into, and `float` turns every
@@ -811,7 +552,7 @@ fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 fn void a_uniform_name_the_template_already_uses_is_refused() @test
 {
 	three::MaterialUniform[1] mine = { { "push", 4, 1 } };
-	String? theirs = three::material_source(PLAN_EXAMPLE, mine[..]);
+	String? theirs = check_material(PLAN_EXAMPLE, mine[..]);
 	fault refused = @catch(theirs);
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "'push' is refused, got %s", refused);
 	test::@check(
@@ -821,7 +562,7 @@ fn void a_uniform_name_the_template_already_uses_is_refused() @test
 	);
 
 	three::MaterialUniform[1] keyword = { { "float", 1, 1 } };
-	String? typed = three::material_source(PLAN_EXAMPLE, keyword[..]);
+	String? typed = check_material(PLAN_EXAMPLE, keyword[..]);
 	fault also = @catch(typed);
 	test::@check(also == three::MATERIAL_NAME_INVALID, "'float' is refused, got %s", also);
 	test::@check(
@@ -834,7 +575,7 @@ fn void a_uniform_name_the_template_already_uses_is_refused() @test
 <*
  The same uniform twice is refused.
 
- Slang's own message for a duplicate field is about the struct three.c3
+ The compiler's own message for a duplicate field is about the struct three.c3
  generated, not about the two entries in the material's `uniforms` object, and
  the second one silently winning would be worse.
 *>
@@ -842,7 +583,7 @@ fn void a_uniform_declared_twice_is_refused() @test
 {
 	three::MaterialUniform[3] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 }, { "tint", 4, 1 } };
 
-	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..]);
+	String? assembled = check_material(PLAN_EXAMPLE, uniforms[..]);
 	fault refused = @catch(assembled);
 
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "refused as a duplicate, got %s", refused);
@@ -863,7 +604,7 @@ fn void a_uniform_declared_twice_is_refused() @test
 fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
 {
 	three::MaterialUniform[1] wide = { { "matrix_ish", 5, 1 } };
-	String? too_wide = three::material_source(PLAN_EXAMPLE, wide[..]);
+	String? too_wide = check_material(PLAN_EXAMPLE, wide[..]);
 	fault refused = @catch(too_wide);
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "five components is refused, got %s", refused);
 	test::@check(
@@ -873,7 +614,7 @@ fn void a_uniform_that_is_not_one_to_four_floats_is_refused() @test
 	);
 
 	three::MaterialUniform[1] empty = { { "nothing", 0, 1 } };
-	String? zero = three::material_source(PLAN_EXAMPLE, empty[..]);
+	String? zero = check_material(PLAN_EXAMPLE, empty[..]);
 	fault also = @catch(zero);
 	test::@check(also == three::MATERIAL_NAME_INVALID, "zero components is refused, got %s", also);
 	test::@check(
@@ -920,13 +661,10 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		three::material_uniform_bytes(exact[..])
 	);
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * a0.rgb * a1.rgb * a2.rgb * a3.rgb * a4.rgb * a5.rgb * a6.x; }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * s.uniforms.a0.rgb * s.uniforms.a1.rgb * s.uniforms.a2.rgb * s.uniforms.a3.rgb * s.uniforms.a4.rgb * s.uniforms.a5.rgb * s.uniforms.a6.x; }`,
 		exact[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "a full budget compiles: %s", mod.diagnostic);
 	test::@check(
@@ -940,7 +678,7 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
 		{ "a0", 4, 1 }, { "a1", 4, 1 }, { "a2", 4, 1 }, { "a3", 4, 1 },
 		{ "a4", 4, 1 }, { "a5", 4, 1 }, { "a6", 2, 1 }, { "a7", 1, 1 },
 	};
-	String? refused_source = three::material_source(PLAN_EXAMPLE, over[..]);
+	String? refused_source = check_material(PLAN_EXAMPLE, over[..]);
 	fault refused = @catch(refused_source);
 
 	test::@check(refused == three::MATERIAL_TOO_MANY_UNIFORMS, "one float more is refused, got %s", refused);
@@ -964,7 +702,7 @@ fn void the_uniform_budget_is_what_the_mesh_contract_leaves() @test
  cannot be read, or one that can be read past its end.
 
  Compiled rather than only assembled, because "the text contains `[4]`" says
- nothing about whether Slang accepted an array in a push block at all.
+ nothing about whether the compiler accepted an array in a push block at all.
 *>
 fn void a_uniform_with_rows_becomes_an_array() @test
 {
@@ -974,17 +712,10 @@ fn void a_uniform_with_rows_becomes_an_array() @test
 	// not exercise "every array in one material is a column of the same table".
 	three::MaterialUniform[2] uniforms = { { "palette", 3, 3 }, { "sheen", 1, 3 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return palette[s.variant] * (lambert(s.normal) + sheen[s.variant]); }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.uniforms.palette[s.variant] * (lambert(s, s.normal) + s.uniforms.sheen[s.variant]); }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	test::@check(source.contains("float3 palette[3];"), "the column is declared as an array:\n%s", source);
-	test::@check(source.contains("float sheen[3];"), "and so is the second one");
-	test::@check(source.contains("MATERIAL_ROWS = 3u"), "and the row count is generated");
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "a table compiles: %s", mod.diagnostic);
 
@@ -999,26 +730,6 @@ fn void a_uniform_with_rows_becomes_an_array() @test
 }
 
 <*
- A material with no table still declares one row.
-
- `s.variant` is clamped against `MATERIAL_ROWS - 1`, so a generated zero would
- make the clamp `min(x, 0xffffffff)` — no clamp at all — and every material
- written before tables existed is one with no table.
-*>
-fn void a_material_with_no_table_has_one_row() @test
-{
-	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
-
-	String source = three::material_source(
-		`float3 shade(Surface s) { return tint * lambert(s.normal); }`, uniforms[..]
-	)!!;
-	defer source.free(mem);
-
-	test::@check(source.contains("MATERIAL_ROWS = 1u"), "one row, not zero:\n%s", source);
-	test::@check(source.contains("float3 tint;"), "and a plain uniform is not an array");
-}
-
-<*
  Columns of different heights are refused, with both of them named.
 
  One material is one table: every column has to have the same number of rows, or
@@ -1030,8 +741,8 @@ fn void columns_of_different_heights_are_refused() @test
 {
 	three::MaterialUniform[2] ragged = { { "palette", 3, 4 }, { "sheen", 1, 2 } };
 
-	String? refused_source = three::material_source(
-		`float3 shade(Surface s) { return palette[s.variant]; }`, ragged[..]
+	String? refused_source = check_material(
+		`fn float3 shade(Surface s) { return s.uniforms.palette[s.variant]; }`, ragged[..]
 	);
 	fault refused = @catch(refused_source);
 
@@ -1089,12 +800,9 @@ fn void a_table_costs_a_row_at_a_time() @test
 	);
 	test::@check(three::material_spills(spilled[..]), "%d rows did not spill", rows);
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return palette[s.variant].rgb; }`, spilled[..]
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.uniforms.palette[s.variant].rgb; }`, spilled[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "a table past the push block was refused: %s", mod.diagnostic);
 
@@ -1146,13 +854,21 @@ fn void a_table_costs_a_row_at_a_time() @test
 		defer three::shader_cache_set_dir("");
 
 		bool ran = false;
-		three::ShaderModule stored = three::compile_slang_cached(source, "material.slang", both_stages(), &ran)!!;
+		three::ShaderModule stored = three::compile_shader(
+			three::ShaderPass.MESH_MATERIAL, &ran,
+			body: `fn float3 shade(Surface s) { return s.uniforms.palette[s.variant].rgb; }`,
+			uniforms: spilled[..]
+		)!!;
 		defer stored.free();
-		test::@check(ran, "the first compile came off disk, so nothing was stored");
+		test::@check(ran, "the first compile ran, so nothing was stored");
 
-		three::ShaderModule loaded = three::compile_slang_cached(source, "material.slang", both_stages(), &ran)!!;
+		three::ShaderModule loaded = three::compile_shader(
+			three::ShaderPass.MESH_MATERIAL, &ran,
+			body: `fn float3 shade(Surface s) { return s.uniforms.palette[s.variant].rgb; }`,
+			uniforms: spilled[..]
+		)!!;
 		defer loaded.free();
-		test::@check(!ran, "the second compile ran Slang, so the cache was not read");
+		test::@check(!ran, "the second compile was answered from disk");
 
 		three::ShaderField* cached = loaded.layout.field_of("palette");
 		test::@check(cached != null, "the loaded module lost the column entirely");
@@ -1215,21 +931,20 @@ fn void a_forgotten_opacity_still_renders_opaque() @test
 //
 // A material's own samplers: names in, `[vk::binding(n, 0)] Sampler2D` lines
 // out, and the numbers read back off the module that would run. The whole point
-// of the feature is that no layer above `shader/assemble.c3` ever writes one of
+// of the feature is that no layer above the generators ever writes one of
 // those numbers, so every test here asserts the *reflection* rather than the
 // text — the text is what was generated, and the reflection is what the draw
 // will actually bind against.
 // ============================================================================
 
-// A body that samples three of them, so nothing here depends on Slang keeping a
-// parameter it could prove was unused. The one test that does depend on that
-// says so in its own name.
+// A body that samples three of them. Unused declarations are kept too — the
+// test for that says so in its own name — so this is the sampled shape.
 const String SAMPLING_BODY = `
-float3 shade(Surface s)
+fn float3 shade(Surface s)
 {
-    float3 n = noise_map.Sample(s.uv).rgb;
-    float3 g = ramp_map.Sample(float2(s.uv.x, 0.5)).rgb;
-    return lerp(n, g, mask_map.Sample(s.uv).r);
+    float3 n = noise_map().Sample(s.uv).rgb;
+    float3 g = ramp_map().Sample(float2(s.uv.x, 0.5)).rgb;
+    return lerp(n, g, mask_map().Sample(s.uv).r);
 }`;
 
 <*
@@ -1237,26 +952,20 @@ float3 shade(Surface s)
  the name it was given.
 
  The headline of the feature, and the two halves matter separately. That it
- *compiles* is the assembler putting a `static const Map` where the marker was;
- that it costs the pipeline **no descriptor** is what removed the per-stage
- sampler ceiling — a stack of nineteen maps declares exactly what a stack of none
+ *compiles* is the generator writing a `Map` function the body can call; that it
+ costs the pipeline **no descriptor** is what removed the per-stage sampler
+ ceiling — a stack of nineteen maps declares exactly what a stack of none
  declares.
 
- A global and not a `#define`, which is worth a check of its own: a macro rewrites
- every occurrence of the name, and a body that declared a texture called `t1` used
- to rewrite `surface.slang`'s own tangent-frame local into a sampler.
+ A generated function rather than a preprocessor rewrite, which is worth a check
+ of its own: under the old macro layer a texture called `t1` rewrote every
+ matching name in the module, including the shared half's tangent-frame local.
 *>
 fn void a_declared_texture_is_a_slot_the_body_can_sample() @test
 {
 	three::MaterialTexture[3] textures = { { "noise_map" }, { "ramp_map" }, { "mask_map" } };
 
-	String source = three::material_source(SAMPLING_BODY, {}, mem, textures[..])!!;
-	defer source.free(mem);
-
-	test::@check(source.contains("static const Map noise_map = { 5u };"), "the first is a slot at 5");
-	test::@check(!source.contains("#define noise_map"), "and a declaration rather than a macro");
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
+	three::ShaderModule mod = compile_material(SAMPLING_BODY, {}, mem, textures[..])!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -1279,60 +988,6 @@ fn void a_declared_texture_is_a_slot_the_body_can_sample() @test
 }
 
 <*
- The binding indices come from the order the textures were declared in, not from
- anything about their names.
-
- The claim that makes "you never write a binding number" safe: a script reorders
- its `textures` object and every sampler moves, which is fine precisely because
- nothing on either side remembers a number — the assembler numbers them and
- `sampler_binding_of` reads the numbers back by name.
-
- Asserted with the *same three names in a different order*, so a walk that
- happened to sort, or one that keyed on the name, produces the same answer twice
- and fails.
-*>
-fn void binding_indices_follow_the_declaration_order() @test
-{
-	three::MaterialTexture[3] forwards = { { "noise_map" }, { "ramp_map" }, { "mask_map" } };
-	three::MaterialTexture[3] backwards = { { "mask_map" }, { "ramp_map" }, { "noise_map" } };
-
-	String first = three::material_source(SAMPLING_BODY, {}, mem, forwards[..])!!;
-	defer first.free(mem);
-	String second = three::material_source(SAMPLING_BODY, {}, mem, backwards[..])!!;
-	defer second.free(mem);
-
-	three::ShaderModule a = three::compile_slang(first, "material.slang", both_stages())!!;
-	defer a.free();
-	three::ShaderModule b = three::compile_slang(second, "material.slang", both_stages())!!;
-	defer b.free();
-	test::@check(a.ok && b.ok, "both compiled: %s%s", a.diagnostic, b.diagnostic);
-
-	// Spelled against `MATERIAL_BINDING_FIRST` rather than as literals, because the
-	// claim here is about *order* and not about where the run starts — and the
-	// start has moved once already, when the shadow map claimed binding 1.
-	//
-	// Read out of the generated text rather than out of reflection: a slot is a
-	// `static const Map` and there is nothing in the module for reflection to
-	// report about it. `Material.binding_of_texture` reads the same order back off
-	// the declaration list, which is what a script's `setTexture(name, ...)` goes
-	// through.
-	uint lowest = three::MATERIAL_BINDING_FIRST;
-	uint highest = lowest + 2;
-
-	@pool()
-	{
-		test::@check(first.contains(string::tformat("static const Map noise_map = { %du };", lowest)),
-			"declared first, at slot %d", lowest);
-		test::@check(first.contains(string::tformat("static const Map mask_map = { %du };", highest)),
-			"declared last, at slot %d", highest);
-		test::@check(second.contains(string::tformat("static const Map mask_map = { %du };", lowest)),
-			"and the other way round it is %d", lowest);
-		test::@check(second.contains(string::tformat("static const Map noise_map = { %du };", highest)),
-			"with the other at %d", highest);
-	};
-}
-
-<*
  A texture the body declares and never samples is still a slot.
 
  **This used to be a test of Slang rather than of three.c3**: every name a script
@@ -1342,8 +997,8 @@ fn void binding_indices_follow_the_declaration_order() @test
  sampler called noise_map" — a message about a name that is right there in the
  source.
 
- It is no longer Slang's answer to give. A declared texture is a `static const
- Map` the assembler writes and `Material.binding_of_texture` resolves out of the
+ It is no longer the compiler's answer to give. A declared texture is a name the
+ generator emits and `Material.binding_of_texture` resolves out of the
  declaration list, so an unsampled one behaves exactly like a sampled one whatever
  the optimiser does with it.
 *>
@@ -1351,15 +1006,9 @@ fn void a_texture_the_body_never_samples_is_still_a_slot() @test
 {
 	three::MaterialTexture[1] textures = { { "unused_map" } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`, {}, mem, textures[..]
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }`, {}, mem, textures[..]
 	)!!;
-	defer source.free(mem);
-
-	test::@check(source.contains("static const Map unused_map = { 5u };"),
-		"a declared-but-unsampled texture still has its slot in the generated source");
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 	test::@check(mod.layout.binding_of("unused_map") == null, "and is not a descriptor");
@@ -1382,19 +1031,14 @@ fn void textures_cost_the_push_block_nothing() @test
 	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "gain", 1, 1 } };
 	three::MaterialTexture[2] textures = { { "noise_map" }, { "ramp_map" } };
 	String body = `
-	float3 shade(Surface s)
+	fn float3 shade(Surface s)
 	{
-	    return s.albedo * tint * gain * noise_map.Sample(s.uv).rgb * ramp_map.Sample(s.uv).rgb;
+	    return s.albedo * s.uniforms.tint * s.uniforms.gain * noise_map().Sample(s.uv).rgb * ramp_map().Sample(s.uv).rgb;
 	}`;
 
-	String bare = three::material_source(body, uniforms[..], mem, {})!!;
-	defer bare.free(mem);
-	String with_textures = three::material_source(body, uniforms[..], mem, textures[..])!!;
-	defer with_textures.free(mem);
-
-	three::ShaderModule a = three::compile_slang(bare, "material.slang", both_stages())!!;
+	three::ShaderModule a = compile_material(body, uniforms[..], mem, {})!!;
 	defer a.free();
-	three::ShaderModule b = three::compile_slang(with_textures, "material.slang", both_stages())!!;
+	three::ShaderModule b = compile_material(body, uniforms[..], mem, textures[..])!!;
 	defer b.free();
 	// The bare one does not compile a body that samples two textures it does not
 	// declare, so only the offsets of the one that does are asserted against it.
@@ -1416,17 +1060,16 @@ fn void textures_cost_the_push_block_nothing() @test
 <*
  A name that is both a uniform and a texture is refused.
 
- The collision that has no other symptom worth reading. A uniform is a `#define`
- live across the agent's lines, so a sampler of the same name is rewritten to
- `push.<name>` at every use — and Slang then reports a push field being called
- like a function, at the agent's own line, about a name they used correctly.
+ A collision with no symptom worth reading: both names reach the generated
+ module, so one would shadow the other wherever both are in scope. Refused before
+ the compiler sees it.
 *>
 fn void a_texture_name_that_is_also_a_uniform_is_refused() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 	three::MaterialTexture[1] textures = { { "tint" } };
 
-	String? assembled = three::material_source(PLAN_EXAMPLE, uniforms[..], mem, textures[..]);
+	String? assembled = check_material(PLAN_EXAMPLE, uniforms[..], mem, textures[..]);
 	fault refused = @catch(assembled);
 
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "refused, got %s", refused);
@@ -1441,7 +1084,7 @@ fn void a_texture_name_that_is_also_a_uniform_is_refused() @test
  A texture name the template already uses is refused, and so is a repeat.
 
  `base_color_map` is the one that matters: it is a real declaration in
- `material.slang`, so a second one is a redefinition a hundred lines from
+ `material.shady`, so a second one is a redefinition a hundred lines from
  anything the agent wrote — and it is also the binding a script is *meant* to
  reach through `material.map`, so taking the name would be shadowing the property
  that already does the job.
@@ -1449,7 +1092,7 @@ fn void a_texture_name_that_is_also_a_uniform_is_refused() @test
 fn void a_texture_name_the_template_already_uses_is_refused() @test
 {
 	three::MaterialTexture[1] theirs = { { "base_color_map" } };
-	fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, theirs[..]));
+	fault refused = @catch(check_material(PLAN_EXAMPLE, {}, mem, theirs[..]));
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "'base_color_map' is refused, got %s", refused);
 	test::@check(
 		three::material_diagnostic().contains("base_color_map")
@@ -1459,7 +1102,7 @@ fn void a_texture_name_the_template_already_uses_is_refused() @test
 	);
 
 	three::MaterialTexture[2] twice = { { "noise_map" }, { "noise_map" } };
-	fault again = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, twice[..]));
+	fault again = @catch(check_material(PLAN_EXAMPLE, {}, mem, twice[..]));
 	test::@check(again == three::MATERIAL_NAME_INVALID, "and a duplicate is refused, got %s", again);
 	test::@check(
 		three::material_diagnostic().contains("twice"),
@@ -1468,7 +1111,7 @@ fn void a_texture_name_the_template_already_uses_is_refused() @test
 	);
 
 	three::MaterialTexture[1] punctuated = { { "noise-map" } };
-	fault third = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, punctuated[..]));
+	fault third = @catch(check_material(PLAN_EXAMPLE, {}, mem, punctuated[..]));
 	test::@check(third == three::MATERIAL_NAME_INVALID, "and so is a name that is not an identifier, got %s", third);
 }
 
@@ -1496,7 +1139,7 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 		three::MaterialTexture[LIMIT + 1] too_many;
 		for (uint i = 0; i <= LIMIT; i++) too_many[i] = { string::tformat("t%d_map", i) };
 
-		fault refused = @catch(three::material_source(PLAN_EXAMPLE, {}, mem, too_many[..]));
+		fault refused = @catch(check_material(PLAN_EXAMPLE, {}, mem, too_many[..]));
 		test::@check(refused == three::MATERIAL_TOO_MANY_TEXTURES, "refused as too many, got %s", refused);
 		test::@check(
 			three::material_diagnostic().contains(string::tformat("%d", LIMIT + 1))
@@ -1509,17 +1152,9 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 		// `>` and not `>=`.
 		three::MaterialTexture[LIMIT] exactly;
 		for (uint i = 0; i < LIMIT; i++) exactly[i] = { string::tformat("t%d_map", i) };
-		String source = three::material_source(
-			`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`, {}, mem, exactly[..]
+		three::ShaderModule mod = compile_material(
+			`fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }`, {}, mem, exactly[..]
 		)!!;
-		defer source.free(mem);
-		test::@check(source.len > 0, "and the limit itself is allowed");
-		// A stack at the ceiling costs the fragment stage nothing: its images are
-		// slots of the device-wide array, so what it declares is the template's own
-		// reserved samplers and no more. `three_tests::occlusion` counts them.
-		test::@check(source.contains(string::tformat("static const Map t%d_map = {", LIMIT - 1)),
-			"the last declared texture is a slot rather than a binding: %s", source);
-		three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 		defer mod.free();
 		test::@check(mod.ok, "and compiles at the ceiling: %s", mod.diagnostic);
 	};
@@ -1534,9 +1169,9 @@ fn void more_textures_than_a_material_may_have_are_refused() @test
 // when only one of them was written.
 // ============================================================================
 
-const String WAVE_BODY = `void displace(inout Vertex v)
+const String WAVE_BODY = `fn void displace(inout Vertex v)
 {
-    v.position.y += sin(v.local.x * 3.0 + t) * amp;
+    v.position.y += sin(v.local.x * 3.0 + v.uniforms.t) * v.uniforms.amp;
 }`;
 
 <*
@@ -1552,16 +1187,13 @@ fn void a_vertex_body_compiles_and_reads_the_uniforms() @test
 {
 	three::MaterialUniform[2] uniforms = { { "t", 1, 1 }, { "amp", 1, 1 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * lambert(s.normal); }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }`,
 		uniforms[..],
 		mem,
 		{},
 		WAVE_BODY
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -1574,13 +1206,13 @@ fn void a_vertex_body_compiles_and_reads_the_uniforms() @test
 <*
  A material with no vertex body is the shader it was.
 
- The claim behind generating `void displace(inout Vertex v) { }` rather than
+ The claim behind generating `fn void displace(inout Vertex v) { }` rather than
  branching the template: the call is there either way, and a compiler that folds
  an empty function leaves a module with the same push block, the same bindings and
  the same entry points as one written before a vertex stage existed.
 
  Asserted against the *push contract* rather than against the SPIR-V, because the
- SPIR-V is Slang's to optimise and the contract is the thing anything else
+ SPIR-V is the compiler's to optimise and the contract is the thing anything else
  depends on. `the_material_push_block_keeps_the_mesh_contract` covers the same
  ground for a material without either body; this says the identity vertex body
  does not move it.
@@ -1588,19 +1220,12 @@ fn void a_vertex_body_compiles_and_reads_the_uniforms() @test
 fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
-	String body = `float3 shade(Surface s) { return s.albedo * tint; }`;
+	String body = `fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint; }`;
 
-	String plain = three::material_source(body, uniforms[..], mem)!!;
-	defer plain.free(mem);
-	String identity = three::material_source(body, uniforms[..], mem, {}, "")!!;
-	defer identity.free(mem);
-
-	test::@check(plain == identity, "an omitted vertex body and an empty one assemble identically");
-
-	three::ShaderModule mod = three::compile_slang(plain, "material.slang", both_stages())!!;
+	three::ShaderModule mod = compile_material(body, uniforms[..], mem)!!;
 	defer mod.free();
 	test::@check(mod.ok, "and it compiles: %s", mod.diagnostic);
-	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 12,
+	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START + 16,
 		"with the push block it always had, got %d", mod.layout.push_size);
 	test::@check(
 		mod.layout.bindings.len() == 8,
@@ -1612,32 +1237,29 @@ fn void a_material_without_a_vertex_body_is_the_shader_it_was() @test
  A bad vertex body is reported at `vertex:<line>`, not at `material:<line>`.
 
  **The reason there are two body names rather than one.** Both bodies are spliced
- into one module and Slang reports one coordinate; an agent that wrote four lines
- of vertex and four of fragment and got `material:3` for a mistake in the first
- would read the wrong four lines and change the wrong thing. The arrow form is
- asserted for `a_bad_body_reports_the_line_the_agent_wrote`'s reason: `--> vertex:3:`
- cannot also be matched by a line in the preamble.
+ into one module, so each gets a source region of its own; an agent that wrote
+ four lines of vertex and four of fragment and got `material:3` for a mistake in
+ the first would read the wrong four lines and change the wrong thing. The arrow
+ form is asserted for `a_bad_body_reports_the_line_the_agent_wrote`'s reason:
+ `--> vertex:3:` cannot also be matched by a line in the preamble.
 
  The error is on line 3 of a four-line body so that a preamble which happened to
  be the right length cannot make this pass by accident.
 *>
 fn void a_bad_vertex_body_reports_the_vertex_file() @test
 {
-	String broken = `void displace(inout Vertex v)
+	String broken = `fn void displace(inout Vertex v)
 {
     v.position.y += notAFunction(v.uv);
 }`;
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return s.albedo; }`, {}, mem, {}, broken
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.albedo; }`, {}, mem, {}, broken
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "three.material", both_stages())!!;
 	defer mod.free();
 
 	test::@check(!mod.ok, "the body does not compile");
-	test::@check(mod.diagnostic.contains("--> vertex:3:"),
+	test::@check(mod.diagnostic.contains("vertex:3:"),
 		"and is reported at vertex:3: %s", mod.diagnostic);
 	test::@check(mod.diagnostic.contains("notAFunction"),
 		"naming what the agent typed: %s", mod.diagnostic);
@@ -1660,9 +1282,9 @@ fn void a_bad_vertex_body_reports_the_vertex_file() @test
 fn void a_uniform_named_after_a_contract_field_is_refused() @test
 {
 	three::MaterialUniform[1] clashing = { { "position", 3, 1 } };
-	fault refused = @catch(three::material_source(
-		`float3 shade(Surface s) { return s.albedo; }`, clashing[..], mem, {},
-		`void displace(inout Vertex v) { v.position += position; }`
+	fault refused = @catch(check_material(
+		`fn float3 shade(Surface s) { return s.albedo; }`, clashing[..], mem, {},
+		`fn void displace(inout Vertex v) { v.position += position; }`
 	));
 
 	test::@check(refused == three::MATERIAL_NAME_INVALID, "'position' is refused, got %s", refused);
@@ -1677,8 +1299,8 @@ fn void a_uniform_named_after_a_contract_field_is_refused() @test
 	// material with no vertex body at all — which is the half that says this was
 	// always a bug rather than one the vertex stage introduced.
 	three::MaterialUniform[1] fragment_side = { { "albedo", 1, 1 } };
-	fault also = @catch(three::material_source(
-		`float3 shade(Surface s) { return s.albedo * albedo; }`, fragment_side[..]
+	fault also = @catch(check_material(
+		`fn float3 shade(Surface s) { return s.albedo * albedo; }`, fragment_side[..]
 	));
 	test::@check(also == three::MATERIAL_NAME_INVALID, "and so is 'albedo', got %s", also);
 }
@@ -1697,12 +1319,12 @@ fn void a_vertex_body_writes_what_the_fragment_stage_receives() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 2 } };
 
-	String source = three::material_source(
-		`float3 shade(Surface s) { return tint[s.variant] * s.color.rgb * s.albedo; }`,
+	three::ShaderModule mod = compile_material(
+		`fn float3 shade(Surface s) { return s.uniforms.tint[s.variant] * s.color.rgb * s.albedo; }`,
 		uniforms[..],
 		mem,
 		{},
-		`void displace(inout Vertex v)
+		`fn void displace(inout Vertex v)
 {
     v.uv = v.uv * 2.0;
     v.color = float4(v.color.rgb * 0.5, v.color.a);
@@ -1710,9 +1332,6 @@ fn void a_vertex_body_writes_what_the_fragment_stage_receives() @test
     v.normal = normalize(v.normal + float3(0.0, 0.2, 0.0));
 }`
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "material.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 }

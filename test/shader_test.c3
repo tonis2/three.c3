@@ -1,91 +1,33 @@
 <*
- Slang at runtime: the compile, the diagnostic, the reflection and the cache.
+ The compiled module, the reflection it produces, and the two caches.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::shader`
 
- **Most of this needs no GPU**, which is the point of keeping the compiler and
- the reflection walk separate from pipeline creation. A shader that fails to
- compile, a diagnostic that carries a line number, and a descriptor layout
- derived from a module are all answerable without a device, and they run in
- milliseconds.
+ The modules here are the engine's own defs, compiled through `compile_shader`,
+ so a diagnostic that carries a line number and a descriptor layout derived from
+ a module are answerable without a device. What needs the GPU is the pipeline
+ cache and the disk cache's interaction with it.
 
- `plan.md` §7 asks for four things here by name: that a known-good shader
- compiles to non-empty SPIR-V, that a known-bad one produces a diagnostic
- containing the line number, that the pipeline cache returns the identical handle
- for identical source, and that a shader with known bindings produces the
- expected descriptor layout. All four are below.
+ The cache tests each say which cache they mean on their first line: the disk
+ directory survives between runs, so a test about the in-memory cache disables it
+ and a test about the disk cache points it at a scratch directory of its own.
 *>
 module three_tests::shader;
 
 import three;
 import three_tests::device;
 import vk;
-import slang;
 import std::core::test;
 import std::io::file;
 import std::io::path;
 
-const String MESH_PATH = "shaders/mesh.slang";
 
-<*
- The mesh shader as the pass compiles it: the file, plus the shared surface
- block its `//@shared` line names.
-
- Two doors on purpose, and which one a check wants depends on what it is asking.
- Anything that *compiles* comes through here, because the file on its own is a
- template with a marker line in it and `mapped_normal_frame` defined nowhere.
- Anything that reads the file as *text* — the declaration checks below, which cut
- a struct out of it and compile that alone — uses `read_source`, because what
- they are holding `material.slang` and `shadow.slang` against is what is written
- in the file rather than what was spliced into it.
-*>
-fn String? mesh_module() => three::shader_source(three::ShaderFile.MESH_SLANG, mem);
-
-<*
- A shader with one binding of every kind this pass can translate, in two sets.
-
- Deliberately not `mesh.slang`: the real shader has exactly one descriptor, so a
- reflection walk that only ever looked at binding range zero would pass every
- check against it. This one has six, including an array and a separate sampler,
- and it is the case that tells `Texture2D` from `Sampler2D` — the distinction
- that is invisible at two of Slang's three levels of reflection.
-*>
-const String RICH_SOURCE = `
-struct Params { float4 tint; float time; };
-[vk::binding(0, 0)] ConstantBuffer<Params> params;
-[vk::binding(1, 0)] Sampler2D albedo;
-[vk::binding(2, 0)] Texture2D extras[4];
-[vk::binding(3, 0)] SamplerState linearSampler;
-[vk::binding(0, 1)] StructuredBuffer<float4> points;
-
-struct PushBlock { float4x4 mvp; uint flags; };
-[vk_push_constant] const PushBlock pc;
-
-struct VOut { float2 uv : TEXCOORD0; float4 sv_position : SV_Position; };
-
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID)
-{
-	VOut o;
-	o.sv_position = mul(pc.mvp, points[vid]);
-	o.uv = float2(0, 0);
-	return o;
-}
-
-[shader("fragment")]
-float4 fragmentMain(VOut i) : SV_Target
-{
-	float3 c = albedo.Sample(i.uv).rgb * params.tint.rgb;
-	c += extras[1].Sample(linearSampler, i.uv).rgb * params.time;
-	return float4(c, 1.0);
-}
-`;
 
 // A global rather than a function returning `three::MESH_ENTRIES[..]`: a slice
 // literal is backed by the stack frame that made it, and c3c says so.
 const three::ShaderEntry[2] BOTH_STAGES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "vertexMain", three::STAGE_VERTEX },
+	{ "fragmentMain", three::STAGE_FRAGMENT },
 };
 
 macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
@@ -127,748 +69,25 @@ fn usz occurrence_count(String source, String needle)
 // Compiling
 // ============================================================================
 
-<*
- A known-good shader compiles to non-empty SPIR-V (`plan.md` §7).
 
- The magic number is checked by `compile_slang` itself, so a module that is not
- SPIR-V arrives as a fault rather than as bytes — which is why this asserts on
- the length and on `ok` rather than re-reading the first four bytes.
-*>
-fn void the_mesh_shader_compiles_from_a_string() @test
-{
-	String source = mesh_module()!!;
-	defer source.free(mem);
 
-	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer mod.free();
 
-	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
-	test::@check(mod.spirv.len > 0, "and produced a module");
-	test::@check(mod.spirv.len % 4 == 0, "which is a whole number of words");
-	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
-}
 
-<*
- Built-in shading owns one light walk, while the custom single-lobe entry points
- remain available. The source shape matters here: rendering can prove that the
- answer is right, but cannot prove that two identical shadow or emitter walks did
- not produce it.
-*>
-fn void standard_lighting_reuses_visibility_and_area_samples() @test
-{
-	String lighting_path = three::find_shader(three::ShaderFile.LIGHTING_SLANG, mem)!!;
-	defer lighting_path.free(mem);
-	String lighting = three::read_source(lighting_path)!!;
-	defer lighting.free(mem);
-
-	String standard = function_body(lighting, "SharedLightTerms shared_standard_lights");
-	String area = function_body(lighting, "SharedAreaTerms shared_area_terms");
-	String cached = function_body(lighting, "SharedAreaTerms shared_area_terms_cached");
-	String reference = function_body(lighting, "SharedAreaTerms shared_area_reference_terms");
-	test::@check(standard.len > 0 && area.len > 0 && cached.len > 0 && reference.len > 0,
-		"the combined light routines and the numeric reference are present");
-	test::@check(
-		occurrence_count(standard, "shared_point_shadow_factor(i,light,position,receiverNormal)") == 3,
-		"each directional, area and punctual branch has one visibility lookup"
-	);
-	test::@check(
-		standard.contains("terms.diffuse+=light.color.rgb*area.diffuse*visibility")
-			&& standard.contains("terms.specular+=area.specular*visibility"),
-		"one area visibility feeds both lobes"
-	);
-	test::@check(
-		occurrence_count(reference, "for(uint y=0u;y<4u;++y)for(uint x=0u;x<4u;++x)") == 1
-			&& reference.contains("terms.diffuse=") && reference.contains("terms.specular="),
-		"one quadrature walk returns both reference area terms"
-	);
-	// The fit's own version of the same claim: one emitter polygon, read by both
-	// lobes, and two table taps for the pair rather than two for each.
-	test::@check(
-		occurrence_count(area, "shared_area_shape(") == 1
-			&& area.contains("terms.diffuse=shared_area_polygon_diffuse")
-			&& area.contains("terms.specular=light.color.rgb*shared_area_ltc_specular"),
-		"one emitter polygon returns diffuse and fitted specular terms"
-	);
-	test::@check(
-		occurrence_count(lighting, "ltc_lut.SampleLevel") == 2,
-		"and the fit is two table reads, got %d", occurrence_count(lighting, "ltc_lut.SampleLevel")
-	);
-	test::@check(
-		occurrence_count(standard, "shared_area_ltc_context(") == 1
-			&& standard.contains("if(!areaContextReady)")
-			&& standard.contains("shared_area_terms_cached(light,shape,normal,areaContext,!skipDiffuse)"),
-		"standard shading lazily builds one surface LTC context for every area light"
-	);
-	test::@check(
-		!cached.contains("shared_area_ltc_context(")
-			&& occurrence_count(area, "shared_area_ltc_context(") == 1,
-		"the cached path reuses the context while the standalone helper remains complete"
-	);
-	test::@check(
-		lighting.contains("float shared_area_diffuse(") && lighting.contains("float3 shared_area_specular("),
-		"custom single-lobe helpers remain available"
-	);
-	test::@check(
-		occurrence_count(standard, "if(!skipDiffuse)terms.diffuse+=") == 3
-			&& occurrence_count(standard, "terms.specular+=") == 3,
-		"a baked light skips cached diffuse only and keeps its live specular lobe"
-	);
-	test::@check(
-		!standard.contains("MAX_LIGHTS") && !lighting.contains("Sampler2D"),
-		"the shared path adds neither a per-light array nor a sampled binding"
-	);
-
-	three::ShaderFile[2] names = { three::ShaderFile.MESH_SLANG, three::ShaderFile.MATERIAL_SLANG };
-	foreach (name : names)
-	{
-		@pool()
-		{
-			String path = three::find_shader(name, tmem)!!;
-			String template = three::read_source(path, tmem)!!;
-			test::@check(
-				occurrence_count(template, "shared_standard_lights(") == 1,
-				"%s sends its built-in standard shading through one shared walk", name.name
-			);
-		};
-	}
-}
-
-<*
- The two entry points come back named, with their stages — in reflection *and*
- in the module.
-
- Both halves matter and they are different claims. Reflection is what
- `check_entry_points` reads; the module's own `OpEntryPoint` names are what
- `vkCreateGraphicsPipelines` looks up, and a module whose stages are both called
- `main` fails there with no mention of a name.
-
- This is deliberately *not* presented as the check on
- `-fvk-use-entrypoint-name`. On the SDK this was built against that flag turns
- out to be a no-op — removing it produces a byte-identical module — so a test
- claiming to catch its removal would be an assumption. See `SLANG_ARGUMENTS`.
-*>
-fn void the_entry_points_keep_their_names() @test
-{
-	String source = mesh_module()!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(mod.entries.len() == 2, "two entry points, got %d", mod.entries.len());
-
-	bool vertex = false;
-	bool fragment = false;
-	foreach (entry : mod.entries)
-	{
-		if (entry.name == "vertexMain" && entry.stage == slang::STAGE_VERTEX) vertex = true;
-		if (entry.name == "fragmentMain" && entry.stage == slang::STAGE_FRAGMENT) fragment = true;
-	}
-	test::@check(vertex, "vertexMain is a vertex shader");
-	test::@check(fragment, "fragmentMain is a fragment shader");
-
-	// `OpEntryPoint` carries the name as a literal string, so the module itself
-	// can be asked rather than only the reflection that describes it.
-	String module_bytes = (String)mod.spirv;
-	test::@check(module_bytes.contains("vertexMain"), "and the module names vertexMain");
-	test::@check(module_bytes.contains("fragmentMain"), "and fragmentMain");
-}
-
-<*
- **Matrices are column-major**, which `slangc` defaults to and the compile-request
- API does not.
-
- This is the M4 bug that cost the most, and it is worth a check of its own
- because of how it failed: every matrix in the frame block and the instance
- array was read transposed, the truck rendered a completely convincing picture,
- and only the built-in triangle collapsed to fourteen pixels. Nothing reported an
- error at any layer.
-
- Asserted on the type name Slang emits into the module, which is the cheapest
- signal that does not need a device. The two checks that would also catch it —
- `instances_land_where_their_transforms_say` and
- `the_shader_rotates_normals_per_instance` — both need a GPU and both did fail
- when this was wrong, so this is the fast tripwire rather than the only one.
-*>
-fn void matrices_are_column_major() @test
-{
-	String source = mesh_module()!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(
-		((String)mod.spirv).contains("ColMajor"),
-		"the module declares column-major matrix storage — without it every transform is read transposed"
-	);
-}
-
-<*
- Two compiles of the same source produce the same bytes.
-
- Not a curiosity: the pipeline cache is keyed on source, so a compiler that
- answered differently for the same input would mean a cache hit and a cache miss
- are not the same pipeline.
-*>
-fn void the_same_source_compiles_to_the_same_bytes() @test
-{
-	String source = mesh_module()!!;
-	defer source.free(mem);
-
-	three::ShaderModule first = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer first.free();
-	three::ShaderModule second = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer second.free();
-
-	test::@check(first.spirv.len == second.spirv.len, "same length: %d and %d", first.spirv.len, second.spirv.len);
-	test::@check(first.spirv == second.spirv, "and the same bytes");
-}
 
 // ============================================================================
 // Diagnostics
 // ============================================================================
 
-<*
- A known-bad shader produces a diagnostic containing the line number
- (`plan.md` §7).
 
- The line number is what is asserted rather than the message, because the message
- is Slang's to change and the line is what an agent uses to fix the script. The
- error is deliberately on line 6 of a 9-line shader, so a diagnostic that reported
- line 1 — or the first line of the *file* rather than of the source string —
- would not accidentally pass.
-*>
-fn void a_bad_shader_says_which_line() @test
-{
-	String source = `struct VOut { float4 sv_position : SV_Position; };
-
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID)
-{
-	VOut o;
-	o.sv_position = notAFunction(vid);
-	return o;
-}`;
-
-	three::ShaderModule mod = three::compile_slang(source, "bad.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(!mod.ok, "it did not compile");
-	test::@check(mod.spirv.len == 0, "and produced no module");
-	test::@check(mod.diagnostic.len > 0, "and said something");
-	test::@check(mod.diagnostic.contains("bad.slang:7"), "naming line 7: %s", mod.diagnostic);
-	test::@check(mod.diagnostic.contains("notAFunction"), "and the identifier that is wrong");
-}
-
-<*
- A shader missing an entry point the caller named is an error, not a smaller
- module.
-
- `compile_slang` names its entry points rather than letting `[shader(...)]`
- attributes discover them, precisely so this is a diagnostic instead of a module
- the pipeline cannot use.
-*>
-fn void a_missing_entry_point_is_a_diagnostic() @test
-{
-	String source = `struct VOut { float4 sv_position : SV_Position; };
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(0,0,0,1); return o; }`;
-
-	three::ShaderModule mod = three::compile_slang(source, "half.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check(!mod.ok, "a module without fragmentMain does not compile");
-	test::@check(mod.diagnostic.contains("fragmentMain"), "and says which one is missing: %s", mod.diagnostic);
-}
 
 // ============================================================================
 // Reflection
 // ============================================================================
 
-<*
- A shader with known bindings produces the descriptor layout it declared
- (`plan.md` §7).
 
- Every field is asserted, because each of them is derived from a different corner
- of Slang's reflection and each has its own way of being quietly wrong: the type
- comes from the binding range, the index from the descriptor-set view, the count
- from the range's descriptor count, and the set from the space offset.
-*>
-fn void a_shader_with_known_bindings_reflects_them() @test
-{
-	three::ShaderModule mod = three::compile_slang(RICH_SOURCE, "rich.slang", both_stages())!!;
-	defer mod.free();
-	test::@check(mod.ok, "the fixture compiles: %s", mod.diagnostic);
 
-	test::@check(mod.layout.bindings.len() == 5, "five descriptors, got %d", mod.layout.bindings.len());
-	test::@check(mod.layout.set_count == 2, "in two sets, got %d", mod.layout.set_count);
 
-	three::ShaderBinding* params = mod.layout.binding_of("params");
-	test::@check(params != null, "params is there");
-	if (params != null)
-	{
-		test::@check(params.type == DESCRIPTOR_TYPE_UNIFORM_BUFFER, "params is a uniform buffer");
-		test::@check(params.set == 0 && params.binding == 0, "at 0,0 — got %d,%d", params.set, params.binding);
-		test::@check(params.count == 1, "one of it");
-	}
 
-	// The distinction the whole reflection walk exists for: a Sampler2D and a
-	// Texture2D have the same type kind and the same parameter category.
-	three::ShaderBinding* albedo = mod.layout.binding_of("albedo");
-	test::@check(albedo != null, "albedo is there");
-	if (albedo != null)
-	{
-		test::@check(
-			albedo.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			"a Sampler2D is a combined image sampler, not a sampled image"
-		);
-		test::@check(albedo.binding == 1, "at binding 1, got %d", albedo.binding);
-	}
-
-	three::ShaderBinding* extras = mod.layout.binding_of("extras");
-	test::@check(extras != null, "extras is there");
-	if (extras != null)
-	{
-		test::@check(extras.type == DESCRIPTOR_TYPE_SAMPLED_IMAGE, "a Texture2D is a sampled image");
-		// One binding of four, not four bindings — an array that arrived as
-		// count 1 would allocate a descriptor set the shader overruns.
-		test::@check(extras.count == 4, "an array of four, got %d", extras.count);
-	}
-
-	three::ShaderBinding* sampler = mod.layout.binding_of("linearSampler");
-	test::@check(sampler != null && sampler.type == DESCRIPTOR_TYPE_SAMPLER, "a SamplerState is a sampler");
-
-	three::ShaderBinding* points = mod.layout.binding_of("points");
-	test::@check(points != null, "points is there");
-	if (points != null)
-	{
-		test::@check(points.type == DESCRIPTOR_TYPE_STORAGE_BUFFER, "a StructuredBuffer is a storage buffer");
-		test::@check(points.set == 1, "in set 1, got %d", points.set);
-	}
-
-	// The push block is a constant buffer at reflection level and must not have
-	// been counted as a descriptor. `bindings.len() == 5` above is that check
-	// from the other side; this names it.
-	test::@check(mod.layout.binding_of("pc") == null, "the push block is not a descriptor");
-	test::@check(mod.layout.push_size == 68, "the push block is 68 bytes, got %d", mod.layout.push_size);
-}
-
-<*
- Both stages are in the derived stage mask.
-*>
-fn void the_stage_mask_covers_both_stages() @test
-{
-	three::ShaderModule mod = three::compile_slang(RICH_SOURCE, "rich.slang", both_stages())!!;
-	defer mod.free();
-
-	test::@check((mod.layout.stages & SHADER_STAGE_VERTEX_BIT) != (vk::ShaderStageFlags)0, "vertex is in the mask");
-	test::@check((mod.layout.stages & SHADER_STAGE_FRAGMENT_BIT) != (vk::ShaderStageFlags)0, "fragment is in the mask");
-}
-
-<*
- The mesh shader's push block is exactly what `MeshPush` says it is.
-
- This is the check that was a comment until M4. `gpu/pipeline.c3`'s header has
- carried a table of these offsets since M1, and a table in a comment is worth
- what `project.json`'s `slangc` line was worth in M2 — which is to say it was
- wrong for a whole milestone and nothing noticed.
-*>
-fn void the_mesh_push_block_matches_the_struct() @test
-{
-	String source = mesh_module()!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "mesh.slang", both_stages())!!;
-	defer mod.free();
-	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
-
-	foreach (expected : three::MESH_PUSH_FIELDS)
-	{
-		three::ShaderField* found = mod.layout.field_of(expected.name);
-		test::@check(found != null, "the shader has a '%s' field", expected.name);
-		if (found == null) continue;
-		test::@check(
-			found.offset == expected.offset && found.size == expected.size,
-			"'%s' is at %d+%d in the shader and %d+%d in MeshPush",
-			expected.name, found.offset, found.size, expected.offset, expected.size
-		);
-	}
-
-	// Against `MATERIAL_PUSH_START` rather than a literal: that constant is
-	// derived from the last entry of `MESH_PUSH_FIELDS`, so a fourth pinned field
-	// moves both together and this check keeps meaning what it says. It was a
-	// literal 60 until `uv_transform` arrived and made it 76, and 76 until the
-	// geometry contract moved into `DrawRecord` and left 24.
-	test::@check(mod.layout.push_size == three::MATERIAL_PUSH_START,
-		"the block is %d bytes, got %d", three::MATERIAL_PUSH_START, mod.layout.push_size);
-	test::@check(mod.layout.push_size <= three::MeshPush::size, "and fits inside MeshPush");
-
-	// **Seven frame images in set 0, and the whole device's textures in set 1.** The
-	// five a *material* wears — its base colour and the built-in material's normal,
-	// metallic-roughness, occlusion and emissive maps — are slots of the texture
-	// array now, reached through `map_at`, so they are not descriptors of this
-	// pipeline at all. What is left in set 0 is what belongs to the frame rather
-	// than to the surface: the environment map, the ambient-occlusion depth, the
-	// shadow atlas three times (plain depth, combined comparison and static
-	// comparison), the area-light fit and the lightmap atlas.
-	//
-	// **The count is checked as well as the names**, and it is the half that earns
-	// its keep: a template that started declaring a material's map again would put
-	// the per-stage ceiling back, one binding at a time.
-	uint set_zero = 0;
-	foreach (binding : mod.layout.bindings) if (binding.set == 0) set_zero++;
-	test::@check(set_zero == three::MATERIAL_FRAME_SAMPLERS,
-		"%d frame descriptors in set 0, got %d", three::MATERIAL_FRAME_SAMPLERS, set_zero);
-	test::@check(
-		mod.layout.binding_of("normal_map") == null
-			&& mod.layout.binding_of("metalness_roughness_map") == null
-			&& mod.layout.binding_of("occlusion_map") == null
-			&& mod.layout.binding_of("emissive_map") == null
-			&& mod.layout.binding_of("base_color_map") == null,
-		"and a material's own maps are slots rather than descriptors"
-	);
-
-	three::ShaderBinding* array = mod.layout.binding_of("three_textures");
-	test::@check(array != null, "and the device-wide texture array is declared");
-	if (array != null)
-	{
-		test::@check(array.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler");
-		test::@check(array.set == three::TEXTURE_TABLE_SET && array.binding == three::TEXTURE_TABLE_BINDING,
-			"at %d,%d — got %d,%d",
-			three::TEXTURE_TABLE_SET, three::TEXTURE_TABLE_BINDING, array.set, array.binding);
-	}
-
-	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
-	test::@check(shadow != null, "and shadows share shadow_atlas");
-	if (shadow != null)
-	{
-		test::@check(shadow.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler too");
-		test::@check(
-			shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
-			"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
-		);
-	}
-
-	three::ShaderBinding* ltc = mod.layout.binding_of("ltc_lut");
-	test::@check(ltc != null, "and the area-light table is reserved past them");
-	if (ltc != null)
-	{
-		test::@check(
-			ltc.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-				&& ltc.set == 0 && ltc.binding == three::LTC_LUT_BINDING,
-			"a combined image sampler at 0,%d — got %d,%d", three::LTC_LUT_BINDING, ltc.set, ltc.binding
-		);
-	}
-
-	three::ShaderBinding* sky = mod.layout.binding_of("environment_map");
-	test::@check(sky != null, "and the third is environment_map");
-	if (sky != null)
-	{
-		test::@check(sky.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, "a combined image sampler as well");
-		test::@check(
-			sky.set == 0 && sky.binding == three::ENVIRONMENT_BINDING,
-			"at 0,%d — got %d,%d", three::ENVIRONMENT_BINDING, sky.set, sky.binding
-		);
-	}
-}
-
-<*
- The draw record is exactly what `DrawRecord` says it is — on both sides.
-
- **The check `the_mesh_push_block_matches_the_struct` stopped making** when the
- geometry contract moved out of the push block. Slang reflects a push block and
- does not reflect the type behind a pointer, so `struct Draw` in the shader and
- `DrawRecord` in C3 became two declarations of one wire format with nothing
- comparing them — and the failure that follows is not a compile error, it is
- `base_color` read out of the middle of a pointer.
-
- So the declaration is cut out of `shaders/mesh.slang` and compiled *as* a push
- block, which is a layout Slang does reflect. Both are scalar-layout structs under
- `-force-glsl-scalar-layout` — the same flag decides both — so the offsets that
- come back are the record's own.
-
- The C3 half is measured rather than declared, for the reason the whole file
- exists: a table in a comment is worth what `project.json`'s `slangc` line was
- worth in M2.
-*>
-fn void the_draw_record_matches_the_shader() @test
-{
-	String source = three::read_source(MESH_PATH)!!;
-	defer source.free(mem);
-
-	sz? start = source.index_of("struct Draw");
-	test::@check(@ok(start), "mesh.slang declares a `struct Draw`");
-	if (catch start) return;
-	sz? end = source[start..].index_of("};");
-	test::@check(@ok(end), "and it is closed");
-	if (catch end) return;
-
-	// `Draw.posed` points at one of these, so the record does not compile without
-	// it. Cut out of the same file rather than written here for the same reason
-	// the record is: a copy in this test would be a third declaration, and the one
-	// that never disagrees with anything because nothing reads it.
-	sz? vertex_start = source.index_of("struct SkinnedVertex");
-	test::@check(@ok(vertex_start), "mesh.slang declares a `struct SkinnedVertex`");
-	if (catch vertex_start) return;
-	sz? vertex_end = source[vertex_start..].index_of("};");
-	test::@check(@ok(vertex_end), "and it is closed");
-	if (catch vertex_end) return;
-
-	// And `Draw.morph` points at one of these, for the same reason and cut the
-	// same way.
-	sz? delta_start = source.index_of("struct MorphDelta");
-	test::@check(@ok(delta_start), "mesh.slang declares a `struct MorphDelta`");
-	if (catch delta_start) return;
-	sz? delta_end = source[delta_start..].index_of("};");
-	test::@check(@ok(delta_end), "and it is closed");
-	if (catch delta_end) return;
-
-	// A push block and two entry points that touch every field, so nothing can be
-	// dropped from the layout for being unread.
-	String probe = string::tformat(
-		"%s};\n"
-		"%s};\n"
-		"%s};\n"
-		"[vk_push_constant] const Draw push;\n"
-		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
-		"{ return push.base_color + float4(push.positions[0] + push.normals[0], push.uvs[0].x)\n"
-		"    + float4(push.weights[0].xyz + push.posed[0].position + push.posed[0].normal, 0.0)\n"
-		"    + float4(push.morph[0].position + push.morph[0].normal, float(push.morph_targets))\n"
-		"    + push.palette[0][0] + float(push.joints[0].x) + float(push.skin_stride); }\n"
-		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
-		"{ return push.uv_transform * push.surface * push.emissive * push.colors[0] * float(push.flags); }\n",
-		source[vertex_start : vertex_end],
-		source[delta_start : delta_end],
-		source[start : end]
-	);
-
-	three::ShaderModule mod = three::compile_slang(probe, "draw.slang", both_stages())!!;
-	defer mod.free();
-	test::@check(mod.ok, "the record compiles as a block: %s", mod.diagnostic);
-
-	// Only the rows `mesh.slang` declares — see `DRAW_RECORD_SHADER_FIELDS`. The
-	// tail past it is written for the templates that have not started reading it,
-	// and it is a tail, so every offset above is where it was.
-	uint declared = three::DRAW_RECORD_SHADER_FIELDS;
-	foreach (expected : three::DRAW_RECORD_FIELDS[:declared])
-	{
-		three::ShaderField* found = mod.layout.field_of(expected.name);
-		test::@check(found != null, "the record has a '%s' field", expected.name);
-		if (found == null) continue;
-		test::@check(
-			found.offset == expected.offset && found.size == expected.size,
-			"'%s' is at %d+%d in the shader and %d+%d in DrawRecord",
-			expected.name, found.offset, found.size, expected.offset, expected.size
-		);
-	}
-	test::@check(
-		mod.layout.push_fields.len() == declared,
-		"and has %d fields, got %d",
-		declared,
-		mod.layout.push_fields.len()
-	);
-
-	// **The C3 side of the same table is not checked here and used to be.** It
-	// measured the addresses of a real `DrawRecord`'s fields, because the comment
-	// on `DRAW_RECORD_FIELDS` said a `$assert` was impossible without `offsetof` —
-	// which was wrong: `Type::members` reports name, offset and size at compile
-	// time, and `@layout_matches` in `gpu/pipeline.c3` is that half now. A struct
-	// that stops matching its table no longer builds, so there is nothing left for
-	// a test to discover about it.
-	//
-	// What stays here is the half a `$assert` genuinely cannot do: comparing this
-	// side against **Slang's** answer for the same declaration.
-	// 288 of it is what `mesh.slang`'s `Draw` declares; the rest is the texture
-	// index row above, which nothing samples through yet.
-	test::@check(three::DrawRecord::size == 392, "and the record is 392 bytes, got %d", three::DrawRecord::size);
-}
-
-<*
- The frame block is exactly what `FrameBlock` says it is — on both sides.
-
- **The same check as the one above, on the struct the shadow pass made a third
- reader of.** `FrameBlock` is behind a pointer, so Slang reflects it no more than
- it reflects `Draw`, and until shadows arrived it had two declarations that were
- always edited together. It now has three, and `shaders/shadow.slang` reads
- `light_view_projection` at offset 88 — so a field inserted above that in two
- files and not the third is a depth map rendered with sixteen floats that are not
- a matrix, which draws something and is not an error anywhere.
-
- Cut out of `mesh.slang` and compiled *as* a push block, exactly as the record
- is, and the entry points touch every field so that nothing is dropped from the
- layout for being unread.
-*>
-fn void the_frame_block_matches_the_shader() @test
-{
-	String source = three::read_source(MESH_PATH)!!;
-	defer source.free(mem);
-
-	sz? light_start = source.index_of("struct Light");
-	test::@check(@ok(light_start), "mesh.slang declares a `struct Light`");
-	if (catch light_start) return;
-	sz? light_end = source[light_start..].index_of("};");
-	test::@check(@ok(light_end), "and it is closed");
-	if (catch light_end) return;
-	sz? shadow_start = source.index_of("struct ShadowGpuView");
-	test::@check(@ok(shadow_start), "mesh.slang declares a `struct ShadowGpuView`");
-	if (catch shadow_start) return;
-	sz? shadow_end = source[shadow_start..].index_of("};");
-	test::@check(@ok(shadow_end), "the shadow view declaration is closed");
-	if (catch shadow_end) return;
-
-	sz? start = source.index_of("struct FrameBlock");
-	test::@check(@ok(start), "mesh.slang declares a `struct FrameBlock`");
-	if (catch start) return;
-	sz? end = source[start..].index_of("};");
-	test::@check(@ok(end), "and it is closed");
-	if (catch end) return;
-
-	// Include both pointer target types so the probe checks the real frame ABI.
-	String probe = string::tformat(
-		"%s};\n"
-		"%s};\n"
-		"%s};\n"
-		"[vk_push_constant] const FrameBlock push;\n"
-		"[shader(\"vertex\")] float4 vertexMain() : SV_Position\n"
-		"{ return mul(push.view_projection, push.lighting) + push.live_poses[0][0] + push.camera; }\n"
-		"[shader(\"fragment\")] float4 fragmentMain() : SV_Target\n"
-		"{ return mul(push.light_view_projection, push.shadow) + push.debug\n"
-		"  + push.lights[0].direction + push.lights[7].color + push.world + push.point_shadow"
-		" + push.inverse_view_projection[0] + push.ambient_occlusion; }\n",
-		source[light_start : light_end],
-		source[shadow_start : shadow_end],
-		source[start : end]
-	);
-
-	three::ShaderModule mod = three::compile_slang(probe, "frame.slang", both_stages())!!;
-	defer mod.free();
-	test::@check(mod.ok, "the block compiles: %s", mod.diagnostic);
-
-	foreach (expected : three::FRAME_BLOCK_FIELDS)
-	{
-		three::ShaderField* found = mod.layout.field_of(expected.name);
-		test::@check(found != null, "the block has a '%s' field", expected.name);
-		if (found == null) continue;
-		test::@check(
-			found.offset == expected.offset && found.size == expected.size,
-			"'%s' is at %d+%d in the shader and %d+%d in FrameBlock",
-			expected.name, found.offset, found.size, expected.offset, expected.size
-		);
-	}
-	test::@check(
-		mod.layout.push_fields.len() == three::FRAME_BLOCK_FIELDS.len,
-		"and has %d fields, got %d",
-		three::FRAME_BLOCK_FIELDS.len,
-		mod.layout.push_fields.len()
-	);
-
-	// The C3 side is `@layout_matches(FrameBlock, FRAME_BLOCK_FIELDS)` in
-	// `gpu/pipeline.c3` and does not need running — see the record's test above.
-	test::@check(three::FrameBlock::size == 400, "and the block is 400 bytes, got %d", three::FrameBlock::size);
-}
-
-<*
- Every shader that reads the geometry declares the same structs, character for
- character once the comments are gone.
-
- **The one that keeps three files honest**, and it was two files until the shadow
- pass. `mesh.slang`, `material.slang` and `shadow.slang` each declare `Instance`,
- `FrameBlock`, `SkinnedVertex` and `Draw` — a wire format shared with
- `scene/scene.c3`, `gpu/pipeline.c3` and each other — and a field added to one and
- not the others is geometry read at the wrong address in whichever was missed.
- That is not a compile error and not a validation message: it is a picture that is
- subtly or spectacularly wrong, with nothing anywhere naming the cause.
-
- `the_draw_record_matches_the_shader` and `the_frame_block_matches_the_shader`
- hold `mesh.slang`'s two against the C3 side through reflection; this holds the
- other files against `mesh.slang`. Between them each declaration is checked
- against something that is not a copy of itself.
-*>
-macro @check_storage_record($Type, String header, String expression)
-{
-	String source = three::read_source(MESH_PATH)!!;
-	defer source.free(mem);
-	sz? start = source.index_of(header);
-	test::@check(@ok(start), "mesh shader declares %s", header);
-	if (try start)
-	{
-		sz? end = source[start..].index_of("};");
-		test::@check(@ok(end), "%s is closed", header);
-		if (try end)
-		{
-			String probe = string::tformat(
-				"%s};\n[vk_push_constant] const %s push;\n"
-				"[shader(\"vertex\")] float4 vertexMain() : SV_Position { return %s; }\n"
-				"[shader(\"fragment\")] float4 fragmentMain() : SV_Target { return %s; }\n",
-				source[start : end], header[7..], expression, expression);
-			three::ShaderModule mod = three::compile_slang(probe, "storage_record.slang", both_stages())!!;
-			defer mod.free();
-			test::@check(mod.ok, "%s compiles: %s", header, mod.diagnostic);
-			$foreach $member : $Type::members:
-			{
-				three::ShaderField* field = mod.layout.field_of($member.name);
-				test::@check(field != null, "%s contains %s", header, $member.name);
-				if (field != null)
-				{
-					test::@check(field.offset == $member.offset && field.size == $member.size,
-						"%s.%s matches C3 offset and size", header, $member.name);
-				}
-			}
-			$endforeach
-			test::@check(mod.layout.push_fields.len() == $Type::members.len,
-				"%s has exactly the C3 fields", header);
-			test::@check(mod.layout.push_size == $Type::size,
-				"%s has the C3 record size %d, got %d", header, $Type::size, mod.layout.push_size);
-		}
-	}
-}
-
-fn void storage_light_and_shadow_records_match_c3() @test
-{
-	@check_storage_record(three::Light, "struct Light",
-		"push.direction + push.color + push.area_right + push.area_up + float4(push.meta)");
-	@check_storage_record(three::ShadowGpuView, "struct ShadowGpuView",
-		"mul(push.view_projection, push.params) + push.atlas + push.dynamic_rect + push.plane_x + push.plane_y + push.plane_z");
-}
-
-fn void every_shader_declares_the_same_contract() @test
-{
-	String[3] paths = { MESH_PATH, "", "" };
-	String material_path = three::find_shader(three::ShaderFile.MATERIAL_SLANG, mem)!!;
-	defer material_path.free(mem);
-	String shadow_path = three::find_shader(three::ShaderFile.SHADOW_SLANG, mem)!!;
-	defer shadow_path.free(mem);
-	paths[1] = material_path;
-	paths[2] = shadow_path;
-
-	String mesh = three::read_source(paths[0])!!;
-	defer mesh.free(mem);
-
-	String[6] structs = { "struct Instance", "struct Light", "struct ShadowGpuView", "struct FrameBlock", "struct SkinnedVertex", "struct Draw" };
-
-	for (uint file = 1; file < 3; file++)
-	{
-		String other = three::read_source(paths[file])!!;
-		defer other.free(mem);
-
-		foreach (header : structs)
-		{
-			String from_mesh = declaration_of(mesh, header);
-			String from_other = declaration_of(other, header);
-
-			test::@check(
-				from_mesh.len > 0 && from_other.len > 0,
-				"%s and %s both declare `%s`", paths[0], paths[file], header
-			);
-			test::@check(
-				from_mesh == from_other,
-				"and they declare the same one:\n  %s: %s\n  %s: %s",
-				paths[0], from_mesh, paths[file], from_other
-			);
-		}
-	}
-}
 
 <*
  One struct declaration, with its comments and whitespace taken out.
@@ -914,13 +133,13 @@ macro @with_gpu(; @body(three::Gpu* gpu, three::Target* target))
 }
 
 <*
- The pipeline cache returns the identical handle for identical source
- (`plan.md` §7) — and skips the Slang call to do it (`plan.md` §3).
+ The pipeline cache returns the identical handle for identical source — and
+ skips the compile to do it.
 
  Both halves are asserted. The pointer alone would also be true of a cache that
- recompiled the shader and threw the result away, which is the one thing §3 says
- must not happen: compilation is the expensive half, about 17 ms against roughly
- 1 ms for the pipeline.
+ recompiled the shader and threw the result away, which is what must not happen:
+ compilation is the expensive half, about 17 ms against roughly 1 ms for the
+ pipeline.
 *>
 fn void the_pipeline_cache_skips_the_compile() @test
 {
@@ -930,8 +149,8 @@ fn void the_pipeline_cache_skips_the_compile() @test
 	// so a second `c3c test` would answer this acquire off disk, leave
 	// `compiles` at zero, and turn a test about the *in-memory* cache into a
 	// test about the *disk* one — passing either way, asserting neither. Saying
-	// so on the first line is the whole fix: `compiles` then means "Slang ran"
-	// and "the memory cache missed" again, which is what every line below
+	// so on the first line is the whole fix: `compiles` then means "the compiler
+	// ran" and "the memory cache missed" again, which is what every line below
 	// claims. `shader/disk_cache.c3` gets its own tests further down, and those
 	// point the directory at a scratch of their own rather than disabling it.
 	//
@@ -942,20 +161,17 @@ fn void the_pipeline_cache_skips_the_compile() @test
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* first = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(cache.compiles == 1, "the first acquire compiled");
 		test::@check(cache.hits == 0, "and was not a hit");
 
-		three::MeshPipeline* second = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* second = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(second == first, "the same pipeline came back");
-		test::@check(cache.compiles == 1, "and Slang was not called again");
+		test::@check(cache.compiles == 1, "and the compiler was not called again");
 		test::@check(cache.hits == 1, "it was a hit");
 	};
 }
@@ -968,7 +184,7 @@ fn void the_pipeline_cache_skips_the_compile() @test
  source alone hands a caller that asked for lines a pipeline built for triangles,
  which draws a wireframe index buffer three indices at a time and produces
  nothing recognisable. Keying the *compile* on the render state as well — which
- is what this cache did until M6 — calls Slang again for SPIR-V it already has,
+ is what this cache did until M6 — calls the compiler again for SPIR-V it already has,
  at about seventeen times the cost of the pipeline it was trying to avoid
  rebuilding.
 
@@ -978,20 +194,17 @@ fn void the_pipeline_cache_skips_the_compile() @test
 *>
 fn void a_different_render_state_is_a_different_pipeline() @test
 {
-	// `compiles` means Slang, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
+	// `compiles` means the compiler, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
 	three::shader_cache_set_dir("");
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* culled = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
-		three::MeshPipeline* both = cache.acquire(gpu, target, source, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* culled = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* both = cache.acquire(gpu, target, three::LINE_STATE, three::ShaderPass.MESH)!!;
 
 		test::@check(culled != both, "two render states, two pipelines");
 		test::@check(culled.handle != both.handle, "and two Vulkan handles");
@@ -999,7 +212,7 @@ fn void a_different_render_state_is_a_different_pipeline() @test
 		// **One compile, not two.** This line read `compiles == 2` until M6, which
 		// recorded the behaviour rather than objecting to it — nothing in the
 		// product asked for a second render state, so nobody paid. Debug lines and
-		// `material.side` both ask, and Slang emits byte-identical SPIR-V for every
+		// `material.side` both ask, and the compiler emits byte-identical SPIR-V for every
 		// one of them: topology, cull mode and the depth flags are pipeline fields
 		// the shader never sees. See `CachedModule`.
 		test::@check(cache.compiles == 1, "and shared one compile between them");
@@ -1017,26 +230,21 @@ fn void a_different_render_state_is_a_different_pipeline() @test
 *>
 fn void a_broken_shader_leaves_the_cache_empty() @test
 {
-	// This is the Slang cache's failure path, and `MESH` compiles through shady
-	// now, so the A/B override pins the run to the implementation under test.
-	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
-	defer three::shader_overrides_clear();
-
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
+		// A body that does not compile: the fault path of the cache.
 		three::MeshPipeline*? broken = cache.acquire(
-			gpu, target, "this is not a shader", "broken.slang", three::SOLID_STATE, three::ShaderPass.MESH
+			gpu, target, three::SOLID_STATE, three::ShaderPass.MESH_MATERIAL,
+			body: "fn float3 shade(Surface s) { return notAFunction(s.uv); }"
 		);
 		test::@check(@catch(broken), "it failed");
 		test::@check(cache.entries.len() == 0, "and cached nothing");
 
-		String source = mesh_module()!!;
-		defer source.free(mem);
-		three::MeshPipeline* good = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* good = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(good != null, "and the cache still works afterwards");
 		test::@check(cache.entries.len() == 1, "with one entry");
 	};
@@ -1046,26 +254,20 @@ fn void a_broken_shader_leaves_the_cache_empty() @test
  The descriptor set layout the pipeline was built with came from the shader.
 
  M4's done condition, asserted on the pipeline rather than on the reflection:
- what `MeshPipeline` carries is what `mesh.slang` declared, and nothing in
+ what `MeshPipeline` carries is what the mesh def declared, and nothing in
  `gpu/pipeline.c3` names `base_color_map` any more.
 *>
 fn void the_pipeline_layout_is_derived_from_the_shader() @test
 {
-	// The bindings and the push size asserted below are `mesh.slang`'s, so this
-	// asks Slang for the module even though `MESH` now defaults to shady.
-	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
-	defer three::shader_overrides_clear();
-
+	// The bindings and the push size asserted below are the mesh def's, read
+	// back off the module the pipeline is built from.
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* pipeline = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* pipeline = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 
 		test::@check(pipeline.descriptor_layout != null, "a descriptor set layout was created");
 		test::@check(pipeline.shader.bindings.len() == 8,
@@ -1077,8 +279,10 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 			pipeline.shader.binding_of("normal_map") == null,
 			"while the built-in material's own maps are slots of that array"
 		);
-		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
-			"with the shader's push size of %d, got %d", three::MATERIAL_PUSH_START, pipeline.shader.push_size);
+		// The walk (24 bytes of pointers) plus the emitted empty Uniforms member,
+		// rounded to the block's 8-byte alignment.
+		test::@check(pipeline.shader.push_size == 32,
+			"with the shader's push size of 32, got %d", pipeline.shader.push_size);
 	};
 }
 
@@ -1101,25 +305,22 @@ fn void the_pipeline_layout_is_derived_from_the_shader() @test
 *>
 fn void a_released_pipeline_is_kept_for_the_next_acquire() @test
 {
-	// `compiles` means Slang, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
+	// `compiles` means the compiler, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
 	three::shader_cache_set_dir("");
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
-		three::MeshPipeline* first = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* first = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		cache.release(gpu, first);
 
 		test::@check(cache.entries.len() == 1, "the entry stayed: %d", (int)cache.entries.len());
 		test::@check(cache.evictions == 0, "and nothing was evicted: %d", cache.evictions);
 
-		three::MeshPipeline* again = cache.acquire(gpu, target, source, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
+		three::MeshPipeline* again = cache.acquire(gpu, target, three::SOLID_STATE, three::ShaderPass.MESH)!!;
 		test::@check(again == first, "the same pipeline came back");
 		test::@check(cache.builds == 1, "and no second VkPipeline was built: %d", cache.builds);
 		test::@check(cache.compiles == 1, "nor a second compile: %d", cache.compiles);
@@ -1155,9 +356,6 @@ fn void the_pipeline_cache_evicts_what_nothing_uses() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
@@ -1167,12 +365,14 @@ fn void the_pipeline_cache_evicts_what_nothing_uses() @test
 		{
 			for (int i = 0; i < 5; i++)
 			{
-				// A trailing comment is a different source and the same shader:
-				// the cache keys on content, so this is the cheapest way to ask
-				// for a compile it has not seen.
-				String variant = string::tformat("%s\n// %d\n", source, i);
-				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
-				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
+				// A trailing comment is a different body and the same shading: the
+				// cache keys on the inputs, so this is the cheapest way to ask for
+				// a compile it has not seen.
+				String variant = string::tformat("fn float3 shade(Surface s) { return s.albedo; } // %d", i);
+				held[i * 2] = cache.acquire(gpu, target, three::SOLID_STATE,
+					three::ShaderPass.MESH_MATERIAL, body: variant)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, three::LINE_STATE,
+					three::ShaderPass.MESH_MATERIAL, body: variant)!!;
 			}
 		};
 
@@ -1212,9 +412,6 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
 {
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = mesh_module()!!;
-		defer source.free(mem);
-
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
@@ -1224,9 +421,11 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
 		{
 			for (int i = 0; i < 5; i++)
 			{
-				String variant = string::tformat("%s\n// %d\n", source, i);
-				held[i * 2] = cache.acquire(gpu, target, variant, "mesh.slang", three::SOLID_STATE, three::ShaderPass.MESH)!!;
-				held[i * 2 + 1] = cache.acquire(gpu, target, variant, "mesh.slang", three::LINE_STATE, three::ShaderPass.MESH)!!;
+				String variant = string::tformat("fn float3 shade(Surface s) { return s.albedo; } // %d", i);
+				held[i * 2] = cache.acquire(gpu, target, three::SOLID_STATE,
+					three::ShaderPass.MESH_MATERIAL, body: variant)!!;
+				held[i * 2 + 1] = cache.acquire(gpu, target, three::LINE_STATE,
+					three::ShaderPass.MESH_MATERIAL, body: variant)!!;
 			}
 		};
 
@@ -1258,16 +457,16 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
 // ============================================================================
 
 <*
- A body written twice, once opaque and once transparent, is **one** Slang call
+ A body written twice, once opaque and once transparent, is **one** compile
  and **two** pipelines.
 
  The two halves fail in opposite directions and both are cheap mistakes to make.
  Leaving the blend mode out of `PipelineState.equals` hands the transparent
  material the opaque pipeline, which renders it solid — a bug that looks like the
  blending was never implemented. Folding the blend into the *module* key instead
- calls Slang again for SPIR-V it already has, at about seventeen times the cost
- of the millisecond it was trying to save, on a device where the shader cannot
- see the blend state at all.
+ calls the compiler again for SPIR-V it already has, at about seventeen times
+ the cost of the millisecond it was trying to save, on a device where the shader
+ cannot see the blend state at all.
 
  It is `a_different_render_state_is_a_different_pipeline`'s claim over the axis
  that arrived with blending, and it is made through `create_material` rather than
@@ -1275,17 +474,17 @@ fn void a_pipeline_something_still_holds_survives_the_eviction() @test
  the half that could quietly stop varying.
 
  The counts are read as deltas over what `MeshPass.init` already built — the pass
- arrives holding `mesh.slang` over four states. Absolute numbers here would be a
- second, weaker copy of `the_pass_prebuilds_the_blended_lambert_variants`, which
- is the test that owns that claim.
+ arrives holding the mesh module over four states. Absolute numbers here would
+ be a second, weaker copy of `the_pass_prebuilds_the_blended_lambert_variants`,
+ which is the test that owns that claim.
 
  **Proved by injection.** The blend folded into the module key — `create_material`
  appending `blend.ordinal` to the assembled source, which is what keying the
- compile on the render state amounts to: "one Slang call for both, got 2".
+ compile on the render state amounts to: "one compile for both, got 2".
 *>
 fn void a_transparent_variant_of_one_source_is_one_compile() @test
 {
-	// `compiles` means Slang, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
+	// `compiles` means the compiler, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
 	three::shader_cache_set_dir("");
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
@@ -1325,10 +524,10 @@ fn void a_transparent_variant_of_one_source_is_one_compile() @test
  A transparent `MeshLambertMaterial` builds nothing, because `MeshPass.init`
  already did.
 
- `create_texture_material`'s doc block promises "no Slang, no device, no new
+ `create_texture_material`'s doc block promises "no device, no compile and no new
  pipeline", and a blend mode is pipeline state on this device — so the promise
  and the feature are in direct conflict unless every variant exists before the
- script asks. That is what `init` acquiring four pipelines over one `mesh.slang`
+ script asks. That is what `init` acquiring four pipelines over one mesh module
  buys: four `VkPipeline` objects, one compile, about a millisecond each, at
  startup where nothing is waiting on a frame.
 
@@ -1345,7 +544,7 @@ fn void a_transparent_variant_of_one_source_is_one_compile() @test
 *>
 fn void the_pass_prebuilds_the_blended_lambert_variants() @test
 {
-	// `compiles` means Slang, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
+	// `compiles` means the compiler, not the disk cache — see `the_pipeline_cache_skips_the_compile`.
 	three::shader_cache_set_dir("");
 
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
@@ -1356,13 +555,13 @@ fn void the_pass_prebuilds_the_blended_lambert_variants() @test
 
 		// Four states over one source — solid, lines, alpha, additive — and the
 		// sky, which is a fifth pipeline over a second source and so a second
-		// Slang call. It is built here for the same reason the four are: a scene
+		// compile. It is built here for the same reason the four are: a scene
 		// that assigns a background should not pay a compile inside that frame.
 		test::@check(pass.pipelines.builds == 5,
 			"the pass built four pipelines from one shader and one from the sky, got %d",
 			(int)pass.pipelines.builds);
 		test::@check(pass.pipelines.compiles == 2,
-			"with one Slang call for the mesh and one for the sky, got %d", (int)pass.pipelines.compiles);
+			"with one compile for the mesh and one for the sky, got %d", (int)pass.pipelines.compiles);
 
 		uint builds = pass.pipelines.builds;
 		uint compiles = pass.pipelines.compiles;
@@ -1430,7 +629,7 @@ const String CACHE_DISABLED_DIR = "build/shader-cache-test/disabled";
  Point the disk cache at an empty directory of this test's own, and zero the
  counters.
 
- **Emptied, not merely created.** A `.slangmod` left by the previous run would
+ **Emptied, not merely created.** A `.shadymod` left by the previous run would
  answer this run's first compile, and `stores == 1` would fail for a reason that
  has nothing to do with the code under test.
 
@@ -1468,7 +667,7 @@ fn usz cached_modules(String dir)
 	{
 		usz found = 0;
 		PathList entries = path::ls(tmem, (Path)dir)!!;
-		foreach (entry : entries) if (((String)entry).ends_with(".slangmod")) found++;
+		foreach (entry : entries) if (((String)entry).ends_with(".shadymod")) found++;
 		return found;
 	};
 }
@@ -1484,7 +683,7 @@ fn String cached_module_path(String dir)
 	PathList entries = path::ls(tmem, (Path)dir)!!;
 	foreach (entry : entries)
 	{
-		if (((String)entry).ends_with(".slangmod")) return string::tformat("%s/%s", dir, (String)entry);
+		if (((String)entry).ends_with(".shadymod")) return string::tformat("%s/%s", dir, (String)entry);
 	}
 	return "";
 }
@@ -1509,28 +708,52 @@ fn usz spirv_offset(char[] bytes)
 	return 0;
 }
 
-// A shader for the cache tests and nothing else. Its own source, because the
-// key is the source: sharing `mesh.slang` would mean these tests and the rest of
-// the suite wrote to the same filename whenever a directory leaked between them.
-const String CACHE_SOURCE = `
-struct VOut { float2 uv : TEXCOORD0; float4 sv_position : SV_Position; };
-[vk::binding(0, 0)] Sampler2D base_color_map;
-struct PushBlock { float4x4 mvp; float4 tint; };
-[vk_push_constant] const PushBlock push;
+<*
+ The cache's door for a test-owned source.
 
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID)
+ The parameter list is the old front door's, so the tests below read as they did:
+ the entry list is ignored because a def's source carries its own entry points,
+ and everything else goes through `compile_shady_cached` exactly as a pass would.
+*>
+fn three::ShaderModule? compile_cached(
+	String source,
+	String name,
+	three::ShaderEntry[] entries,
+	bool* compiled = null,
+	three::ShaderSpec[] specs = { })
 {
-	VOut o;
-	o.sv_position = mul(push.mvp, float4(float(vid), 0, 0, 1));
-	o.uv = float2(0, 0);
-	return o;
+	three::ShaderDef def = { .name = name, .sources = { { .name = name, .source = source } } };
+	return three::compile_shady_cached(def, three::MeshPush, compiled, specs);
 }
 
-[shader("fragment")]
-float4 fragmentMain(VOut i) : SV_Target
+// A shader for the cache tests and nothing else. Its own source, because the
+// key is the source: sharing a def with the rest of the suite would mean these
+// tests wrote to the same filename whenever a directory leaked between them.
+const String CACHE_SOURCE = `
+struct VertexIn
 {
-	return base_color_map.Sample(i.uv) * push.tint;
+	uint vid @builtin(vertex_index);
+}
+
+struct VertexOutput
+{
+	float4 sv_position @position;
+	float2 uv;
+}
+
+Sampler2D base_color_map @set(0) @binding(0);
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput result;
+	result.sv_position = float4(float(input.vid), 0.0, 0.0, 1.0);
+	result.uv = float2(0.0, 0.0);
+	return result;
+}
+
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	return base_color_map.Sample(input.uv);
 }
 `;
 
@@ -1543,7 +766,7 @@ float4 fragmentMain(VOut i) : SV_Target
  ## Why the third compile flips a byte
 
  Every equality check below would also pass against a loader that opened the
- file, threw it away and called Slang again. The compiler is deterministic —
+ file, threw it away and compiled again. The compiler is deterministic —
  `the_same_source_compiles_to_the_same_bytes` pins that — so "the same module
  came back" says nothing at all about where it came from, and `loads == 1` and
  `!ran` are both the implementation reporting on itself.
@@ -1555,22 +778,23 @@ float4 fragmentMain(VOut i) : SV_Target
  loader re-checks, so the file stays well-formed and this is not a disguised test
  of the rejection path.
 
- **Proved by injection.** `compile_slang_cached` freeing what `cache_load` gave it
+ **Proved by injection.** `compile_shady_cached` freeing what `cache_load` gave it
  and compiling anyway — one line, and the shape of every "load it, then compile
  to be safe" bug. It passes `!ran`, `loads == 1`, `stores == 0` and every
  field-for-field comparison in this test, and dies on the byte:
  "the third compile returned the byte that is on disk, got 0x00 rather than 0xff".
 *>
-fn void the_disk_cache_answers_the_second_compile_without_slang() @test
+fn void the_disk_cache_answers_the_second_compile_without_compiling() @test
 {
 	fresh_cache(CACHE_SECOND_DIR);
 
 	bool ran = false;
-	three::ShaderModule first = three::compile_slang_cached(CACHE_SOURCE, "cache.slang", both_stages(), &ran)!!;
+	three::ShaderModule first = compile_cached(CACHE_SOURCE, "cache.shady", both_stages(), &ran)!!;
 	defer first.free();
 
 	three::ShaderCacheStats after_first = three::shader_cache_stats();
-	test::@check(ran, "the first compile ran Slang");
+	test::@check(first.ok, "it compiles: %s", first.diagnostic);
+	test::@check(ran, "the first compile ran");
 	test::@check(after_first.misses == 1, "with nothing to read: %d", after_first.misses);
 	test::@check(after_first.stores == 1, "and stored one module: %d", after_first.stores);
 	test::@check(cached_modules(CACHE_SECOND_DIR) == 1,
@@ -1578,11 +802,11 @@ fn void the_disk_cache_answers_the_second_compile_without_slang() @test
 
 	three::shader_cache_reset_stats();
 
-	three::ShaderModule second = three::compile_slang_cached(CACHE_SOURCE, "cache.slang", both_stages(), &ran)!!;
+	three::ShaderModule second = compile_cached(CACHE_SOURCE, "cache.shady", both_stages(), &ran)!!;
 	defer second.free();
 
 	three::ShaderCacheStats after_second = three::shader_cache_stats();
-	test::@check(!ran, "the second compile did not run Slang");
+	test::@check(!ran, "the second compile did not run the compiler");
 	test::@check(after_second.loads == 1, "it came off disk: %d", after_second.loads);
 	test::@check(after_second.stores == 0, "and wrote nothing: %d", after_second.stores);
 	test::@check(after_second.invalid == 0, "and refused nothing: %d", after_second.invalid);
@@ -1655,10 +879,10 @@ fn void the_disk_cache_answers_the_second_compile_without_slang() @test
 
 	three::shader_cache_reset_stats();
 
-	three::ShaderModule third = three::compile_slang_cached(CACHE_SOURCE, "cache.slang", both_stages(), &ran)!!;
+	three::ShaderModule third = compile_cached(CACHE_SOURCE, "cache.shady", both_stages(), &ran)!!;
 	defer third.free();
 
-	test::@check(!ran, "the third compile did not run Slang either");
+	test::@check(!ran, "the third compile did not run the compiler either");
 	test::@check(three::shader_cache_stats().loads == 1, "and was a load");
 	test::@check(third.spirv.len > 8, "the module is long enough to hold the edit");
 	test::@check(third.spirv[8] == (char)(original ^ 0xff),
@@ -1666,14 +890,12 @@ fn void the_disk_cache_answers_the_second_compile_without_slang() @test
 		(int)third.spirv[8], (int)(char)(original ^ 0xff));
 }
 
-// A fragment that does not compile: `float3` initialised from a `float4`, which
-// Slang refuses with `error[E30019]: type mismatch in expression`.
+// A body that does not compile: an identifier that is declared nowhere.
 const String CACHE_BROKEN_SOURCE = `
-struct VOut { float4 sv_position : SV_Position; };
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(0, 0, 0, 1); return o; }
-[shader("fragment")]
-float4 fragmentMain(VOut i) : SV_Target { float3 c = float4(1, 0, 0, 1); return float4(c, 1); }
+fn float4 fragmentMain() @fragment
+{
+	return notAFunction(1.0);
+}
 `;
 
 <*
@@ -1691,22 +913,22 @@ float4 fragmentMain(VOut i) : SV_Target { float3 c = float4(1, 0, 0, 1); return 
  implementation would break by returning early.
 
  **Proved by injection.** The `if (mod.ok)` guard removed from
- `compile_slang_cached`, so every compile is stored: "nothing was written: 1".
+ `compile_shady_cached`, so every compile is stored: "nothing was written: 1".
 *>
 fn void only_a_successful_compile_is_stored() @test
 {
 	fresh_cache(CACHE_FAILURE_DIR);
 
 	bool ran = false;
-	three::ShaderModule broken = three::compile_slang_cached(
-		CACHE_BROKEN_SOURCE, "broken.slang", both_stages(), &ran
+	three::ShaderModule broken = compile_cached(
+		CACHE_BROKEN_SOURCE, "broken", both_stages(), &ran
 	)!!;
 	defer broken.free();
 
-	test::@check(ran, "Slang ran");
+	test::@check(ran, "the compiler ran");
 	test::@check(!broken.ok, "and refused the shader");
 	test::@check(broken.diagnostic.len > 0, "with something to say about it");
-	test::@check(broken.diagnostic.contains("error"), "which is an error: %s", broken.diagnostic);
+	test::@check(broken.diagnostic.contains("broken:"), "which names the source and a line: %s", broken.diagnostic);
 
 	three::ShaderCacheStats stats = three::shader_cache_stats();
 	test::@check(stats.stores == 0, "nothing was written: %d", stats.stores);
@@ -1714,129 +936,54 @@ fn void only_a_successful_compile_is_stored() @test
 		"and the directory is empty: %d", (int)cached_modules(CACHE_FAILURE_DIR));
 
 	// The second attempt is a miss again, not a stored refusal handed back.
-	three::ShaderModule again = three::compile_slang_cached(
-		CACHE_BROKEN_SOURCE, "broken.slang", both_stages(), &ran
+	three::ShaderModule again = compile_cached(
+		CACHE_BROKEN_SOURCE, "broken", both_stages(), &ran
 	)!!;
 	defer again.free();
-	test::@check(ran, "the retry reached Slang too");
+	test::@check(ran, "the retry reached the compiler too");
 	test::@check(three::shader_cache_stats().loads == 0, "and read nothing");
 }
 
-// A shader that compiles *and* warns: `u` is read before it is written, which
-// Slang reports as `warning[E41016]: use of uninitialized variable`. Chosen from
-// four candidates that were tried against the SDK rather than assumed — the
-// other three (implicit conversion, unreachable code, `#warning`) all work too.
-const String CACHE_WARNING_SOURCE = `
-struct VOut { float4 sv_position : SV_Position; };
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(0, 0, 0, 1); return o; }
-[shader("fragment")]
-float4 fragmentMain(VOut i) : SV_Target
-{
-	float u;
-	return float4(u, 0, 0, 1);
-}
-`;
-
-<*
- A warning survives being cached.
-
- The trap this closes is specific and quiet: a compile that warns still succeeds,
- so it is stored, and every run after the first is a load. A loader that did not
- carry the diagnostic would make the warning appear once — on the machine that
- first compiled it, on the day it was written — and never again, on any machine,
- for as long as the file exists. `compile.c3`'s header is explicit that "a warning
- on a successful compile is worth as much as an error on a failed one", and
- `plan.md` §6 calls a compile that fails quietly the runtime version of the
- `$embed` trap. A warning that goes quiet on the second run is the same trap with
- a longer fuse.
-
- The text is compared, not merely its length: a loader that stored the
- diagnostic's size and lost its bytes would pass a length check.
-
- **Proved by injection.** The diagnostic written as an empty blob —
- `cache_put_u32(&out, 0)` in place of `cache_put_blob(&out, mod.diagnostic)`:
- "the warning came back with it: ''".
-*>
-fn void a_cached_warning_still_reaches_the_log() @test
-{
-	fresh_cache(CACHE_WARNING_DIR);
-
-	bool ran = false;
-	three::ShaderModule compiled = three::compile_slang_cached(
-		CACHE_WARNING_SOURCE, "warn.slang", both_stages(), &ran
-	)!!;
-	defer compiled.free();
-
-	test::@check(ran, "Slang ran");
-	test::@check(compiled.ok, "and the shader compiled");
-	test::@check(compiled.diagnostic.len > 0, "with a warning: '%s'", compiled.diagnostic);
-	test::@check(compiled.diagnostic.contains("warning"), "which is a warning: %s", compiled.diagnostic);
-	test::@check(three::shader_cache_stats().stores == 1, "a warning does not stop the store");
-
-	three::ShaderModule loaded = three::compile_slang_cached(
-		CACHE_WARNING_SOURCE, "warn.slang", both_stages(), &ran
-	)!!;
-	defer loaded.free();
-
-	test::@check(!ran, "the second compile came off disk");
-	test::@check(loaded.ok, "and is a module");
-	test::@check(loaded.diagnostic == compiled.diagnostic,
-		"the warning came back with it: '%s'", loaded.diagnostic);
-}
 
 <*
  A fresh `PipelineCache` over a seeded directory builds its pipeline without
- calling Slang.
+ calling the compiler.
 
- The other three tests here are about `compile_slang_cached`; this one is about
- the wiring. `module_for` is where every pipeline in this renderer gets its
- SPIR-V, and a disk cache that nothing calls is 17 ms per process that nobody
- saves.
+ `module_for` is where every pipeline in this renderer gets its SPIR-V, and a
+ disk cache that nothing calls is 17 ms per process that nobody saves.
 
  Both counters are read because they fail in opposite directions.
  `compiles == 0` alone would be true of a cache that never got a module at all;
  `disk_hits == 1` alone would be true of a cache that loaded one *and* compiled
  it anyway. And the pipeline is built at the end because a loaded `ShaderLayout`
- has to survive `check_push_block` — the safety net under the loader, which
+ has to survive `check_push_block` - the safety net under the loader, which
  re-validates every layout against the device that is actually present.
-
- The source is assembled by `material_source`, so what goes through the cache is
- what an agent's `ShaderMaterial` produces rather than a hand-written probe.
-
- **Proved by injection.** `module_for` calling `compile_slang` directly, which is
- what it did before this phase: "it read the module off disk rather than
- compiling it: 1 compiles, 0 disk hits".
 *>
-fn void the_pipeline_cache_reads_the_disk_before_slang() @test
+fn void the_pipeline_cache_reads_the_disk_before_the_compiler() @test
 {
 	fresh_cache(CACHE_PIPELINE_DIR);
 
-	// The disk entry below is a Slang module and the acquire must look for it
-	// through Slang, so the flipped `MESH` row is overridden back for the run.
-	three::shader_override(three::ShaderPass.MESH, three::ShaderCompiler.SLANG);
-	defer three::shader_overrides_clear();
-
 	@with_gpu(; three::Gpu* gpu, three::Target* target)
 	{
-		String source = three::material_source(
-			`float3 shade(Surface s) { return s.albedo * 0.5 + float3(0.1, 0.2, 0.3); }`, {}
-		)!!;
-		defer source.free(mem);
+		// What an agent's `ShaderMaterial` produces, rather than a hand-written
+		// probe: the same def and the same body the acquire below asks for.
+		String body = `fn float3 shade(Surface s) { return s.albedo * 0.5; }`;
 
 		// Seeding rather than a first `acquire`: this test is about what a
 		// *fresh* cache does with a directory somebody else filled, which is
 		// what the second run of the binary is.
-		three::ShaderModule seed = three::compile_slang_cached(source, "material.slang", three::MESH_ENTRIES[..])!!;
+		bool wrote = false;
+		three::ShaderModule seed = three::compile_shader(
+			three::ShaderPass.MESH_MATERIAL, &wrote, body: body)!!;
 		seed.free();
-		test::@check(three::shader_cache_stats().stores == 1, "the directory was seeded");
+		test::@check(wrote && three::shader_cache_stats().stores == 1, "the directory was seeded");
 
 		three::PipelineCache cache;
 		cache.init();
 		defer cache.free(gpu);
 
 		three::MeshPipeline* pipeline = cache.acquire(
-			gpu, target, source, "material.slang", three::SOLID_STATE, three::ShaderPass.MESH
+			gpu, target, three::SOLID_STATE, three::ShaderPass.MESH_MATERIAL, body: body
 		)!!;
 
 		test::@check(cache.compiles == 0 && cache.disk_hits == 1,
@@ -1845,12 +992,8 @@ fn void the_pipeline_cache_reads_the_disk_before_slang() @test
 		test::@check(cache.hits == 0, "and the in-memory cache had nothing to offer: %d", cache.hits);
 		test::@check(cache.builds == 1, "one VkPipeline was built: %d", cache.builds);
 		test::@check(pipeline.handle != null, "and it exists");
-		// The loaded layout went through `check_push_block` to get here, and the
-		// pipeline carries what the shader declared rather than what a literal
-		// somewhere says.
-		test::@check(pipeline.shader.push_size == three::MATERIAL_PUSH_START,
-			"with the shader's push size of %d, got %d",
-			three::MATERIAL_PUSH_START, pipeline.shader.push_size);
+		test::@check(pipeline.shader.push_size == 32,
+			"with the shader's push size of 32, got %d", pipeline.shader.push_size);
 		test::@check(pipeline.shader.binding_of("environment_map") != null,
 			"and the binding the shader named");
 	};
@@ -1858,13 +1001,13 @@ fn void the_pipeline_cache_reads_the_disk_before_slang() @test
 
 
 <*
- The smallest shader Slang will take: one vertex entry, no descriptors, no push
- block.
+ The smallest shader the compiler will take: one vertex entry, no descriptors, no
+ push block.
 
  Its size is the whole point. The three tests below edit a stored module and ask
  for it again, once per edit, and every edit that is refused costs a compile —
  so the compile has to be cheap. This one is about three milliseconds against
- `mesh.slang`'s seventeen, and it stores as a file of under a kilobyte, which is
+ the mesh def's seventeen, and it stores as a file of under a kilobyte, which is
  what makes a sweep over *every* truncation point affordable.
 
  No descriptors and no push fields is not laziness either: it puts the layout
@@ -1873,14 +1016,22 @@ fn void the_pipeline_cache_reads_the_disk_before_slang() @test
  guards exist for, and a shader with two bindings would bury it.
 *>
 const String CACHE_TINY_SOURCE = `
-struct VOut { float4 sv_position : SV_Position; };
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(float(vid), 0, 0, 1); return o; }
+struct TOut
+{
+	float4 sv_position @position;
+}
+
+fn TOut vertexMain() @vertex
+{
+	TOut result;
+	result.sv_position = float4(0.0, 0.0, 0.0, 1.0);
+	return result;
+}
 `;
 
 // A global for `BOTH_STAGES`' reason: a slice literal is backed by the stack
 // frame that made it.
-const three::ShaderEntry[1] TINY_ENTRY = { { "vertexMain", slang::STAGE_VERTEX } };
+const three::ShaderEntry[1] TINY_ENTRY = { { "vertexMain", three::STAGE_VERTEX } };
 
 macro three::ShaderEntry[] tiny_entry() => TINY_ENTRY[..];
 
@@ -1920,7 +1071,7 @@ fn void probe_corrupt(String path, char[] bytes, char[] reference, String what, 
 	file::save(path, bytes)!!;
 	three::shader_cache_reset_stats();
 
-	three::ShaderModule? answered = three::compile_slang_cached(CACHE_TINY_SOURCE, "tiny.slang", tiny_entry());
+	three::ShaderModule? answered = compile_cached(CACHE_TINY_SOURCE, "tiny.shady", tiny_entry());
 	test::@check(@ok(answered), "%s %d: it answered rather than faulting", what, (int)at);
 	three::ShaderModule mod = answered!!;
 	defer mod.free();
@@ -1982,7 +1133,7 @@ fn void probe_corrupt(String path, char[] bytes, char[] reference, String what, 
 
  About three hundred iterations, each at most one compile of the tiny source,
  and the whole test runs in about six hundred milliseconds. That is affordable
- only because the shader is small; the same sweep over `mesh.slang` would take
+ only because the shader is small; the same sweep over the mesh def would take
  the best part of a minute.
 
  **Proved by injection.** The bindings' guard removed from `cache_load` —
@@ -2003,7 +1154,7 @@ fn void a_corrupt_cache_entry_recompiles_rather_than_crashes() @test
 {
 	fresh_cache(CACHE_CORRUPT_DIR);
 
-	three::ShaderModule reference = three::compile_slang_cached(CACHE_TINY_SOURCE, "tiny.slang", tiny_entry())!!;
+	three::ShaderModule reference = compile_cached(CACHE_TINY_SOURCE, "tiny.shady", tiny_entry())!!;
 	defer reference.free();
 	test::@check(three::shader_cache_stats().stores == 1, "one module was stored to damage");
 
@@ -2061,7 +1212,7 @@ fn void a_corrupt_cache_entry_recompiles_rather_than_crashes() @test
  for is refused.
 
  The hash names a candidate; the file decides. This is the half of that rule
- nothing else here can reach: `the_disk_cache_answers_the_second_compile_without_slang`
+ nothing else here can reach: `the_disk_cache_answers_the_second_compile_without_compiling`
  proves a hit is really read, and `a_corrupt_cache_entry_recompiles_rather_than_crashes`
  proves a broken file is refused, but both of those work on files that are
  *about* the right shader. What a hash collision produces is a file that is
@@ -2094,7 +1245,7 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
 {
 	fresh_cache(CACHE_IDENTITY_DIR);
 
-	three::ShaderModule reference = three::compile_slang_cached(CACHE_TINY_SOURCE, "tiny.slang", tiny_entry())!!;
+	three::ShaderModule reference = compile_cached(CACHE_TINY_SOURCE, "tiny.shady", tiny_entry())!!;
 	defer reference.free();
 	test::@check(three::shader_cache_stats().stores == 1, "one module was stored");
 	test::@check(reference.spirv.len > 8, "long enough to carry an edit");
@@ -2109,12 +1260,12 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
 		char[] bytes = file::load(tmem, found)!!;
 
 		// The stored source, found by a line of itself rather than by counting
-		// header fields. One character of it changes — `float(vid)` becomes
-		// `float(vld)` — which is a different shader by the only definition the
-		// cache has, and the same number of bytes by construction.
-		usz source_at = byte_offset(bytes, "float4(float(vid), 0, 0, 1)");
+		// header fields. One character of it changes — `0.0` becomes `1.0` —
+		// which is a different shader by the only definition the cache has, and
+		// the same number of bytes by construction.
+		usz source_at = byte_offset(bytes, "float4(0.0, 0.0, 0.0, 1.0)");
 		test::@check(source_at < bytes.len, "the stored source is in the file");
-		bytes[source_at + 13] = 'l';
+		bytes[source_at + 7] = '1';
 
 		usz spirv_at = spirv_offset(bytes);
 		test::@check(spirv_at > 0, "and so is the SPIR-V");
@@ -2127,8 +1278,8 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
 	three::shader_cache_reset_stats();
 
 	bool ran = false;
-	three::ShaderModule answered = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule answered = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer answered.free();
 
@@ -2138,7 +1289,7 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
 		(int)answered.spirv[8], (int)reference.spirv[8]);
 
 	three::ShaderCacheStats stats = three::shader_cache_stats();
-	test::@check(ran, "Slang ran");
+	test::@check(ran, "the compiler ran");
 	test::@check(stats.loads == 0, "nothing was loaded: %d", stats.loads);
 	test::@check(stats.invalid == 1, "the file was refused rather than missing: %d", stats.invalid);
 	test::@check(stats.stores == 1, "and one module was written: %d", stats.stores);
@@ -2161,7 +1312,7 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
  built with other arguments, is not this process's module.
 
  All three are in the key — `cache_key` hashes the format version, the compiler
- tag and the joined argument list before it hashes the source — and none can be
+ name and the joined argument list before it hashes the source — and none can be
  observed through the key, because the key is a private function whose only
  visible effect is a filename nothing else knows how to predict. So what is
  tested here is the half that *is* observable and is the half that matters: what
@@ -2171,26 +1322,26 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
  That is not a weaker test than one that compared two hashes. The key and the
  file are written from the same three values by the same function pair — the
  arguments `cache_store` writes as a blob are the arguments `cache_key` hashed,
- the compiler tag likewise, and the version is a constant used by both — so a key
- that stopped covering any of them would still be caught here as an identity
+ the compiler name likewise, and the version is a constant used by both — so a
+ key that stopped covering any of them would still be caught here as an identity
  failure. The failure mode this rules out is the real one: a stale file being
  *believed*.
 
- ## The compiler half is the one that fires without anybody deciding to
+ ## Moving the compiler means clearing the cache
 
- The other two need a person: somebody edits `SLANG_ARGUMENTS`, or somebody
- bumps `SHADER_CACHE_FORMAT_VERSION`. An SDK upgrade needs nobody, arrives as a
- changed dylib, and until `slang::build_tag()` was in the key it left every
- stored module in place — modules a compiler that is no longer installed
- produced, loaded and used with nothing reporting anything. The symptom is "the
- shader still behaves the way it did before the upgrade", true on a machine whose
- cache is warm and not reproducible on one whose cache is empty.
+ The key names no compiler revision: the compiler is a submodule and its own
+ sources move with a checkout, so two builds under the same name are
+ indistinguishable here on purpose. **Clear `build/shader-cache` after moving the
+ submodule** — the directory is the whole of "clear the cache". Skip it and the
+ next run serves a module the old compiler built: "the shader still behaves the
+ way it did before the move", true on a machine whose cache is warm and not
+ reproducible on one whose cache is empty.
 
- What it cannot see is two untagged compiler builds, which report the same
- string. `SHADER_CACHE_FORMAT_VERSION` is still the manual lever for that, and it
- only works if the loader actually checks the field — which is exactly what a
- version written into a file and never read again would silently stop doing.
- Deleting `build/shader-cache` is the blunt one.
+ The name check catches a file a *different* compiler wrote — this test patches a
+ file to prove it — but it cannot tell two builds of the same name apart.
+ `SHADER_CACHE_FORMAT_VERSION` is the lever when the format changes, and it only
+ works if the loader actually checks the field — which is exactly what a version
+ written into a file and never read again would silently stop doing.
 
  All three halves patch the file in place, keeping every length, and all three
  flip a SPIR-V byte alongside so that a module which came off disk can be told
@@ -2203,7 +1354,7 @@ fn void a_hash_hit_with_different_source_is_a_miss() @test
  believed: "a module built under this format version came back, byte 8 of its
  SPIR-V is 0xff rather than 0x00". The compiler check removed —
  `if (stored_compiler != compiler) return cache_reject();` — and the file from
- another SDK is believed the same way: "a module built by this compiler came
+ another compiler is believed the same way: "a module built by this compiler came
  back, byte 8 of its SPIR-V is 0xff rather than 0x00". And the argument check
  removed — `if (stored_args != args) return cache_reject();` — for the third:
  "a module built with these arguments came back, byte 8 of its SPIR-V is 0xff
@@ -2213,7 +1364,7 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 {
 	fresh_cache(CACHE_KEY_DIR);
 
-	three::ShaderModule reference = three::compile_slang_cached(CACHE_TINY_SOURCE, "tiny.slang", tiny_entry())!!;
+	three::ShaderModule reference = compile_cached(CACHE_TINY_SOURCE, "tiny.shady", tiny_entry())!!;
 	defer reference.free();
 	test::@check(three::shader_cache_stats().stores == 1, "one module was stored");
 
@@ -2256,8 +1407,8 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	three::shader_cache_reset_stats();
 
 	bool ran = false;
-	three::ShaderModule after_version = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule after_version = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer after_version.free();
 
@@ -2265,7 +1416,7 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	test::@check(after_version.spirv == reference.spirv,
 		"a module built under this format version came back, byte 8 of its SPIR-V is 0x%02x rather than 0x%02x",
 		(int)after_version.spirv[8], (int)reference.spirv[8]);
-	test::@check(ran, "Slang ran");
+	test::@check(ran, "the compiler ran");
 	test::@check(three::shader_cache_stats().invalid == 1,
 		"the file from another version was refused: %d", three::shader_cache_stats().invalid);
 	test::@check(three::shader_cache_stats().loads == 0,
@@ -2276,19 +1427,22 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	@pool()
 	{
 		char[] bytes = file::load(tmem, path)!!;
-		// Found by its own text rather than at offset 12, where the format puts
-		// it: a field located by position would keep patching *something* if the
-		// header grew, and what it patched would no longer be the tag. The tag
-		// this process reports is the tag the file was written with one compile
-		// ago, so a search for it is exact.
-		String tag = slang::build_tag();
-		test::@check(tag.len > 0, "libslang reports a build tag: '%s'", tag);
-		usz tag_at = byte_offset(bytes, tag);
-		test::@check(tag_at < bytes.len, "and it is in the file");
-		// Same length, different bytes — a shorter tag would move every offset
+		// Found by its own text rather than at a fixed offset, where the format
+		// puts it: a field located by position would keep patching *something*
+		// if the header grew, and what it patched would no longer be the
+		// compiler's name. The name this process writes is the name the file was
+		// written with one compile ago, so a search for it is exact.
+		String compiler = "shady";
+		usz tag_at = byte_offset(bytes, compiler);
+		test::@check(tag_at < bytes.len, "and the compiler's name is in the file");
+		// Same length, different bytes — a shorter name would move every offset
 		// after it and the loader would then be refusing a truncated file rather
 		// than a foreign compiler.
-		bytes[tag_at] = bytes[tag_at] == 'x' ? 'y' : 'x';
+		bytes[tag_at] = 'o';
+		bytes[tag_at + 1] = 't';
+		bytes[tag_at + 2] = 'h';
+		bytes[tag_at + 3] = 'e';
+		bytes[tag_at + 4] = 'r';
 
 		usz spirv_at = spirv_offset(bytes);
 		test::@check(spirv_at > 0, "and so is the SPIR-V");
@@ -2299,8 +1453,8 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 
 	three::shader_cache_reset_stats();
 
-	three::ShaderModule after_compiler = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule after_compiler = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer after_compiler.free();
 
@@ -2308,7 +1462,7 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	test::@check(after_compiler.spirv == reference.spirv,
 		"a module built by this compiler came back, byte 8 of its SPIR-V is 0x%02x rather than 0x%02x",
 		(int)after_compiler.spirv[8], (int)reference.spirv[8]);
-	test::@check(ran, "Slang ran");
+	test::@check(ran, "the compiler ran");
 	test::@check(three::shader_cache_stats().invalid == 1,
 		"the file from another SDK was refused: %d", three::shader_cache_stats().invalid);
 	test::@check(three::shader_cache_stats().loads == 0,
@@ -2319,13 +1473,12 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	@pool()
 	{
 		char[] bytes = file::load(tmem, path)!!;
-		// One of the five flags, found by its own text. `-force-glsl-scalar-layout`
-		// is the one whose absence `compile.c3` says arrives a third of the way
-		// off with nothing reporting an error, which is what a cache that
-		// ignored the argument list would reproduce exactly.
-		usz args_at = byte_offset(bytes, "-force-glsl-scalar-layout");
+		// The flag the adapter passes, found by its own text. A cache that
+		// ignored the argument list would hand back a module built with a
+		// different layout.
+		usz args_at = byte_offset(bytes, "scalar-layout");
 		test::@check(args_at < bytes.len, "the stored arguments are in the file");
-		bytes[args_at + 1] = 'F';
+		bytes[args_at] = 'S';
 
 		usz spirv_at = spirv_offset(bytes);
 		test::@check(spirv_at > 0, "and so is the SPIR-V");
@@ -2336,8 +1489,8 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 
 	three::shader_cache_reset_stats();
 
-	three::ShaderModule after_args = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule after_args = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer after_args.free();
 
@@ -2345,7 +1498,7 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 	test::@check(after_args.spirv == reference.spirv,
 		"a module built with these arguments came back, byte 8 of its SPIR-V is 0x%02x rather than 0x%02x",
 		(int)after_args.spirv[8], (int)reference.spirv[8]);
-	test::@check(ran, "Slang ran");
+	test::@check(ran, "the compiler ran");
 	test::@check(three::shader_cache_stats().invalid == 1,
 		"the file built with other flags was refused: %d", three::shader_cache_stats().invalid);
 	test::@check(cached_modules(CACHE_KEY_DIR) == 1,
@@ -2355,9 +1508,17 @@ fn void the_cache_key_covers_the_compiler_the_arguments_and_the_format_version()
 // The tiny source with one expression changed, so the two are the same shader
 // in every way a reader cares about and a different string to the key.
 const String CACHE_TINY_SOURCE_EDIT = `
-struct VOut { float4 sv_position : SV_Position; };
-[shader("vertex")]
-VOut vertexMain(uint vid : SV_VertexID) { VOut o; o.sv_position = float4(float(vid) + 1.0, 0, 0, 1); return o; }
+struct TOut
+{
+	float4 sv_position @position;
+}
+
+fn TOut vertexMain() @vertex
+{
+	TOut result;
+	result.sv_position = float4(1.0, 0.0, 0.0, 1.0);
+	return result;
+}
 `;
 
 // Two value sets that differ only under id 1, and the first listed the other
@@ -2380,17 +1541,18 @@ const three::ShaderSpec[2] SPEC_TAPS_4_REVERSED = {
  One module, several value sets: the values are identity, not a comment.
 
  The key hashes the values by id in a canonical order, so the same set listed
- two ways is one entry and one changed value is another. Every file here is
- Slang's and the source does not read a `@spec` constant — what is pinned is the
- key, which has to separate the values before a pass can rely on the separation.
+ two ways is one entry and one changed value is another. The files here are the
+ compiler's output and the source does not read a `@spec` constant — what is
+ pinned is the key, which has to separate the values before a pass can rely on
+ the separation.
 *>
 fn void a_changed_spec_value_is_a_different_module() @test
 {
 	fresh_cache(CACHE_SPEC_DIR);
 
 	bool ran = false;
-	three::ShaderModule four = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4[..]
+	three::ShaderModule four = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran, SPEC_TAPS_4[..]
 	)!!;
 	defer four.free();
 	test::@check(ran, "the first value set compiled");
@@ -2399,8 +1561,8 @@ fn void a_changed_spec_value_is_a_different_module() @test
 		"with one miss and one store: %d/%d", after_first.misses, after_first.stores);
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule reversed = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4_REVERSED[..]
+	three::ShaderModule reversed = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran, SPEC_TAPS_4_REVERSED[..]
 	)!!;
 	defer reversed.free();
 	test::@check(!ran, "the same values listed the other way came off disk");
@@ -2408,8 +1570,8 @@ fn void a_changed_spec_value_is_a_different_module() @test
 	test::@check(reversed.spirv == four.spirv, "and it is the same module");
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule eight = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_8[..]
+	three::ShaderModule eight = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran, SPEC_TAPS_8[..]
 	)!!;
 	defer eight.free();
 	test::@check(ran, "one changed value is not the stored entry");
@@ -2421,8 +1583,8 @@ fn void a_changed_spec_value_is_a_different_module() @test
 		"two value sets, two files: %d", (int)cached_modules(CACHE_SPEC_DIR));
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule again = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran, SPEC_TAPS_4[..]
+	three::ShaderModule again = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran, SPEC_TAPS_4[..]
 	)!!;
 	defer again.free();
 	test::@check(!ran && three::shader_cache_stats().loads == 1,
@@ -2443,15 +1605,15 @@ fn void a_changed_source_is_a_different_module() @test
 	fresh_cache(CACHE_SOURCE_EDIT_DIR);
 
 	bool ran = false;
-	three::ShaderModule first = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule first = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer first.free();
 	test::@check(ran && three::shader_cache_stats().stores == 1, "the first source was stored");
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule edited = three::compile_slang_cached(
-		CACHE_TINY_SOURCE_EDIT, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule edited = compile_cached(
+		CACHE_TINY_SOURCE_EDIT, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer edited.free();
 	test::@check(ran, "the edited source missed");
@@ -2463,8 +1625,8 @@ fn void a_changed_source_is_a_different_module() @test
 		"two sources, two files: %d", (int)cached_modules(CACHE_SOURCE_EDIT_DIR));
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule again = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule again = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer again.free();
 	test::@check(!ran && three::shader_cache_stats().loads == 1,
@@ -2472,23 +1634,17 @@ fn void a_changed_source_is_a_different_module() @test
 }
 
 <*
- The shady path is cached, and under a key of its own.
+ A compiled pass is cached, and under a key of its own.
 
- This is the wiring half: a pass on shady compiles once and loads afterwards,
- exactly as a pass on Slang does. The second half is the values and the file
- count — a different spec set is a second entry, not the entry that is already
- there.
+ This is the wiring half: a pass compiles once and loads afterwards. The second
+ half is the values and the file count — a different spec set is a second entry,
+ not the entry that is already there.
 *>
-fn void the_shady_path_is_cached_under_its_own_key() @test
+fn void a_pass_is_cached_under_its_own_key() @test
 {
 	fresh_cache(CACHE_SHADY_DIR);
-	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
-	defer three::shader_overrides_clear();
-
 	bool ran = false;
-	three::ShaderModule first = three::compile_shader(
-		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
-	)!!;
+	three::ShaderModule first = three::compile_shader(three::ShaderPass.CLUSTER, &ran)!!;
 	defer first.free();
 	test::@check(first.ok, "the shady cluster compiles: %s", first.diagnostic);
 	test::@check(ran, "the first compile ran shady");
@@ -2499,9 +1655,7 @@ fn void the_shady_path_is_cached_under_its_own_key() @test
 		"one module is on disk: %d", (int)cached_modules(CACHE_SHADY_DIR));
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule second = three::compile_shader(
-		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
-	)!!;
+	three::ShaderModule second = three::compile_shader(three::ShaderPass.CLUSTER, &ran)!!;
 	defer second.free();
 	test::@check(!ran, "the second compile did not run shady");
 	test::@check(three::shader_cache_stats().loads == 1, "it came off disk");
@@ -2509,9 +1663,7 @@ fn void the_shady_path_is_cached_under_its_own_key() @test
 
 	three::shader_cache_reset_stats();
 	three::ShaderModule other = three::compile_shader(
-		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran,
-		specs: SPEC_TAPS_8[..]
-	)!!;
+		three::ShaderPass.CLUSTER, &ran, specs: SPEC_TAPS_8[..])!!;
 	defer other.free();
 	test::@check(ran, "a different value set is not the stored entry");
 	test::@check(three::shader_cache_stats().stores == 1, "so it was stored under its own key");
@@ -2520,17 +1672,14 @@ fn void the_shady_path_is_cached_under_its_own_key() @test
 }
 
 <*
- A broken shady compile is a miss and no store, like a broken Slang one.
+ A broken compile is a miss and no store.
 *>
 fn void a_broken_shady_compile_is_not_stored() @test
 {
 	fresh_cache(CACHE_SHADY_FAILURE_DIR);
-	three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SHADY);
-	defer three::shader_overrides_clear();
-
 	bool ran = false;
 	three::ShaderModule broken = three::compile_shader(
-		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..], &ran,
+		three::ShaderPass.POST, &ran,
 		body: `fn float3 post(Post p) { return notAFunction(p.uv); }`
 	)!!;
 	defer broken.free();
@@ -2543,7 +1692,7 @@ fn void a_broken_shady_compile_is_not_stored() @test
 
 	three::shader_cache_reset_stats();
 	three::ShaderModule again = three::compile_shader(
-		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..], &ran,
+		three::ShaderPass.POST, &ran,
 		body: `fn float3 post(Post p) { return notAFunction(p.uv); }`
 	)!!;
 	defer again.free();
@@ -2551,137 +1700,46 @@ fn void a_broken_shady_compile_is_not_stored() @test
 	test::@check(three::shader_cache_stats().loads == 0, "and read nothing");
 }
 
-<*
- A pass moved between the compilers is never served the other's module.
-
- Both directions are asked and both are answered by the compiler actually
- running: flipping to shady compiles rather than loading the entry Slang wrote,
- and flipping back loads the Slang entry rather than the shady one. The
- `compile_shader` calls pass the out-flag, which is what lets them report which
- happened.
-*>
-fn void a_flipped_pass_never_reads_the_other_compilers_module() @test
-{
-	fresh_cache(CACHE_FLIP_DIR);
-
-	String source = three::shader_source(three::ShaderFile.CLUSTER_SLANG, mem)!!;
-	defer source.free(mem);
-
-	bool ran = false;
-	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
-	three::ShaderModule through_slang = three::compile_shader(
-		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
-	)!!;
-	defer through_slang.free();
-	test::@check(through_slang.ok, "the Slang cluster compiles: %s", through_slang.diagnostic);
-	test::@check(ran && three::shader_cache_stats().stores == 1, "and was stored");
-
-	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
-	three::shader_cache_reset_stats();
-	three::ShaderModule through_shady = three::compile_shader(
-		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
-	)!!;
-	defer through_shady.free();
-	test::@check(through_shady.ok, "the flipped pass compiles through shady: %s", through_shady.diagnostic);
-	test::@check(ran, "shady ran rather than answering with the Slang module");
-	test::@check(three::shader_cache_stats().loads == 0,
-		"and nothing was read: %d", three::shader_cache_stats().loads);
-
-	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SLANG);
-	three::shader_cache_reset_stats();
-	three::ShaderModule back = three::compile_shader(
-		three::ShaderPass.CLUSTER, source, three::ShaderFile.CLUSTER_SLANG.name, three::CLUSTER_ENTRIES[..], &ran
-	)!!;
-	defer back.free();
-	test::@check(!ran, "flipping back read the Slang entry rather than compiling");
-	test::@check(three::shader_cache_stats().loads == 1, "which is a load");
-	test::@check(back.spirv == through_slang.spirv, "and it is the Slang module");
-}
 
 <*
- The stored compiler identity is checked, in both directions.
+ The stored compiler identity is checked.
 
- The compile-level flip above is two different sources as well as two compilers,
- so it cannot tell a key that names the compiler from one that does not. Here a
- file found under the right name is made to claim the other compiler — the six
- bytes of `slang:` and `shady:` are the same length, so nothing moves — and the
- loader has to refuse it in each direction rather than believe it.
+ A file found under the right name is made to claim a compiler that did not
+ write it - `shady` becomes `other`, the same length so nothing moves - and the
+ loader has to refuse it rather than believe it.
 *>
-fn void the_stored_compiler_identity_is_checked_in_both_directions() @test
+fn void the_stored_compiler_identity_is_checked() @test
 {
 	fresh_cache(CACHE_COMPILER_DIR);
 
 	bool ran = false;
-	three::ShaderModule reference = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
-	)!!;
+	three::ShaderModule reference = three::compile_shader(three::ShaderPass.CLUSTER, &ran)!!;
 	defer reference.free();
-	test::@check(ran && three::shader_cache_stats().stores == 1, "one Slang module was stored");
+	test::@check(ran && three::shader_cache_stats().stores == 1, "one module was stored");
 
 	@pool()
 	{
 		String path = cached_module_path(CACHE_COMPILER_DIR);
 		test::@check(path.len > 0, "and it is findable");
 		char[] bytes = file::load(tmem, path)!!;
-		usz at = byte_offset(bytes, "slang:");
-		test::@check(at < bytes.len, "whose stored identity names Slang");
-		bytes[at] = 's';
-		bytes[at + 1] = 'h';
-		bytes[at + 2] = 'a';
-		bytes[at + 3] = 'd';
-		bytes[at + 4] = 'y';
-		bytes[at + 5] = ':';
+		usz at = byte_offset(bytes, "shady");
+		test::@check(at < bytes.len, "whose stored identity names the compiler");
+		bytes[at] = 'o';
+		bytes[at + 1] = 't';
+		bytes[at + 2] = 'h';
+		bytes[at + 3] = 'e';
+		bytes[at + 4] = 'r';
 		file::save(path, bytes)!!;
 	};
 
 	three::shader_cache_reset_stats();
-	three::ShaderModule answered = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
-	)!!;
-	defer answered.free();
-	test::@check(ran, "the Slang compile ran rather than trusting the file");
-	test::@check(three::shader_cache_stats().invalid == 1 && three::shader_cache_stats().loads == 0,
-		"the file claiming the other compiler was refused: %d invalid, %d loads",
-		three::shader_cache_stats().invalid, three::shader_cache_stats().loads);
-	test::@check(answered.spirv == reference.spirv, "and the clean module came back");
-
-	// The other direction: a shady file made to claim Slang.
-	fresh_cache(CACHE_COMPILER_DIR);
-	three::shader_override(three::ShaderPass.CLUSTER, three::ShaderCompiler.SHADY);
-	defer three::shader_overrides_clear();
-
-	three::ShaderModule shady_ref = three::compile_shader(
-		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
-	)!!;
-	defer shady_ref.free();
-	test::@check(ran && three::shader_cache_stats().stores == 1, "one shady module was stored");
-
-	@pool()
-	{
-		String path = cached_module_path(CACHE_COMPILER_DIR);
-		test::@check(path.len > 0, "and it is findable");
-		char[] bytes = file::load(tmem, path)!!;
-		usz at = byte_offset(bytes, "shady:");
-		test::@check(at < bytes.len, "whose stored identity names shady");
-		bytes[at] = 's';
-		bytes[at + 1] = 'l';
-		bytes[at + 2] = 'a';
-		bytes[at + 3] = 'n';
-		bytes[at + 4] = 'g';
-		bytes[at + 5] = ':';
-		file::save(path, bytes)!!;
-	};
-
-	three::shader_cache_reset_stats();
-	three::ShaderModule again = three::compile_shader(
-		three::ShaderPass.CLUSTER, "", "three.cluster", three::CLUSTER_ENTRIES[..], &ran
-	)!!;
+	three::ShaderModule again = three::compile_shader(three::ShaderPass.CLUSTER, &ran)!!;
 	defer again.free();
-	test::@check(ran, "the shady compile ran rather than trusting the file");
+	test::@check(ran, "the compile ran rather than trusting the file");
 	test::@check(three::shader_cache_stats().invalid == 1 && three::shader_cache_stats().loads == 0,
-		"the file claiming the other compiler was refused: %d invalid, %d loads",
+		"the file claiming another compiler was refused: %d invalid, %d loads",
 		three::shader_cache_stats().invalid, three::shader_cache_stats().loads);
-	test::@check(again.spirv == shady_ref.spirv, "and the clean module came back");
+	test::@check(again.spirv == reference.spirv, "and the clean module came back");
 }
 
 <*
@@ -2705,8 +1763,8 @@ fn void the_stored_compiler_identity_is_checked_in_both_directions() @test
  test owns a directory it never uses: `CACHE_DISABLED_DIR` is emptied and removed
  on the first line, and nothing that follows may bring it back.
 
- **Proved by injection.** The early return removed from `compile_slang_cached` —
- the `if (cache_dir.len == 0)` branch that answers straight from `compile_slang`
+ **Proved by injection.** The early return removed from `compile_shady_cached` —
+ the `if (cache_dir.len == 0)` branch that answers straight from `compile_shady`
  — so a disabled cache walks the whole path with an empty directory name:
  "it did not count a lookup it never made: 2", one miss per compile, preceded on
  stderr by two of "shader cache: cannot create  (path::INVALID_PATH); compiling
@@ -2726,14 +1784,14 @@ fn void a_disabled_cache_neither_reads_nor_writes() @test
 	three::shader_cache_set_dir("");
 
 	bool ran = false;
-	three::ShaderModule first = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule first = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer first.free();
-	test::@check(ran, "the first compile ran Slang");
+	test::@check(ran, "the first compile ran the compiler");
 
-	three::ShaderModule second = three::compile_slang_cached(
-		CACHE_TINY_SOURCE, "tiny.slang", tiny_entry(), &ran
+	three::ShaderModule second = compile_cached(
+		CACHE_TINY_SOURCE, "tiny.shady", tiny_entry(), &ran
 	)!!;
 	defer second.free();
 	test::@check(ran, "and so did the second — a disabled cache remembers nothing");

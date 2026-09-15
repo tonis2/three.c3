@@ -581,7 +581,7 @@ export class Material {
 // **It compiles nothing.** The pipeline is the one the renderer built at
 // startup — the same one every untextured mesh already draws with — so
 // constructing one is a list push, it cannot fail with a shader diagnostic,
-// and it works in a build with no Slang. That is the whole reason it is not
+// and there is no compile in it at all. That is the whole reason it is not
 // a ShaderMaterial with a one-line body.
 //
 // Lambert rather than Basic or Standard, because that is what the built-in

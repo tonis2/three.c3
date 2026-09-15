@@ -110,7 +110,7 @@ const Lighting DEFAULT_LIGHTING = {
 };
 
 <*
- The debug views `three.debug.view` selects, as `shaders/mesh.slang` reads them
+ The debug views `three.debug.view` selects, as `shaders/material.shady` reads them
  out of `FrameBlock.debug.x`.
 
  Numbers and not an enum because they cross into a shader as a float, and the one
@@ -139,11 +139,11 @@ struct MeshPass
 	// 
 	// Held here rather than acquired when one is asked for, and that is a design
 	// decision rather than an optimisation: `create_texture_material` promises
-	// that putting a picture on a box needs no device, no Slang and no new
+	// that putting a picture on a box needs no device, no compile and no new
 	// pipeline, and a lazily-acquired variant would break all three the first time
 	// a script wrote `transparent: true`. Building them here costs one
-	// `VkPipeline` each — about a millisecond, no Slang at all, since `acquire`
-	// keys the compile on the source and this is the same `mesh.slang` byte for
+	// `VkPipeline` each — about a millisecond, no compile at all, since `acquire`
+	// keys the compile on the source and this is the same `mesh.shady` byte for
 	// byte — and it happens once at startup.
 	MeshPipeline* alpha_pipeline;
 	MeshPipeline* additive_pipeline;
@@ -156,7 +156,7 @@ struct MeshPass
 	MeshPipeline* reference_alpha_pipeline;
 	MeshPipeline* reference_additive_pipeline;
 	bool reference_ready;
-	// `shaders/sky.slang` — a different template and so a second Slang call, not a
+	// `shaders/sky.shady` — a different module and so a second compile, not a
 	// fourth state over the mesh one. Null until `init` has run, and recorded only
 	// for a scene that has a background image. See `render/sky.c3`.
 	MeshPipeline* sky_pipeline;
@@ -456,16 +456,16 @@ const uint NOT_DRAWN = uint::max;
 <*
  Compiles the mesh shader and builds the pipeline from it.
 
- The `.slang` source is read and compiled at startup, which is why editing
- `shaders/mesh.slang` and re-running shows the change with no build step in
+ The `.shady` sources are read and compiled at startup, which is why editing
+ `shaders/mesh.shady` and re-running shows the change with no build step in
  between.
 
- The source is `shader_source`'s — the search path when there is a checkout, the
+ The source is `load_source`'s — the search path when there is a checkout, the
  copy embedded in the binary when there is not. A `--shader <path>` parameter
- could only ever name *this* template: `material.slang`, `post.slang`,
- `shadow.slang` and `skin.slang` are looked up the same way from four other
- places, so a run that pointed one of the five somewhere else got as far as the
- first `ShaderMaterial` and then failed with `SHADER_NOT_FOUND`.
+ could only ever name *this* def: the material, post, shadow and skin defs are
+ looked up the same way from their own places, so a run that pointed one of them
+ somewhere else got as far as the first `ShaderMaterial` and then failed with
+ `SHADER_NOT_FOUND`.
 *>
 fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 {
@@ -494,42 +494,33 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 
 	@pool()
 	{
-		// The name rather than a path: the template may have come from the search
-		// path or from the copy in the binary, and what `acquire` wants it for is a
-		// cache key and a diagnostic label. A key that changed with where the file
-		// happened to be found would miss the cache for the same bytes.
-		String source = shader_source(ShaderFile.MESH_SLANG, tmem)!;
-		String path   = ShaderFile.MESH_SLANG.name;
-		self.pipeline = self.pipelines.acquire(gpu, target, source, path, SOLID_STATE, ShaderPass.MESH)!;
+		self.pipeline = self.pipelines.acquire(gpu, target, SOLID_STATE, ShaderPass.MESH)!;
 
-		// The line pipeline is the same shader over a different fixed-function state
+		// The line pipeline is the same def over a different fixed-function state
 		// — `LINE_STATE` has the argument — so this is a second `VkPipeline` and
-		// *not* a second Slang call: `acquire` keys on the source as well as the
-		// state, and the source is byte-identical.
+		// *not* a second compile: `acquire` keys the module on the def's inputs,
+		// which are identical.
 		// 
 		// It draws nothing until a script asks for a helper. Built here anyway,
 		// because building it on demand would put a 1 ms pipeline creation inside
 		// whichever frame first added a box helper, and the whole point of a debug
 		// tool is that reaching for it is free.
-		self.line_pipeline = self.pipelines.acquire(gpu, target, source, path, LINE_STATE, ShaderPass.MESH)!;
+		self.line_pipeline = self.pipelines.acquire(gpu, target, LINE_STATE, ShaderPass.MESH)!;
 
 		// And the two blended variants, for the same reason and at the same price.
 		// Neither is claimed by a built-in material, so unlike the two above they
 		// take no second reference here: what `acquire` handed back is the pass's
 		// own, and `create_texture_material` retains per material on top of it.
-		self.alpha_pipeline = self.pipelines.acquire(gpu, target, source, path, ALPHA_STATE, ShaderPass.MESH)!;
-		self.additive_pipeline = self.pipelines.acquire(gpu, target, source, path, ADDITIVE_STATE, ShaderPass.MESH)!;
+		self.alpha_pipeline = self.pipelines.acquire(gpu, target, ALPHA_STATE, ShaderPass.MESH)!;
+		self.additive_pipeline = self.pipelines.acquire(gpu, target, ADDITIVE_STATE, ShaderPass.MESH)!;
 
-		// The sky is a different template and therefore a second Slang call, unlike
-		// the three above. Built here for their reason: a scene that assigns a
+		// The sky is a different def and therefore a second compile, unlike the
+		// three above. Built here for their reason: a scene that assigns a
 		// background should not pay a pipeline creation inside the frame that did
 		// it, and a scene that never assigns one records nothing.
-		String sky = shader_source(ShaderFile.SKY_SLANG, tmem)!;
 		self.sky_pipeline = self.pipelines.acquire(
 			gpu,
 			target,
-			sky,
-			ShaderFile.SKY_SLANG.name,
 			SKY_STATE,
 			ShaderPass.SKY,
 			contract: SKY_PUSH_FIELDS[..]
@@ -538,7 +529,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 
 	// `DEFAULT_MATERIAL` is index 0 and is built here, before anything can ask for
 	// a material, so `Node.material` never has to mean "none". Its uniform block is
-	// empty: `mesh.slang` declares no fields past `flags`.
+	// empty: the built-in def declares no agent uniforms.
 	// 
 	// `LINE_MATERIAL` is index 1 and is built beside it for the same reason: a
 	// node's material is a `uint`, so the pass has to be able to hand out an index
@@ -1005,10 +996,9 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
  Builds the numeric-reference draw pipelines the first frame that asks for one.
 
  `area_reference` is the built-in draw path's own switch, so what it needs is
- the same four states over `mesh_def`'s reference variant. The cache key is a
- name and not the Slang template: a shady def is its own text, and the module
- cache identifies a module by the string it was compiled from - the LTC build of
- the same files would answer for this one if they shared it.
+ the same four states over `mesh_def`'s reference variant. The pass itself is
+ the cache key: the fitted build of the same files would answer for this one if
+ the two shared it.
 
  A build that fails is a fault rather than a fallback to the fit: an
  `area_reference` frame that silently drew the fitted path would make the
@@ -1016,17 +1006,13 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 *>
 fn void? MeshPass.ensure_reference_pipelines(&self, Gpu* gpu, Target* target)
 {
-	String key = "three.mesh_reference";
 	@pool()
 	{
-		self.reference_pipeline = self.pipelines.acquire(
-			gpu, target, key, key, SOLID_STATE, ShaderPass.MESH_REFERENCE)!;
-		self.reference_line_pipeline = self.pipelines.acquire(
-			gpu, target, key, key, LINE_STATE, ShaderPass.MESH_REFERENCE)!;
-		self.reference_alpha_pipeline = self.pipelines.acquire(
-			gpu, target, key, key, ALPHA_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_pipeline = self.pipelines.acquire(gpu, target, SOLID_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_line_pipeline = self.pipelines.acquire(gpu, target, LINE_STATE, ShaderPass.MESH_REFERENCE)!;
+		self.reference_alpha_pipeline = self.pipelines.acquire(gpu, target, ALPHA_STATE, ShaderPass.MESH_REFERENCE)!;
 		self.reference_additive_pipeline = self.pipelines.acquire(
-			gpu, target, key, key, ADDITIVE_STATE, ShaderPass.MESH_REFERENCE)!;
+			gpu, target, ADDITIVE_STATE, ShaderPass.MESH_REFERENCE)!;
 	};
 	self.reference_ready = true;
 }
@@ -1264,7 +1250,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 <*
  Whether this material's geometry can be spoken for by the depth prepass.
 
- The prepass draws with `shaders/shadow.slang` against the camera, so it can
+ The prepass draws with `shaders/shadow.shady` against the camera, so it can
  reproduce exactly what a bucket's *vertices* do — the model matrix, the morph
  targets and both skinning paths — and exactly one thing its *fragments* do:
  `material.alphaTest`, which the cut-out variant cuts with the same line and the
@@ -1276,7 +1262,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 
  - A blended material, which writes no depth in the colour pass either.
  - A line, for `casts_shadow`'s reason: `LINE_STATE` neither tests nor writes.
- - A `vertex:` body. It moves the surface in `material.slang` and this pass does
+ - A `vertex:` body. It moves the surface in `shaders/material.shady` and this pass does
    not run it, so the two would disagree about where the vertex is. The same
    limitation the shadow pass states.
  - A `fragment:` body containing `discard`. A body may cut its own shape and
@@ -1663,14 +1649,14 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// maps — its base colour and everything a body declared — are slots of the
 		// device-wide texture array, written into this bucket's record by
 		// `texture_indices_of` and reached in the shader through `map_at`. What is
-		// left here is the seven the template reserves, which are the same images
+		// left here is the seven the def reserves, which are the same images
 		// for every draw in the frame.
 		SampledBindings samplers;
 		// Binding 1, the first reserved one, and asked for by index rather than
-		// assumed to be there: Slang may drop a sampler the linked program never
-		// reads, and pushing a write for a binding the layout does not declare is a
-		// validation error. Both templates read it today, so the answer is yes
-		// today.
+		// assumed to be there: the compiler may drop a sampler the linked program
+		// never reads, and pushing a write for a binding the layout does not
+		// declare is a validation error. Both defs read it today, so the answer is
+		// yes today.
 		// 
 		// The white 1x1 when there is no shadow pass, which is not a fallback but
 		// the correct value: a depth of 1 is the far plane, nothing is in front of
@@ -1746,8 +1732,8 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		};
 		// The reflected size, not `MeshPush::size`. The two agree at 24 today and
 		// have not always: the block used to end in a `uint` that C3 followed with
-		// four bytes of tail padding, so Slang reported 76 where the struct occupied
-		// 80, and pushing 80 into a 76-byte range is a validation error.
+		// four bytes of tail padding, and the Slang-era report was 76 where the
+		// struct occupied 80 — pushing 80 into a 76-byte range is a validation error.
 		// 
 		// Worth knowing how it fails, because it is not how it sounds: the picture
 		// is pixel-identical either way on this driver, so no test here catches it
@@ -2101,8 +2087,8 @@ fn uint MeshPass.draw_casters(
 
 	// The mesh contract exactly as the main pass pushes it, and pointing at the
 	// same three buffers. The only field that means something different is the one
-	// that is not in here at all: `shaders/shadow.slang` reads
-	// `light_view_projection` out of the frame block where `mesh.slang` reads
+	// that is not in here at all: `shaders/shadow.shady` reads
+	// `light_view_projection` out of the frame block where `mesh.shady` reads
 	// `view_projection`.
 	// 
 	// The instance address carries the run's own offset, for `record`'s reason: the
@@ -2304,10 +2290,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	self.cluster_overflow[slot].upload(&zero, uint::size);
 	if (!self.cluster_pipeline.ready)
 	{
-		String source = shader_source(ShaderFile.CLUSTER_SLANG, mem)!;
-		defer source.free(mem);
-		ShaderModule mod = compile_shader(
-			ShaderPass.CLUSTER, source, ShaderFile.CLUSTER_SLANG.name, CLUSTER_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(ShaderPass.CLUSTER)!;
 		defer mod.free();
 		if (!mod.ok) { @advise("three: cluster shader: %s", mod.diagnostic); return SHADER_MISSING_ENTRY_POINT~; }
 		self.cluster_pipeline.init_cluster(gpu, &mod)!;
@@ -2510,7 +2493,7 @@ fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
  the time this runs, so the work here is one 4x4 multiply per joint. Doing it on
  the GPU would mean uploading sixty matrices so the device could turn them into
  sixty matrices — strictly more traffic than uploading the sixty results, plus a
- dispatch and a barrier. `shaders/skin.slang` is where compute earns its place,
+ dispatch and a barrier. `shaders/skin.shady` is where compute earns its place,
  and it is a different question: *where the vertex blend runs*, not *who writes
  the palette*.
 
@@ -2839,7 +2822,7 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 	if (needed == 0) return;
 
 	// Compiled the first time anything asks. A project that never routes a
-	// character through compute never reads `shaders/skin.slang` off disk.
+	// character through compute never reads `shaders/skin.shady` off disk.
 	if (!self.skin_pipeline.ready) self.build_skin_pipeline(gpu)!;
 
 	if (self.posed_capacity[slot] < needed)
@@ -2922,19 +2905,15 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 }
 
 <*
- Compiles `shaders/skin.slang` and builds the compute pipeline, once.
+ Compiles the skinning def and builds the compute pipeline, once.
 
  Late rather than in `init` for the reason the whole path is opt-in: this is a
- Slang compile and a `VkPipeline` that a project which never asks for compute
+ compile and a `VkPipeline` that a project which never asks for compute
  skinning should not pay for.
 *>
 fn void? MeshPass.build_skin_pipeline(&self, Gpu* gpu)
 {
-	String source = shader_source(ShaderFile.SKIN_SLANG, mem)!;
-	defer source.free(mem);
-
-	ShaderModule mod = compile_shader(
-		ShaderPass.SKIN, source, ShaderFile.SKIN_SLANG.name, SKIN_ENTRIES[..])!;
+	ShaderModule mod = compile_shader(ShaderPass.SKIN)!;
 	defer mod.free();
 	if (!mod.ok)
 	{
@@ -3003,34 +2982,32 @@ fn SceneStats MeshPass.stats(&self, Scene* scene = null)
 
  The pipeline comes from the same `PipelineCache` the built-in shader uses, keyed
  on the assembled source, so two `ShaderMaterial`s written with identical bodies
- share one `VkPipeline` and the second one skips the Slang call entirely. They
+ share one `VkPipeline` and the second one skips the compile entirely. They
  are still two materials — uniform values are pushed per draw, so two materials
  over one pipeline are two buckets with different bytes.
 
  Its own pass row (`MESH_MATERIAL`) rather than the built-in draw path's: the
- body, the declared uniforms and the declared textures go to the row's compiler
- as the script's half, so flipping the built-in material must not route a script
- through the def's default body. The row is still on Slang - the assembly is
- wired and a shady override compiles it - because every script body, `layers.js`
- and the test fixtures alike, is still written in the Slang spelling; the relief
- helpers and the baked module that used to hold it are in.
+ body, the declared uniforms and the declared textures go to the row's def as the
+ script's half, so the built-in body is never what a script's material compiles.
+ Every script body, `layers.js` and the test fixtures alike, is written in
+ shady's spelling against the helpers `material.shady` carries.
 
  The diagnostic is handed back rather than printed: a bad shader has to throw a
- JS error carrying the Slang text. It is set on success too, because a warning
- arrives with `ok == true` and an agent that never sees its warnings writes the
- same mistake twice.
+ JS error carrying the compiler's text. It is set on success too, because a
+ warning arrives with `ok == true` and an agent that never sees its warnings
+ writes the same mistake twice.
 
  The blend mode is part of the pipeline and so is decided here, once. It costs no
  extra compile: the cache keys the SPIR-V on the source and the pipeline on the
  render state, so a body written twice — once opaque, once transparent — is one
- Slang call and two `VkPipeline` objects. There is no setter for the same reason.
+ compile and two `VkPipeline` objects. There is no setter for the same reason.
 
  @param side : `SIDE_FRONT, SIDE_BACK or SIDE_DOUBLE — which faces survive culling.`
  @param blending : `BLENDING_NONE, BLENDING_NORMAL or BLENDING_ADDITIVE. Baked into the pipeline, so it cannot change afterwards.`
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_material_texture per name, because that is where the references are taken.`
- @param vertex : `A fn void displace(inout Vertex v) body - the Slang spelling on the Slang path - or empty for a material that does not move its geometry.`
+ @param vertex : `A fn void displace(inout Vertex v) body, shady text, or empty for a material that does not move its geometry.`
  @param bounds : `How far that body can move a vertex, world units. Grows the box the frustum is tested against — see Material.bounds.`
- @param [out] diagnostic : `Slang's output verbatim, on failure and on warnings alike. Owned by the caller.`
+ @param [out] diagnostic : `The compiler's output verbatim, on failure and on warnings alike. Owned by the caller.`
  @return `The material index, for Node.material.`
 *>
 fn uint? MeshPass.create_material(
@@ -3051,12 +3028,10 @@ fn uint? MeshPass.create_material(
 	BlendMode blend = blend_for(blending);
 	@pool()
 	{
-		String source = material_source(fragment, uniforms, tmem, textures, vertex)!;
+		validate_material(fragment, uniforms, textures)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
 			gpu,
 			target,
-			source,
-			"three.material",
 			state_for_blend(blend),
 			ShaderPass.MESH_MATERIAL,
 			diagnostic,
@@ -3090,8 +3065,8 @@ fn uint? MeshPass.create_material(
 				.declared_uniforms = copy_uniform_declarations(uniforms),
 				.declared_textures = copy_texture_declarations(textures),
 				.bounds = bounds, // A `ShaderMaterial` can be given a `map` afterwards like any other
-				// material — `material.slang` declares the same binding 0 that
-				// `mesh.slang` does, so `Surface.uv` samples it either way. It just does
+				// material — `material.shady` declares the same binding 0 that
+				// `mesh.shady` does, so `Surface.uv` samples it either way. It just does
 				// not start with one.
 				.texture = NO_TEXTURE,
 			}
@@ -3179,22 +3154,22 @@ fn float MeshPass.material_opacity(&self, uint index)
  A material that is the built-in shader plus an image —
  `three.MeshLambertMaterial`.
 
- No Slang, no device, no new pipeline. It borrows one of the pass's own pipelines
+ No compile, no device, no new pipeline. It borrows one of the pass's own pipelines
  — `self.pipeline` is the very one `DEFAULT_MATERIAL` draws with — so building
  one is a push onto a list and a retain. That is why it is its own verb rather
  than a `ShaderMaterial` with a one-line body: putting a picture on a box should
  not compile a shader, should not be able to fail with a compiler diagnostic, and
- in a build with no Slang could not happen at all.
+ has no compiler in it at all.
 
  That promise is what makes the blend variants prebuilt. A blend mode is a
  pipeline field on this device, so a transparent material needs a different
  `VkPipeline` from an opaque one — and building it here would need the `Gpu` and
  the `Target` this signature does not take, inside whichever frame first said
  `transparent: true`. `MeshPass.init` builds all three up front instead: same
- `mesh.slang`, so no Slang call, about a millisecond each, once, at startup.
+ `mesh.shady` module, so no compile, about a millisecond each, once, at startup.
 
  It has no colour of its own, deliberately. `mesh.color` is the per-copy channel
- and `mesh.slang` multiplies it into the sampled texel, so a tinted textured mesh
+ and `material.shady` multiplies it into the sampled texel, so a tinted textured mesh
  already works and a thousand of them are still one draw call. A colour on the
  material would be a second way to say the same thing that also splits the
  bucket.
@@ -3502,7 +3477,7 @@ fn float[4] MeshPass.material_uv(&self, uint index)
  a debug line carries no uvs, so the setting would silently do nothing.
 
  A mesh with no uvs is not refused and cannot be, which is the one surprise worth
- stating: `mesh.slang` samples only under `FLAG_HAS_UVS`, so a map on a convex
+ stating: `mesh.shady` reads the uv stream only under `FLAG_HAS_UVS`, so a map on a convex
  hull — which has no natural parameterisation and uploads no uv stream — renders
  exactly as it did without one. The material is not wrong and the texture is not
  missing; there is nowhere on that geometry to put it.
@@ -3548,7 +3523,7 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
 
  The two built-in materials are refused by `editable`, as everywhere else, and a
  material drawn by the *built-in shader* is refused here on its own account.
- `mesh.slang` declares `normal_map`, `metalness_roughness_map` and
+ `material.shady` declares `normal_map`, `metalness_roughness_map` and
  `occlusion_map`, so those names would otherwise resolve through this door — and
  that is exactly the thing `NORMAL_MAP_BINDING` argues against, because it would
  make the shader's own spelling part of the script-facing API and leave two ways
@@ -3584,15 +3559,15 @@ fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name,
  `material.normalMap = texture`, and the two beside it — the built-in material's
  three maps past its base colour.
 
- `set_material_map` for the bindings `mesh.slang` reserves above zero, and the
+ `set_material_map` for the bindings `material.shady` reserves above zero, and the
  differences are two. The slot is a number rather than a name, because the name
  would be the shader's — `NORMAL_MAP_BINDING` has the argument. And the material
  has to be one the *built-in* shader draws: a `ShaderMaterial` numbers its own
  samplers at exactly these bindings, so writing a normal map into one would put
  an image in whatever the body called its first texture and shade with it.
 
- A mesh with no uvs is not refused, for `set_material_map`'s reason: `mesh.slang`
- samples all four maps under one `FLAG_HAS_UVS` test, so a normal map on a convex
+ A mesh with no uvs is not refused, for `set_material_map`'s reason: all four maps
+ sample the uv stream, which `mesh.shady` reads only under `FLAG_HAS_UVS`, so a normal map on a convex
  hull is set, correct and invisible.
 
  The retain/release dance is `set_material_map`'s exactly.
@@ -3640,7 +3615,7 @@ fn int MeshPass.material_slot(&self, uint index, int slot)
 }
 
 <*
- Is this material drawn by `mesh.slang` rather than by a body somebody wrote?
+ Is this material drawn by the built-in look rather than by a body somebody wrote?
 
  Asked by pipeline rather than by how the material was built, because
  `PipelineCache.acquire` hands the same pointer back for the same source and
@@ -3660,7 +3635,7 @@ fn bool MeshPass.shades_built_in(&self, Material* material)
 
 <*
  Which of the built-in material's four maps this bucket carries, as the bits
- `shaders/mesh.slang` samples them under.
+ `shaders/material.shady` samples them under.
 
  Zero for anything a body shades: a `ShaderMaterial`'s own samplers sit at the
  same bindings, and a bit set from one of those would be this shader's answer to
@@ -3670,7 +3645,7 @@ fn uint MeshPass.map_flags(&self, Material* material)
 {
 	// **Above the guard**, unlike the three below it: `material.stochastic` is a
 	// property of every material and not only of the ones drawn by the built-in
-	// shader — `material.slang` reads the same bit for a body's base map — and a
+	// shader — `material.shady` reads the same bit for a body's base map — and a
 	// setting that silently did nothing on a `ShaderMaterial` would be worse than
 	// one that is not offered.
 	uint stochastic = material.stochastic ? FLAG_STOCHASTIC : 0;

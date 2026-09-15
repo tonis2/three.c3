@@ -2,7 +2,7 @@
  The shady-backed compile, held to the ABI the engine consumes.
 
  The adapter is only useful if a `ShaderDef` reaches the pipeline builder as the
- same facts the Slang path produces: the entry points the pass names, the push
+ same facts the engine consumes: the entry points the pass names, the push
  block `check_push_block` already checks against `MESH_PUSH_FIELDS` and friends,
  and the bindings the draw path resolves by name. What these tests hold is
  exactly that, from the def through shady, with no call site flipped.
@@ -15,7 +15,6 @@ module three_tests::shader_adapter;
 
 import three;
 import shady;
-import slang;
 import vk;
 import std::core::test;
 import std::io;
@@ -99,8 +98,8 @@ fn void the_mesh_def_arrives_with_the_engines_abi() @test
 	bool fragment = false;
 	foreach (entry : mod.entries)
 	{
-		if (entry.name == "vertexMain" && entry.stage == slang::STAGE_VERTEX) vertex = true;
-		if (entry.name == "fragmentMain" && entry.stage == slang::STAGE_FRAGMENT) fragment = true;
+		if (entry.name == "vertexMain" && entry.stage == three::STAGE_VERTEX) vertex = true;
+		if (entry.name == "fragmentMain" && entry.stage == three::STAGE_FRAGMENT) fragment = true;
 	}
 	test::@check(vertex, "vertexMain is a vertex shader");
 	test::@check(fragment, "fragmentMain is a fragment shader");
@@ -299,8 +298,8 @@ fn void a_cutout_shadow_def_reports_its_own_entries_and_sets() @test
 	bool fragment = false;
 	foreach (entry : mod.entries)
 	{
-		if (entry.name == "cutoutVertexMain" && entry.stage == slang::STAGE_VERTEX) cutout = true;
-		if (entry.name == "fragmentMain" && entry.stage == slang::STAGE_FRAGMENT) fragment = true;
+		if (entry.name == "cutoutVertexMain" && entry.stage == three::STAGE_VERTEX) cutout = true;
+		if (entry.name == "fragmentMain" && entry.stage == three::STAGE_FRAGMENT) fragment = true;
 	}
 	test::@check(cutout, "the cut-out vertex entry is named cutoutVertexMain");
 	test::@check(fragment, "beside the fragment stage");
@@ -317,8 +316,8 @@ fn void a_cutout_shadow_def_reports_its_own_entries_and_sets() @test
 
 <*
  A body that does not compile is the ordinary answer, not a fault: `ok` false,
- no module, and the diagnostic naming the body's own line - the same shape the
- Slang path returns, which is what an agent editing a script reads.
+ no module, and the diagnostic naming the body's own line - the same shape
+ `compile_shader` returns, which is what an agent editing a script reads.
 *>
 fn void a_broken_def_comes_back_as_a_diagnostic() @test
 {
@@ -333,28 +332,4 @@ fn void a_broken_def_comes_back_as_a_diagnostic() @test
 	test::@check(!mod.ok, "it did not compile");
 	test::@check(mod.spirv.len == 0, "and produced no module");
 	test::@check(mod.diagnostic.contains("post_body:4"), "naming the body's own line: %s", mod.diagnostic);
-}
-
-<*
- The tag the adapter embeds is the submodule's own pin.
-
- The file it comes from is written by `project.json`'s `exec` hook at the start
- of every trusted build, which is what keeps the cache identity and the compiler
- together. A checkout with no submodule metadata says `shady:unknown` instead,
- which names no compiler but still is a key.
-*>
-fn void the_compiler_tag_names_the_submodule_pin() @test
-{
-	char[256] buffer;
-	String? captured = process::run_capture_stdout(buffer[..], { "git", "-C", "lib/shady.c3l", "rev-parse", "HEAD" });
-	String pin = (captured ?? "").trim();
-	if (pin.len == 0)
-	{
-		test::@check(three::SHADY_COMPILER_TAG == "shady:unknown",
-			"no submodule pin here, so the tag names no compiler: %s", three::SHADY_COMPILER_TAG);
-		return;
-	}
-	test::@check(three::SHADY_COMPILER_TAG == string::tformat("shady:%s", pin),
-		"the embedded tag names the submodule pin: it says %s, the pin is shady:%s",
-		three::SHADY_COMPILER_TAG, pin);
 }

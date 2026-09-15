@@ -206,7 +206,7 @@ screen.
 
 ## one-module
 
-The vertex body and the fragment body compile into one Slang module, vertex first. A helper function
+The vertex body and the fragment body compile into one module, vertex first. A helper function
 may therefore be declared in only one of them: declaring `float3 ripple(float2 q)` in both is
 `error[E30201]: function 'ripple' already has a body`, which is correct and surprising. Put shared
 helpers in `vertex`, which comes first, and call them from `fragment`.
@@ -1053,7 +1053,7 @@ and groups are never collapsed. Siblings sharing a shape but not a material do n
 travels per copy, a texture or a blend mode has no per-copy channel.
 
 Left out on purpose: helpers and hidden subtrees, because the export is what the frame shows, and
-ShaderMaterials, because a material here is a Slang pipeline and glTF describes surfaces rather than
+ShaderMaterials, because a material here is a compiled program and glTF describes surfaces rather than
 programs. Pass `{ bake: true }` to run each shader body over its mesh's uv layout and write the answer as
 a `baseColorTexture` or `baseColorFactor` — the difference between a file that is your scene and a file
 that is your scene in one grey.

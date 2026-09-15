@@ -276,12 +276,7 @@ fn void the_params_are_the_switch() @test
 *>
 fn void the_shadow_shader_is_the_mesh_contract() @test
 {
-	String path = three::find_shader(three::ShaderFile.SHADOW_SLANG, mem)!!;
-	defer path.free(mem);
-	String source = three::read_source(path)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, three::ShaderFile.SHADOW_SLANG.name, three::SHADOW_ENTRIES[..])!!;
+	three::ShaderModule mod = three::compile_shader(three::ShaderPass.SHADOW)!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -694,207 +689,7 @@ fn char[] read_shadow_depth(three::Renderer* renderer)
 	return out;
 }
 
-<*
- The depth map through both compilers, compared as bytes rather than pixels.
 
- Slang and shady emit different SPIR-V; what has to be identical is the depth
- the pass produces. The one caster is the skinned fixture in a bent pose and a
- turned, translated instance, so the palette blend and the model matrix are both
- inside the compared bytes; the map is copied out whole, which puts the clear
- value and every untouched texel in the comparison too.
-
- The view caches are dropped between the captures: a full-plan frame that
- changed nothing would leave the first compiler's depth in the atlas and compare
- it with itself. `draws` is required to be non-zero after each capture for the
- same reason - an empty map is all clear and would compare equal in silence.
-*>
-fn void the_depth_map_is_the_same_bytes_through_both_compilers() @test
-{
-	three::Renderer* renderer = device::borrow(W, H);
-	defer device::release();
-	defer three::shader_overrides_clear();
-
-	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, renderer)!!;
-	defer runtime.close();
-
-	three::RunResult built = runtime.run(`
-		const scene = new three.Scene();
-		globalThis.depthCaster = (await three.load('test/fixtures/skinned.glb')).instantiate();
-		depthCaster.position.set(0.9, 0.15, -0.5);
-		depthCaster.rotation.y = 0.6;
-		scene.add(depthCaster);
-		depthCaster.play('Bend', { time: 0.9 });
-		three.light.set([0.3, 1.0, 0.2], 0.6);
-		three.light.shadow = { enabled: true, size: 512 };
-		three.camera.frameAll();
-		three.camera.orbit(0.3, 0.7, three.camera.distance);
-	`);
-	defer built.free();
-	test::@check(built.ok, "the shadow scene built: %s", built.error);
-
-	three::shader_override(three::ShaderPass.SHADOW, three::ShaderCompiler.SLANG);
-	renderer.capture()!!.free();
-	test::@check(renderer.pass.shadows.draws > 0, "the Slang frame drew the map");
-	char[] slang = read_shadow_depth(renderer);
-	defer alloc::free(mem, slang);
-
-	three::shader_override(three::ShaderPass.SHADOW, three::ShaderCompiler.SHADY);
-	// The pipeline holds the Slang module's SPIR-V; the next draw has to build
-	// one from the shady module instead.
-	if (renderer.pass.shadows.pipeline_ready)
-	{
-		renderer.pass.shadows.pipeline.free(&renderer.gpu);
-		renderer.pass.shadows.pipeline_ready = false;
-	}
-	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
-	{
-		if (!renderer.pass.shadow_view_set.views[at].live) continue;
-		renderer.pass.shadow_view_set.views[at].live_valid = false;
-		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
-	}
-	renderer.capture()!!.free();
-	test::@check(renderer.pass.shadows.draws > 0, "the shady frame drew the map");
-	char[] shady = read_shadow_depth(renderer);
-	defer alloc::free(mem, shady);
-
-	test::@check(slang.len == shady.len,
-		"both maps are the same size, %d against %d bytes", slang.len, shady.len);
-	sz texel = shadow_depth_texel(renderer.pass.shadow_manager.atlas.format);
-	sz first_difference = slang.len;
-	for (sz at = 0; at < slang.len && at < shady.len; at++)
-	{
-		if (slang[at] != shady[at]) { first_difference = at; break; }
-	}
-	test::@check(first_difference == slang.len,
-		"the depth map is byte-identical through both compilers, first difference at byte %d (texel %d, %d)",
-		first_difference,
-		first_difference / texel % renderer.pass.shadow_manager.atlas.width,
-		first_difference / texel / renderer.pass.shadow_manager.atlas.width);
-}
-
-<*
- The cut-out depth map through both compilers, compared as bytes rather than
- pixels.
-
- **The fragment half of the same claim**: the depth-only comparison above never
- runs a fragment stage, so it says nothing about the sampler, the uv or the
- discard. Here the casters are cards with an alpha mask, and two copies are in
- one map: one whose sheet is opaque everywhere and one whose sheet is clear
- everywhere, both with `alphaTest` on so both go through the cut-out pipeline.
- The first has to keep every texel and the second has to cut all of them in both
- compilers, so the whole atlas — the kept card's depths, the cut card's absence
- and the clear value between them — is the comparison.
-
- Two copies in one frame rather than one copy in two frames, because the
- alternative to a correct discard is visible in either direction: a shader that
- never cuts leaves the second card's depth in the map, and one that always cuts
- takes the first card's out.
-
- The view caches are dropped and the cut-out pipeline is retired between the
- captures, so the second compiler is not reading the first's map; the scene cache
- is off for the same reason. `draws` and `cutout_ready` are required after each
- capture, and the Slang map is required to hold more than the clear value, so an
- empty or all-cut map cannot pass in silence.
-*>
-fn void the_cutout_depth_map_is_the_same_bytes_through_both_compilers() @test
-{
-	three::Renderer* renderer = device::borrow(W, H);
-	defer device::release();
-	defer three::shader_overrides_clear();
-	renderer.scene_cache_disabled = true;
-	defer renderer.scene_cache_disabled = false;
-
-	three::JsRuntime runtime;
-	runtime.open(&renderer.pass, renderer)!!;
-	defer runtime.close();
-
-	three::RunResult built = runtime.run(`
-		const scene = new three.Scene();
-		// Four texels, nearest filtered: the alpha is read exactly where the uv
-		// says, with no mip or gamma between it and the threshold.
-		function sheet(alpha) {
-			return new three.DataTexture(new Uint8Array([
-				255, 255, 255, alpha,  255, 255, 255, alpha,
-				255, 255, 255, alpha,  255, 255, 255, alpha,
-			]), 2, 2, {
-				colorSpace: three.LinearSRGBColorSpace,
-				generateMipmaps: false,
-				filter: three.NearestFilter,
-			});
-		}
-		const shape = new three.PlaneGeometry(6, 6);
-		const keeps = new three.MeshLambertMaterial({ map: sheet(255), alphaTest: 0.5 });
-		const cuts  = new three.MeshLambertMaterial({ map: sheet(0), alphaTest: 0.5 });
-		const whole = new three.Mesh(shape, keeps);
-		whole.position.set(-5, 6, 0);
-		scene.add(whole);
-		const gone = new three.Mesh(shape, cuts);
-		gone.position.set(5, 6, 0);
-		scene.add(gone);
-		three.light.set([0.2, 1.0, 0.3], 0.5);
-		three.light.shadow = { enabled: true, size: 512 };
-		three.camera.frameAll();
-		three.camera.orbit(0.3, 0.7, three.camera.distance);
-	`);
-	defer built.free();
-	test::@check(built.ok, "the cut-out shadow scene built: %s", built.error);
-
-	three::shader_override(three::ShaderPass.SHADOW_CUTOUT, three::ShaderCompiler.SLANG);
-	renderer.capture()!!.free();
-	test::@check(renderer.pass.shadows.cutout_ready, "the Slang frame used the cut-out pipeline");
-	test::@check(renderer.pass.shadows.draws > 0, "and drew the map");
-	char[] slang = read_shadow_depth(renderer);
-	defer alloc::free(mem, slang);
-
-	// The kept copy has to have written depth: a map that is only the clear value
-	// would compare equal through any two compilers, however wrong they are.
-	bool cast = false;
-	if (slang.len >= 4)
-	{
-		uint first = *(uint*)slang.ptr;
-		for (sz at = 4; at + 4 <= slang.len; at += 4)
-		{
-			if (*(uint*)(slang.ptr + at) != first) { cast = true; break; }
-		}
-	}
-	test::@check(cast, "the kept copy is in the map and not only the clear value");
-
-	three::shader_override(three::ShaderPass.SHADOW_CUTOUT, three::ShaderCompiler.SHADY);
-	// The pipeline holds the Slang module's SPIR-V; the next draw has to build
-	// one from the shady module instead, which is also where the cut-out's own
-	// vertex entry lives.
-	if (renderer.pass.shadows.cutout_ready)
-	{
-		renderer.pass.shadows.cutout_pipeline.free(&renderer.gpu);
-		renderer.pass.shadows.cutout_ready = false;
-	}
-	for (uint at = 0; at < renderer.pass.shadow_view_set.count; at++)
-	{
-		if (!renderer.pass.shadow_view_set.views[at].live) continue;
-		renderer.pass.shadow_view_set.views[at].live_valid = false;
-		renderer.pass.shadow_view_set.views[at].dynamic_valid = false;
-	}
-	renderer.capture()!!.free();
-	test::@check(renderer.pass.shadows.cutout_ready, "the shady frame used the cut-out pipeline");
-	test::@check(renderer.pass.shadows.draws > 0, "and drew the map");
-	char[] shady = read_shadow_depth(renderer);
-	defer alloc::free(mem, shady);
-
-	test::@check(slang.len == shady.len,
-		"both maps are the same size, %d against %d bytes", slang.len, shady.len);
-	sz texel = shadow_depth_texel(renderer.pass.shadow_manager.atlas.format);
-	sz first_difference = slang.len;
-	for (sz at = 0; at < slang.len && at < shady.len; at++)
-	{
-		if (slang[at] != shady[at]) { first_difference = at; break; }
-	}
-	test::@check(first_difference == slang.len,
-		"the cut-out depth map is byte-identical through both compilers, first difference at byte %d (texel %d, %d)",
-		first_difference,
-		first_difference / texel % renderer.pass.shadow_manager.atlas.width,
-		first_difference / texel / renderer.pass.shadow_manager.atlas.width);
-}
 
 // ============================================================================
 // Materials
@@ -998,7 +793,7 @@ fn void a_shader_material_draws_the_same_shadowed_frame() @test
  the whole of the built-in shading until there was a highlight; now the built-in
  is a diffuse half the metalness takes away and a specular half it gives back, and
  `standard(s)` is the name for both of them together. If that name is not exactly
- what `mesh.slang` computes then the sentence in `getApiDocs` — "standard(s) IS
+ what `material.shady` computes then the sentence in `getApiDocs` — "standard(s) IS
  the built-in shading, whole" — is a comment rather than a fact, and a material
  written to look like the default would be subtly not.
 
@@ -2669,9 +2464,9 @@ const String CUTOUT_SCENE = `
 <*
  `material.alphaTest` cuts the surface, and cuts the shadow it throws.
 
- **`plan.md` §28's one open entry, and the check is built around the half that is
- easy to fake.** Making the *card* have holes in it is one `discard` in
- `mesh.slang` and would be visible in a screenshot; making its *shadow* have the
+ **The check is built around the half that is easy to fake.** Making the *card*
+ have holes in it is one `discard` in `material.shady` and would be visible in a
+ screenshot; making its *shadow* have the
  same holes needs a fragment stage on a pass that has never had one, a second
  pipeline, and the base colour map bound to it — and a renderer that did the first
  and not the second draws a leaf casting the shadow of its quad, which is the
@@ -3044,15 +2839,14 @@ fn void a_single_sided_quad_is_still_culled_from_behind() @test
 <*
  A `ShaderMaterial` flips its back face the same way the built-in one does.
 
- `material.slang` carries its own copy of the negation, beside its own copy of
- `lambert` and `shadow_factor` and for the same reason: a body whose text is the
- default has to land where no material at all lands. So the check is the one
+ `material.shady` carries the flip in `mesh_fragment`, ahead of the body, so a body
+ whose text is the default lands where no material at all lands. The check is the one
  `a_body_of_standard_draws_the_built_in_frame` makes — the same scene twice, once
  with `MeshLambertMaterial` and once with a body of `standard(s)`, byte for byte
  identical — asked of a quad turned away from the camera, with the shadow pass on.
 
- Proved by injection: take the flip out of `material.slang` alone and the two
- frames stop matching, because the built-in one still flips.
+ Proved by injection: remove the flip and both frames go black, which the luma
+ check beside the equality catches — the equality alone would still hold.
 *>
 fn void a_shader_material_flips_its_back_face_too() @test
 {

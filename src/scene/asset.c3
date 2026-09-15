@@ -4020,7 +4020,7 @@ fn UvTransform layer_uv_transform(gltf::MaterialLayer layer) @local
 
  **The base's transform is already on the uv a layer starts from.** It crosses as
  `material.repeat` and `material.offset`, and the fragment stage applies those
- before the generated body runs (`shaders/material.slang`), so `layers.js` builds
+ before the generated body runs (`shaders/material.shady`), so `layers.js` builds
  a layer's uv as `s.uv * uvScale + uvOffset` over a uv that is already
  `mesh_uv * base.scale + base.offset`. Handing a layer the file's own numbers
  there would tile it by the base's scale a second time — a ground whose base

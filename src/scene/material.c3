@@ -3,17 +3,18 @@
 
  ## The uniforms ride in the push block, not in a uniform buffer
 
- `shaders/material.slang` appends the agent's uniforms to the same push block the
- mesh contract already uses. That is the whole storage story for *values*.
+ The agent's uniforms are appended by the generator to the same push block the
+ mesh contract already uses (`src/shader/uniforms.c3`). That is the whole storage
+ story for *values*.
 
  Textures are not in it and never were. A sampler is a descriptor, so the ones a
  material declares cost the push block nothing and the budget below is only ever
  about floats.
 
  The alternative, a `ConstantBuffer<Params>` reached by descriptor, costs four
- things that do not exist here: reflection of uniform-block *members* (Slang
- reports a constant buffer as one opaque binding, and the externs to walk into it
- are not declared in `lib/slang.c3l`), a `UNIFORM_BUFFER` usage bit on
+ things that do not exist here: reflection of uniform-block *members* (the
+ compiler reports a constant buffer as one opaque binding, and nothing here
+ walks into it), a `UNIFORM_BUFFER` usage bit on
  `Gpu.create_dynamic`, a descriptor pool sized for it, and a per-frame-slot ring
  so a buffer the GPU may still be reading is never overwritten. The push block
  costs none of them: reflection of push fields by name and byte offset is already
@@ -55,8 +56,8 @@ faultdef
  The material every node draws with until it is given another.
 
  Index 0 of `MeshPass.materials`, built in `MeshPass.init` from the same
- `mesh.slang` pipeline the pass has always used, so a scene that never mentions a
- material renders exactly as it did before this file existed.
+ built-in draw pipeline the pass has always used, so a scene that never mentions
+ a material renders exactly as it did before this file existed.
 *>
 const uint DEFAULT_MATERIAL = 0;
 
@@ -191,7 +192,7 @@ fn uint binding_for_material_slot(int slot)
  The material every debug line draws with.
 
  Index 1 of `MeshPass.materials`, built in `MeshPass.init` from the same
- `mesh.slang` the default material uses, over `LINE_STATE`.
+ built-in draw module the default material uses, over `LINE_STATE`.
 
  A *material* rather than a flag on the mesh because a bucket is
  `(asset, mesh, material)` and the material is what chooses the pipeline. Making
@@ -210,12 +211,12 @@ const uint LINE_MATERIAL = 1;
  Where a material's uniforms begin in the push block.
 
  The mesh contract owns everything below this: `MESH_PUSH_FIELDS` ends with
- `draw` at 16+8, and `shaders/material.slang` declares those three fields first
- and in that order so `check_push_block` passes on a generated module exactly as
- it does on `mesh.slang`. The `$assert` is what makes this a derived number
- rather than a copied one, and it earned that twice: when `uv_transform` was
- added and this moved from 60 to 76, and when the whole mesh contract moved into
- `DrawRecord` and it fell to 24.
+ `draw` at 16+8, and the generator emits those fields first and in that order,
+ then the material's own uniforms, so `check_push_block` passes on a generated
+ module exactly as it does on the built-in one. The `$assert` is what makes this
+ a derived number rather than a copied one, and it earned that twice: when
+ `uv_transform` was added and this moved from 60 to 76, and when the whole mesh
+ contract moved into `DrawRecord` and it fell to 24.
 *>
 const uint MATERIAL_PUSH_START = 24;
 
@@ -342,7 +343,7 @@ struct Material
 	// 
 	// Two kinds of material fill it and neither knows about the other. A
 	// `ShaderMaterial` puts the samplers its body declared here, at the bindings
-	// the assembler generated. A material drawn by `mesh.slang` puts its normal,
+	// the def generated. A material drawn by the built-in look puts its normal,
 	// metallic-roughness and occlusion maps here, at the three bindings that
 	// shader reserves — which are the same numbers, and cannot be confused,
 	// because a binding is only ever resolved against the pipeline that declared
@@ -509,7 +510,7 @@ struct Material
 	UvVariant[UV_VARIANTS] uv_variants;
 	// `material.stochastic` — sample this material's maps through
 	// `stochastic_sample` rather than straight, so a tiled surface stops having a
-	// period. `plan.md` §27, and `shaders/surface.slang` is what it does.
+	// period. `shaders/surface.shady` is what it does.
 	// 
 	// False by default and the zero fill is the right answer, which matters more
 	// here than usual: it is three taps instead of one on every map, so a
@@ -522,7 +523,7 @@ struct Material
 
  `js/prelude/layers.js` turns a layer stack into a fragment body and a set of
  samplers, and that is all that would otherwise cross: `fragment` holds "the
- blend was a multiply" as Slang text, and no reader on this side can get it back
+ blend was a multiply" as shady text, and no reader on this side can get it back
  out. Without this record, a scene built with `new three.LayeredMaterial(...)`
  exports as a flat material while the *same stack loaded from a `.glb`* exports
  intact, because `scene/export.c3` can read that one out of the source document.
@@ -902,7 +903,7 @@ fn void Material.uniform_fields(&self, List{ShaderField}* out)
  Called once, wherever a material is built, and idempotent. Two things come out
  of the reflected layout and neither can be derived from the uniform list on this
  side — the pointer's offset in the push block, and how large the table is —
- because both are Slang's answers rather than ours.
+ because both are the compiler's answers rather than ours.
 
  A material whose uniforms fit the push block gets `NO_TABLE_POINTER`, an empty
  table and no allocation.

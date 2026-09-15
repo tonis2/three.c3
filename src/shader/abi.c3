@@ -23,7 +23,7 @@
  rather than a name a shader compiler rejects later with a paragraph between it
  and its cause.
 
- The shader uses the C3 name, so the ported `mesh.slang` says `DrawRecord` where
+ The shader uses the C3 name, so the ported `mesh.shady` says `DrawRecord` where
  the Slang text said `Draw`. A rename table would be the second place the ABI is
  written down - and the place that would drift.
 *>

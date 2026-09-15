@@ -41,7 +41,7 @@ import std::math::quaternion;
 import collision;
 
 <*
- One instance, exactly as the GPU reads it. Mirrored in `shaders/mesh.slang`.
+ One instance, exactly as the GPU reads it. Mirrored in `shaders/mesh.shady`.
 
  148 bytes: two `float4x4`, a `float4` and a `uint` under scalar layout, which is
  4-byte aligned, so an array of these is tightly packed and indexable by
@@ -90,7 +90,7 @@ struct Instance
 	// The pair is what makes a crossfade cost a baked character nothing it was
 	// not already paying: two offsets and a weight still disagree per instance
 	// and nothing else does, so a crowd mid-fade is still one draw call. What it
-	// buys and what it costs in accuracy is `skin_matrix` in `shaders/mesh.slang`.
+	// buys and what it costs in accuracy is `skin_matrix` in `shaders/skinning.shady`.
 	uint pose_from;
 	float blend;
 

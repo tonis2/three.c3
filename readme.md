@@ -9,7 +9,7 @@ Connectable to a coding agent over MCP.
 
 - **Vulkan renderer** — instancing, shadows, skinning, post-processing, sky
 - **glTF** — load a `.glb` or `.gltf`, pull meshes out of a kit and place them
-- **Slang shaders** — compiled at startup, so editing a `.slang` and re-running shows it
+- **Shaders in shady** — compiled at startup, so editing a `.shady` and re-running shows it
 - **KTX textures** — compressed, transcoded on load
 - **Animation** and skeletal skinning, instanced animations
 - **Physics** — rigid bodies, joints, heightfields
@@ -85,9 +85,9 @@ cd three.c3
 c3c build 
 ```
 
-`setup.sh` fetches the Slang compiler and, on macOS arm64, a Vulkan driver. Both are
-release assets rather than committed binaries, so a clone stays cheap. It is safe to
-re-run, and takes one step by name — `./setup.sh slang`.
+`setup.sh` fetches, on macOS arm64, the Vulkan loader and driver. They are
+release assets rather than committed binaries, so a clone stays cheap. It is
+safe to re-run, and takes one step by name — `./setup.sh driver`.
 
 For a release build: `c3c build --safe=no -O3`
 

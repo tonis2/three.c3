@@ -24,7 +24,7 @@
  ## One message is one line
 
  Messages are stored end to end and separated by newlines, so a message that
- carries newlines of its own — a Slang diagnostic is several lines — is flattened
+ carries newlines of its own — a compiler diagnostic is several lines — is flattened
  to spaces on the way in. That keeps "split on newline" a correct way to get the
  array back, which is what `mcp/server.c3` does.
 

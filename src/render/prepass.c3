@@ -7,9 +7,9 @@ import vk;
  scene pass, so the expensive fragment shader runs once per pixel instead of once
  per layer of overdraw.
 
- It draws with `shaders/shadow.slang` — the same depth-only vertex path the
+ It draws with `shaders/shadow.shady` — the same depth-only vertex path the
  shadow map uses, against the camera's view-projection rather than a light's, so
- a vertex lands in exactly the place `mesh.slang` and `material.slang` put it.
+ a vertex lands in exactly the place `shaders/mesh.shady` and `shaders/material.shady` put it.
  The two pipelines here differ from the shadow map's in one thing only: the cull
  mode is dynamic. A prepass that drew a face the colour pass culls would leave
  depth in front of geometry the colour pass never covers, which reads as a hole
@@ -40,8 +40,8 @@ struct DepthPrepass
 }
 
 <*
- Compiles the depth program — `shaders/shadow.slang`, or the shady def when the
- switch says so — and builds one depth-only pipeline from it.
+ Compiles the depth program — `shaders/shadow.shady`, depth-only or cut out —
+ and builds one pipeline from it.
 
  Shared with `ShadowMap.build_pipeline` and `ShadowMap.build_cutout_pipeline`,
  which is the whole reason it is a free function: the shadow map and the prepass
@@ -54,30 +54,14 @@ struct DepthPrepass
 fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format format,
 	bool cutout = false, bool dynamic_cull = false)
 {
-	String source = shader_source(ShaderFile.SHADOW_SLANG, mem)!;
-	defer source.free(mem);
-
-	// `#line 1` after the define so a Slang diagnostic still names the line the
-	// file has. The define is the Slang half's switch; the shady half takes the
-	// cut-out def, which is its own module with the same pair of stages.
-	DString variant;
-	variant.init(mem);
-	defer variant.free();
-	if (cutout) variant.append_string("#define THREE_SHADOW_CUTOUT 1\n#line 1\n");
-	variant.append_string(source);
-
 	ShaderPass pass = cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW;
-	// Entry names are how the host tells stages apart, and they differ between
-	// the implementations: the shady cut-out module carries `shadow.shady`'s
-	// depth-only `vertexMain` beside its own `cutoutVertexMain`. The list the
-	// pipeline is built from is the list the module is held to and linked under.
-	ShaderEntry[] entries = cutout
-		? (shader_compiler(pass) == ShaderCompiler.SHADY
-			? SHADOW_CUTOUT_SHADY_ENTRIES[..]
-			: SHADOW_CUTOUT_ENTRIES[..])
-		: SHADOW_ENTRIES[..];
+	// Entry names are how the host tells stages apart. The cut-out module carries
+	// `shadow.shady`'s depth-only `vertexMain` beside its own `cutoutVertexMain`,
+	// so the list the pipeline is built from is the list the module is held to
+	// and linked under.
+	ShaderEntry[] entries = cutout ? SHADOW_CUTOUT_SHADY_ENTRIES[..] : SHADOW_ENTRIES[..];
 
-	ShaderModule mod = compile_shader(pass, variant.str_view(), ShaderFile.SHADOW_SLANG.name, entries)!;
+	ShaderModule mod = compile_shader(pass)!;
 	defer mod.free();
 	if (!mod.ok)
 	{

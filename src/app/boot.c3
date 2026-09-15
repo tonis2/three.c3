@@ -134,14 +134,6 @@ struct Options
 	*>
 	String cache_dir;
 	bool cache_dir_set;
-	<*
-	 `--shady` and `--slang`: comma-separated pass names whose compiler this run
-	 forces, for A/B-ing one pass without a rebuild. `apply_shader_overrides`
-	 reads them, and the environment variables behind them, before the first
-	 compile.
-	*>
-	String shady;
-	String slang;
 	bool help;
 }
 
@@ -313,7 +305,7 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false)
 	// thing `--debug` cannot promise on its own.
 	if (debugging) self.renderer.gpu.report();
 
-	// The shader is compiled here, from shaders/mesh.slang on disk. Editing it and
+	// The shader is compiled here, from shaders/mesh.shady on disk. Editing it and
 	// re-running changes the picture — no rebuild of this binary, and no build step
 	// for the shader either.
 	self.renderer.pass.init(&self.renderer.gpu, &self.renderer.target)!;

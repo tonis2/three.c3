@@ -31,7 +31,7 @@
 
  ## Built-in and layered material pipelines
 
- Built-in materials use `mesh.slang` compiled with `THREE_LIGHTMAP_BAKE`. Known
+ Built-in materials use `shaders/mesh.shady` compiled with `MATERIAL_LIGHTMAP_BAKE`. Known
  layered materials use their generated material program so their blended normal
  maps match the frame. Arbitrary shader bodies and displaced geometry remain in
  the real-time path because the cache cannot infer what their output means.
@@ -304,7 +304,7 @@ struct Lightmap
 	// and what makes the binding fall back to the shared white image.
 	bool live;
 
-	// `mesh.slang` under `THREE_LIGHTMAP_BAKE`, compiled on the first bake and
+	// `shaders/mesh.shady` under `MATERIAL_LIGHTMAP_BAKE`, compiled on the first bake and
 	// kept. A compile that failed once is not retried.
 	MeshPipeline pipeline;
 	bool pipeline_ready;
@@ -804,15 +804,12 @@ fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_
 	LightmapMaterialPipeline entry = { .material = material_index };
 	@pool()
 	{
-		String? source = material_source(material.fragment, material.declared_uniforms, tmem,
-			material.declared_textures, material.vertex, lightmap: true);
-		if (try source)
+		// A material that reaches here was accepted by `create_material`; a
+		// refusal leaves the entry unready rather than compiling around it.
+		if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures)))
 		{
-			// The script's own half is passed beside the assembled source: the
-			// lightmap row assembles its module around the body, the same way
-			// the material row does, and only the selected compiler reads it.
 			ShaderModule mod = compile_shader(
-				ShaderPass.LIGHTMAP_MATERIAL, source, "three.lightmap", MESH_ENTRIES[..],
+				ShaderPass.LIGHTMAP_MATERIAL,
 				body: material.fragment,
 				uniforms: material.declared_uniforms,
 				textures: material.declared_textures,
@@ -832,7 +829,8 @@ fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_
 }
 
 <*
- `mesh.slang` compiled to write light into a tile instead of colour onto a screen.
+ The built-in draw def compiled to write light into a tile instead of colour
+ onto a screen.
 
  `init_post` rather than `init` and that is the whole of the difference in state:
  no depth attachment — a uv-space rasterisation has nothing to occlude — and
@@ -847,19 +845,7 @@ fn void? Lightmap.ensure_pipeline(&self, Gpu* gpu)
 
 	@pool()
 	{
-		String source = shader_source(ShaderFile.MESH_SLANG, tmem)!;
-		DString variant;
-		variant.tinit(source.len + 128);
-		// `#line 1` after the defines so a Slang diagnostic still names the line the
-		// file has. `THREE_NO_AO` drops a sampler that reads the camera's depth
-		// buffer, which a bake does not have. `THREE_AREA_REFERENCE` keeps numeric
-		// specular helpers available; lightmap diffuse still uses the live polygon.
-		variant.append_string("#define THREE_LIGHTMAP_BAKE 1\n#define THREE_NO_AO 1\n");
-		variant.append_string("#define THREE_AREA_REFERENCE 1\n#line 1\n");
-		variant.append_string(source);
-
-		ShaderModule mod = compile_shader(
-			ShaderPass.LIGHTMAP, variant.str_view(), ShaderFile.MESH_SLANG.name, MESH_ENTRIES[..])!;
+		ShaderModule mod = compile_shader(ShaderPass.LIGHTMAP)!;
 		defer mod.free();
 		if (!mod.ok)
 		{

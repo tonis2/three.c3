@@ -4,7 +4,7 @@
  Two halves of one feature, with one image behind them:
 
  - **The background.** Three vertices at the far plane, sampled by the direction
- through each pixel — `shaders/sky.slang` has how, and why it is
+ through each pixel — `shaders/sky.shady` has how, and why it is
  equirectangular rather than a cubemap.
  - **The environment.** The same image bound at `ENVIRONMENT_BINDING` in every
  shader that shades a surface, reflected by `environment_light`. This is the
@@ -66,7 +66,7 @@ const PipelineState SKY_STATE = {
 };
 
 <*
- `shaders/sky.slang`'s push block, and the whole of what the pass tells it.
+ `shaders/sky.shady`'s push block, and the whole of what the pass tells it.
 
  It shares nothing with `MESH_PUSH_FIELDS` for `POST_PUSH_FIELDS`'s reason: a sky
  has no geometry, no instances and no draw record, so a contract requiring
@@ -89,7 +89,7 @@ const PushFieldLayout[*] SKY_PUSH_FIELDS = {
 	{ "params", 64, 16 },
 };
 
-$assert SkyPush::size == 80 : "SkyPush no longer matches shaders/sky.slang";
+$assert SkyPush::size == 80 : "SkyPush no longer matches shaders/sky.shady";
 
 <*
  What a scene's sky is — `scene.background` and `scene.environment`.
@@ -162,7 +162,7 @@ fn float[4] MeshPass.environment_params(&self)
 
  The pipeline is acquired at `MeshPass.init` beside the line and blend variants
  and for the same reason: building it the first time somebody assigns a sky would
- put a Slang compile inside that frame.
+ put a shader compile inside that frame.
 *>
 fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
 {

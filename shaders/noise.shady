@@ -1,0 +1,156 @@
+// Hash and value noise, shared by material and post bodies.
+//
+// `surface.shady` and `post.shady` import this file, so `hash11`, `hash21`,
+// `hash22`, `noise2`, `fbm2` and `worley2` are in scope in every body they
+// carry: a `shade`/`displace` body and a `post` body alike.
+//
+// Integer mixing, not `frac(sin(x) * 43758.5453)`: the low bits of a
+// transcendental are a driver's to compute differently, and a sin hash bands
+// once the coordinate is large enough to lose precision.
+//
+// A tiling call passes a period in whole cells, and 0 on an axis does not wrap
+// that axis.
+
+fn uint2 hash_words(uint2 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v ^= v >> 16u;
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v ^= v >> 16u;
+	return v;
+}
+
+// 0..1 from a word.
+fn float unit_float(uint h)
+{
+	return (float)h * (1.0 / 4294967296.0);
+}
+
+// A lattice cell hashed as integers, so a wrapped cell comes back to exactly
+// the coordinate it started from.
+fn float cell_hash(int2 cell)
+{
+	return unit_float(hash_words(uint2(cell)).x);
+}
+
+// The same cell, two numbers out - a point inside it, for worley2.
+fn float2 cell_hash2(int2 cell)
+{
+	uint2 h = hash_words(uint2(cell));
+	return float2(unit_float(h.x), unit_float(h.y));
+}
+
+// One number hashed by its bits: 0.5 and 0.51 are unrelated, which is what a
+// per-copy or per-vertex seed wants.
+fn float hash11(float x)
+{
+	return unit_float(hash_words(uint2(asuint(x), 0x9E3779B9u)).x);
+}
+
+// Two numbers in, one out.
+fn float hash21(float2 p)
+{
+	return unit_float(hash_words(uint2(asuint(p.x), asuint(p.y))).x);
+}
+
+// Two in, two out - a point, an offset, a direction to pick.
+fn float2 hash22(float2 p)
+{
+	uint2 h = hash_words(uint2(asuint(p.x), asuint(p.y)));
+	return float2(unit_float(h.x), unit_float(h.y));
+}
+
+// Which cell a period puts this one at; 0 on an axis does not wrap it.
+fn int2 wrap_cell(int2 cell, float2 period)
+{
+	int2 p = int2(period);
+	if (p.x > 0) cell.x = ((cell.x % p.x) + p.x) % p.x;
+	if (p.y > 0) cell.y = ((cell.y % p.y) + p.y) % p.y;
+	return cell;
+}
+
+// Smooth value noise on a unit lattice, 0..1. `period` is the number of cells
+// across the image and is what makes the result tile; it has to divide the
+// image, and 0 on an axis leaves that axis alone.
+fn float noise2(float2 p, float2 period)
+{
+	int2 i = int2(floor(p));
+	float2 f = frac(p);
+	float2 w = f * f * (3.0 - 2.0 * f);
+
+	int2 a = wrap_cell(i, period);
+	int2 b = wrap_cell(i + int2(1, 0), period);
+	int2 c = wrap_cell(i + int2(0, 1), period);
+	int2 d = wrap_cell(i + int2(1, 1), period);
+
+	return lerp(
+		lerp(cell_hash(a), cell_hash(b), w.x),
+		lerp(cell_hash(c), cell_hash(d), w.x),
+		w.y
+	);
+}
+
+// The same, not tiling.
+fn float noise2(float2 p)
+{
+	return noise2(p, float2(0.0, 0.0));
+}
+
+// `octaves` layers of `noise2`, each twice as fine and half as strong,
+// normalized back to 0..1. The period doubles with the frequency, so every
+// octave wraps where the image does.
+fn float fbm2(float2 p, float2 period, int octaves)
+{
+	float sum = 0.0;
+	float total = 0.0;
+	float amplitude = 1.0;
+	float2 at = p;
+	float2 per = period;
+	for (int i = 0; i < octaves; i++)
+	{
+		sum += amplitude * noise2(at, per);
+		total += amplitude;
+		amplitude *= 0.5;
+		at *= 2.0;
+		per *= 2.0;
+	}
+	return total > 0.0 ? sum / total : 0.0;
+}
+
+// The same, not tiling.
+fn float fbm2(float2 p, int octaves)
+{
+	return fbm2(p, float2(0.0, 0.0), octaves);
+}
+
+// Distance to the nearest of one feature point per cell, 0 at a point and
+// climbing towards 1, clamped there. The mortar to noise2's blob.
+fn float worley2(float2 p, float2 period)
+{
+	int2 base = int2(floor(p));
+	float2 f = frac(p);
+	float nearest = 1.0;
+
+	for (int y = -1; y <= 1; y++)
+	{
+		for (int x = -1; x <= 1; x++)
+		{
+			int2 over = int2(x, y);
+			// The neighbour is wrapped for the hash and not for the distance:
+			// the point lives in the cell next door, it is only the same point
+			// the far side of the image has.
+			float2 feature = float2(over) + cell_hash2(wrap_cell(base + over, period));
+			nearest = min(nearest, length(feature - f));
+		}
+	}
+	return min(nearest, 1.0);
+}
+
+// The same, not tiling.
+fn float worley2(float2 p)
+{
+	return worley2(p, float2(0.0, 0.0));
+}

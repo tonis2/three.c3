@@ -1,10 +1,10 @@
 <*
- The engine's compile, backed by shady instead of Slang.
+ The engine's compile.
 
  `compile_shady` takes a `ShaderDef` - a name, the module's text sources, and the
- `Uniforms` region a script's declarations emitted - and produces the same
- `ShaderModule` the Slang path produces: the SPIR-V, the entry points it really
- contains, and the `ShaderLayout` the pipeline builder reads.
+ `Uniforms` region a script's declarations emitted - and produces the
+ `ShaderModule` the pipeline builder reads: the SPIR-V, the entry points it
+ really contains, and the `ShaderLayout`.
 
  ## Where each part of the layout comes from
 
@@ -31,15 +31,11 @@
  feature is enabled once in `gpu/device.c3` (the queried Vulkan 1.2 features are
  handed to `deviceCreateInfo`), and the pipeline layout has nothing to say
  about it - a `VkPipelineLayout` has no BDA flag.
-
- Landed unused: no call site compiles through here yet, so both implementations
- live in one binary until the per-pass switch flips them one at a time.
 *>
 module three;
 
 import std::collections::list;
 import vk;
-import slang;
 import shady;
 
 faultdef SHADY_UNIFORMS_UNREADABLE;
@@ -66,19 +62,6 @@ struct ShadyVariable
 	uint pointer; // its OpTypePointer id
 	uint storage; // StorageClass
 }
-
-<*
- The compiler's identity for the disk cache: which shady, exactly.
-
- It embeds `build/shady_compiler_tag.txt`, written before every trusted build by
- `scripts/shady_compiler_tag.c3` - the project's `exec` hook - from the submodule
- pin `git -C lib/shady.c3l rev-parse HEAD`. So the tag moves with the dependency
- and there is nothing hand-maintained to forget. A checkout with no submodule
- metadata gets `shady:unknown`, which names no compiler but is stable;
- `SHADER_CACHE_FORMAT_VERSION` is the lever when two such builds must be told
- apart.
-*>
-const String SHADY_COMPILER_TAG = $embed("../../build/shady_compiler_tag.txt");
 
 // The options `shady::compile` is called with. In the cache key beside the
 // source, so a change here cannot be shadowed by a module an earlier build
@@ -173,7 +156,8 @@ fn ShaderModule compile_shady_cached_source(
 	@pool()
 	{
 		ShaderCacheKey key = {
-			.compiler = SHADY_COMPILER_TAG,
+			// The compiler's name only; a moved revision is a cache clear.
+			.compiler = "shady",
 			.arguments = shader_cache_argument_blob(SHADY_ARGUMENTS[..]),
 			.name = def.name,
 			.specs = specs,
@@ -253,8 +237,7 @@ fn ShaderModule compile_shady_source(
 
 	// What the generator appended above the walk. A spilled set is a pointer to
 	// the table buffer; a set that fits is the struct itself, and its fields
-	// land where a Slang-spliced one did: named, at the block offsets the host
-	// writes them through.
+	// land at the block offsets the host writes them through, by name.
 	if (def.uniforms.len > 0)
 	{
 		if (def.uniforms_spilled)
@@ -323,9 +306,8 @@ fn ShaderModule compile_shady_source(
 
 	if (compiled.len < 4 || compiled.len % 4 != 0 || *(uint*)compiled.ptr != SPIRV_MAGIC)
 	{
-		// Unreachable for the emitter this adapter exists for, but the same
-		// guard the Slang path keeps: a module that is not SPIR-V is not
-		// something a pipeline can load.
+		// Unreachable for this emitter, but a module that is not SPIR-V is
+		// not something a pipeline can load.
 		mod.ok = false;
 		mod.diagnostic = "three: shady returned something that is not a SPIR-V module".copy(mem);
 		alloc::free(mem, compiled);
@@ -452,11 +434,10 @@ fn uint parse_decimal(String digits) @local
 <*
  What the module says about itself: its entry points and its descriptors.
 
- Read out of the SPIR-V that is about to run, the way `reflect.c3` reads
- Slang's reflection out of the compile that produced the module - so a binding
- in the layout cannot describe a different module than the one loaded. Only
- what the two consumers need is recovered: the entries' names and stages, and
- the descriptor variables' names, sets, bindings, counts and kinds.
+ Read out of the SPIR-V that is about to run, so a binding in the layout cannot
+ describe a different module than the one loaded. Only what the two consumers
+ need is recovered: the entries' names and stages, and the descriptor
+ variables' names, sets, bindings, counts and kinds.
 
  Push-constant variables carry the storage class that says they are not
  descriptors, so the push block walk is not disturbed by anything here.
@@ -588,7 +569,7 @@ fn void reflect_shady_module(
 					String name = spirv_string(words, i + 3, i + length);
 					entries.push({
 						.name = name.copy(mem),
-						.stage = slang_stage((shady::ExecutionModel)words[i + 1]),
+						.stage = stage_of((shady::ExecutionModel)words[i + 1]),
 					});
 				}
 			default:
@@ -608,7 +589,7 @@ fn void reflect_shady_module(
 
 		// A runtime-sized array unwraps to its element - it is the one resource
 		// this project binds whole, at set 1 - and a fixed one multiplies the
-		// count the way Slang reports `Texture2D extras[4]`.
+		// count the array's own length implies.
 		uint pointee = op_b[variable.pointer];
 		uint array_count = 1;
 		while (pointee < bound)
@@ -679,18 +660,14 @@ fn String spirv_string(uint* words, usz first, usz limit) @local
 
 <*
  A shady execution model in the numbering `ShaderEntry.stage` uses.
-
- That numbering is Slang's today - `gpu/pipeline.c3` names its entry tables with
- `slang::STAGE_*` and `stage_union` maps them to Vulkan - so a shady module
- reports the same numbers the pipeline builder already compares against.
 *>
-fn uint slang_stage(shady::ExecutionModel model) @local
+fn uint stage_of(shady::ExecutionModel model) @local
 {
 	switch (model)
 	{
-		case shady::ExecutionModel.VERTEX: return slang::STAGE_VERTEX;
-		case shady::ExecutionModel.FRAGMENT: return slang::STAGE_FRAGMENT;
-		case shady::ExecutionModel.GL_COMPUTE: return slang::STAGE_COMPUTE;
+		case shady::ExecutionModel.VERTEX: return STAGE_VERTEX;
+		case shady::ExecutionModel.FRAGMENT: return STAGE_FRAGMENT;
+		case shady::ExecutionModel.GL_COMPUTE: return STAGE_COMPUTE;
 		default: return 0;
 	}
 }

@@ -15,7 +15,7 @@ module lighting;
 
 import "lighting.shady";
 
-// The area-light fit, at the binding the Slang templates reserve for it. Rows
+// The area-light fit, at the binding the engine reserves for it. Rows
 // 0-63 hold the fitted inverse and rows 64-127 the directional albedo.
 Sampler2D ltc_lut @set(0) @binding(19);
 

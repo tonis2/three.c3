@@ -2556,7 +2556,7 @@ export const three = {
 	// next frame with no compile.
 	//
 	// It compiles here, at this line, so a body that does not compile throws
-	// where it was written and carries Slang's diagnostic with `post:<line>`
+	// where it was written and carries the compiler's diagnostic with `post:<line>`
 	// coordinates counting the agent's own lines. A failed set leaves the
 	// previous chain running — it is the old shaders or the new one and never
 	// neither.

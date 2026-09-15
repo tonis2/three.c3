@@ -1,40 +1,23 @@
 <*
- Slang reflection, turned into the two things Vulkan asks for: a descriptor set
- layout and a name → offset map for the push block.
+ What a compiled module needs bound, and what its push block looks like.
 
- This is what makes an agent-written shader work without a hand-authored
- descriptor declaration beside it. Both outputs are read out of the same compile
- that produced the SPIR-V, so they cannot describe a different module than the
- one that runs.
+ A module's own reflection produces both: the descriptors are read out of the
+ SPIR-V that is about to run (`reflect_shady_module`), and the push block is
+ walked from the C3 struct the pass fills (`compile_shady`), so neither can
+ describe a different module than the one loaded.
 
- ## Three views of the same parameter, and only one is enough
+ ## The stage union
 
- A `Sampler2D` and a `Texture2D` are indistinguishable at two of the three
- levels Slang exposes:
-
- type kind           RESOURCE for both
- parameter category  DESCRIPTOR_TABLE_SLOT for both
- binding range type  COMBINED_TEXTURE_SAMPLER vs TEXTURE
-
- Only the third says which. Deriving a set layout from the first two produces a
- `SAMPLED_IMAGE` where the shader wants a `COMBINED_IMAGE_SAMPLER` — a
- validation error at best and a black screen at worst.
-
- The binding *index* comes from a fourth view again, the descriptor-set one,
- because that is the view that knows about `[vk::binding(n, m)]`. A binding
- range's own index is its position in declaration order, which is the same
- number often enough to look correct.
-
- A push block is not a descriptor. It reflects as a constant buffer like
- `ConstantBuffer<T>` does, and only the parameter category separates them;
- putting one into a set layout is a validation error naming a binding the shader
- never declared.
+ `ShaderLayout.stages` is the union of every entry point's stage, not which
+ binding is read by which stage. Being wrong in the tight direction is a
+ descriptor the shader reads and the layout does not declare — undefined
+ behaviour, reported by nothing. A stage flag wider than necessary is legal,
+ costs nothing at draw time, and cannot be wrong.
 *>
 module three;
 
 import std::collections::list;
 import vk;
-import slang;
 
 <*
  One thing the shader wants bound, in the terms `vkCreateDescriptorSetLayout`
@@ -78,8 +61,8 @@ struct ShaderLayout
 	List{ShaderField} push_fields;
 	// Bytes, as the shader lays them out. Zero if the shader has no push block.
 	uint push_size;
-	// The union of every entry point's stage. See `stage_union` for why the
-	// union rather than the precise per-binding set.
+	// The union of every entry point's stage. See the header for why the union
+	// rather than the precise per-binding set.
 	vk::ShaderStageFlags stages;
 	// How many distinct descriptor sets the bindings fall into. One, for
 	// everything this project draws so far.
@@ -90,7 +73,7 @@ struct ShaderLayout
  A deep copy, names included.
 
  One compiled module serves several pipelines — the line pass and the solid pass
- are the same `mesh.slang` over two fixed-function states, and `material.side`
+ are the same mesh module over two fixed-function states, and `material.side`
  is one material source over two cull modes. `PipelineCache` keeps the module
  and hands each pipeline one of these.
 
@@ -167,127 +150,28 @@ fn ShaderField* ShaderLayout.field_of(&self, String name)
 const vk::DescriptorType DESCRIPTOR_TYPE_UNBINDABLE = (vk::DescriptorType)0xFFFF_FFFF;
 
 <*
- Which Vulkan descriptor a Slang binding range is.
-
- Anything not listed arrives as `DESCRIPTOR_TYPE_UNBINDABLE` and is refused by
- `MeshPipeline.init` with the parameter's name attached. A shader declaring an
- acceleration structure is not something this pass can bind, and guessing
- `STORAGE_BUFFER` for it would fail later and further away.
-*>
-fn vk::DescriptorType descriptor_type_of(uint binding_type)
-{
-	bool mutable = (binding_type & slang::BINDING_MUTABLE_FLAG) != 0;
-	switch (binding_type & slang::BINDING_BASE_MASK)
-	{
-		case slang::BINDING_SAMPLER:
-			return DESCRIPTOR_TYPE_SAMPLER;
-		case slang::BINDING_TEXTURE:
-			return mutable ? DESCRIPTOR_TYPE_STORAGE_IMAGE : DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		case slang::BINDING_COMBINED_TEXTURE_SAMPLER:
-			return DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		case slang::BINDING_CONSTANT_BUFFER:
-		case slang::BINDING_PARAMETER_BLOCK:
-			return DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		case slang::BINDING_RAW_BUFFER:
-			return DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		case slang::BINDING_TYPED_BUFFER:
-			return mutable ? DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-		case slang::BINDING_INPUT_RENDER_TARGET:
-			return DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-		default:
-			return DESCRIPTOR_TYPE_UNBINDABLE;
-	}
-}
-
-<*
- The Vulkan stage flag for a Slang stage.
+ The Vulkan stage flag for one of the engine's stage numbers.
 *>
 fn vk::ShaderStageFlags stage_flag_of(uint stage)
 {
 	switch (stage)
 	{
-		case slang::STAGE_VERTEX: return SHADER_STAGE_VERTEX_BIT;
-		case slang::STAGE_HULL: return SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-		case slang::STAGE_DOMAIN: return SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-		case slang::STAGE_GEOMETRY: return SHADER_STAGE_GEOMETRY_BIT;
-		case slang::STAGE_FRAGMENT: return SHADER_STAGE_FRAGMENT_BIT;
-		case slang::STAGE_COMPUTE: return SHADER_STAGE_COMPUTE_BIT;
+		case STAGE_VERTEX: return SHADER_STAGE_VERTEX_BIT;
+		case STAGE_HULL: return SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+		case STAGE_DOMAIN: return SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+		case STAGE_GEOMETRY: return SHADER_STAGE_GEOMETRY_BIT;
+		case STAGE_FRAGMENT: return SHADER_STAGE_FRAGMENT_BIT;
+		case STAGE_COMPUTE: return SHADER_STAGE_COMPUTE_BIT;
 		default: return (vk::ShaderStageFlags)0;
 	}
 }
 
 <*
  Every stage the module contains, as one flag set.
-
- The union, not the per-binding truth. `spIsParameterLocationUsed` would say
- precisely which stages touch which binding, and being wrong in the tight
- direction is a descriptor the shader reads and the layout does not declare —
- undefined behaviour, reported by nothing. A stage flag wider than necessary is
- legal, costs nothing at draw time, and cannot be wrong.
 *>
 fn vk::ShaderStageFlags stage_union(ShaderEntry[] entries)
 {
 	vk::ShaderStageFlags flags = (vk::ShaderStageFlags)0;
 	foreach (entry : entries) flags |= stage_flag_of(entry.stage);
 	return flags;
-}
-
-<*
- Walks a compiled program's reflection into a `ShaderLayout`.
-
- The result owns copies of every name, because the reflection they point into
- dies with the compile request.
-*>
-fn ShaderLayout reflect_layout(slang::Reflection reflection, ShaderEntry[] entries)
-{
-	ShaderLayout out;
-	out.bindings.init(mem, 4);
-	out.push_fields.init(mem, 8);
-	out.stages = stage_union(entries);
-
-	if (reflection == null) return out;
-
-	@pool()
-	{
-		List{slang::Descriptor} descriptors;
-		descriptors.tinit(8);
-		reflection.descriptors(&descriptors);
-
-		uint highest = 0;
-		foreach (descriptor : descriptors)
-		{
-			out.bindings.push(
-				{
-					.name = descriptor.name.copy(mem),
-					.set = descriptor.set,
-					.binding = descriptor.binding,
-					.count = descriptor.count,
-					.type = descriptor_type_of(descriptor.type),
-					.stages = out.stages,
-				}
-			);
-			if (descriptor.set + 1 > highest) highest = descriptor.set + 1;
-		}
-		out.set_count = highest;
-
-		List{slang::Field} fields;
-		fields.tinit(8);
-		// `MATERIAL_TABLE_FIELD` is followed wherever it appears, which is a
-		// generated material whose uniform table did not fit the push block.
-		// Every other module has no field by that name and the walk is unchanged.
-		out.push_size = reflection.push_block(&fields, MATERIAL_TABLE_FIELD);
-		foreach (field : fields)
-		{
-			out.push_fields.push(
-				{
-					.name = field.name.copy(mem),
-					.offset = field.offset,
-					.size = field.size,
-					.indirect = field.indirect,
-				}
-			);
-		}
-	};
-
-	return out;
 }

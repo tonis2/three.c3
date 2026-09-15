@@ -1041,30 +1041,23 @@ fn void a_lightmap_retry_keeps_tile_sizes_with_their_receivers() @test
 // ============================================================================
 
 <*
- The built-in lightmap bake through both compilers, compared as file bytes.
+ The built-in lightmap bake writes a real tile.
 
  `LIGHTMAP` is the built-in material compiled with `MATERIAL_LIGHTMAP_BAKE`:
  placed by its chart and answering with the baked lights' direct diffuse. The
- module is the draw path's own files with the lightmap constant on, and for an
- area light its `area_diffuse` is the LTC half's polygon form factor - the
- answer the original's bake path integrates.
+ fixture is one area emitter wide and close to the plane - the shape where the
+ polygon form factor differs most from the quadrature, so a weight taken the
+ wrong way moves the payload. The payload is required to hold a range of values,
+ because a flat tile would make any check on it blind.
 
- **The pipeline is dropped between the two bakes.** This pass keeps the pipeline
- it compiled, so the override alone would only be read by whoever ran first and
- the comparison would be one build against itself. Slang's bake goes first, its
- atlas is saved, the pipeline is freed, and the table's own default - shady -
- runs the second.
-
- The fixture is one area emitter wide and close to the plane - the shape where
- the polygon form factor differs most from the quadrature, so a weight taken the
- wrong way moves the payload. The payload is required to hold a range of values
- before the comparison, because a flat tile would make it blind and green.
+ **The module's own text is checked too**: the bake carries the LTC half, whose
+ `area_diffuse` is the polygon form factor the original's bake integrates, so
+ the fit table is declared even though the bake never reads it.
 *>
-fn void the_built_in_lightmap_bake_is_the_same_file_through_both_compilers() @test
+fn void the_built_in_lightmap_bake_writes_a_tile() @test
 {
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
 	{
-		defer three::shader_overrides_clear();
 		@with_assets(run)
 		{
 			// The bake is its own submission, not the frame cache, but the scene
@@ -1096,60 +1089,26 @@ fn void the_built_in_lightmap_bake_is_the_same_file_through_both_compilers() @te
 			image::Image warm = renderer.capture()!!;
 			warm.free();
 
-			three::shader_override(three::ShaderPass.LIGHTMAP, three::ShaderCompiler.SLANG);
-			three::RunResult slang_bake = run.run(
+			three::RunResult bake = run.run(
 				`area.baked = true;
 				 const b = three.lights.bake({ texelsPerMetre: 64 });
-				 three.lights.saveBake('builtin_slang.lightmap');
+				 three.lights.saveBake('builtin.lightmap');
 				 return [b.receivers, b.skipped].join(' ');`
 			);
-			defer slang_bake.free();
-			test::@check(slang_bake.ok, "the Slang bake ran: %s", slang_bake.error);
-			test::@check(slang_bake.ok && renderer.pass.lightmap.pipeline.shader.binding_of("ltc_lut") == null,
-				"the Slang module carries no fit table");
+			defer bake.free();
+			test::@check(bake.ok, "the bake ran: %s", bake.error);
+			test::@check(renderer.pass.lightmap.pipeline.shader.binding_of("ltc_lut") != null,
+				"the bake module carries the fit table its LTC half declares");
 
-			renderer.pass.lightmap.pipeline.free(&renderer.gpu);
-			renderer.pass.lightmap.pipeline_ready = false;
-			renderer.pass.lightmap.pipeline_refused = false;
+			char[] loaded = file::load(mem, "build/test-bake/builtin.lightmap")!!;
+			defer mem::free(loaded);
 
-			three::shader_overrides_clear();
-			three::RunResult shady_bake = run.run(
-				`const b = three.lights.bake({ texelsPerMetre: 64 });
-				 three.lights.saveBake('builtin_shady.lightmap');
-				 return [b.receivers, b.skipped].join(' ');`
-			);
-			defer shady_bake.free();
-			test::@check(shady_bake.ok, "the shady bake ran: %s", shady_bake.error);
-			test::@check(shady_bake.ok && renderer.pass.lightmap.pipeline.shader.binding_of("ltc_lut") != null,
-				"the shady module carries the fit table its LTC half declares");
-			test::@check(shady_bake.value == slang_bake.value,
-				"both bakes covered the same copies, %s against %s", slang_bake.value, shady_bake.value);
-
-			char[] first = file::load(mem, "build/test-bake/builtin_slang.lightmap")!!;
-			defer mem::free(first);
-			char[] second = file::load(mem, "build/test-bake/builtin_shady.lightmap")!!;
-			defer mem::free(second);
-
-			three::LightmapHeader* header = (three::LightmapHeader*)first.ptr;
+			three::LightmapHeader* header = (three::LightmapHeader*)loaded.ptr;
 			usz texels_at = three::LightmapHeader::size + (usz)header.tiles * three::LightmapFileTile::size;
-			uint levels = first.len > texels_at ? distinct_bytes(first[texels_at..]) : 0;
+			uint levels = loaded.len > texels_at ? distinct_bytes(loaded[texels_at..]) : 0;
 			test::@check(header.texel_bytes > 0 && levels > 4,
 				"the fixture is not a flat tile: %d bytes of texels, %d distinct values",
 				header.texel_bytes, levels);
-
-			sz differing = 0;
-			usz first_at = 0;
-			usz common = first.len < second.len ? first.len : second.len;
-			for (usz at = 0; at < common; at++)
-			{
-				if (first[at] == second[at]) continue;
-				if (differing == 0) first_at = at;
-				differing++;
-			}
-			differing += (sz)(first.len > second.len ? first.len - second.len : second.len - first.len);
-			test::@check(differing == 0,
-				"a built-in lightmap bake is byte-identical through both compilers: %d of %d bytes differ, first at %d",
-				differing, first.len, first_at);
 		};
 	};
 }
