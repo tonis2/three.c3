@@ -25,6 +25,8 @@
 // pixels, `info.z` the clock, `planes` the camera's near and far - has one place
 // to be wrong rather than two.
 
+import "noise.shady";
+
 struct VertexIn
 {
 	uint vid @builtin(vertex_index);

@@ -66,6 +66,7 @@ const char[*] EMBED_LIGHTING_SHADY        = $embed("../../shaders/lighting.shady
 const char[*] EMBED_LIGHTING_LTC_SHADY    = $embed("../../shaders/lighting_ltc.shady");
 const char[*] EMBED_LIGHTING_REFERENCE_SHADY = $embed("../../shaders/lighting_reference.shady");
 const char[*] EMBED_MATERIAL_SHADY        = $embed("../../shaders/material.shady");
+const char[*] EMBED_NOISE_SHADY           = $embed("../../shaders/noise.shady");
 const char[*] EMBED_SURFACE_SHADY         = $embed("../../shaders/surface.shady");
 
 <*
@@ -96,6 +97,7 @@ enum ShaderFile : int (String name, String text)
 	LIGHTING_LTC_SHADY   { "lighting_ltc.shady", EMBED_LIGHTING_LTC_SHADY },
 	LIGHTING_REFERENCE_SHADY { "lighting_reference.shady", EMBED_LIGHTING_REFERENCE_SHADY },
 	MATERIAL_SHADY       { "material.shady", EMBED_MATERIAL_SHADY },
+	NOISE_SHADY          { "noise.shady", EMBED_NOISE_SHADY },
 	SURFACE_SHADY        { "surface.shady", EMBED_SURFACE_SHADY },
 }
 
