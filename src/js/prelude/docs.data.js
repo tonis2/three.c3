@@ -2,7 +2,7 @@
 // `c3c build` regenerates it; `docs.js` reads it.
 
 export const DATA = {
-	"version": "0.1.0",
+	"version": "0.1.5",
 	"summary": "A Three.js-shaped scene API over direct Vulkan.",
 	"differences": {
 		"load-is-synchronous": "`three.load(path)` is synchronous. `await` works but is not needed.",
