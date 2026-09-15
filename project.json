@@ -4,7 +4,7 @@
 	"authors": [],
 	"version": "0.1.0",
 	"dependency-search-paths": ["lib"],
-	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "slang", "ktx", "font", "cui", "shady"],
+	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "ktx", "font", "cui", "shady"],
 	"features": [],
 	"macos-min-version": "26.0",
 

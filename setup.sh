@@ -4,7 +4,6 @@
 #
 #     ./setup.sh              # all of it
 #     ./setup.sh submodules   # just one step, by name
-#     ./setup.sh slang
 #     ./setup.sh driver
 #
 # Safe to re-run: every step checks whether it has already been done.
@@ -46,29 +45,6 @@ run_submodules() {
 	git submodule update --init --recursive
 }
 
-run_slang() {
-	echo "==> slang"
-	# slang.c3l links Slang IN, as one 43 MB static archive, and has no other
-	# mode — no SDK on the machine, no dylibs beside the binary, no rpath. The
-	# archive is too large for git, so it is published as a release asset on
-	# that repository's `static` tag and this fetches it, verified against the
-	# SHA256SUMS published beside it: the same arrangement as run_driver below,
-	# for the same reason.
-	#
-	# Skipping it fails at the linker with "library not found for -lslang".
-	#
-	# A target nobody has published yet has to be built on a machine of that
-	# architecture — Slang runs code generators it compiled for the host, so
-	# there is no cross-build — with lib/slang.c3l/native/build-slang.sh, then
-	# published with native/publish-static.sh. Only macos-aarch64 exists today,
-	# and fetch-static.sh says so by name, listing what the release does have.
-	#
-	# **The archive carries no spirv-opt**, so src/shader/compile.c3's
-	# SLANG_ARGUMENTS must keep its `-O0`. Without it every shader compile fails
-	# with "failed to load downstream compiler 'spirv-opt'".
-	./lib/slang.c3l/native/fetch-static.sh
-}
-
 run_driver() {
 	# Only macOS on Apple Silicon bundles a driver at all. Linux and Windows
 	# have a system Vulkan and the loader finds it; there is nothing to fetch.
@@ -95,16 +71,11 @@ run_driver() {
 }
 
 case "$step" in
-	all)        run_submodules; run_slang; run_driver ;;
+	all)        run_submodules; run_driver ;;
 	submodules) run_submodules ;;
-	slang)      run_slang ;;
-	# `static` was this script's name for the Slang fetch while there was also a
-	# dylib path to tell it apart from. There is not any more; kept so the old
-	# invocation does not fail with "unknown step".
-	static)     run_slang ;;
 	driver)     run_driver ;;
 	-h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	*)          echo "setup: unknown step '$step' (all, submodules, slang, driver)" >&2; exit 2 ;;
+	*)          echo "setup: unknown step '$step' (all, submodules, driver)" >&2; exit 2 ;;
 esac
 
 echo "==> done"
