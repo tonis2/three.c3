@@ -17,6 +17,8 @@
 // index is not uniform across the wave, and a body reading a map inside a
 // branch that differs between lanes must not have to know that.
 
+import "noise.shady";
+
 Sampler2D three_textures[] @set(1) @binding(0);
 
 // The row of `DrawRecord.texture_index` the base colour map sits at. The row is
