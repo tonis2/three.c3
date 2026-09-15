@@ -22,6 +22,8 @@ on:
       - 'docs/**'
       - 'tools/docs.mjs'
       - 'src/js/prelude/docs.data.js'
+      # `docs.data.js` embeds this file's `version`, so a bump there stales it.
+      - 'project.json'
       - 'src/scene/input.c3'
       - 'package.json'
       - 'package-lock.json'
@@ -32,6 +34,8 @@ on:
       - 'docs/**'
       - 'tools/docs.mjs'
       - 'src/js/prelude/docs.data.js'
+      # Same reason as the push filter above.
+      - 'project.json'
       - 'src/scene/input.c3'
   workflow_dispatch:
 
