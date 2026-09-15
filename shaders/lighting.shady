@@ -10,13 +10,7 @@
 //
 // A surface is lit by the punctual lights the cluster pass left it - the
 // directionals from the frame's own list and the points, spots and area
-// emitters from this fragment's cluster, each with its own shadow. What is
-// **not** here yet, and is its own piece of work rather than an omission to be
-// discovered later:
-//
-//  - **the bake pass's own diffuse** (`shared_baked_diffuse`), which the
-//    lightmap pass still compiles from Slang; reading a tile and the
-//    dynamic-caster delta that corrects it live here.
+// emitters from this fragment's cluster, each with its own shadow.
 //
 // The shape that matters is kept: the light list is the *cluster's*, so a
 // fragment is lit by what the culling pass decided reaches it, and the two
