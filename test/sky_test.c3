@@ -1,6 +1,6 @@
 <*
  The sky: the image behind the scene, and the one metals reflect —
- `src/render/sky.c3` and `shaders/sky.slang`.
+ `src/render/sky.c3` and `shaders/sky.shady`.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::sky`
 
@@ -299,32 +299,18 @@ fn image::Image quadrants()
 }
 
 <*
- The same frame through both compilers, compared as pixels.
+ The sky renders its fixture in all four quadrants.
 
- Slang and shady are different compilers and are expected to produce different
- SPIR-V; what has to be identical is the frame. This is the first flipped pass
- with a resource, so it is also the first whose pipeline layout has to be derived
- from what the module declares rather than from a table: `sky_map` at set 0
- binding 0, a combined image sampler in one set, and the push range the module's
- own block needs.
-
- The module is compiled directly rather than through `MeshPass.init`, so both
- compilers' modules exist in one process at once. The pipelines are built over one
- target and one state, and swapped in front of the capture. The scene cache is
- off, because the sky is inside the scene recording and a cache hit would read the
- first compiler's frame back and compare it with itself.
-
- The frame is required to hold all four quadrants first, so a comparison blind to
- u or to v cannot pass: black clear, a non-zero rotation and an intensity away
- from one put every arm of the shader in the picture.
+ The frame is required to hold all four quadrants, so a shader blind to u or to v
+ cannot pass: black clear, a non-zero rotation and an intensity away from one put
+ every arm of the shader in the picture.
 *>
-fn void the_sky_is_the_same_pixels_through_both_compilers() @test
+fn void the_sky_renders_every_quadrant() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
-	defer three::shader_overrides_clear();
-	// The sky is inside the scene recording, so a cache hit would read the first
-	// compiler's frame back and compare it with itself.
+	// The sky is inside the scene recording, so a cache hit would read an older
+	// frame back.
 	renderer.scene_cache_disabled = true;
 
 	renderer.clear = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -343,80 +329,44 @@ fn void the_sky_is_the_same_pixels_through_both_compilers() @test
 	renderer.pass.scene.look.sky.rotation = 0.6f;
 	renderer.pass.scene.look.sky.background_intensity = 0.9f;
 
-	String source = three::shader_source(three::ShaderFile.SKY_SLANG, mem)!!;
-	defer source.free(mem);
-
-	three::shader_override(three::ShaderPass.SKY, three::ShaderCompiler.SLANG);
-	three::ShaderModule slang_mod = three::compile_shader(
-		three::ShaderPass.SKY, source, three::ShaderFile.SKY_SLANG.name, three::MESH_ENTRIES[..])!!;
-	defer slang_mod.free();
-	test::@check(slang_mod.ok, "the Slang sky compiles: %s", slang_mod.diagnostic);
-
-	three::MeshPipeline slang_pipe;
-	slang_pipe.init(&renderer.gpu, &renderer.target, &slang_mod, three::SKY_STATE,
-		contract: three::SKY_PUSH_FIELDS[..])!!;
-	defer slang_pipe.free(&renderer.gpu);
-
-	three::shader_override(three::ShaderPass.SKY, three::ShaderCompiler.SHADY);
-	three::ShaderModule shady_mod = three::compile_shader(
-		three::ShaderPass.SKY, source, three::ShaderFile.SKY_SLANG.name, three::MESH_ENTRIES[..])!!;
-	defer shady_mod.free();
-	test::@check(shady_mod.ok, "the shady sky compiles: %s", shady_mod.diagnostic);
+	three::ShaderModule mod = three::compile_shader(three::ShaderPass.SKY)!!;
+	defer mod.free();
+	test::@check(mod.ok, "the sky compiles: %s", mod.diagnostic);
 
 	// The descriptor the pipeline builder reads, out of the module that is
 	// about to run.
-	three::ShaderBinding* binding = shady_mod.layout.binding_of("sky_map");
+	three::ShaderBinding* binding = mod.layout.binding_of("sky_map");
 	test::@check(
 		binding != null && binding.set == 0 && binding.binding == 0
 			&& binding.count == 1 && binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		"the shady sky declares sky_map at set 0 binding 0 as a combined image sampler"
+		"the sky declares sky_map at set 0 binding 0 as a combined image sampler"
 	);
-	test::@check(shady_mod.layout.set_count == 1,
-		"in one set, got %d", shady_mod.layout.set_count);
-	test::@check(shady_mod.layout.push_size == slang_mod.layout.push_size,
-		"and the same push block, %d bytes against %d",
-		shady_mod.layout.push_size, slang_mod.layout.push_size);
+	test::@check(mod.layout.set_count == 1, "in one set, got %d", mod.layout.set_count);
 
-	three::MeshPipeline shady_pipe;
-	shady_pipe.init(&renderer.gpu, &renderer.target, &shady_mod, three::SKY_STATE,
+	three::MeshPipeline pipe;
+	pipe.init(&renderer.gpu, &renderer.target, &mod, three::SKY_STATE,
 		contract: three::SKY_PUSH_FIELDS[..])!!;
-	defer shady_pipe.free(&renderer.gpu);
+	defer pipe.free(&renderer.gpu);
 
-	renderer.pass.sky_pipeline = &slang_pipe;
-	image::Image through_slang = renderer.capture()!!;
-	defer through_slang.free();
-
-	renderer.pass.sky_pipeline = &shady_pipe;
-	image::Image through_shady = renderer.capture()!!;
-	defer through_shady.free();
+	renderer.pass.sky_pipeline = &pipe;
+	image::Image frame = renderer.capture()!!;
+	defer frame.free();
 	renderer.pass.sky_pipeline = null;
 
 	// Black clear, so a frame that is merely cleared shows none of them. All four
 	// rather than bright pixels alone: a frame that only ever samples one
-	// longitude or one latitude is a frame this comparison is blind to.
+	// longitude or one latitude would pass without them.
 	char[3][4] wanted = {
 		{ 220, 40, 40 }, { 40, 220, 40 }, { 40, 40, 220 }, { 220, 200, 40 },
 	};
 	uint[4] seen = { 0, 0, 0, 0 };
 	foreach (i, colour : wanted)
 	{
-		seen[i] = count_near(&through_slang, colour, 0.0f, 1.0f);
+		seen[i] = count_near(&frame, colour, 0.0f, 1.0f);
 	}
 	test::@check(seen[0] > 0 && seen[1] > 0 && seen[2] > 0 && seen[3] > 0,
-		"the compared frame holds every quadrant, %d, %d, %d, %d pixels",
+		"the frame holds every quadrant, %d, %d, %d, %d pixels",
 		seen[0], seen[1], seen[2], seen[3]);
-
-	sz differing = 0;
-	sz first = through_slang.pixels.len;
-	for (sz at = 0; at < through_slang.pixels.len; at++)
-	{
-		if (through_slang.pixels[at] == through_shady.pixels[at]) continue;
-		if (differing == 0) first = at;
-		differing++;
-	}
-	test::@check(differing == 0,
-		"the sky is byte-identical through both compilers, %d of %d bytes differ, first at byte %d (pixel %d, %d)",
-		differing, through_slang.pixels.len, first, first / 4 % W, first / 4 / W);
 }
 
 // ============================================================================

@@ -95,7 +95,7 @@
  a `.glb` with the debug boxes baked in is a file nobody wants, and a node whose
  subtree is switched off is not part of the picture being exported.
 
- A `ShaderMaterial` is not exported, and cannot be: it is a Slang pipeline, and
+ A `ShaderMaterial` is not exported, and cannot be: it is a shader program, and
  glTF describes surfaces rather than programs. A mesh drawn under one exports
  with the base colour and texture its geometry carries. Nothing is silently
  dropped that a script cannot see — the report names the count.
@@ -144,7 +144,7 @@
  A `LayeredMaterial` a script built goes back too, by the other door.
  `js/prelude/layers.js` sends the description across at construction beside the
  shader it generates (`Material.script_layers`), because a shader cannot be read
- back: "this layer multiplies" is a choice of expression by the time the Slang
+ back: "this layer multiplies" is a choice of expression by the time the shader
  exists. That path is lossless for its own reason — a script stack has no PBR
  half and no height data to lose, because the JS API refuses both by name. Its
  images have no file behind them, so they are read off the device and encoded.
@@ -2350,7 +2350,7 @@ fn void Exporter.count_shading(&self, NodeId id, bool shared)
  number that says "almost everything lost its shading" about a file where almost
  nothing had.
 
- The distinction is the fragment body: a material with one is a Slang pipeline,
+ The distinction is the fragment body: a material with one is a shader program,
  and glTF describes surfaces rather than programs.
 *>
 fn bool Exporter.loses_its_shader(&self, uint material)
@@ -3025,7 +3025,7 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 				// it, which `MeshPass.record` draws as nothing at all. Every answer here has
 				// the same shape for it — opaque, single-sided, the identity transform.
 				// A baked image is indexed by the mesh's own TEXCOORD_0 with nothing applied
-				// to it — `material.slang` rasterises the bake into the attribute as the file
+				// to it — `mesh.shady` rasterises the bake into the attribute as the file
 				// carries it, and the body's own sampling already went through the transform
 				// inside the bake. Writing the transform again would apply it twice.
 		.uv_transform = baked.texture >= 0 || material_of == null ? UV_IDENTITY

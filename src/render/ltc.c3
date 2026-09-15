@@ -6,8 +6,7 @@
  closed-form integral. Heitz et al. (2016) fit the GGX lobe, per roughness and
  per view angle, to that same cosine seen through a 3x3 linear map — so the GGX
  integral over the emitter becomes the cosine integral over a transformed
- emitter, and the sixteen-sample loop `lighting.slang` used to run becomes two
- texture reads and four edges.
+ emitter: the sixteen-sample loop becomes two texture reads and four edges.
 
  `ltc_table.bin` is the fit, generated offline: 64x128 RGBA halves, the column
  perceptual roughness and the row `sqrt(1 - N·V)`. Rows 0-63 hold the four free

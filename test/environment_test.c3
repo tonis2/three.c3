@@ -616,7 +616,7 @@ fn void backside_is_what_makes_a_dome_visible_from_inside() @test
  changing a material's side writes a field and nothing else. That is what makes
  it safe to flip inside an animation callback, which is where a script would want
  to: under the first version of this, which baked the cull mode into the
- pipeline, twelve assignments cost two Slang compiles and two `VkPipeline`
+ pipeline, twelve assignments cost two shader compiles and two `VkPipeline`
  builds, and a frame that first asked for a new side would drop about 17 ms.
 
  Both counters are asserted because they fail differently. `compiles` rising
@@ -627,7 +627,7 @@ fn void backside_is_what_makes_a_dome_visible_from_inside() @test
 *>
 fn void flipping_a_side_costs_no_compile_and_no_pipeline() @test
 {
-	// `compiles` means Slang, not the disk cache — see
+	// `compiles` means a compile, not the disk cache — see
 	// `the_pipeline_cache_skips_the_compile` in shader_test.c3 for the convention.
 	three::shader_cache_set_dir("");
 
@@ -660,7 +660,7 @@ fn void flipping_a_side_costs_no_compile_and_no_pipeline() @test
 
 		test::@check(
 			renderer.pass.pipelines.compiles == compiles,
-			"Slang was not called again for a side change, got %d more",
+			"the compiler was not called again for a side change, got %d more",
 			renderer.pass.pipelines.compiles - compiles
 		);
 		test::@check(

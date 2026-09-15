@@ -147,7 +147,7 @@ fn void a_restore_directive_numbers_the_line_after_it() @test
 }
 
 <*
- The real thing: `sky.slang`'s port, through the def that describes the pass.
+ The real thing: `shaders/sky.shady` through the def that describes the pass.
 
  What this writes is what kong compiles and validates - the bridge by which a
  generated module is asked whether it is one before the engine is switched over.
@@ -1314,13 +1314,8 @@ fn void a_scripted_material_compiles_through_the_switch() @test
 	};
 	three::MaterialTexture[1] textures = { { "noise_map" } };
 
-	// The row is held on Slang until the material half carries relief and the
-	// bake half; the assembly itself is what this asks about.
-	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SHADY);
-	defer three::shader_overrides_clear();
-
 	three::ShaderModule mod = three::compile_shader(
-		three::ShaderPass.MESH_MATERIAL, "", "three.material", three::MESH_ENTRIES[..],
+		three::ShaderPass.MESH_MATERIAL,
 		body: `fn float3 shade(Surface s)
 {
 	return s.uniforms.tint.rgb * s.uniforms.colors[s.variant].rgb * noise_map().Sample(s.uv).rgb;
@@ -1331,7 +1326,7 @@ fn void a_scripted_material_compiles_through_the_switch() @test
 	)!!;
 	defer mod.free();
 
-	test::@check(mod.ok, "a scripted material compiles through shady: %s", mod.diagnostic);
+	test::@check(mod.ok, "a scripted material compiles: %s", mod.diagnostic);
 
 	// The uniform fields, by the names the script declared.
 	test::@check(mod.layout.field_of("tint") != null && mod.layout.field_of("colors") != null,
@@ -1351,7 +1346,7 @@ fn void a_scripted_post_compiles_through_the_switch() @test
 	three::MaterialTexture[1] textures = { { "tint_map" } };
 
 	three::ShaderModule mod = three::compile_shader(
-		three::ShaderPass.POST, "", "three.post", three::MESH_ENTRIES[..],
+		three::ShaderPass.POST,
 		body: `fn float3 post(Post p)
 {
 	return tint_map.Sample(p.uv).rgb * p.uniforms.gain;
@@ -1362,7 +1357,7 @@ fn void a_scripted_post_compiles_through_the_switch() @test
 	)!!;
 	defer mod.free();
 
-	test::@check(mod.ok, "a scripted post compiles through shady: %s", mod.diagnostic);
+	test::@check(mod.ok, "a scripted post compiles: %s", mod.diagnostic);
 
 	three::ShaderBinding* tint = mod.layout.binding_of("tint_map");
 	test::@check(tint != null && tint.set == 0 && tint.binding == three::POST_BINDING_FIRST,
@@ -1373,13 +1368,8 @@ fn void a_scripted_post_compiles_through_the_switch() @test
 fn void a_scripted_body_error_names_the_scripts_own_line() @test
 {
 	three::MaterialUniform[] uniforms = { { "tint", 4, 1 } };
-	// The row is held on Slang until the material half carries relief and the
-	// bake half; the assembly itself is what this asks about.
-	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SHADY);
-	defer three::shader_overrides_clear();
-
 	three::ShaderModule mod = three::compile_shader(
-		three::ShaderPass.MESH_MATERIAL, "", "three.material", three::MESH_ENTRIES[..],
+		three::ShaderPass.MESH_MATERIAL,
 		body: `fn float3 shade(Surface s)
 {
 	return s.uniforms.tint.rgb * notAFunction(s.uv);

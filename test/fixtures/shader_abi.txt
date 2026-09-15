@@ -1,0 +1,1104 @@
+# Frozen from the Slang-era build; now the contract the shady defs must meet.
+
+# three.c3 Slang shader ABI fixtures.
+#
+# What the Slang path reported for each engine shader module: entry points,
+# descriptors, the push block's fields and size, and the wire structs behind
+# its pointers, with their members. A struct's `stride` is what one array
+# element takes; it is `size` rounded up to the type's alignment.
+# Fields are in the order the compiler laid them out, so a diff shows the one
+# that moved.
+#
+# Compared by three_tests::shader_abi::the_fixture_is_what_the_shady_path_reports,
+# which compiles every variant through the engine's shady defs and checks the
+# result against this capture. The port's deliberate differences are `Delta`
+# entries in that test; nothing rewrites this file any more, because it is the
+# Slang capture and not a generated report.
+#
+# MESH_REFERENCE has no section: its call site compiles the cache key rather
+# than a template, so the Slang path has no module to capture. The scripted
+# rows carry one fixed body and declaration list each, because a script's own
+# names are not enumerable.
+
+[variant cluster]
+source shaders/cluster.slang
+entry computeMain compute
+push_size 120
+push_field lights offset=0 size=8 indirect=no
+push_field counts offset=8 size=8 indirect=no
+push_field indices offset=16 size=8 indirect=no
+push_field overflow offset=24 size=8 indirect=no
+push_field view_projection offset=32 size=64 indirect=no
+push_field light_count offset=96 size=4 indirect=no
+push_field camera_near offset=100 size=16 indirect=no
+push_field far_plane offset=116 size=4 indirect=no
+struct ClusterPush size=120 stride=120
+struct_field ClusterPush.lights offset=0 size=8
+struct_field ClusterPush.counts offset=8 size=8
+struct_field ClusterPush.indices offset=16 size=8
+struct_field ClusterPush.overflow offset=24 size=8
+struct_field ClusterPush.view_projection offset=32 size=64
+struct_field ClusterPush.light_count offset=96 size=4
+struct_field ClusterPush.camera_near offset=100 size=16
+struct_field ClusterPush.far_plane offset=116 size=4
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+[variant skin]
+source shaders/skin.slang
+entry computeMain compute
+push_size 96
+push_field positions offset=0 size=8 indirect=no
+push_field normals offset=8 size=8 indirect=no
+push_field joints offset=16 size=8 indirect=no
+push_field weights offset=24 size=8 indirect=no
+push_field instances offset=32 size=8 indirect=no
+push_field baked offset=40 size=8 indirect=no
+push_field live offset=48 size=8 indirect=no
+push_field output offset=56 size=8 indirect=no
+push_field morph offset=64 size=8 indirect=no
+push_field morph_weights offset=72 size=8 indirect=no
+push_field vertex_count offset=80 size=4 indirect=no
+push_field instance_count offset=84 size=4 indirect=no
+push_field flags offset=88 size=4 indirect=no
+push_field morph_targets offset=92 size=4 indirect=no
+struct SkinPush size=96 stride=96
+struct_field SkinPush.positions offset=0 size=8
+struct_field SkinPush.normals offset=8 size=8
+struct_field SkinPush.joints offset=16 size=8
+struct_field SkinPush.weights offset=24 size=8
+struct_field SkinPush.instances offset=32 size=8
+struct_field SkinPush.baked offset=40 size=8
+struct_field SkinPush.live offset=48 size=8
+struct_field SkinPush.output offset=56 size=8
+struct_field SkinPush.morph offset=64 size=8
+struct_field SkinPush.morph_weights offset=72 size=8
+struct_field SkinPush.vertex_count offset=80 size=4
+struct_field SkinPush.instance_count offset=84 size=4
+struct_field SkinPush.flags offset=88 size=4
+struct_field SkinPush.morph_targets offset=92 size=4
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant shadow]
+source shaders/shadow.slang
+entry vertexMain vertex
+push_size 96
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+push_field padding offset=24 size=8 indirect=no
+push_field projection offset=32 size=64 indirect=no
+struct PushData size=96 stride=96
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct_field PushData.padding offset=24 size=8
+struct_field PushData.projection offset=32 size=64
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant sky]
+source shaders/sky.slang
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor sky_map set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 80
+push_field inverse_view_projection offset=0 size=64 indirect=no
+push_field params offset=64 size=16 indirect=no
+struct SkyPush size=80 stride=80
+struct_field SkyPush.inverse_view_projection offset=0 size=64
+struct_field SkyPush.params offset=64 size=16
+[variant mesh]
+source shaders/mesh.slang
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant shadow_cutout]
+source shaders/shadow.slang + THREE_SHADOW_CUTOUT
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 96
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+push_field padding offset=24 size=8 indirect=no
+push_field projection offset=32 size=64 indirect=no
+struct PushData size=96 stride=96
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct_field PushData.padding offset=24 size=8
+struct_field PushData.projection offset=32 size=64
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant mesh_lightmap]
+source shaders/mesh.slang + THREE_LIGHTMAP_BAKE THREE_NO_AO THREE_AREA_REFERENCE
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant material_plain]
+source shaders/material.slang + body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant material_declared]
+source shaders/material.slang + body, uniform, table, texture
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 100
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+push_field tint offset=24 size=12 indirect=no
+push_field swatches offset=36 size=64 indirect=no
+struct PushData size=100 stride=104
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct_field PushData.tint offset=24 size=12
+struct_field PushData.swatches offset=36 size=64
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant material_vertex]
+source shaders/material.slang + body, uniform, vertex body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 36
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+push_field tint offset=24 size=12 indirect=no
+struct PushData size=36 stride=40
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct_field PushData.tint offset=24 size=12
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant material_spilled]
+source shaders/material.slang + body, spilled table
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 44
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+push_field material_table offset=24 size=8 indirect=no
+push_field swatches offset=0 size=128 indirect=yes
+push_field tint offset=32 size=12 indirect=no
+struct PushData size=44 stride=48
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct_field PushData.material_table offset=24 size=8
+struct_field PushData.tint offset=32 size=12
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+struct MaterialTable size=128 stride=128
+struct_field MaterialTable.swatches offset=0 size=128
+[variant material_bake]
+source shaders/material.slang + THREE_BAKE
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant lightmap_material]
+source shaders/material.slang + THREE_LIGHTMAP_BAKE THREE_NO_AO THREE_NO_LIGHTMAP THREE_AREA_REFERENCE
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field frame offset=0 size=8 indirect=no
+push_field instances offset=8 size=8 indirect=no
+push_field draw offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.frame offset=0 size=8
+struct_field PushData.instances offset=8 size=8
+struct_field PushData.draw offset=16 size=8
+struct FrameBlock size=400 stride=400
+struct_field FrameBlock.view_projection offset=0 size=64
+struct_field FrameBlock.lighting offset=64 size=16
+struct_field FrameBlock.live_poses offset=80 size=8
+struct_field FrameBlock.light_view_projection offset=88 size=64
+struct_field FrameBlock.shadow offset=152 size=16
+struct_field FrameBlock.debug offset=168 size=16
+struct_field FrameBlock.camera offset=184 size=16
+struct_field FrameBlock.environment offset=200 size=16
+struct_field FrameBlock.lights offset=216 size=8
+struct_field FrameBlock.morph_weights offset=224 size=8
+struct_field FrameBlock.world offset=232 size=16
+struct_field FrameBlock.point_shadow offset=248 size=16
+struct_field FrameBlock.inverse_view_projection offset=264 size=64
+struct_field FrameBlock.ambient_occlusion offset=328 size=16
+struct_field FrameBlock.shadow_views offset=344 size=8
+struct_field FrameBlock.cluster_counts offset=352 size=8
+struct_field FrameBlock.cluster_indices offset=360 size=8
+struct_field FrameBlock.cluster_grid offset=368 size=16
+struct_field FrameBlock.cluster_screen offset=384 size=16
+struct Light size=80 stride=80
+struct_field Light.direction offset=0 size=16
+struct_field Light.color offset=16 size=16
+struct_field Light.area_right offset=32 size=16
+struct_field Light.area_up offset=48 size=16
+struct_field Light.meta offset=64 size=16
+struct ShadowGpuView size=160 stride=160
+struct_field ShadowGpuView.view_projection offset=0 size=64
+struct_field ShadowGpuView.atlas offset=64 size=16
+struct_field ShadowGpuView.params offset=80 size=16
+struct_field ShadowGpuView.dynamic_rect offset=96 size=16
+struct_field ShadowGpuView.plane_x offset=112 size=16
+struct_field ShadowGpuView.plane_y offset=128 size=16
+struct_field ShadowGpuView.plane_z offset=144 size=16
+struct Instance size=180 stride=180
+struct_field Instance.model offset=0 size=64
+struct_field Instance.normal offset=64 size=64
+struct_field Instance.color offset=128 size=16
+struct_field Instance.variant offset=144 size=4
+struct_field Instance.pose offset=148 size=4
+struct_field Instance.pose_from offset=152 size=4
+struct_field Instance.blend offset=156 size=4
+struct_field Instance.morph offset=160 size=4
+struct_field Instance.lightmap offset=164 size=16
+struct Draw size=388 stride=392
+struct_field Draw.positions offset=0 size=8
+struct_field Draw.normals offset=8 size=8
+struct_field Draw.uvs offset=16 size=8
+struct_field Draw.lightmap_uvs offset=24 size=8
+struct_field Draw.colors offset=32 size=8
+struct_field Draw.joints offset=40 size=8
+struct_field Draw.weights offset=48 size=8
+struct_field Draw.palette offset=56 size=8
+struct_field Draw.posed offset=64 size=8
+struct_field Draw.morph offset=72 size=8
+struct_field Draw.base_color offset=80 size=16
+struct_field Draw.flags offset=96 size=4
+struct_field Draw.skin_stride offset=100 size=4
+struct_field Draw.morph_targets offset=104 size=4
+struct_field Draw.uv_transform offset=108 size=16
+struct_field Draw.surface offset=124 size=16
+struct_field Draw.uv_variant_count offset=140 size=4
+struct_field Draw.uv_variants offset=144 size=128
+struct_field Draw.emissive offset=272 size=16
+struct_field Draw.texture_index offset=288 size=96
+struct_field Draw.material_rows offset=384 size=4
+struct SkinnedVertex size=24 stride=24
+struct_field SkinnedVertex.position offset=0 size=12
+struct_field SkinnedVertex.normal offset=12 size=12
+struct MorphDelta size=24 stride=24
+struct_field MorphDelta.position offset=0 size=12
+struct_field MorphDelta.normal offset=12 size=12
+[variant post]
+source shaders/post.slang + body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor prev set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor scene set=0 binding=1 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tap_image set=0 binding=3 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field info offset=0 size=16 indirect=no
+push_field planes offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.info offset=0 size=16
+struct_field PushData.planes offset=16 size=8
+[variant post_declared]
+source shaders/post.slang + body, uniform, texture
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor prev set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor scene set=0 binding=1 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tap_image set=0 binding=3 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tint_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 28
+push_field info offset=0 size=16 indirect=no
+push_field planes offset=16 size=8 indirect=no
+push_field gain offset=24 size=4 indirect=no
+struct PushData size=28 stride=28
+struct_field PushData.info offset=0 size=16
+struct_field PushData.planes offset=16 size=8
+struct_field PushData.gain offset=24 size=4
+[variant tonemap_none]
+source shaders/post.slang + engine identity body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor prev set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor scene set=0 binding=1 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tap_image set=0 binding=3 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 24
+push_field info offset=0 size=16 indirect=no
+push_field planes offset=16 size=8 indirect=no
+struct PushData size=24 stride=24
+struct_field PushData.info offset=0 size=16
+struct_field PushData.planes offset=16 size=8
+[variant tonemap_agx]
+source shaders/post.slang + engine tonemap_agx body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor prev set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor scene set=0 binding=1 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tap_image set=0 binding=3 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 28
+push_field info offset=0 size=16 indirect=no
+push_field planes offset=16 size=8 indirect=no
+push_field exposure offset=24 size=4 indirect=no
+struct PushData size=28 stride=28
+struct_field PushData.info offset=0 size=16
+struct_field PushData.planes offset=16 size=8
+struct_field PushData.exposure offset=24 size=4
+[variant tonemap_agx_blender]
+source shaders/post.slang + engine tonemap_agx_blender body
+entry vertexMain vertex
+entry fragmentMain fragment
+descriptor prev set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor scene set=0 binding=1 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor tap_image set=0 binding=3 count=1 type=COMBINED_IMAGE_SAMPLER
+push_size 28
+push_field info offset=0 size=16 indirect=no
+push_field planes offset=16 size=8 indirect=no
+push_field exposure offset=24 size=4 indirect=no
+struct PushData size=28 stride=28
+struct_field PushData.info offset=0 size=16
+struct_field PushData.planes offset=16 size=8
+struct_field PushData.exposure offset=24 size=4

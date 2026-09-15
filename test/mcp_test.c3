@@ -562,7 +562,7 @@ fn void the_flags_that_went_are_refused_rather_than_ignored() @test
 
 	// With a value after it, which is the shape that was removed — a `--shader`
 	// refused only when bare would still swallow the path beside it.
-	String[*] pointed = { "three", "--shader", "shaders/mesh.slang" };
+	String[*] pointed = { "three", "--shader", "shaders/mesh.shady" };
 	three::Options? refused_shader = three::parse_args(pointed[..]);
 	test::@check(@catch(refused_shader), "--shader was accepted rather than refused");
 

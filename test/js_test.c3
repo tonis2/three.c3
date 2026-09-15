@@ -1686,7 +1686,7 @@ fn void a_table_row_can_be_written_on_its_own() @test
  material, and the same reason: an object is a detached description until it is
  added, and a script that sets a colour and then adds must not lose it. Checked
  with the default shader, so it also says the instance colour reaches
- `mesh.slang` and not only a `ShaderMaterial`.
+ `mesh.shady` and not only a `ShaderMaterial`.
 *>
 fn void a_colour_set_before_the_add_survives_it() @test
 {
@@ -2207,7 +2207,7 @@ fn void picking_without_a_device_says_which_verb_needs_one() @test
 // Materials
 //
 // `plan.md` §5's done condition for M5: an agent-written fragment shader renders
-// and a bad one throws a JS error carrying the Slang diagnostic. Both halves are
+// and a bad one throws a JS error carrying the compiler diagnostic. Both halves are
 // asserted here, on a device, through the same `run_script` surface an agent
 // drives — not against the assembly layer, which `three_tests::material` covers.
 // ============================================================================
@@ -2451,7 +2451,7 @@ fn void two_materials_at_once_each_get_their_own_shader() @test
  A bad body throws, and the message names the line the agent wrote.
 
  The done condition. The error must arrive at construction — not at the next
- render, and not as a black screen — and it must carry Slang's own text, whose
+ render, and not as a black screen — and it must carry the compiler's own text, whose
  line number `#line` has already remapped to the agent's body rather than to the
  generated preamble around it.
 
@@ -2641,7 +2641,7 @@ fn void two_materials_over_one_mesh_are_two_draws() @test
 <*
  `three.texture(path)` reports what it loaded, and a material wears it.
 
- The whole tier-1 texture story in one script: no Slang, no uniforms, no
+ The whole tier-1 texture story in one script: no compile, no uniforms, no
  `ShaderMaterial`. If this needs a fragment body to put a picture on a box, the
  verb has failed at the thing it exists for.
 
@@ -2800,9 +2800,9 @@ fn void disposing_a_handle_does_not_disturb_a_material_using_it() @test
  A `ShaderMaterial` can wear a map too, and it arrives as `Surface.albedo`.
 
  Documented in `getApiDocs` and true for a reason that is easy to lose:
- `material.slang` declares the same `[vk::binding(0, 0)] Sampler2D` that
- `mesh.slang` does and folds the sample into `s.albedo` before the agent's body
- runs — so a body that never mentions a texture gets one anyway. Nothing else in
+ `material.shady` samples the material's base map through `map_at` and folds the
+ sample into `s.albedo` before the agent's body runs — so a body that never
+ mentions a texture gets one anyway. Nothing else in
  the suite crosses those two features, and a claim in the docs with no test
  behind it is the kind that stops being true quietly.
 
@@ -2865,7 +2865,7 @@ fn void a_shader_material_can_wear_a_map() @test
 
  A sphere seen from the inside shows only its back faces, so under the default it
  is not dim, it is *absent*. Before `MeshLambertMaterial` the only way to ask for
- `BackSide` was to compile a `ShaderMaterial` for it — a Slang invocation to
+ `BackSide` was to compile a `ShaderMaterial` for it — a shader compile to
  change one Vulkan enum.
 
  Asserted as a render from inside the sphere, because "the material was built" is
@@ -5043,10 +5043,10 @@ fn void removing_an_animated_prop_stops_it() @test
  that had the defect.
 
  Five entries are never evictable and are added to the cap here rather than
- glossed: the pass holds `mesh.slang` over four render states for its whole life
+ glossed: the pass holds `mesh.shady` over four render states for its whole life
  — `SOLID_STATE` and `LINE_STATE` for `DEFAULT_MATERIAL` and `LINE_MATERIAL`,
  plus `ALPHA_STATE` and `ADDITIVE_STATE`, which `MeshPass.init` builds up front so
- that `create_texture_material` can stay device-free — and `sky.slang` beside
+ that `create_texture_material` can stay device-free — and `sky.shady` beside
  them. The number was two until blending arrived and four until the sky; it is
  written as a number rather than read off the pass because the claim being made
  is about what an *agent's* shaders leave behind, and a cap that quietly grew
@@ -5073,7 +5073,7 @@ fn void an_agent_iterating_on_a_shader_does_not_accumulate_pipelines() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 
 		three::PipelineCache* cache = &run.pass.pipelines;
-		// Five built-in ones: four states over `mesh.slang` and the sky.
+		// Five built-in ones: four states over `mesh.shady` and the sky.
 		sz cap = (sz)three::MAX_UNUSED_PIPELINES + 5;
 		test::@check(cache.entries.len() <= cap,
 			"twelve compiles left %d entries, and the cap plus the five built-in ones is %d",
@@ -6400,9 +6400,9 @@ fn void post_uniforms_are_live_between_frames() @test
 }
 
 <*
- A post body that does not compile throws Slang's own text, at the agent's line.
+ A post body that does not compile throws the compiler's own text, at the agent's line.
 
- `plan.md` §5's done condition for a material, applied to the pass: the error a
+ The done condition for a material, applied to the pass: the error a
  script catches has to *carry the diagnostic*, because a fault on its own leaves
  an agent with "it did not work" and nothing to edit. Both coordinates are
  asserted — `post:` is the file name the `#line` directive gives the body, and
@@ -6418,8 +6418,8 @@ fn void post_uniforms_are_live_between_frames() @test
  **Proved by injection.** `post_failure` returning its fault sentence
  unconditionally, with the `if (diagnostic.len > 0)` test removed — the shape of
  the mistake where the diagnostic is collected and then not used: "the throw does
- not carry the Slang text: the post shader failed to compile and Slang said
- nothing about why". Restored, green again.
+ not carry the compiler's text: the post shader failed to compile and no
+ diagnostic came back". Restored, green again.
 *>
 fn void a_bad_post_shader_throws_the_diagnostic() @test
 {
@@ -6446,7 +6446,7 @@ fn void a_bad_post_shader_throws_the_diagnostic() @test
 			"a body calling a function that does not exist was accepted");
 		test::@check(
 			result.value.contains("post_body:3") || result.value.contains("post_body(3)"),
-			"the throw does not carry the Slang text: %s",
+			"the throw does not carry the diagnostic: %s",
 			result.value
 		);
 		test::@check(run.renderer.post.active(), "the failed set left the pass with no shader at all");
@@ -6458,7 +6458,7 @@ fn void a_bad_post_shader_throws_the_diagnostic() @test
 
  No device is needed for any of these, which is the point: they are refused in
  JavaScript before a byte crosses to the host, so an agent gets the sentence at
- the line rather than a Slang error about a module that should never have been
+ the line rather than a compiler error about a module that should never have been
  assembled. The one exception rides along at the end — a *valid* spec on a
  runtime with no GPU, which is the host's refusal and is the only one that could
  not be made here.

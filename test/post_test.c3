@@ -6,11 +6,10 @@
 
  Two halves, and the split is the same one `three_tests::material` makes.
 
- **The assembly half needs no GPU.** `post_source` is string work and
- `compile_slang` needs Slang and nothing else, so the `#line` arithmetic, the
- reserved names, the budget and the push contract are all answerable in
- milliseconds. That matters because the loop these protect is an agent editing a
- post body and asking again.
+ **The declaration half needs no GPU.** Validation and one compile are not
+ rendering, so the reserved names, the budget and the push contract are all
+ answerable in milliseconds. That matters because the loop these protect is an
+ agent editing a post body and asking again.
 
  **The engine half needs a device**, and it is where the barriers are. Image A
  goes COLOR_ATTACHMENT → SHADER_READ_ONLY and `target.color` goes UNDEFINED →
@@ -24,7 +23,7 @@
  image A being `_SRGB` (a `_UNORM` A double-encodes and shifts the mid-tones),
  the post viewport being positive (a negative one flips the frame top to bottom
  and no validation layer objects), and the sample being a straight `uv` with no
- flip anywhere in `shaders/post.slang`.
+ flip anywhere in the post def.
 *>
 module three_tests::post;
 
@@ -32,7 +31,6 @@ import three;
 import three_tests::device;
 import vk;
 import image;
-import slang;
 import std::core::test;
 import std::math;
 import std::collections::list;
@@ -40,35 +38,49 @@ import std::collections::list;
 // A global rather than a function returning a slice literal: a slice literal is
 // backed by the stack frame that made it, and c3c says so.
 const three::ShaderEntry[2] BOTH_STAGES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "vertexMain", three::STAGE_VERTEX },
+	{ "fragmentMain", three::STAGE_FRAGMENT },
 };
 
 macro three::ShaderEntry[] both_stages() => BOTH_STAGES[..];
 
 // The smallest body that is a post pass: hand the frame back unchanged.
-const String IDENTITY = `float3 post(Post p) { return p.color; }`;
-
-// The same body in the spelling the engine's defs splice - `fn` for the
-// function, `p.uniforms` for the uniform set. The direct-assembly tests above
-// keep the Slang spelling because `post_source` still assembles it.
-const String IDENTITY_SHADY = `fn float3 post(Post p) { return p.color; }`;
+const String IDENTITY = `fn float3 post(Post p) { return p.color; }`;
 
 // Three lines, so line 3 is a line an agent can point at. `notAFunction` is not
-// declared anywhere, which is a Slang error and not a preprocessor one — the
-// distinction matters, because a preprocessor error is reported against the
-// physical file and would pass this check for the wrong reason.
-const String BAD_BODY = `float3 post(Post p)
+// declared anywhere, so the fault is the body's own line under the def's
+// `post_body` region.
+const String BAD_BODY = `fn float3 post(Post p)
 {
 	return notAFunction(p.uv);
 }`;
 
-// The same, for the runtime path: the fault is the body's own line under the
-// def's `post_body` region.
-const String BAD_BODY_SHADY = `fn float3 post(Post p)
+<*
+ Validates a post body's declarations, then compiles the post def around it.
+ The parameter list is the old front door's, so the tests read as they did.
+*>
+fn three::ShaderModule? compile_post(
+	String body,
+	three::MaterialUniform[] uniforms = {},
+	alloc::Allocator allocator = mem,
+	three::MaterialTexture[] textures = { })
 {
-	return notAFunction(p.uv);
-}`;
+	three::validate_post(body, uniforms, textures)!;
+	return three::compile_shader(
+		three::ShaderPass.POST, body: body, uniforms: uniforms, textures: textures);
+}
+
+// Validation only, with the same argument shape. Empty on success, like the old
+// front door, so the tests that check `@ok` keep reading.
+fn String? check_post(
+	String body,
+	three::MaterialUniform[] uniforms = {},
+	alloc::Allocator allocator = mem,
+	three::MaterialTexture[] textures = { })
+{
+	three::validate_post(body, uniforms, textures)!;
+	return "";
+}
 
 const uint W = 96;
 const uint H = 72;
@@ -77,45 +89,7 @@ const uint H = 72;
 // Helpers
 // ============================================================================
 
-<*
- The 1-based physical line of the first line containing `needle`, or zero.
 
- The restore `#line` names an absolute line in the assembled module, so a test
- that hardcoded the number would pass for as long as nobody edited the
- template's header comment. This finds it the way the assembler counts it.
-*>
-fn uint line_containing(String source, String needle)
-{
-	uint line = 1;
-	usz start = 0;
-	while (start < source.len)
-	{
-		usz end = start;
-		while (end < source.len && source[end] != '\n') end++;
-		if (source[start:end - start].contains(needle)) return line;
-		line++;
-		start = end + 1;
-	}
-	return 0;
-}
-
-<*
- The `n`th line of `source`, 1-based, or the empty string.
-*>
-fn String line_at(String source, uint n)
-{
-	uint line = 1;
-	usz start = 0;
-	while (start < source.len)
-	{
-		usz end = start;
-		while (end < source.len && source[end] != '\n') end++;
-		if (line == n) return source[start:end - start];
-		line++;
-		start = end + 1;
-	}
-	return "";
-}
 
 macro @with_pass(; @body(three::Renderer* renderer))
 {
@@ -221,21 +195,18 @@ fn image::Image copy_of(image::Image* img)
 <*
  The smallest post body compiles, and the module it produces is a whole shader.
 
- The floor everything else stands on: `shaders/post.slang` is a template and not
- valid Slang as it sits on disk, so nothing else in this file means anything
- until the assembled version of it is known to compile.
+ The floor everything else stands on: `shaders/post.shady` is only valid once a
+ body is spliced in for its `post` declaration, so nothing else in this file
+ means anything until the pair is known to compile.
 
- **Proved by injection.** `//@shade` deleted from `shaders/post.slang`, so the
- body is never inserted: "it compiled: error[E30015]: undefined identifier".
- Restored, green again.
+ **Proved by injection.** The body left out of the splice, so the fixed half's
+ `@required post` has no definition: it fails to compile rather than producing a
+ module with no body. Restored, green again.
 *>
 fn void the_smallest_post_body_compiles() @test
 {
 	three::MaterialUniform[] none = {};
-	String source = three::post_source(IDENTITY, none)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
+	three::ShaderModule mod = compile_post(IDENTITY, none)!!;
 	defer mod.free();
 
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
@@ -243,7 +214,6 @@ fn void the_smallest_post_body_compiles() @test
 	test::@check(mod.spirv.len % 4 == 0, "which is a whole number of words");
 	test::@check(mod.diagnostic.len == 0, "with nothing to say about it: %s", mod.diagnostic);
 	test::@check(mod.entries.len() == 2, "two entry points, got %d", mod.entries.len());
-	test::@check(!source.contains(`\n`), "no literal backslash-n survived into the module");
 }
 
 <*
@@ -267,85 +237,15 @@ fn void the_smallest_post_body_compiles() @test
 fn void the_line_a_bad_post_body_reports_is_the_line_the_agent_wrote() @test
 {
 	three::MaterialUniform[] none = {};
-	String source = three::post_source(BAD_BODY, none)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
+	three::ShaderModule mod = compile_post(BAD_BODY, none)!!;
 	defer mod.free();
 
 	test::@check(!mod.ok, "a body calling a function that does not exist compiled anyway");
-	test::@check(
-		mod.diagnostic.contains("post:3") || mod.diagnostic.contains("post(3)"),
-		"the diagnostic does not name post:3 — %s",
-		mod.diagnostic
-	);
+	test::@check(mod.diagnostic.contains("post_body:3"),
+		"the diagnostic does not name post_body:3 — %s", mod.diagnostic);
 }
 
-<*
- The restore directive names the line that really follows it, for both
- templates.
 
- The subtlest half of the `#line` arithmetic and the reason it may exist only
- once: `#line N "three.post"` numbers the line *after* itself, and N is the
- physical line of that text in a module whose height nothing upstream of the
- assembler knows. An off-by-one here does not fail anything — it silently points
- Slang's `candidate:` notes one line away from where they belong, for ever.
-
- Checked on a material and on a post pass through the one walk that now serves
- both, because the whole risk of sharing it is getting it right for one caller
- and wrong for the other.
-
- **Proved by injection.** `physical + 2` in `assemble_shader` changed to
- `physical + 1`: "three.post: the restore directive says 117 and the line after
- it is 118". Restored, green again.
-*>
-fn void the_restore_directive_names_the_line_that_follows_it() @test
-{
-	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "speed", 1, 1 } };
-
-	String post = three::post_source(IDENTITY, uniforms[..])!!;
-	defer post.free(mem);
-	check_restore_line(post, "three.post");
-
-	String material = three::material_source(
-		`float3 shade(Surface s) { return s.albedo * tint * speed; }`,
-		uniforms[..]
-	)!!;
-	defer material.free(mem);
-	check_restore_line(material, "three.material");
-}
-
-<*
- The restore `#line` in `source` says the number of the line beneath it.
-
- A function rather than a macro because nothing here needs the caller's frame,
- and the failure text names which of the two templates it was looking at.
-*>
-fn void check_restore_line(String source, String preamble)
-{
-	@pool()
-	{
-		String needle = string::tformat(`"%s"`, preamble);
-		uint at = line_containing(source, needle);
-		test::@check(at > 0, "%s: no restore directive at all", preamble);
-		if (at == 0) return;
-
-		// `#line 148 "three.post"` — the number between the directive and the name.
-		String directive = line_at(source, at).trim();
-		String[] parts = directive.tsplit(" ");
-		test::@check(parts.len >= 3, "%s: the restore directive is '%s'", preamble, directive);
-		if (parts.len < 3) return;
-
-		uint claimed = parts[1].to_uint()!!;
-		test::@check(
-			claimed == at + 1,
-			"%s: the restore directive says %d and the line after it is %d",
-			preamble,
-			claimed,
-			at + 1
-		);
-	};
-}
 
 <*
  The push block is `info` at 0+16 and the agent's uniforms after it.
@@ -357,25 +257,21 @@ fn void check_restore_line(String source, String preamble)
  shader reading the frame's width out of the middle of somebody's colour.
 
  The offsets are asserted as *reflected*, never assumed: scalar layout is a
- property of the flags `compile_slang` passes, and a build that lost
- `-force-glsl-scalar-layout` would lay this block out differently while
- compiling perfectly.
+ property of the compile the def asks for, and a build that lost `scalar_layout:
+ true` would lay this block out differently while compiling perfectly.
 
- **Proved by injection.** `//@uniforms` moved above `float4 info;` in
- `shaders/post.slang`, so one uniform of any width displaces it: "'info' is at
- 16+16 and POST_PUSH_FIELDS has it at 0+16". Restored, green again.
+ **Proved by injection.** The emitted `Uniforms` member moved ahead of `info` in
+ the push block, so one uniform of any width displaces it: "'info' is at 16+16
+ and POST_PUSH_FIELDS has it at 0+16". Restored, green again.
 *>
 fn void the_post_push_block_is_info_and_then_the_uniforms() @test
 {
 	three::MaterialUniform[2] uniforms = { { "tint", 3, 1 }, { "speed", 1, 1 } };
 
-	String source = three::post_source(
-		`float3 post(Post p) { return p.color * tint * speed; }`,
+	three::ShaderModule mod = compile_post(
+		`fn float3 post(Post p) { return p.color * p.uniforms.tint * p.uniforms.speed; }`,
 		uniforms[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -412,8 +308,8 @@ fn void the_post_push_block_is_info_and_then_the_uniforms() @test
  derived number rather than one somebody chose: with nothing appended the block
  is the 16 bytes `info` occupies, and 128 minus 16 is the budget.
 
- **Proved by injection.** `float pad;` added to `PushData` in
- `shaders/post.slang` — the shape of any future field creeping into the pass's
+ **Proved by injection.** `float pad;` added to `PostPush` in
+ `src/shader/post.c3` — the shape of any future field creeping into the pass's
  own half of the block: "16 bytes, got 20". `POST_UNIFORM_BUDGET` itself cannot
  be injected into, because the two `$assert`s beside it refuse to compile a
  budget that does not add up to 128. Restored, green again.
@@ -421,15 +317,14 @@ fn void the_post_push_block_is_info_and_then_the_uniforms() @test
 fn void a_post_pass_without_uniforms_is_exactly_info() @test
 {
 	three::MaterialUniform[] none = {};
-	String source = three::post_source(IDENTITY, none)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
+	three::ShaderModule mod = compile_post(IDENTITY, none)!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
-	test::@check(mod.layout.push_size == three::POST_PUSH_START,
-		"%d bytes, got %d", three::POST_PUSH_START, mod.layout.push_size);
+	// `info` and `planes`, plus the emitted empty `Uniforms` member every
+	// scripted pass carries.
+	test::@check(mod.layout.push_size == three::POST_PUSH_START + 4,
+		"%d bytes, got %d", three::POST_PUSH_START + 4, mod.layout.push_size);
 	test::@check(
 		mod.layout.push_fields.len() == three::POST_PUSH_FIELDS.len,
 		"and %d fields, got %d",
@@ -437,21 +332,20 @@ fn void a_post_pass_without_uniforms_is_exactly_info() @test
 		mod.layout.push_fields.len()
 	);
 	test::@check(
-		three::POST_UNIFORM_BUDGET == three::PUSH_BUDGET - mod.layout.push_size,
-		"the budget is what is left of the 128: %d",
+		three::POST_UNIFORM_BUDGET == three::PUSH_BUDGET - three::POST_PUSH_START,
+		"the budget is what is left of the 128 after the contract: %d",
 		three::POST_UNIFORM_BUDGET
 	);
 }
 
 <*
- The names `shaders/post.slang` uses for itself are refused, with the reason.
+ The names `shaders/post.shady` uses for itself are refused, with the reason.
 
- Four of them, because they break in four different ways. `info` is a second
- member of the struct the uniforms are appended to. `push` and `p` are rewritten
- by their own `#define` across the agent's lines. `post` is the body's own
- function name, so a uniform by that name makes the signature unparseable.
- Every one of them fails as a Slang error pointing at generated code the agent
- cannot see, which is why they are refused before Slang is reached.
+ Four of them, because the generated module already uses all four: `info` is a
+ member of the struct the uniforms are appended to, `push` and `p` are the push
+ block and the body's own parameter, and `post` is the body's function name. A
+ collision here surfaces as a compiler error against generated code the agent
+ cannot see, which is why the names are refused before the compile.
 
  **Proved by injection.** `"info"` removed from `POST_RESERVED`: "a uniform
  called 'info' was accepted" — and what the agent would have got instead is a
@@ -464,7 +358,7 @@ fn void a_post_uniform_the_template_already_uses_is_refused() @test
 	foreach (name : taken)
 	{
 		three::MaterialUniform[1] mine = { { name, 1, 1 } };
-		String? refused = three::post_source(IDENTITY, mine[..]);
+		String? refused = check_post(IDENTITY, mine[..]);
 		fault why = @catch(refused);
 
 		test::@check(why == three::POST_NAME_INVALID, "a uniform called '%s' was accepted", name);
@@ -483,7 +377,7 @@ fn void a_post_uniform_the_template_already_uses_is_refused() @test
  The one rule a material has that this inverts. A material's arrays are a column
  indexed by `Surface.variant`, the per-instance row selector — and a post pass
  draws one triangle over the whole frame, so there is no instance for a row to
- belong to and `shaders/post.slang` deliberately has no `//@rows` marker.
+ belong to and a post uniform cannot be a table.
 
  Refused rather than flattened, because a caller asking for four rows believes
  it can index them: silently generating `float3 tint;` would compile, and the
@@ -497,7 +391,7 @@ fn void a_post_uniform_the_template_already_uses_is_refused() @test
 fn void a_post_uniform_cannot_be_a_table() @test
 {
 	three::MaterialUniform[1] table = { { "tint", 3, 4 } };
-	String? refused = three::post_source(IDENTITY, table[..]);
+	String? refused = check_post(IDENTITY, table[..]);
 	fault why = @catch(refused);
 
 	test::@check(why == three::POST_NAME_INVALID, "a 4-row uniform was accepted");
@@ -542,14 +436,15 @@ fn void post_uniforms_are_held_to_what_info_leaves() @test
 			three::post_uniform_bytes(exact)
 		);
 
-		String fits = three::post_source(IDENTITY, exact, tmem)!!;
-		test::@check(fits.len > 0, "the budget exactly was refused: %s", three::post_diagnostic());
+		three::ShaderModule fits = compile_post(IDENTITY, exact, tmem)!!;
+		defer fits.free();
+		test::@check(fits.ok, "the budget exactly was refused: %s", fits.diagnostic);
 
 		// One float4 more, which is 112 — over by the eight bytes `planes` takes.
 		three::MaterialUniform[] over = alloc::new_array(tmem, three::MaterialUniform, 7);
 		foreach (i, &uniform : over) *uniform = { string::tformat("u%d", i), 4, 1 };
 
-		String? refused = three::post_source(IDENTITY, over);
+		String? refused = check_post(IDENTITY, over);
 		fault why = @catch(refused);
 		test::@check(why == three::POST_TOO_MANY_UNIFORMS, "112 bytes of uniforms were accepted");
 		test::@check(
@@ -560,167 +455,6 @@ fn void post_uniforms_are_held_to_what_info_leaves() @test
 	};
 }
 
-<*
- The shared walk still writes the material module it always wrote, byte for
- byte.
-
- The regression pin for `shader/assemble.c3` being extracted out of
- `material_source.c3`. A refactor that produces a *nearly* identical module is
- the dangerous one — every existing material test would still pass on an extra
- blank line or a shifted `#undef`, and the thing that would break is the
- `#line` restore number that nothing else looks at.
-
- The expectation is built here rather than stored as a golden file, and built
- from the template rather than from the assembler: every line of
- `shaders/material.slang` except the four markers, with each marker replaced by
- the block it is documented to produce. So this survives an edit to the
- template's prose — which a stored snapshot would not — and still fails on any
- change to what the markers turn into.
-
- The one number that cannot be written literally is the restore `#line`, since
- it is the physical line of the text after it. It is filled in from the position
- the expectation itself puts it at, which is the definition rather than a copy of
- the arithmetic.
-
- **Proved by injection.** `#define %s (push.%s)` in `assemble_shader` changed to
- `#define %s push.%s` — legal, compiles, and wrong the first time a body writes
- `tint.x * 2`: "the assembled material is 11434 bytes and the expectation is
- 11440". Restored, green again.
-*>
-fn void the_shared_walk_writes_the_same_material_it_always_did() @test
-{
-	three::MaterialUniform[3] uniforms = { { "tint", 3, 1 }, { "time", 1, 1 }, { "palette", 3, 2 } };
-	String body = `float3 shade(Surface s)
-{
-	float3 c = s.albedo * tint * (0.5 + 0.5 * sin(time));
-	return c * palette[s.variant];
-}`;
-
-	String assembled = three::material_source(body, uniforms[..])!!;
-	defer assembled.free(mem);
-
-	@pool()
-	{
-		// The template as the assembler sees it, which is the file with the shared
-		// surface block already spliced into its `//@shared` line — `shader_source`
-		// does that before `assemble_shader` ever reads a marker, and `renumbered`
-		// is the assembler's own argument for taking no `#line` with it. Walking
-		// the raw file instead would expect a `//@shared` line in the output and
-		// find sixty lines of Slang.
-		String template = three::shader_source(three::ShaderFile.MATERIAL_SLANG, tmem, renumbered: true)!!;
-
-		List{String} want;
-		want.tinit(512);
-
-		usz start = 0;
-		while (start < template.len)
-		{
-			usz end = start;
-			while (end < template.len && template[end] != '\n') end++;
-			String line = template[start:end - start];
-			start = end + 1;
-
-			switch (line.trim())
-			{
-				case "//@uniforms":
-					want.push("    float3 tint;");
-					want.push("    float time;");
-					want.push("    float3 palette[2];");
-				case "//@rows":
-					want.push("static const uint MATERIAL_ROWS = 2u;");
-				case "//@vdefines":
-					// Nothing: this material declared no vertex body, so the
-					// uniform macros are not opened over `vertexMain` at all.
-					break;
-				case "//@vertex":
-					// The identity, which is what a material without a `vertex:`
-					// gets — one line, and the same one every time.
-					want.push("void displace(inout Vertex v) { }");
-				case "//@bake":
-					// Nothing: this is a frame's material and not an export's, so the
-					// unlit uv-space variant is not asked for and the marker is
-					// replaced by zero lines. `three_tests::export` has the bake.
-					break;
-				case "//@features":
-					// No early feature define: this material has neither a vertex body
-					// nor twelve textures, so it receives screen occlusion.
-					break;
-				case "//@table":
-					// Nothing: this material's uniforms fit the push block, so no
-					// table struct is generated and the marker is replaced by zero
-					// lines. `three_tests::material` has the material that does
-					// spill and what it generates instead.
-					break;
-				case "//@textures":
-					// Nothing: this material declared no samplers, and a marker with
-					// nothing to generate is replaced by zero lines rather than left
-					// in place. Spelled as an empty case rather than left to
-					// `default`, because falling through to `default` would push the
-					// marker line itself and the byte comparison below would say
-					// twelve bytes and not why.
-					break;
-				case "//@defines":
-					want.push("#define tint (push.tint)");
-					want.push("#define time (push.time)");
-					want.push("#define palette (push.palette)");
-				case "//@shade":
-					want.push(`#line 1 "material"`);
-					foreach (body_line : body.tsplit("\n")) want.push(body_line);
-					// Filled in below: the restore directive names the line that
-					// follows it, and its own position is not known until the list
-					// is complete.
-					want.push("");
-					want.push("#undef tint");
-					want.push("#undef time");
-					want.push("#undef palette");
-				default:
-					want.push(line);
-			}
-		}
-
-		sz restore_at = 0;
-		foreach (i, line : want) if (line.len == 0 && i > 0 && want[i - 1].starts_with("}")) restore_at = i;
-		test::@check(restore_at > 0, "the expectation has no restore slot");
-		if (restore_at == 0) return;
-		// `restore_at` is a 0-based index; the directive is on line `restore_at + 1`
-		// and numbers the line beneath it.
-		want[restore_at] = string::tformat(`#line %d "three.material"`, restore_at + 2);
-
-		DString expected;
-		expected.tinit(assembled.len + 64);
-		foreach (line : want)
-		{
-			expected.append_string(line);
-			expected.append_char('\n');
-		}
-
-		String want_str = expected.str_view();
-		test::@check(
-			want_str.len == assembled.len,
-			"the assembled material is %d bytes and the expectation is %d",
-			assembled.len,
-			want_str.len
-		);
-
-		usz shortest = want_str.len < assembled.len ? want_str.len : assembled.len;
-		usz differs = shortest;
-		for (usz i = 0; i < shortest; i++)
-		{
-			if (want_str[i] != assembled[i]) { differs = i; break; }
-		}
-		if (differs < shortest)
-		{
-			uint at = 1;
-			for (usz i = 0; i < differs; i++) if (assembled[i] == '\n') at++;
-			test::@check(false,
-				"the assembled material differs at line %d: expected '%s', got '%s'",
-				at,
-				line_at(want_str, at),
-				line_at(assembled, at)
-			);
-		}
-	};
-}
 
 // ============================================================================
 // The engine — image A, the barriers and the pixels
@@ -741,7 +475,7 @@ fn void the_shared_walk_writes_the_same_material_it_always_did() @test
    negative, to undo Vulkan's Y-down NDC for a glm-convention projection. There
    is no projection here, so the flip would be a flip: the frame would come back
    upside down, and no validation layer says a word about it.
- - **`shaders/post.slang` needs no `uv` flip**, which is the same claim from the
+ - **`shaders/post.shady` needs no `uv` flip**, which is the same claim from the
    shader's side.
 
  The fixture is asymmetric top to bottom and this asserts that it is, because a
@@ -776,7 +510,7 @@ fn void an_identity_post_pass_leaves_the_frame_where_it_was() @test
 			top, bottom
 		);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 
 		image::Image posted = renderer.capture()!!;
 		defer posted.free();
@@ -937,7 +671,7 @@ fn void a_second_post_shader_retires_the_first() @test
 	{
 		asymmetric_scene(renderer);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 		image::Image first = renderer.capture()!!;
 		defer first.free();
 
@@ -971,8 +705,8 @@ fn void a_second_post_shader_retires_the_first() @test
  the diagnostic.
 
  Two claims and they are the same decision. The text has to reach the caller,
- because `plan.md` §5's condition is a JS error *carrying* the Slang output — a
- fault alone would leave a script with "it did not work". And the pass has to be
+ because the error is a JS fault *carrying* the compiler's output — the fault
+ alone would leave a script with "it did not work". And the pass has to be
  either the old shader or the new one and never neither, because the natural
  caller is an agent editing a body inside a live frame loop, where a failed
  compile that also blanked the screen would be two problems instead of one.
@@ -993,7 +727,7 @@ fn void a_post_shader_that_does_not_compile_leaves_the_last_one_running() @test
 
 		String diagnostic;
 		fault refused = @catch(
-			renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY_SHADY, {}, diagnostic: &diagnostic)
+			renderer.post.set(&renderer.gpu, &renderer.target, BAD_BODY, {}, diagnostic: &diagnostic)
 		);
 		defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
@@ -1071,7 +805,7 @@ fn void the_post_pass_is_silent_under_validation() @test
 
 		renderer.gpu.begin_capture();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 		image::Image one = renderer.capture()!!;
 		one.free();
 		image::Image two = renderer.capture()!!;
@@ -1129,16 +863,17 @@ fn void the_post_pass_is_silent_under_validation() @test
 
  The third is the frame's depth buffer and the fourth is `tap`, the third source.
  Both are in the count here even though this body reads neither `p.depth` nor
- `p.tap`: `fragmentMain` samples both unconditionally to fill the fields, so Slang
- keeps the declarations either way. That is also exactly why the untapped `tap`
- binds image A rather than being refused — `PostPass.add` has that argument.
+ `p.tap`: `fragmentMain` samples both unconditionally to fill the fields, so both
+ are declared whether or not the body reads them. That is also exactly why the
+ untapped `tap` binds image A rather than being refused — `PostPass.add` has that
+ argument.
 *>
 fn void a_post_texture_is_a_binding_beside_the_scene() @test
 {
 	three::MaterialTexture[2] textures = { { "grade_lut" }, { "grain_map" } };
 
-	String source = three::post_source(
-		`float3 post(Post p)
+	three::ShaderModule mod = compile_post(
+		`fn float3 post(Post p)
 		{
 		    float3 graded = grade_lut.Sample(float2(p.color.r, 0.5)).rgb;
 		    return graded + grain_map.Sample(p.uv).rgb * 0.05;
@@ -1147,9 +882,6 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 		mem,
 		textures[..]
 	)!!;
-	defer source.free(mem);
-
-	three::ShaderModule mod = three::compile_slang(source, "post.slang", both_stages())!!;
 	defer mod.free();
 	test::@check(mod.ok, "it compiled: %s", mod.diagnostic);
 
@@ -1177,10 +909,10 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 	test::@check(lut.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 		"as a combined image sampler, got %d", (uint)lut.type);
 
-	// `info` is 16 bytes and stays 16 bytes: a sampler is a descriptor, not push
-	// data, so declaring two of them moves nothing in the block.
-	test::@check(mod.layout.push_size == three::POST_PUSH_START,
-		"and the push block is still just info, got %d", mod.layout.push_size);
+	// The contract plus the emitted empty uniforms member: a sampler is a
+	// descriptor, not push data, so declaring two of them moves nothing.
+	test::@check(mod.layout.push_size == three::POST_PUSH_START + 4,
+		"and the push block is still the contract, got %d", mod.layout.push_size);
 }
 
 <*
@@ -1193,7 +925,7 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 fn void a_post_texture_name_the_template_already_uses_is_refused() @test
 {
 	three::MaterialTexture[1] theirs = { { "scene" } };
-	fault refused = @catch(three::post_source(IDENTITY, {}, mem, theirs[..]));
+	fault refused = @catch(check_post(IDENTITY, {}, mem, theirs[..]));
 	test::@check(refused == three::POST_NAME_INVALID, "'scene' is refused, got %s", refused);
 	test::@check(
 		three::post_diagnostic().contains("scene") && three::post_diagnostic().contains("reserved"),
@@ -1203,13 +935,13 @@ fn void a_post_texture_name_the_template_already_uses_is_refused() @test
 
 	three::MaterialUniform[1] uniforms = { { "amount", 1, 1 } };
 	three::MaterialTexture[1] clashing = { { "amount" } };
-	fault both = @catch(three::post_source(IDENTITY, uniforms[..], mem, clashing[..]));
+	fault both = @catch(check_post(IDENTITY, uniforms[..], mem, clashing[..]));
 	test::@check(both == three::POST_NAME_INVALID, "a uniform's name is refused too, got %s", both);
 
 	three::MaterialTexture[5] too_many = {
 		{ "a_map" }, { "b_map" }, { "c_map" }, { "d_map" }, { "e_map" },
 	};
-	fault counted = @catch(three::post_source(IDENTITY, {}, mem, too_many[..]));
+	fault counted = @catch(check_post(IDENTITY, {}, mem, too_many[..]));
 	test::@check(counted == three::POST_TOO_MANY_TEXTURES, "and five is too many, got %s", counted);
 }
 
@@ -1389,10 +1121,10 @@ fn void a_chain_runs_its_passes_in_order() @test
  the other direction — and that is why the first body returns black rather than
  something subtler.
 
- It also exercises the reflection guard on the reserved bindings: pass 1 never
- mentions `p.color` or `p.scene`, so Slang is free to drop both samplers from its
- layout, and pushing a descriptor for a binding the layout does not declare is a
- validation error. `pipeline_declares_binding` is why this is silent.
+ It also exercises the reserved samplers' descriptor path: pass 1 never mentions
+ `p.color` or `p.scene`, and both are pushed anyway — the fixed half declares
+ them whatever the body reads, and `pipeline_declares_binding` is what skips a
+ binding a module does not declare.
 *>
 fn void a_later_pass_reads_the_scene_and_not_only_its_predecessor() @test
 {
@@ -1452,7 +1184,7 @@ fn void the_chain_carries_values_above_one_between_passes() @test
 	{
 		asymmetric_scene(renderer);
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 		image::Image once = renderer.capture()!!;
 		defer once.free();
 
@@ -1666,8 +1398,8 @@ fn void a_pass_reads_a_pass_that_is_not_its_predecessor() @test
 			"the third source did not reach the frame: rgb (%d, %d, %d)", red, green, blue);
 
 		// An index the chain does not have. Refused rather than clamped, and
-		// before Slang runs — a pass reading a pass that does not exist is not a
-		// picture that can be produced.
+		// before the compiler runs — a pass reading a pass that does not exist is
+		// not a picture that can be produced.
 		String reason;
 		fault missing = @catch(renderer.post.add(&renderer.gpu, &renderer.target,
 			`fn float3 post(Post p) { return p.tap; }`, {}, {}, 9, &reason));
@@ -1743,7 +1475,7 @@ fn void a_chain_is_silent_under_validation() @test
 		// grows inside one captured span — the ping-pong image that pass 3 was
 		// writing is left in SHADER_READ_ONLY by the frame before and must be
 		// re-opened from UNDEFINED by the frame after.
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 		image::Image shrunk = renderer.capture()!!;
 		shrunk.free();
 
@@ -1793,7 +1525,7 @@ fn void each_stage_has_its_own_uniform_block() @test
 		image::Image scaled = renderer.capture()!!;
 		defer scaled.free();
 
-		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY_SHADY, {})!!;
+		renderer.post.set(&renderer.gpu, &renderer.target, IDENTITY, {})!!;
 		image::Image plain = renderer.capture()!!;
 		defer plain.free();
 
@@ -2043,7 +1775,7 @@ fn void a_tonemap_change_recompiles_once_and_reaches_the_next_frame() @test
  What makes `three.toneMappingExposure` the half of this pair a script can
  animate: it is a uniform in the tonemap's own push block, so a stop up is four
  bytes and the same `VkPipeline` draws the next frame. A constant folded into
- the body would have been a Slang call per change.
+ the body would be a compile per change.
 
  The brightening is checked as well as the handle, because a uniform written to
  the wrong offset also leaves the handle alone.
@@ -2183,198 +1915,5 @@ fn void the_background_goes_through_the_tonemap() @test
 			"and AgX moves it — got %d,%d,%d",
 			(int)toned[0], (int)toned[1], (int)toned[2]
 		);
-	};
-}
-
-// ============================================================================
-// Both compilers, one process
-//
-// Slang and shady are expected to produce different SPIR-V; what has to be
-// identical is the frame. The scene cache is off in both checks below, because
-// the scene recording is what caches: with it on, the second capture would hand
-// back the first compiler's frame and compare it with itself.
-// ============================================================================
-
-<*
- The same three-tap vertical blur, written once per compiler.
-
- `fn` is the only difference: Slang's function syntax needs none and shady's
- needs it, and a body is otherwise the same text.
-*>
-macro String blur_body_slang(float radius)
-{
-	return string::tformat(
-		`float3 post(Post p)
-{
-	float2 step = float2(0.0, %f / p.resolution.y);
-	return (prev.Sample(p.uv + step).rgb + prev.Sample(p.uv).rgb + prev.Sample(p.uv - step).rgb) / 3.0;
-}`,
-		radius
-	);
-}
-
-macro String blur_body_shady(float radius)
-{
-	return string::tformat(
-		`fn float3 post(Post p)
-{
-	float2 step = float2(0.0, %f / p.resolution.y);
-	return (prev.Sample(p.uv + step).rgb + prev.Sample(p.uv).rgb + prev.Sample(p.uv - step).rgb) / 3.0;
-}`,
-		radius
-	);
-}
-
-<*
- Every reserved sampler a post pipeline reads is in its layout, by name.
-
- The bindings are derived from the module rather than from a table, so this is
- the adapter's own claim asked at both compilers' door - and the four together
- are what makes the check not pass for a module that happens to declare one.
-*>
-fn void check_post_bindings(three::PostStage* stage)
-{
-	String[4] names = { "prev", "scene", "depth_buffer", "tap_image" };
-	foreach (i, name : names)
-	{
-		three::ShaderBinding* binding = stage.pipeline.shader.binding_of(name);
-		test::@check(
-			binding != null && binding.set == 0 && binding.binding == (uint)i
-				&& binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			"%s is set 0 binding %d as a combined image sampler",
-			name, (int)i
-		);
-	}
-}
-
-// The bytes of two frames of the same size, and which of them differ.
-fn void check_same_pixels(image::Image* a, image::Image* b, String what)
-{
-	sz differing = 0;
-	sz first = a.pixels.len;
-	for (sz at = 0; at < a.pixels.len; at++)
-	{
-		if (a.pixels[at] == b.pixels[at]) continue;
-		if (differing == 0) first = at;
-		differing++;
-	}
-	test::@check(
-		differing == 0,
-		"%s: %d of %d bytes differ, first at byte %d (pixel %d, %d)",
-		what, differing, a.pixels.len, first, first / 4 % W, first / 4 / W
-	);
-}
-
-<*
- A scripted post pass is the same pixels through both compilers.
-
- Both pipelines are built by `PostPass.set` in one process, one override apart,
- so the comparison covers what the engine does with a body and not only what the
- compiler emits: the four reserved descriptors derived from the module, the
- push block, the chain's images and the positive post viewport.
-
- The effect is a vertical three-tap blur, and the fixture is two bands meeting
- across the middle. A frame that is one colour, or a horizontal blur, would make
- the two compilers' frames equal for reasons that have nothing to do with the
- port - so the fixture's asymmetry and the blur's reach are both asserted.
-*>
-fn void the_post_pass_is_the_same_pixels_through_both_compilers() @test
-{
-	@with_pass(; three::Renderer* renderer)
-	{
-		defer three::shader_overrides_clear();
-		renderer.scene_cache_disabled = true;
-
-		asymmetric_scene(renderer);
-
-		image::Image plain = renderer.capture()!!;
-		defer plain.free();
-		float top = band_mean(&plain, 0, true);
-		float bottom = band_mean(&plain, 2, false);
-		test::@check(
-			math::abs(top - bottom) > 20.0,
-			"the fixture is not asymmetric enough to catch a flip: top red %f, bottom blue %f",
-			top, bottom
-		);
-
-		three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SLANG);
-		renderer.post.set(&renderer.gpu, &renderer.target, blur_body_slang(8.0), {})!!;
-		check_post_bindings(renderer.post.stages[0]);
-		image::Image through_slang = renderer.capture()!!;
-		defer through_slang.free();
-
-		renderer.post.clear(&renderer.gpu);
-		three::shader_override(three::ShaderPass.POST, three::ShaderCompiler.SHADY);
-		renderer.post.set(&renderer.gpu, &renderer.target, blur_body_shady(8.0), {})!!;
-		check_post_bindings(renderer.post.stages[0]);
-		image::Image through_shady = renderer.capture()!!;
-		defer through_shady.free();
-
-		// A blur that reached nothing would leave both frames the plain one, and a
-		// comparison of two identical frames is the failure this whole file
-		// exists to not mistake for a pass.
-		test::@check(
-			worst_channel_delta(&plain, &through_slang) > 0,
-			"the blur did not reach the frame: %d levels",
-			worst_channel_delta(&plain, &through_slang)
-		);
-
-		check_same_pixels(&through_slang, &through_shady, "the post pass is byte-identical through both compilers");
-	};
-}
-
-<*
- The engine's own post pass, the same pixels through both compilers.
-
- `TONEMAP` is the post preamble with a body the engine owns, so unlike a
- script's it can be written in both spellings - `tonemap_body` and
- `tonemap_body_shady` - and compared. All three modes, because each is a
- different body: the identity has no uniform, both curves read `exposure`, and
- the curves' matrix literals are the half the two languages spell differently.
-
- Parked on the other mode before each selection, so choosing one always
- recompiles and the override is what compiled the frame being captured.
-*>
-fn void the_tonemap_is_the_same_pixels_through_both_compilers() @test
-{
-	@with_pass(; three::Renderer* renderer)
-	{
-		defer three::shader_overrides_clear();
-		renderer.scene_cache_disabled = true;
-
-		asymmetric_scene(renderer);
-
-		image::Image plain = renderer.capture()!!;
-		defer plain.free();
-		float top = band_mean(&plain, 0, true);
-		float bottom = band_mean(&plain, 2, false);
-		test::@check(
-			math::abs(top - bottom) > 20.0,
-			"the fixture is not asymmetric enough for a matrix to tint: top red %f, bottom blue %f",
-			top, bottom
-		);
-
-		three::ToneMap[3] modes = { three::ToneMap.NONE, three::ToneMap.AGX, three::ToneMap.AGX_BLENDER };
-		foreach (mode : modes)
-		{
-			three::ToneMap parked = mode == three::ToneMap.NONE ? three::ToneMap.AGX : three::ToneMap.NONE;
-			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, parked)!!;
-
-			three::shader_override(three::ShaderPass.TONEMAP, three::ShaderCompiler.SLANG);
-			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, mode)!!;
-			image::Image through_slang = renderer.capture()!!;
-			defer through_slang.free();
-
-			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, parked)!!;
-			three::shader_override(three::ShaderPass.TONEMAP, three::ShaderCompiler.SHADY);
-			renderer.post.set_tonemap(&renderer.gpu, &renderer.target, mode)!!;
-			image::Image through_shady = renderer.capture()!!;
-			defer through_shady.free();
-
-			check_same_pixels(
-				&through_slang, &through_shady,
-				"the tonemap is byte-identical through both compilers"
-			);
-		}
 	};
 }

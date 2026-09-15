@@ -1039,26 +1039,24 @@ fn PosedRegion posed_region(three::Renderer* renderer)
 }
 
 <*
- The same posed vertices through both compilers, compared as bytes.
+ The posed vertices in one dispatch.
 
- Slang and shady emit different SPIR-V; what has to be identical is where the
- pass puts the mesh. Four copies of the fixture go through one dispatch - the end
- of `Bend`, the end of `Twist`, a crossfade halfway between them, and one posed
- from a rotated bone - so the compared bytes carry two different joint rotations,
- a two-palette blend and the live-palette branch. **The rotations are the point**:
- a transposed read or a reversed multiply order moves a turned mesh and leaves a
- translation-only one looking plausible.
+ Four copies of the fixture go through it - the end of `Bend`, the end of
+ `Twist`, a crossfade halfway between them, and one posed from a rotated bone -
+ so the buffer carries two different joint rotations, a two-palette blend and the
+ live-palette branch. **The rotations are the point**: a transposed read or a
+ reversed multiply order moves a turned mesh and leaves a translation-only one
+ looking plausible.
 
- The fixture's own arithmetic is checked first, on the bytes about to be
- compared: `Bend`'s tip has to land where `make_skinned.py` works it out by hand
+ The fixture's own arithmetic is checked on the bytes: `Bend`'s tip has to land
+ where `make_skinned.py` works it out by hand
  (`a_bent_joint_puts_the_tip_where_the_maths_says` uses the same number), or a
- comparison of two identically wrong buffers would pass in silence.
+ buffer that is uniformly wrong would pass in silence.
 *>
-fn void skin_poses_the_same_bytes_through_both_compilers() @test
+fn void skin_poses_the_expected_vertices() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
-	defer three::shader_overrides_clear();
 
 	three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 
@@ -1111,71 +1109,43 @@ fn void skin_poses_the_same_bytes_through_both_compilers() @test
 		renderer.pass.posed_capacity[i] = CAPACITY;
 	}
 
-	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SLANG);
-	uint slang_slot = renderer.frames.slot;
+	uint slot = renderer.frames.slot;
 	renderer.capture()!!.free();
 
 	PosedRegion region = posed_region(renderer);
 	test::@check(region.bytes > 0, "the scene posed %d bytes", region.bytes);
 	if (region.bytes == 0) return;
-	char[] slang = device::read_device_bytes(
-		renderer, &renderer.pass.posed_buffers[slang_slot], region.bytes);
-	defer alloc::free(mem, slang);
+	char[] posed = device::read_device_bytes(
+		renderer, &renderer.pass.posed_buffers[slot], region.bytes);
+	defer alloc::free(mem, posed);
 
 	// The tip rides joint 1 with weight 1, and the baked matrix at t = 1 walks
 	// (0.2, 2, 0) to (-1, 1.2, 0) - the number the fixture documents.
 	sz tip = 5 * three::SkinnedVertex::size;
 	test::@check(
-		near(*(float*)&slang[tip], -1.0f)
-			&& near(*(float*)&slang[tip + 4], 1.2f)
-			&& near(*(float*)&slang[tip + 8], 0.0f),
+		near(*(float*)&posed[tip], -1.0f)
+			&& near(*(float*)&posed[tip + 4], 1.2f)
+			&& near(*(float*)&posed[tip + 8], 0.0f),
 		"`Bend`'s tip is where the fixture says, got (%f, %f, %f)",
-		*(float*)&slang[tip], *(float*)&slang[tip + 4], *(float*)&slang[tip + 8]
+		*(float*)&posed[tip], *(float*)&posed[tip + 4], *(float*)&posed[tip + 8]
 	);
 	bool differs = false;
 	for (uint copy = 1; copy < 4; copy++)
 	{
-		if (!mem::equals(slang.ptr, slang.ptr + copy * region.instance_stride, region.instance_stride))
+		if (!mem::equals(posed.ptr, posed.ptr + copy * region.instance_stride, region.instance_stride))
 		{
 			differs = true;
 		}
 	}
-	test::@check(differs, "the compared buffer carries more than one pose");
-
-	three::shader_override(three::ShaderPass.SKIN, three::ShaderCompiler.SHADY);
-	// The pipeline holds the Slang module's SPIR-V; the next dispatch has to
-	// build one from the shady module.
-	renderer.pass.skin_pipeline.free(&renderer.gpu);
-	uint shady_slot = renderer.frames.slot;
-	renderer.capture()!!.free();
-
-	char[] shady = device::read_device_bytes(
-		renderer, &renderer.pass.posed_buffers[shady_slot], region.bytes);
-	defer alloc::free(mem, shady);
-
-	sz first_difference = region.bytes;
-	for (sz at = 0; at < region.bytes; at++)
-	{
-		if (slang[at] != shady[at])
-		{
-			first_difference = at;
-			break;
-		}
-	}
-	test::@check(first_difference == region.bytes,
-		"the posed vertices are byte-identical through both compilers, first difference at byte %d (copy %d vertex %d byte %d)",
-		first_difference,
-		first_difference / region.instance_stride,
-		(first_difference % region.instance_stride) / three::SkinnedVertex::size,
-		first_difference % three::SkinnedVertex::size);
+	test::@check(differs, "the buffer carries more than one pose");
 }
 
 <*
  A scene with no compute-routed character builds no compute pipeline.
 
  The other half of the check above, and the reason the path is lazy: a project
- that never asks for compute skinning should not read `shaders/skin.slang` off
- disk, hand it to Slang, or hold a `VkPipeline` for it.
+ that never asks for compute skinning should not read the skinning module off
+ disk, compile it, or hold a `VkPipeline` for it.
 *>
 fn void the_compute_pipeline_is_not_built_unless_asked() @test
 {
@@ -1368,7 +1338,7 @@ fn uint clip_called(three::Asset* asset, String name)
  **This is the whole of what the baked path costs a fade**: two offsets and a
  weight on the instance, so a crowd mid-transition is still a crowd. There are no
  matrices to compute and nothing to upload — the two frames were baked when the
- file first drew — and `shaders/mesh.slang` mixes them.
+ file first drew — and `shaders/skinning.shady` mixes them.
 
  The offsets are checked against the segments they have to be inside rather than
  against numbers written down here: an offset that lands in the wrong clip's

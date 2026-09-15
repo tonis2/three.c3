@@ -200,7 +200,7 @@ struct Node
 	 with this set cannot share a `DrawRecord` — or a draw call — with one that
 	 has not. It buys the blend being paid once per frame rather than once per
 	 draw, which is worth nothing until the same character is drawn in a second
-	 pass. See `shaders/skin.slang`.
+	 pass. See `shaders/skin.shady`.
 	*>
 	bool preskinned;
 

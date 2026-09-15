@@ -101,7 +101,7 @@ fn String shady_float_type(uint components) @private
  `Map` the body samples, built with the same `map_at` the engine's own maps use:
  there is no second descriptor scheme and no new binding. A post pass's images
  are descriptors of its own set, so a name is the sampler itself and the body
- reads it exactly as it did against the Slang template.
+ reads it by that name.
 
  `first` is the row or binding the first declared texture gets; declaration order
  is the numbering, so nothing outside the list remembers a number.

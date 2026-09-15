@@ -59,7 +59,7 @@ const SOLVER_SHAPE = {
 // A **point** lamp of P W delivers P/(4 pi² d²) at d metres — 4 pi for the
 // sphere it radiates into and pi again for the same Lambert term — and that is a
 // number this renderer already speaks: `lambert` sums `colour * intensity * n·l`
-// and `light_toward` in `shaders/surface.slang` falls off inverse-square from one
+// and `light_toward` in `shaders/lighting.shady` falls off inverse-square from one
 // metre, so `intensity = P/(4 pi²)` *is* the brightness at one metre and the
 // falloff does the rest of the distance. There is no anchor and nothing to tune:
 // 2.2 W of sun arrives as 0.700, a 45 W lantern as 1.140, a 60 W one as 1.520.
@@ -86,7 +86,7 @@ const LIGHT_THRESHOLD = 0.01;
 // **Because glTF does state it.** The specification fixes a dielectric's F0 at
 // 0.04 and offers no slot to say otherwise, so every material in every file is
 // one — and 0.5 is Filament's spelling of that 4%, which is the mapping
-// `specular()` in `shaders/surface.slang` already uses. The default stays 0 for a
+// `specular()` in `shaders/material.shady` already uses. The default stays 0 for a
 // scripted material, where nothing has said anything; `scene/material.c3` carries
 // that half of the argument.
 const IMPORTED_REFLECTANCE = 0.5;
@@ -1483,9 +1483,9 @@ export class Asset {
 	//
 	// **What used to happen instead, and why it stopped.** A normal map or a glow
 	// routed the material through a `LayeredMaterial` — a generated shading body,
-	// a Slang compile and a pipeline per glTF material — because those were the
-	// only maps that had a home. `plan.md` §26 gave the built-in shader all four,
-	// so the layered path was compiling a shader for something the startup
+	// a shader compile and a pipeline per glTF material — because those were the
+	// only maps that had a home. The built-in shader has all four now, so the
+	// layered path was compiling a shader for something the startup
 	// pipeline does. Occlusion and the metallic-roughness map were dropped
 	// entirely on the way past; they are applied now. A *stack* still compiles a
 	// body, and that is not the same mistake: a stack is a description of a

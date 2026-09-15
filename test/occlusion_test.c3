@@ -14,14 +14,13 @@ import image;
 import std::core::test;
 import std::math;
 import vk;
-import slang;
 
 const uint W = 192;
 const uint H = 144;
 
 const three::ShaderEntry[2] AO_BOTH_STAGES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "vertexMain", three::STAGE_VERTEX },
+	{ "fragmentMain", three::STAGE_FRAGMENT },
 };
 
 macro @with_js(; @body(three::JsRuntime* run, three::Renderer* renderer))
@@ -363,12 +362,12 @@ fn void a_partial_scene_view_conservatively_disables_ao() @test
 	};
 }
 
-const String TWELVE_SAMPLES = `float3 shade(Surface s) {
-	float3 c = t0.Sample(s.uv).rgb * t1.Sample(s.uv).rgb * t2.Sample(s.uv).rgb;
-	c *= t3.Sample(s.uv).rgb * t4.Sample(s.uv).rgb * t5.Sample(s.uv).rgb;
-	c *= t6.Sample(s.uv).rgb * t7.Sample(s.uv).rgb * t8.Sample(s.uv).rgb;
-	c *= t9.Sample(s.uv).rgb * t10.Sample(s.uv).rgb * t11.Sample(s.uv).rgb;
-	return c * lambert(s.normal);
+const String TWELVE_SAMPLES = `fn float3 shade(Surface s) {
+	float3 c = t0().Sample(s.uv).rgb * t1().Sample(s.uv).rgb * t2().Sample(s.uv).rgb;
+	c *= t3().Sample(s.uv).rgb * t4().Sample(s.uv).rgb * t5().Sample(s.uv).rgb;
+	c *= t6().Sample(s.uv).rgb * t7().Sample(s.uv).rgb * t8().Sample(s.uv).rgb;
+	c *= t9().Sample(s.uv).rgb * t10().Sample(s.uv).rgb * t11().Sample(s.uv).rgb;
+	return c * lambert(s, s.normal);
 }`;
 
 <*
@@ -397,19 +396,17 @@ fn void a_material_declares_no_samplers_of_its_own_whatever_its_stack() @test
 		{
 			DString body;
 			body.tinit(512);
-			body.append_string("float3 shade(Surface s) { float3 c = float3(1.0);");
+			body.append_string("fn float3 shade(Surface s) { float3 c = float3(1.0);");
 			three::MaterialTexture[three::MATERIAL_TEXTURE_LIMIT] textures;
 			for (uint i = 0; i < n; i++)
 			{
 				textures[i] = { string::tformat("t%d", i) };
-				body.appendf(" c *= t%d.Sample(s.uv).rgb;", i)!!;
+				body.appendf(" c *= t%d().Sample(s.uv).rgb;", i)!!;
 			}
-			body.append_string(" return c * lambert(s.normal); }");
+			body.append_string(" return c * lambert(s, s.normal); }");
 
-			String source = three::material_source(body.str_view(), {}, mem, textures[:n])!!;
-			defer source.free(mem);
-
-			three::ShaderModule mod = three::compile_slang(source, "material.slang", AO_BOTH_STAGES[..])!!;
+			three::ShaderModule mod = three::compile_shader(
+				three::ShaderPass.MESH_MATERIAL, body: body.str_view(), textures: textures[:n])!!;
 			defer mod.free();
 			test::@check(mod.ok, "%d maps compile: %s", n, mod.diagnostic);
 
@@ -449,9 +446,8 @@ fn void twelve_live_material_samplers_draw_and_keep_their_ambient_occlusion() @t
 	@pool()
 	{
 		for (uint i = 0; i < 12; i++) textures[i] = { string::tformat("t%d", i) };
-		String source = three::material_source(TWELVE_SAMPLES, {}, mem, textures[..])!!;
-		defer source.free(mem);
-		three::ShaderModule mod = three::compile_slang(source, "material.slang", AO_BOTH_STAGES[..])!!;
+		three::ShaderModule mod = three::compile_shader(
+			three::ShaderPass.MESH_MATERIAL, body: TWELVE_SAMPLES, textures: textures[..])!!;
 		defer mod.free();
 		test::@check(mod.ok, "twelve sampled textures plus lambert compile: %s", mod.diagnostic);
 		uint samplers = 0;

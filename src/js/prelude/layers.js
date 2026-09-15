@@ -3,7 +3,7 @@
 //
 // **This compiles nothing new about the renderer.** A layer stack is a fragment
 // function that samples several images and mixes them, which is exactly what
-// `shaders/material.slang`'s tier 2 already is — so this file writes Slang and
+// `shaders/material.shady`'s tier 2 already is — so this file writes shady and
 // hands it to the same `H.createMaterial` a hand-written `ShaderMaterial` goes
 // through. There is no layered pipeline, no second descriptor layout and no new
 // push contract; `dispose`, `side`, `blending`, `repeat`, `offset` and `opacity`
@@ -78,7 +78,7 @@ const ANIMATED_LIMIT = Math.floor(UNIFORM_BUDGET / 16);
 // reads, and the importer has nothing to translate.
 //
 // Each entry is a function of `(a, b)` — what is below, and this layer — written
-// as Slang source. The result is then mixed back over `a` by the layer's mask,
+// as shady source. The result is then mixed back over `a` by the layer's mask,
 // which is the extension's rule: `lerp(below, f(below, layer), mask)`.
 const BLEND = {
 	mix: (a, b) => b,
@@ -162,13 +162,13 @@ const UNSUPPORTED = {
 	subsurface: 'subsurface scattering needs a light transport this renderer does not have',
 };
 
-// A number as Slang source.
+// A number as shady source.
 //
-// The decimal point is not cosmetic: `float3(1, 1, 1) * 8` is legal Slang and
+// The decimal point is not cosmetic: `float3(1, 1, 1) * 8` is legal shady and
 // `s.uv * 8` is legal too, but a literal that reads as an integer is one
 // promotion rule away from surprising somebody, and the generated text is read by
 // whoever is debugging the stack. Non-finite is refused rather than emitted —
-// `NaN` is not a Slang literal at all, and the compile error it causes points at
+// `NaN` is not a shady literal at all, and the compile error it causes points at
 // generated code.
 //
 // **The shortest spelling that survives the round trip to float32**, which is the
@@ -192,7 +192,7 @@ function num(v, what) {
 	return decimal(String(f));
 }
 
-// A number's text with a decimal point in it, so Slang reads a float rather than
+// A number's text with a decimal point in it, so the compiler reads a float rather than
 // an int. `toPrecision` may answer in exponential form for a very small or very
 // large value — `1.0e-7` — which is already a float literal and is left alone.
 function decimal(text) {
@@ -439,7 +439,7 @@ function readLayer(raw, at) {
 // rather than beside it.
 //
 // `s.uv` already carries `material.repeat` and `material.offset` — the fragment
-// stage applies them before the body runs (`shaders/material.slang`) — so this
+// stage applies them before the body runs (`shaders/material.shady`) — so this
 // composes with them rather than replacing them: the material's transform moves
 // the whole stack and a layer's own scale tiles that layer inside it. **The mask
 // is deliberately not scaled by this.** A splat map describes where things are on
@@ -644,10 +644,10 @@ function emit(base, layers) {
 	// The core material's other three maps.
 	//
 	// **They are here because a generated pipeline has no built-in slots.**
-	// `mesh.slang` binds a normal, a metallic-roughness, an occlusion and an
-	// emissive map at four fixed bindings and `MeshLambertMaterial` fills them in;
-	// `material.slang` reserves three bindings for the pass and hands every other
-	// one to the body, so a stack that wanted the file's occlusion map had nowhere
+	// The built-in look reads a normal, a metallic-roughness, an occlusion and an
+	// emissive map from four fixed slots and `MeshLambertMaterial` fills them in;
+	// a generated body gets none of them, so a stack that wanted the file's
+	// occlusion map had nowhere
 	// to put it and an imported material quietly lost all three. Each costs a
 	// sampler of the same budget a layer's maps come out of, which is the honest
 	// price and is why `MATERIAL_TEXTURE_LIMIT` went to twelve in the same change.
@@ -656,7 +656,7 @@ function emit(base, layers) {
 	// the end: `s.emissive` is `material.emissive` times `material.emissiveIntensity`
 	// and glTF's rule is that the texture multiplies the factor, so the material's
 	// own two numbers stay the way to turn the glow up. `Surface` is a by-value
-	// parameter — `material.slang`'s own `standard` overloads are built out of
+	// parameter — `material.shady`'s own `standard` overloads are built out of
 	// writing to it — so the copy this body holds is its own.
 	if (base.emissive !== null) {
 		textures.base_emissive_map = base.emissive;

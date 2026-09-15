@@ -170,7 +170,7 @@ fn void js_create_material(
 		}
 
 		// The diagnostic is the product here, not a side effect: a bad shader has
-		// to throw a JS error carrying the Slang text, so it is collected whether
+		// to throw a JS error carrying the compiler's text, so it is collected whether
 		// the compile failed or only warned, and the warning path logs rather than
 		// throws.
 		// 
@@ -282,11 +282,10 @@ fn void js_create_material(
 <*
  Turns a sampler fault into a sentence an agent can act on.
 
- The `MATERIAL_SAMPLER_UNKNOWN` case is the one worth the words. It has two
- causes that look identical from here — a name that is not in the body at all,
- and a name that is in the body and never sampled, which Slang is free to drop
- from the module before reflection sees it — and the fix differs: one is a typo
- and the other is a line of shader that has to actually read the texture.
+ The `MATERIAL_SAMPLER_UNKNOWN` case is the one worth the words: a sampler is
+ reached by the name the body declares, so a name that is not in the material's
+ declaration list has nowhere to bind. A declared texture the body never samples
+ is not this case — the module keeps every declaration.
 *>
 fn String material_texture_failure(fault err, String name) @local
 {
@@ -294,8 +293,8 @@ fn String material_texture_failure(fault err, String name) @local
 	{
 		case MATERIAL_SAMPLER_UNKNOWN:
 			return string::tformat(
-				"this material's shader has no sampler called '%s' — either the name is not the one the body uses, "
-					"or the body never samples it and Slang dropped it from the module",
+				"this material's shader has no sampler called '%s' — the name is not one of the "
+					"material's declared textures",
 				name
 			);
 		case MATERIAL_TEXTURE_UNKNOWN:
@@ -348,7 +347,7 @@ fn void js_set_material_texture(
 <*
  Turns a material fault into a sentence an agent can act on.
 
- The Slang diagnostic goes through verbatim when there is one — it already names
+ The compiler's diagnostic goes through verbatim when there is one — it already names
  the file, the line and the column, and `#line` has already made that line the
  one the agent wrote rather than one in the generated preamble. The validation
  faults have no diagnostic behind them, so they carry their own sentence.
@@ -415,7 +414,7 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
 		case MATERIAL_TOO_MANY_TEXTURES:
 			return string::tformat("a material may declare %d textures of its own", MATERIAL_TEXTURE_LIMIT);
 		case SHADER_COMPILE_FAILED:
-			return "the material shader failed to compile and Slang said nothing about why";
+			return "the material shader failed to compile and no diagnostic came back";
 		default:
 			return string::tformat("the material could not be built: %s", err);
 	}
@@ -1143,7 +1142,7 @@ fn void js_set_material(
  Everything else on this file's surface crosses in one direction: a description
  goes in and a compiled pipeline comes out, and the description is not needed
  again. A layer stack is the exception, because `scene.export` has to write the
- stack back into a `.glb` and cannot get it out of the Slang the generator
+ stack back into a `.glb` and cannot get it out of the shader the generator
  emitted — "this layer multiplies" is a choice of expression by then, and
  `CUSTOM_materials_layers` wants the word.
 
