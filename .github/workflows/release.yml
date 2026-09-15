@@ -1,13 +1,13 @@
 # Build a downloadable bundle of three for each platform.
 #
 # What a user gets is a zip they extract and run: the binary — with the shader
-# compiler and sources inside it — and, on macOS, the Vulkan driver. Nothing to
-# install and nothing to build.
+# compiler and sources inside it — and, on macOS, the Vulkan loader and driver.
+# Nothing to install and nothing to build.
 #
-# The driver is the only library left beside the executable, and it is there
-# because it cannot be anywhere else: vk/driver.c3 dlopens it by name at
-# runtime, and it is fetched from vulkan.c3l's release by setup.sh's `driver`
-# step.
+# Those dylibs are the only libraries left beside the executable, and they are
+# there because they cannot be anywhere else: vk/driver.c3 dlopens the driver by
+# name at runtime, and setup.sh's `driver` step fetches both from vulkan.c3l's
+# release.
 #
 #   push a tag v*        build every platform, publish a GitHub release
 #   run it by hand       build every platform, keep the zips as artifacts
@@ -83,8 +83,7 @@ jobs:
             target: macos-aarch64
             exe: three
           # ---------------------------------------------------------------
-          # Linux builds like the others now. One step below fires only for
-          # this leg: the quickjs PIC rebuild. `experimental` until it has one
+          # Linux builds like the others now. `experimental` until it has one
           # green build on this image.
           - bundle: three-linux-x64
             runner: ubuntu-24.04
@@ -141,49 +140,14 @@ jobs:
       - name: setup.sh
         run: ./setup.sh
 
-      # quickjs.c3l ships lib/linux-x64/libquickjs.a prebuilt, and that archive
-      # was built without -fPIC. ELF x86-64 forbids the relocations non-PIC code
-      # emits from inside a PIE, and `cc` links a PIE by default on every
-      # current distro, so the *consumer* dies at the link naming a file it does
-      # not own:
-      #
-      #   libquickjs.a(quickjs.o): relocation R_X86_64_32S against `.rodata'
-      #   can not be used when making a PIE object
-      #
-      # macOS and Windows are unaffected — only ELF x86-64 has that constraint,
-      # which is why this went unnoticed until a Linux leg existed.
-      #
-      # The real fix is `-fPIC` in quickjs.c3l's own native/build-quickjs.sh
-      # plus a rebuilt archive committed there; that flag is now in the script
-      # but the committed .a predates it. Rebuilding here is cheap (~5 s for
-      # four translation units), needs nothing but the runner's own cc, and the
-      # flag list is READ OUT OF the script rather than repeated, so the two
-      # cannot drift. Drop this step once the archive in quickjs.c3l is PIC.
-      - name: Rebuild the quickjs archive as PIC (the committed one is not)
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          cd lib/quickjs.c3l
-          common="$(sed -n 's/^COMMON="\(.*\)"$/\1/p' native/build-quickjs.sh)"
-          test -n "$common" || {
-            echo "::error::could not read COMMON out of native/build-quickjs.sh —"
-            echo "::error::the script changed shape; update this step or drop it."
-            exit 1; }
-          echo "cflags: $common -fPIC"
-          work="$(mktemp -d)"
-          objs=""
-          for unit in dtoa libregexp libunicode quickjs; do
-            echo "  cc $unit.c"
-            # shellcheck disable=SC2086
-            cc -c "vendor/quickjs-ng/$unit.c" -Ivendor/quickjs-ng -Inative \
-               -o "$work/$unit.o" $common -fPIC
-            objs="$objs $work/$unit.o"
-          done
-          rm -f lib/linux-x64/libquickjs.a
-          # shellcheck disable=SC2086
-          ar rcs lib/linux-x64/libquickjs.a $objs
-          rm -rf "$work"
-          ls -la lib/linux-x64/
+      # No quickjs compile step. quickjs.c3l ships a static archive per target in
+      # lib/<target>/ — libquickjs.a, or quickjs.lib on Windows — and every target
+      # links that instead of compiling the engine's four translation units. The
+      # linux-x64 archive is built with -fPIC there, which is what let the
+      # hand-rolled rebuild this workflow used to carry go away: ELF x86-64
+      # forbids the relocations non-PIC objects emit from inside the PIE the
+      # consumer links. Rebuilding an archive is the library's own job — see
+      # lib/quickjs.c3l/native/build-quickjs.sh and its README.
 
       # ---------------------------------------------------------------- build --
       # `--trust=full` is the documented invocation — a manifest that needs to
@@ -350,9 +314,9 @@ jobs:
           test -f "$driver" || {
             echo "::error::no libvulkan_kosmickrisp.dylib in the bundle — setup.sh's"
             echo "::error::driver step was skipped, or stage-libs.sh did not copy it."
-            echo "::error::That step is lib/vulkan.c3l/fetch-driver.sh, which pulls the"
-            echo "::error::dylib from vulkan.c3l's 'latest' release and verifies it"
-            echo "::error::against driver.sha256; a failure there is named in the log."
+            echo "::error::That step is lib/vulkan.c3l/fetch-dylibs.sh, which pulls"
+            echo "::error::both dylibs from vulkan.c3l's 'latest' release and verifies"
+            echo "::error::them against dylibs.sha256; a failure there is named in the log."
             exit 1; }
           file "$driver"
           lipo -archs "$driver" | grep -q arm64 || {
