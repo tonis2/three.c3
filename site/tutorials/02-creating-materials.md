@@ -1,7 +1,7 @@
 ---
 title: Creating materials
 order: 2
-summary: Textures, Slang shaders, uniform tables and a vertex stage — without splitting the draw call.
+summary: Textures, shady shaders, uniform tables and a vertex stage — without splitting the draw call.
 ---
 
 # Creating materials
@@ -54,30 +54,30 @@ every frame and the tiling scrolls without the geometry moving.
 
 ## A shader you write in the scene
 
-A `ShaderMaterial` takes a Slang function, `float3 shade(Surface s)`, and
+A `ShaderMaterial` takes a shady function, `fn float3 shade(Surface s)`, and
 compiles it when you construct the material. If the shader has a mistake, the
-constructor throws on that line with the Slang error message and the line
+constructor throws on that line with the compiler's error message and the line
 number from your code.
 
 ```js
 const glow = new three.ShaderMaterial({
 	uniforms: { tint: [0.3, 0.7, 1.0], t: 0 },
 	fragment: `
-		float3 shade(Surface s) {
-			float pulse = 0.5 + 0.5 * sin(t * 2.0 + s.position.y * 1.5);
+		fn float3 shade(Surface s) {
+			float pulse = 0.5 + 0.5 * sin(s.uniforms.t * 2.0 + s.position.y * 1.5);
 			float rim = pow(1.0 - abs(dot(s.normal, float3(0.0, 1.0, 0.0))), 2.0);
-			return s.albedo * lambert(s.normal) + tint * (0.35 + pulse * 1.4) * (0.25 + rim);
+			return s.albedo * lambert(s, s.normal) + s.uniforms.tint * (0.35 + pulse * 1.4) * (0.25 + rim);
 		}
 	`,
 });
 ```
 
-Every uniform is available in the shader body **by its own name** — `tint` and
-`t`, not `uniforms.tint`. `Surface` carries `albedo`, `normal`, `uv`,
-`position`, `color`, `variant`, and the material's own roughness and metalness.
-Five helper functions are already in scope: `standard(s)` is the complete
-built-in shading, `lambert(normal)` is its diffuse part, `specular(s)` is the
-rest, plus `srgb_to_linear` and `mapped_normal`.
+Every uniform is available in the shader body **through the surface** —
+`s.uniforms.tint` and `s.uniforms.t`. `Surface` carries `albedo`, `normal`,
+`uv`, `position`, `color`, `variant`, and the material's own roughness and
+metalness. Five helper functions are already in scope: `standard(s)` is the
+complete built-in shading, `lambert(s, normal)` is its diffuse part,
+`specular(s)` is the rest, plus `srgb_to_linear` and `mapped_normal`.
 
 > **There is no built-in clock.** `t` above is an ordinary uniform that this
 > script declared, and something has to write to it. That is deliberate: a
@@ -103,10 +103,10 @@ const crystal = new three.ShaderMaterial({
 		],
 	},
 	fragment: `
-		float3 shade(Surface s) {
-			float4 row = palette[s.variant];
+		fn float3 shade(Surface s) {
+			float4 row = s.uniforms.palette[s.variant];
 			float rim = pow(1.0 - abs(s.normal.y), row.w);
-			return row.rgb * lambert(s.normal) + row.rgb * rim * 0.6;
+			return row.rgb * lambert(s, s.normal) + row.rgb * rim * 0.6;
 		}
 	`,
 });
@@ -139,7 +139,7 @@ fixed timestep exists to provide.
 ## Moving geometry without moving it
 
 The other half of a `ShaderMaterial` is a vertex stage:
-`void displace(inout Vertex v)`, which runs once per vertex before anything is
+`fn void displace(inout Vertex v)`, which runs once per vertex before anything is
 projected onto the screen. No extra draw call, no upload, no change to the
 geometry — the mesh is still the same asset, and every copy of it is still one
 draw call.
@@ -149,16 +149,16 @@ const water = new three.ShaderMaterial({
 	uniforms: { t: 0, deep: [0.06, 0.24, 0.38], shallow: [0.35, 0.75, 0.85] },
 	bounds: 0.6,
 	vertex: `
-		void displace(inout Vertex v) {
-			float wave = sin(v.local.x * 0.9 + t) * 0.18 + sin(v.local.y * 1.3 - t * 0.7) * 0.12;
+		fn void displace(inout Vertex v) {
+			float wave = sin(v.local.x * 0.9 + v.uniforms.t) * 0.18 + sin(v.local.y * 1.3 - v.uniforms.t * 0.7) * 0.12;
 			v.position.y += wave;
 			v.uv += float2(wave * 0.05, 0.0);
 		}
 	`,
 	fragment: `
-		float3 shade(Surface s) {
+		fn float3 shade(Surface s) {
 			float depth = smoothstep(0.15, 0.55, s.position.y);
-			return lerp(deep, shallow, depth) * lambert(s.normal);
+			return lerp(s.uniforms.deep, s.uniforms.shallow, depth) * lambert(s, s.normal);
 		}
 	`,
 });
@@ -178,9 +178,9 @@ Three things to remember:
 - **`v.local` is object space and is an input. `v.position` is world space
   and is what you write to.** `v.index` is the vertex number, which makes a
   good per-vertex random seed.
-- **The vertex body and the fragment body compile into one Slang module**,
+- **The vertex body and the fragment body compile into one shady module**,
   vertex first. So a helper function may be declared in only one of them —
-  declaring it in both gives `error[E30201]: function already has a body`.
+  declaring it in both defines the same function twice, which is an error.
   Put shared helpers in `vertex` and call them from `fragment`.
 
 ## Drive the uniforms
