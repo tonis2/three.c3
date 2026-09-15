@@ -29,8 +29,8 @@
  the opposite of `three_tests::texture`'s rule and is deliberate: a layer stack's
  output is one lerp chain and a wrong blend mode produces a perfectly plausible
  picture, while the text says in one line which mode was emitted. The stack is
- compiled as well — `createMaterial` runs Slang on it — so "it generates" and "it
- is valid Slang" are both covered without a frame being rendered.
+ compiled as well — `createMaterial` runs the compiler on it — so "it generates" and "it
+ is valid shady" are both covered without a frame being rendered.
 *>
 module three_tests::layers;
 
@@ -339,7 +339,7 @@ fn void the_pbr_half_crosses_and_only_subsurface_is_left_behind() @test
  A stack imported from a file compiles, and the body says what it did.
 
  The whole five-layer stack, as the file wrote it. Every assertion here is on a
- line of Slang that is only there if one specific thing was carried across
+ line of shady that is only there if one specific thing was carried across
  correctly.
 *>
 fn void an_imported_stack_generates_the_shader_it_describes() @test
@@ -594,7 +594,7 @@ fn void an_unpainted_mesh_reads_a_vertex_mask_as_zero() @test
 <*
  A mesh whose material carries the extension is not tinted by its COLOR_0.
 
- glTF's rule for the attribute is a tint on the base colour, and `mesh.slang`
+ glTF's rule for the attribute is a tint on the base colour, and the built-in look
  applied it to every mesh that had one. What this file paints is a layer mask —
  three weights, one per layer, whose product with the texture is a colour nobody
  chose. `terrain` is painted (0, 1, 0.251), so multiplying it in zeroes the red
@@ -1040,8 +1040,8 @@ fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 <*
  The core material's other three maps have somewhere to go.
 
- A generated body has no built-in map bindings — `NORMAL_MAP_BINDING` and the three
- beside it belong to `mesh.slang` — so an imported stack used to drop the file's
+ A generated body has no built-in map slots — `NORMAL_MAP_BINDING` and the three
+ beside it belong to the built-in look — so an imported stack used to drop the file's
  occlusion, emissive and metallic-roughness maps on the floor and say nothing. Each
  is a sampler of the stack's own budget now, and each lands in the term it belongs
  to: the occlusion in `standard`'s fourth argument, the pair as a multiply into the
@@ -1351,7 +1351,7 @@ fn ParallaxShot parallax_shot(three::JsRuntime* run, float yaw, float distance)
 
  The generator can be checked by reading the source it wrote; parallax cannot,
  because `parallax_uv(...)` being emitted says nothing about whether the texture
- slides, how far, or which way. Those three live in `shaders/material.slang` and
+ slides, how far, or which way. Those three live in `shaders/material.shady` and
  only a frame can see them.
 
  A **flat white** height map lifts every texel by the same half a bump distance,

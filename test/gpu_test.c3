@@ -136,6 +136,30 @@ fn void device_comes_up_headless() @test
 	}
 }
 
+<*
+ `create_dynamic` lands in cached host memory when the device offers such a type.
+
+ The picture key folds the whole instance array on the CPU every frame, and the
+ same bytes read through an uncached host-visible mapping cost an order of
+ magnitude more. Conditional, because a device with one memory type has nothing
+ to prefer — but where the choice exists, the per-frame buffers have to take it.
+*>
+fn void a_dynamic_buffer_is_host_cached_where_the_device_offers_one() @test
+{
+	@with_gpu(; three::Gpu* gpu)
+	{
+		if (!gpu.has_cached_dynamic_memory()) return;
+
+		vk::Memory memory = gpu.create_dynamic(256)!!;
+		defer memory.free();
+		test::@check(
+			(memory.page.properties & vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_CACHED_BIT)
+				== vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_HOST_CACHED_BIT,
+			"the device offers cached host memory and a dynamic buffer did not use it"
+		);
+	};
+}
+
 // ============================================================================
 // Validation reaches the caller
 // ============================================================================

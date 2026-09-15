@@ -50,7 +50,7 @@
 
  ## Colour: baked, not refused
 
- `shaders/mesh.slang` multiplies three factors into albedo — the material's own
+ `shaders/material.shady` multiplies three factors into albedo — the material's own
  `base_color`, the copy's `mesh.color` (srgb-decoded), and a `COLOR_0` vertex
  attribute when the mesh has one (`draw.flags & FLAG_HAS_COLORS`, linear,
  untouched) — so a vertex-colour channel is already how this renderer lets one

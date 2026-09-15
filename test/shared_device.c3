@@ -266,6 +266,13 @@ fn void warm_uploads(Slot* slot) @private
 	// `three.debug.overlay` alike. `reset` frees the layer, so a test still
 	// starts without one; what has to happen here is the page underneath it.
 	slot.renderer.ui.ensure(&slot.renderer.gpu, &slot.renderer.target)!!;
+
+	// The per-frame buffers `create_dynamic` hands out live on a page of their
+	// own, because their property set is the CPU-readable one. A test that draws
+	// the first real frame would otherwise own that page, so it is created here
+	// beside the rest and given straight back.
+	vk::Memory warm_dynamic = slot.renderer.gpu.create_dynamic(1024)!!;
+	warm_dynamic.free();
 }
 
 <*

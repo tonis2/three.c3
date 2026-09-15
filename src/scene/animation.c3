@@ -520,7 +520,7 @@ fn float AnimationPlayer.blend_weight(&self)
  **This is the honest half of the crossfade.** It blends the transforms rather
  than the matrices they compose into — a lerp on translation and scale, a slerp on
  rotation — so a joint mid-fade is a rotation of the right length and the limb
- keeps its bones. `shaders/mesh.slang` explains what the baked path does instead
+ keeps its bones. `shaders/skinning.shady` explains what the baked path does instead
  and why it is allowed to be worse.
 
  Three passes over the channels rather than one, and only while a fade is running.

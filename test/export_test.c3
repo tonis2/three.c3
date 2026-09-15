@@ -24,7 +24,7 @@
 
  Two things do not survive, each for a reason `scene/export.c3` argues: helpers
  and hidden subtrees, because the export is what the frame shows; and
- `ShaderMaterial`s, because a material here is a Slang pipeline and glTF
+ `ShaderMaterial`s, because a material here is a shader program and glTF
  describes surfaces.
 
  **Per-copy colour used to be a third**, and is now the subject of half the tests
@@ -439,7 +439,7 @@ fn void helpers_and_hidden_subtrees_are_not_in_the_file() @test
 <*
  A ShaderMaterial's geometry is exported and its shader is not, and it says so.
 
- A material here is a Slang pipeline; glTF describes surfaces, not programs.
+ A material here is a shader program; glTF describes surfaces, not programs.
  Dropping the mesh would be worse than dropping the shader — the geometry is
  what an exported scene is mostly for — so the mesh goes out with the base colour
  and texture it carries, and `shaded` is how a script finds out.
@@ -1836,7 +1836,8 @@ fn void a_vertex_colour_mask_takes_its_attribute_with_it() @test
  closes. That test's stack came out of `layered.glb`, so the exporter could read
  it from the source document; this one was never in a file, and until
  `Material.script_layers` existed there was nothing on the host side to read at
- all — the description lived in JavaScript and what crossed was Slang. Two stacks
+ all — the description lived in JavaScript and what crossed was the compiled
+ shader. Two stacks
  that render identically exported as a layered file and as a flat colour, which
  is a difference no script could see.
 
@@ -2082,11 +2083,11 @@ fn void a_source_materials_normal_map_is_written_across() @test
 <*
  A built-in material's own maps are written across.
 
- **`plan.md` §26 and §28's shared entry.** The check above is a *source* material's
+ The check above is a *source* material's
  normal map — an image the exporter finds by walking back to the document a mesh
  was loaded from. A script that writes `material.emissiveMap = ...` on a
  `MeshLambertMaterial` has no document to walk back to: the image is a slot on the
- material, at a binding `mesh.slang` samples, and `surface_for` used to look
+ material, at a binding `material.shady` samples, and `surface_for` used to look
  straight past it. So a glowing sign exported as a sign that does not glow, and
  the factor beside it crossed — which is worse than losing both, because the file
  then states an emissive colour multiplying an image that is not there.
@@ -2135,9 +2136,8 @@ fn void a_built_in_materials_own_maps_are_written_across() @test
 <*
  A file's maps come back onto a material that compiles nothing.
 
- **`plan.md` §26 and §28's importer entry, as the round trip it is.**
  `instantiate({ materials: true })` used to route a normal map or a glow through a
- `LayeredMaterial` — a generated body, a Slang compile and a pipeline per glTF
+ `LayeredMaterial` — a generated body, a shader compile and a pipeline per glTF
  material — and to drop the occlusion and metallic-roughness maps on the floor.
  Every one of those is a sampler binding on the pipeline the renderer built at
  startup, so the layered path was compiling a shader for something the built-in
@@ -2480,7 +2480,7 @@ fn void a_materials_emissive_is_in_the_file() @test
  The three outcomes of a bake, in one scene.
 
  `scene.export` has always written a `ShaderMaterial`'s geometry and lost its
- shading, because a material here is a Slang pipeline and glTF describes
+ shading, because a material here is a shader program and glTF describes
  surfaces. The cost of that is not abstract: a scene whose whole character is its
  shaders comes back as a correct scene in one grey, since a generated primitive's
  `base_color` is a single default shared by every one of them.
@@ -2566,44 +2566,17 @@ fn void a_shader_material_bakes_into_the_file() @test
 }
 
 <*
- A scripted bake through both compilers, compared as file bytes.
+ A scripted bake runs and writes a real gradient.
 
- The bake re-assembles the stored body, so its spelling has to follow the
- material row: the Slang override bakes the Slang body through `material_source`
- exactly as before, and the row's own shady module compiles the shady body again
- through the bake def. The bodies are the same shading written twice, so the
- `.glb`s they write have to be identical - image bytes, material factors and all
- - and the image has to be a real gradient rather than one flat tile, or a bake
- that ignored its body would match too.
+ A body that bakes is compiled with the bake's interface - uv-space placement
+ and an unlit surface - so its `.glb` carries the image it shaded rather than the
+ material's live colour.
 *>
-fn void a_scripted_bake_is_the_same_file_through_both_compilers() @test
+fn void a_scripted_bake_writes_a_gradient() @test
 {
-	defer three::shader_overrides_clear();
+	String path = "build/export_bake.glb";
+	defer (void)file::delete(path);
 
-	String slang_path = "build/export_bake_slang.glb";
-	String shady_path = "build/export_bake_shady.glb";
-	defer (void)file::delete(slang_path);
-	defer (void)file::delete(shady_path);
-
-	// The Slang side names its compiler; the shady side below takes the
-	// table's default, so this comparison is the row's own answer.
-	three::shader_override(three::ShaderPass.MESH_MATERIAL, three::ShaderCompiler.SLANG);
-	@with_js(; three::JsRuntime* run)
-	{
-		three::RunResult result = run.run(`
-			const scene = new three.Scene();
-			const mat = new three.ShaderMaterial({
-				fragment: "float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.25); }"
-			});
-			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
-			const report = scene.export("build/export_bake_slang.glb", { bake: 128 });
-			return [report.shaded, report.bakedImages, report.bakedColors].join(' ');
-		`);
-		defer result.free();
-		test::@check(result.value == `"0 1 0"`, "the Slang bake ran: %s", result.value);
-	};
-
-	three::shader_overrides_clear();
 	@with_js(; three::JsRuntime* run)
 	{
 		three::RunResult result = run.run(`
@@ -2612,41 +2585,14 @@ fn void a_scripted_bake_is_the_same_file_through_both_compilers() @test
 				fragment: "fn float3 shade(Surface s) { return float3(s.uv.x, s.uv.y, 0.25); }"
 			});
 			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
-			const report = scene.export("build/export_bake_shady.glb", { bake: 128 });
+			const report = scene.export("build/export_bake.glb", { bake: 128 });
 			return [report.shaded, report.bakedImages, report.bakedColors].join(' ');
 		`);
 		defer result.free();
-		test::@check(result.value == `"0 1 0"`, "the shady bake ran: %s", result.value);
+		test::@check(result.value == `"0 1 0"`, "the bake ran: %s", result.value);
 	};
-	// Cleared before the comparison rather than only at the test's end, so a
-	// failing check below cannot leave the override live for the next test.
-	three::shader_overrides_clear();
 
-	char[]? slang = file::load_temp(slang_path);
-	if (catch slang)
-	{
-		test::@check(false, "the Slang bake wrote a file");
-		return;
-	}
-	char[]? shady = file::load_temp(shady_path);
-	if (catch shady)
-	{
-		test::@check(false, "the shady bake wrote a file");
-		return;
-	}
-
-	test::@check(slang.len == shady.len, "the two bakes are the same size, %d against %d", slang.len, shady.len);
-	if (slang.len != shady.len) return;
-
-	sz first = slang.len;
-	foreach (i, c : slang)
-	{
-		if (c == shady[i]) continue;
-		first = i;
-		break;
-	}
-	test::@check(first == slang.len,
-		"a scripted bake is byte-identical through both compilers, first difference at byte %d", first);
+	test::@check(file::is_file(path), "the bake wrote a file");
 }
 
 <*

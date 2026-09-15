@@ -1215,13 +1215,13 @@ Critter.frame('draw', () => {
 const sky = three.setPost({
 	uniforms: { viewFar: 400, skyLow: [0.72, 0.86, 0.92], skyHigh: [0.26, 0.52, 0.80], haze: [0.66, 0.78, 0.80], fogRange: [30, 120] },
 	fragment: `
-		float3 post(Post p) {
-			float isSky = smoothstep(viewFar * 0.975, viewFar * 0.999, p.depth);
+		fn float3 post(Post p) {
+			float isSky = smoothstep(p.uniforms.viewFar * 0.975, p.uniforms.viewFar * 0.999, p.depth);
 			float up = pow(clamp(1.0 - p.uv.y, 0.0, 1.0), 0.9);
-			float3 gradient = lerp(skyLow, skyHigh, up);
+			float3 gradient = lerp(p.uniforms.skyLow, p.uniforms.skyHigh, up);
 
-			float f = clamp((p.depth - fogRange.x) / max(1.0, fogRange.y - fogRange.x), 0.0, 1.0);
-			float3 lit = lerp(p.color, haze, f * f * 0.7);
+			float f = clamp((p.depth - p.uniforms.fogRange.x) / max(1.0, p.uniforms.fogRange.y - p.uniforms.fogRange.x), 0.0, 1.0);
+			float3 lit = lerp(p.color, p.uniforms.haze, f * f * 0.7);
 			return lerp(lit, gradient, isSky);
 		}`,
 });

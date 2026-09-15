@@ -636,7 +636,7 @@ fn int? Assets.attach_skin(&self, Gpu* gpu, AssetId id, uint joints)
  compute skinner — and the one for a caller that owns its own skeleton. Nothing
  here samples a clip or reads a node: the matrices arrive whole, already
  `world * inverse_bind`, which is the same contract `write_live_poses` produces
- from bone nodes and the same one `shaders/mesh.slang` reads.
+ from bone nodes and the same one `shaders/skinning.shady` reads.
 
  A side table rather than a field on `Node`, for `MorphWeights`' reason: almost
  no node has one, and a `List` per node would be a pointer, a length and a
@@ -1002,7 +1002,7 @@ fn void Scene.update_sockets(&self)
 <*
  Two matrices mixed componentwise, `weight` of the second.
 
- The socket's half of `shaders/mesh.slang`'s crossfade, and wrong in exactly the
+ The socket's half of `shaders/skinning.shady`'s crossfade, and wrong in exactly the
  way that one is wrong — deliberately, because a socket that took the honest path
  would drift away from the hand the shader drew.
 *>

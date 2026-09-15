@@ -25,7 +25,7 @@
  Each of the three was re-run against the mistake it is aimed at, and the number
  in the message is what the broken shader actually produced:
 
- - `mesh.slang`'s `FLAG_HAS_NORMAL_MAP` branch deleted: "a normal map tilted the
+ - `material.shady`'s `FLAG_HAS_NORMAL_MAP` branch deleted: "a normal map tilted the
    surface away from the light: 199 flat, 199 with the map", and the script-side
    check fails beside it with the same pair.
  - The metallic-roughness sample read `.bg` instead of `.gb`, which is the
@@ -486,12 +486,12 @@ fn void a_material_holds_a_reference_to_every_map_it_names() @test
  A ShaderMaterial's samplers are its own, and these three verbs cannot reach
  them.
 
- The one refusal worth having. `mesh.slang` numbers its normal map at binding 3
- and `material.slang` numbers an agent's *first* declared sampler at the same
- place, so a `normalMap` written onto a compiled material would put an image in
- whatever the body called its first texture and shade the scene with it. Refused
- by fault rather than by silence, because the picture that comes out of the other
- answer looks like a shader bug.
+ The one refusal worth having. The built-in look numbers its normal map at binding
+ 3, the same binding a scripted body's *first* declared sampler lands on, so a
+ `normalMap` written onto a compiled material would put an image in whatever the
+ body called its first texture and shade the scene with it. Refused by fault
+ rather than by silence, because the picture that comes out of the other answer
+ looks like a shader bug.
 *>
 fn void a_shader_materials_samplers_are_its_own() @test
 {
@@ -534,7 +534,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 <*
  And the shader's own names are not a second door into those three slots.
 
- `mesh.slang` declares `normal_map`, so `material.textures.normal_map = tex`
+ `material.shady` declares `normal_map`, so `material.textures.normal_map = tex`
  would otherwise resolve through the *name* — which is the thing
  `NORMAL_MAP_BINDING` argues against, because it makes the shader's spelling part
  of the API and leaves one slot with two ways to write it. The refusal is what
@@ -575,70 +575,6 @@ fn void the_built_in_shaders_own_names_are_not_a_door() @test
 // One copy of the frame, in two shaders
 // ============================================================================
 
-<*
- `mapped_normal_frame` is written once and spliced into both shaders.
-
- The GGX block is duplicated character for character between `mesh.slang` and
- `material.slang` and is held together by nothing but a comment, which is exactly
- what made a third copy the wrong answer here. So this asserts the mechanism
- rather than the agreement: neither template contains the maths, the shared file
- does, and what reaches Slang has it.
-
- `read_source` is the file as written and `shader_source` is the file as
- compiled — the difference between the two *is* the splice.
-*>
-fn void one_tangent_frame_reaches_both_shaders() @test
-{
-	// A line only the cotangent frame contains, so finding it is finding the
-	// maths rather than finding a call to it.
-	String maths = "float3 dp_dy_perp = cross(dp_dy, n);";
-
-	String shared = three::shader_source(three::ShaderFile.SURFACE_SLANG, mem)!!;
-	defer shared.free(mem);
-	test::@check(shared.contains(maths), "the shared block is where the frame is built");
-
-	three::ShaderFile[2] names = { three::ShaderFile.MESH_SLANG, three::ShaderFile.MATERIAL_SLANG };
-	foreach (name : names)
-	{
-		@pool()
-		{
-			String path = three::find_shader(name, tmem)!!;
-			String file = three::read_source(path, tmem)!!;
-			test::@check(
-				!file.contains(maths),
-				"%s does not carry its own copy of the frame",
-				name.name
-			);
-			test::@check(has_marker_line(file), "%s asks for the shared block", name.name);
-			String compiled = three::shader_source(name, tmem)!!;
-			test::@check(
-				compiled.contains(maths) && !has_marker_line(compiled),
-				"and what is compiled has it spliced in: %s",
-				name.name
-			);
-			test::@check(
-				compiled.contains("mapped_normal_frame"),
-				"%s can call mapped_normal_frame",
-				name.name
-			);
-		};
-	}
-}
-
-// ============================================================================
-// From a script
-// ============================================================================
-
-// Is the marker still a line of its own in here?
-//
-// By line rather than by substring, because the shared block's own header
-// mentions the marker in a sentence — and a check that could not tell a comment
-// about the mechanism from the mechanism would fail on a rewording.
-fn bool has_marker_line(String source)
-{
-	foreach (line : source.tsplit("\n")) if (line.trim() == "//@shared") return true;
-	return false;
-}
 
 <*
  A normal map set from JavaScript reaches the GPU and changes the picture.

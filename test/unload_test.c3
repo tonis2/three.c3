@@ -978,7 +978,7 @@ fn void the_scene_warning_waits_for_twice_the_count() @test
  `create_texture_material` rather than `create_material`, because this needs a
  lot of materials and none of them needs a compile: it takes a reference on a
  pipeline the pass already holds. What is being counted is materials, and every
- one of them holds a pipeline whether Slang ran for it or not.
+ one of them holds a pipeline whether a compile ran for it or not.
 
  **Proved by injection.** `note_material_claimed` returning before the doubling:
  "the next word waits for twice the count: 64 then 64" — and every creation from

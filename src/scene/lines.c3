@@ -123,7 +123,7 @@ fn String LineShape.label(&self)
 
  The absence is what makes the line flat-shaded. `Assets.upload_built` decides a
  stream exists by comparing its length against the position count, so a builder
- that never pushes a normal produces `has_normals = false` and `mesh.slang`'s
+ that never pushes a normal produces `has_normals = false` and `mesh.shady`'s
  unlit branch. Pushing a normal here would light the wireframe, and a wireframe
  dark on one side is a worse diagnostic than one that is not.
 *>

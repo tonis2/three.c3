@@ -15,8 +15,9 @@
 // It is deliberately not a pretty picture: it exercises
 // the three things a bundle can be broken in ways a build cannot catch.
 //
-//   a shape and a material   -> the mesh/material module compiled, so libslang
-//                               and shaders/ both resolved
+//   a shape and a material   -> the mesh/material module compiled, so the
+//                               embedded shader sources and the linked
+//                               compiler both resolved
 //   three.light.shadow       -> the SHADOW module compiled too. This is the one
 //                               that fails on its own, prints a warning and
 //                               exits 0, so nothing but an assertion finds it
@@ -39,9 +40,8 @@ three.light.set([0.4, 1.0, 0.5], 0.35);
 three.light.shadow = true;
 three.camera.frameAll();
 
-// shadow.enabled reads back FALSE when the shadow shader did not build — the
-// glslang library missing from the bundle is exactly that, and it is otherwise
-// a warning on stdout and exit code 0.
+// shadow.enabled reads back FALSE when the shadow shader did not build, and
+// that failure is otherwise a warning on stdout and exit code 0.
 // Read it on frame 3, not frame 1: shadow state settles after a pass has had a
 // chance to run, and frame 1 reports "no pass yet" whether or not anything is
 // wrong.

@@ -9,17 +9,17 @@
 
  ## The push block
 
- Mirrors `shaders/mesh.slang` exactly:
+ Mirrors the built-in shader's flat block exactly:
 
  frame        0     8      -> FrameBlock, one per frame in flight
  instances    8     8      -> Instance[], already offset to this bucket
  draw        16     8      -> DrawRecord*, this bucket's own = 24 bytes
 
  That table is `MESH_PUSH_FIELDS` below, and it is checked against the shader on
- every pipeline build. As a comment it would be exactly as good as a `slangc`
- line in a manifest. Slang reflects the real offsets out of the module that is
- about to run, so a field added to one side and not the other is a sentence at
- startup instead of geometry read at the wrong address.
+ every pipeline build. As a comment it would be exactly as good as a compiler
+ invocation in a manifest. The compiler's reflection reports the real offsets out
+ of the module that is about to run, so a field added to one side and not the
+ other is a sentence at startup instead of geometry read at the wrong address.
 
  128 bytes is the budget and it is not a coincidence — it is the push constant
  size every Vulkan implementation is required to offer, so this pass can never be
@@ -55,7 +55,6 @@ import std::math;
 import std::math::matrix;
 import std::collections::list;
 import vk;
-import slang;
 
 faultdef
 	NO_SCALAR_BLOCK_LAYOUT,
@@ -78,12 +77,12 @@ const uint FLAG_PRESKINNED  = 16;
 
 <*
  The three maps the built-in material carries past its base colour, as
- `shaders/mesh.slang` reads them.
+ `shaders/material.shady` reads them.
 
  Set by `MeshPass.build_draw_records` from the material's own texture slots, one
- bit per slot, and read by `mesh.slang` alone: `material.slang` numbers an
- agent's samplers at the same bindings and has its own body deciding what to do
- with them, so these bits mean nothing to a `ShaderMaterial`.
+ bit per slot, and read only by the built-in look: a scripted body numbers its
+ samplers at the same bindings and decides for itself what to do with them, so
+ these bits mean nothing to a `ShaderMaterial`.
 
  A bit rather than a comparison against the bound image, because every declared
  binding is written every draw and an empty one carries 1x1 white — which is the
@@ -96,21 +95,21 @@ const uint FLAG_HAS_OCCLUSION_MAP           = 128;
 
 <*
  `material.stochastic` — sample this material's maps through `stochastic_sample`
- rather than straight, so a tiled surface stops having a period. `plan.md` §27.
+ rather than straight, so a tiled surface stops having a period.
 
- The one bit above that is *not* only `mesh.slang`'s: `material.slang` reads it
- too, for a body's base map, which is why `map_flags` sets it before its own test
- for whether the built-in shader is drawing.
+ The one bit above that is *not* only the built-in look's: `material.shady` reads
+ it for a body's base map too, which is why `map_flags` sets it before its own
+ test for whether the built-in shader is drawing.
 *>
 const uint FLAG_STOCHASTIC                  = 256;
-// Whether the material carries an emissive map of its own — `mesh.slang`'s
-// `FLAG_HAS_EMISSIVE_MAP`. Zero on a material that glows a flat colour and on
-// one that does not glow at all.
+// Whether the material carries an emissive map of its own — the built-in
+// look's `FLAG_HAS_EMISSIVE_MAP`. Zero on a material that glows a flat colour
+// and on one that does not glow at all.
 const uint FLAG_HAS_EMISSIVE_MAP            = 512;
 
 <*
- This mesh's COLOR_0 is a layer mask rather than a tint, so `mesh.slang` leaves it
- out of the albedo.
+ This mesh's COLOR_0 is a layer mask rather than a tint, so the built-in look
+ leaves it out of the albedo.
 
  Off the *mesh* and not off the material, like `FLAG_HAS_COLORS` beside it and
  unlike the four map bits: what the attribute means was decided by whoever painted
@@ -140,27 +139,27 @@ const uint POSE_MASK = 0x7fffffff;
 // grow into.
 const uint PUSH_BUDGET = 128;
 
-// The entry points `mesh.slang` is required to contain, and the stages they are
+// The entry points `shaders/mesh.shady` is required to contain, and the stages
 // compiled for. Named rather than discovered — see `compile_shader`.
 const ShaderEntry[*] MESH_ENTRIES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "vertexMain", STAGE_VERTEX },
+	{ "fragmentMain", STAGE_FRAGMENT },
 };
 
-// `shaders/skin.slang`'s one entry point. A compute module has no fragment stage
+// `shaders/skin.shady`'s one entry point. A compute module has no fragment stage
 // and no attachment formats, which is most of why it gets its own pipeline type
 // rather than a flag on the mesh one.
 const ShaderEntry[*] SKIN_ENTRIES = {
-	{ "computeMain", slang::STAGE_COMPUTE },
+	{ "computeMain", STAGE_COMPUTE },
 };
-const ShaderEntry[*] CLUSTER_ENTRIES = { { "computeMain", slang::STAGE_COMPUTE } };
+const ShaderEntry[*] CLUSTER_ENTRIES = { { "computeMain", STAGE_COMPUTE } };
 const uint CLUSTER_X = 16;
 const uint CLUSTER_Y = 9;
 const uint CLUSTER_Z = 24;
 const uint CLUSTER_LIGHT_CAPACITY = 64;
 
 <*
- `shaders/shadow.slang`'s one entry point.
+ `shaders/shadow.shady`'s one entry point.
 
  One, and a vertex one. A depth-only pipeline needs no fragment stage — there is
  nothing to write but the depth the rasteriser already produced — so this list
@@ -170,21 +169,21 @@ const uint CLUSTER_LIGHT_CAPACITY = 64;
  would fail this module for missing a `fragmentMain` it is right not to have.
 *>
 const ShaderEntry[*] SHADOW_ENTRIES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
+	{ "vertexMain", STAGE_VERTEX },
 };
 
 <*
  The same file's entry points in its cut-out variant.
 
  Two, because a fragment stage is the only place a `discard` can happen and a
- cut-out shadow is a discard. It is a second *compile* of `shaders/shadow.slang`
- rather than a second entry point in the first one — see the `#ifdef
- THREE_SHADOW_CUTOUT` block there — so that the pipeline every ordinary caster
- shares has no sampler in its layout at all.
+ cut-out shadow is a discard. It is a module of its own
+ (`shaders/shadow_cutout.shady`) rather than a second entry point in the first
+ one, so that the pipeline every ordinary caster shares has no sampler in its
+ layout at all.
 *>
 const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
-	{ "vertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "vertexMain", STAGE_VERTEX },
+	{ "fragmentMain", STAGE_FRAGMENT },
 };
 
 <*
@@ -198,11 +197,11 @@ const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
  depth-only entry by mistake.
 *>
 const ShaderEntry[*] SHADOW_CUTOUT_SHADY_ENTRIES = {
-	{ "cutoutVertexMain", slang::STAGE_VERTEX },
-	{ "fragmentMain", slang::STAGE_FRAGMENT },
+	{ "cutoutVertexMain", STAGE_VERTEX },
+	{ "fragmentMain", STAGE_FRAGMENT },
 };
 
-// The workgroup size `skin.slang` declares. Here so the dispatch and the shader
+// The workgroup size `skin.shady` declares. Here so the dispatch and the shader
 // cannot drift: one thread per (instance, vertex), rounded up to whole groups,
 // and the shader drops the tail itself.
 const uint SKIN_WORKGROUP = 64;
@@ -231,7 +230,7 @@ struct Light
 	// light carried when this field was unused, so nothing in the wire format moved
 	// to make room and a scene written against four suns is the scene it was. Above
 	// zero, `xyz` is a world *position* and `w` is how far the light reaches, in
-	// metres. `light_toward` in `shaders/surface.slang` is the one function that
+	// metres. `light_toward` in `shaders/lighting.shady` is the one function that
 	// unpacks it.
 	float[4] direction;
 	// rgb the light's colour, linear. w its intensity, which the shader multiplies
@@ -271,7 +270,7 @@ struct FrameBlock
 
 	 Identity in a frame with no shadow pass, and unread in one — `shadow[3]` is
 	 what says which. Written here rather than pushed because both ends need it and
-	 they are different pipelines: `shaders/shadow.slang` rasterises the map with
+	 they are different pipelines: `shaders/shadow.shady` rasterises the map with
 	 it and both shading shaders read the map back with it, so one fit reaching one
 	 buffer is what keeps the two from disagreeing.
 	*>
@@ -310,7 +309,7 @@ struct FrameBlock
 	 x  intensity, and **zero means there is no environment** — the one number
 	 the shading branches on, so a scene with no sky and a scene whose sky
 	 is turned all the way down are the same frame.
-	 y  rotation about world Y in radians, the same angle `shaders/sky.slang`
+	 y  rotation about world Y in radians, the same angle `shaders/sky.shady`
 	 turns the background by. One number in one place, or a metal would
 	 reflect a sky pointing somewhere else than the one on screen.
 	 z  the highest mip level of the environment image, which is what turns
@@ -328,7 +327,7 @@ struct FrameBlock
 	 array is whatever was there last frame and no loop reaches it.
 
 	 **At the end of the block deliberately.** Every field above kept the offset it
-	 had when there was one light, and `shaders/shadow.slang` reads
+	 had when there was one light, and `shaders/shadow.shady` reads
 	 `light_view_projection` at 88 by that offset rather than by name.
 	*>
 	Light* lights;
@@ -343,7 +342,7 @@ struct FrameBlock
 
 	 **After `lights` rather than beside `live_poses`**, which is the rule the
 	 comment above states: every field keeps the offset it had, so
-	 `shaders/shadow.slang` goes on reading `light_view_projection` at 88 by that
+	 `shaders/shadow.shady` goes on reading `light_view_projection` at 88 by that
 	 offset and nothing had to be recompiled to agree.
 	*>
 	float* morph_weights;
@@ -355,7 +354,7 @@ struct FrameBlock
 	 `render/pass.c3` carries the argument.
 
 	 **After `lights` and after `morph_weights`**, for the rule the two comments
-	 above state: every field keeps the offset it had, so `shaders/shadow.slang`
+	 above state: every field keeps the offset it had, so `shaders/shadow.shady`
 	 goes on reading `light_view_projection` at 88 by that offset.
 	*>
 	float[4] world;
@@ -380,7 +379,7 @@ struct FrameBlock
  One vertex as the compute pass leaves it: posed, in the character's own space.
 
  Interleaved, unlike the geometry streams, because one thread writes both halves
- and one thread reads them — see `shaders/mesh.slang`'s copy of this.
+ and one thread reads them — see the declaration `abi.c3` emits from this struct.
 *>
 struct SkinnedVertex
 {
@@ -389,8 +388,8 @@ struct SkinnedVertex
 }
 
 <*
- One vertex's displacement for one morph target, as `shaders/mesh.slang` declares
- it.
+ One vertex's displacement for one morph target, as `shaders/skinning.shady`
+ reads it.
 
  **Displacements and not positions**, which is what glTF stores and the only form
  that composes: a face with a smile target and a blink target has to be able to do
@@ -409,7 +408,7 @@ struct MorphDelta
 
 <*
  One row of a material's per-copy uv table, as `variant_uv` in
- `shaders/surface.slang` reads it.
+ `shaders/mesh.shady` reads it.
 
  A `float4` on the wire because that is what a table of anything is on this side
  of it, and the last two are small integers carried as floats rather than a
@@ -437,7 +436,7 @@ struct UvVariant
 const uint UV_VARIANTS = 8;
 
 <*
- One bucket's geometry and surface, as `shaders/mesh.slang`'s `Draw` declares it.
+ One bucket's geometry and surface, as `DrawRecord` is declared to the shader.
 
  Written per bucket per frame into a host-visible buffer, which is the difference
  between this and everything above it: `FrameBlock` is one per frame and
@@ -468,8 +467,8 @@ const uint UV_VARIANTS = 8;
  alignment and so has no tail padding left to spend
 
  The stride between records is this struct's size, decided on the C3 side alone:
- the shader is handed a pointer to one record and never indexes past it, so
- Slang's own array stride for `Draw` is not part of the wire format the way the
+ the shader is handed a pointer to one record and never indexes past it, so no
+ reflected array stride for `DrawRecord` is part of the wire format the way the
  field offsets are.
 *>
 // How many bindings a draw carries a texture index for. Covers every binding
@@ -483,7 +482,7 @@ struct DrawRecord
 	Vec3* normals;
 	Vec2* uvs;
 	Vec2* lightmap_uvs;
-	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.slang`. The
+	// glTF's COLOR_0, read only by a material body — see `shaders/mesh.shady`. The
 	// first field added since the record replaced the push block, and the whole of
 	// what it cost is this line and 8 bytes per bucket per frame.
 	Vec4* colors;
@@ -533,8 +532,7 @@ struct DrawRecord
 	uint uv_variant_count;
 	// `material.uvVariants` — one uv transform per copy, picked by
 	// `Instance.variant`, applied to the mesh's own uv before `uv_transform`
-	// scales it. `plan.md` §27 is why, and `variant_uv` in
-	// `shaders/surface.slang` is what a row means.
+	// scales it. `variant_uv` in `shaders/mesh.shady` is what a row means.
 	// 
 	// Here for `uv_transform`'s reason once more, and the reason has not worn out:
 	// the surface most likely to be a row of one shape wearing one picture is a
@@ -595,8 +593,7 @@ struct ShadowPush
 }
 
 <*
- What one compute-skinning dispatch is handed, as `shaders/skin.slang`'s
- `SkinPush` declares it.
+ What one compute-skinning dispatch is handed, as `shaders/skin.shady` reads it.
 
  Its own 128 bytes. A compute pass has no material and no uniforms appended to
  the tail, so this can be eleven fields where the draw path had to move its
@@ -677,19 +674,19 @@ $assert @layout_matches(
 	FrameBlock,
 	FRAME_BLOCK_FIELDS
 ) : "FrameBlock no longer lays out the way FRAME_BLOCK_FIELDS says";
-// Not a bound but an equality, because these numbers are a wire format shared
-// with `shaders/mesh.slang` and a silent change to either side is a misread
-// buffer rather than an error. `Instance` is in `scene/scene.c3`.
+// Not a bound but an equality, because these numbers are the wire format the
+// shaders are generated from and the fixtures pin; a silent move would change
+// every offset in the module rather than fail. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
-$assert ShadowPush::size == 96 : "the shadow push block no longer matches shaders/shadow.slang";
+$assert ShadowPush::size == 96 : "the shadow push block moved off its pinned size";
 // 388 bytes of fields and four of the struct's own tail alignment: the padding is
 // not a field and not part of the wire format, which is why the new field is last.
-$assert DrawRecord::size == 392 : "DrawRecord no longer matches shaders/mesh.slang's Draw";
-$assert FrameBlock::size == 400 : "FrameBlock no longer matches shaders/mesh.slang";
-$assert Light::size == 80 : "Light no longer matches shaders/mesh.slang";
-$assert Instance::size == 180 : "Instance no longer matches shaders/mesh.slang";
-$assert SkinnedVertex::size == 24 : "SkinnedVertex no longer matches shaders/skin.slang";
-$assert MorphDelta::size == 24 : "MorphDelta no longer matches shaders/mesh.slang";
+$assert DrawRecord::size == 392 : "DrawRecord moved off its pinned size";
+$assert FrameBlock::size == 400 : "FrameBlock moved off its pinned size";
+$assert Light::size == 80 : "Light moved off its pinned size";
+$assert Instance::size == 180 : "Instance moved off its pinned size";
+$assert SkinnedVertex::size == 24 : "SkinnedVertex moved off its pinned size";
+$assert MorphDelta::size == 24 : "MorphDelta moved off its pinned size";
 
 <*
  One field of the push block as this side lays it out.
@@ -741,16 +738,10 @@ const PushFieldLayout[*] MESH_PUSH_FIELDS = {
  The frame block's own contract, in the same terms and for the same reason as
  `DRAW_RECORD_FIELDS`.
 
- `FrameBlock` is reached through a pointer, so Slang does not reflect it and
- nothing compares it against the C3 struct — survivable while `mesh.slang` and
- `material.slang` were the only two files declaring it and both were edited
- together. `shaders/shadow.slang` is a third, it reads `light_view_projection` at
- offset 88, and a field inserted above that in two files out of three is a shadow
- map rendered with whatever sixteen floats happen to sit there.
-
- `the_frame_block_matches_the_shader` closes it the way the draw record's check
- does: the declaration is cut out of `shaders/mesh.slang` and compiled *as* a
- push block, which is a layout Slang will report.
+ The generator walks this struct into the shader's declaration, so the two
+ cannot drift; the table is the host-side pin, checked at compile time by
+ `@layout_matches`, so a field that gains or loses padding is a build failure
+ rather than a shadow map read eight bytes off.
 
  view_projection          0    64
  lighting                64    16
@@ -790,18 +781,13 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 <*
  The draw record's own contract, in the same terms and for the same reason.
 
- Slang reflects a push block and does not reflect the type behind a pointer, so
- without this nothing would compare `Draw` against `DrawRecord` and a field added
- to one and not the other would be geometry read at the wrong address.
+ The declaration is generated from this struct, so `DrawRecord` and the shader's
+ copy are one; the table is the host-side pin, checked against the struct at
+ compile time by `@layout_matches`.
 
- `the_draw_record_matches_the_shader` closes that by cutting the `struct Draw`
- declaration out of `shaders/mesh.slang` and compiling it *as* a push block,
- which is a layout Slang will reflect. Both are scalar-layout structs under
- `-force-glsl-scalar-layout`, so what comes back is what the record has.
-
- The C3 half is the `$assert` below, not part of that test — so the two sides are
- checked independently, and the side that can be checked without running anything
- is.
+ The fixture test reads the offsets back against the C3 members as well, so the
+ scalar-layout answer is checked from both sides: the generator's walk out and
+ the captured fixture in.
 *>
 const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "positions", 0, 8 },
@@ -827,15 +813,15 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "material_rows", 384, 4 },
 };
 
-// How many of those `shaders/mesh.slang` declares in its own `struct Draw`. All
-// of them, since the templates read the texture row; the constant stays as the
-// one place a row written ahead of the shaders would be excused.
+// How many of those the shader's generated declaration carries. All of them,
+// since the walk emits the whole struct; the constant stays as the one place a
+// field written ahead of the shaders would be excused.
 const uint DRAW_RECORD_SHADER_FIELDS = DRAW_RECORD_FIELDS.len;
 
 <*
  The whole of the post pass's push contract: one `float4` and nothing else.
 
- `shaders/post.slang` declares `info` first — xy the target's extent, z seconds
+ `shaders/post.shady` declares `info` first — xy the target's extent, z seconds
  since the shader was set, w reserved — then `planes`, the camera's near and far,
  and the agent's uniforms after those. So `POST_PUSH_START` is 24 and the budget
  is the other 104.
@@ -870,7 +856,7 @@ const PushFieldLayout[*] POST_PUSH_FIELDS = {
 
  The cost is small and bounded, unlike the cull mode's: this is a closed set of
  three values shared by every material that asks for one, so it is a handful of
- `VkPipeline` objects for the life of the process and no extra Slang call at all
+ `VkPipeline` objects for the life of the process and no extra compile at all
  — `PipelineCache` keys the compile on the source and the pipeline on the state.
  `material.side`, by contrast, is an axis an agent varies freely.
 
@@ -1062,7 +1048,7 @@ fn bool PipelineState.equals(self, PipelineState other)
 	return self.topology == other.topology && self.depth_test == other.depth_test
 		&& self.depth_write
 			== other
-				.depth_write // The line that makes a blended variant its own cache entry: one Slang
+				.depth_write // The line that makes a blended variant its own cache entry: one
 				// compile, about a millisecond for the extra `VkPipeline`.
 		&& self.blend == other.blend
 		&& self.color == other.color;
@@ -1409,8 +1395,9 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.build(gpu.handle, gpu.driver_cache.handle)!;
 
 	// A copy, not a move. A module now produces one pipeline per render state —
-	// the line pass and the solid pass are one `mesh.slang`, and a material's two
-	// sides are one source — so the module has to survive with its layout intact.
+	// the line pass and the solid pass are one built-in module, and a material's
+	// two sides are one source — so the module has to survive with its layout
+	// intact.
 	// 
 	// Still owned by the pipeline and still freed with it. `ShaderLayout.copy` has
 	// the argument against borrowing instead.
@@ -1420,7 +1407,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 }
 
 <*
- Builds the mesh pipeline from a compiled Slang module.
+ Builds the mesh pipeline from a compiled module.
 
  No vertex input state, no `VkRenderPass`, no `VkFramebuffer`: attachment formats
  are declared here through `PipelineRenderingCreateInfo` and the attachments
@@ -1519,7 +1506,7 @@ fn MeshPipeline? MeshPipeline.init(
 }
 
 <*
- Builds the post-processing pipeline from a compiled Slang module.
+ Builds the post-processing pipeline from a compiled module.
 
  The same object as `init` produces, so `Gpu.retire_pipeline` and
  `MeshPipeline.free` cover it with no new machinery. Four things differ, and each
@@ -1705,7 +1692,7 @@ fn void MeshPipeline.free(&self, Gpu* gpu)
 // ============================================================================
 
 <*
- The pipeline `shaders/skin.slang` becomes.
+ The pipeline `shaders/skin.shady` becomes.
 
  The only compute pipeline in the project, and the only thing it has in common
  with `MeshPipeline` is the push-block check: there is no vertex input state to
@@ -1729,7 +1716,7 @@ struct SkinPipeline
  Compiles the skinning shader and builds the compute pipeline from it.
 
  The same runtime compile every other shader here goes through — `compile_shader`
- takes the entry points it wants by name and stage, and `slang::STAGE_COMPUTE` is
+ takes the entry points it wants by name and stage, and `STAGE_COMPUTE` is
  one of them.
 
  @param mod : `A module from compile_shader containing computeMain.`
@@ -1809,29 +1796,29 @@ fn void SkinPipeline.free(&self, Gpu* gpu)
 // ============================================================================
 
 <*
- One compiled shader the cache is keeping, and the source that produced it.
+ One compiled shader the cache is keeping, and the inputs that produced it.
 
- A pipeline is `(source, render state)`. A *compile* is source alone — Slang
- emits byte-identical SPIR-V for a line pipeline and a solid one, because
- topology, cull mode and the depth flags are `VkGraphicsPipelineCreateInfo`
- fields the shader never sees.
+ A pipeline is `(module, render state)`. A *compile* is the module's inputs
+ alone — the compiler emits byte-identical SPIR-V for a line pipeline and a
+ solid one, because topology, cull mode and the depth flags are
+ `VkGraphicsPipelineCreateInfo` fields the shader never sees.
 
  Keying both levels together costs nothing until something asks for two states
- over one source. Debug lines and `material.side` both ask, and under a single
- key each called Slang again on source it had already compiled: measured at
- `compiles=2, hits=0` for a `MeshPass.init` that builds one shader. Roughly 17 ms
- for the compile against 1 ms for the pipeline, so splitting the levels is worth
- seventeen eighteenths of the cost.
+ over one module. Debug lines and `material.side` both ask, and under a single
+ key each called the compiler again on input it had already compiled: measured
+ at `compiles=2, hits=0` for a `MeshPass.init` that builds one shader. Roughly
+ 17 ms for the compile against 1 ms for the pipeline, so splitting the levels is
+ worth seventeen eighteenths of the cost.
 *>
 struct CachedModule
 {
 	ulong hash;
-	// The source that produced it, kept so a hash *hit* can be confirmed rather
+	// The inputs that produced it, kept so a hash *hit* can be confirmed rather
 	// than trusted — the same rule `gpu/texture.c3` follows when it compares
 	// dimensions before believing its content hash. A 64-bit collision here would
 	// build a pipeline out of a different shader, which renders something plausible
 	// and wrong.
-	String source;
+	String key;
 	ShaderModule mod;
 	// How many `CachedPipeline` entries were built from it. Not how many callers
 	// asked: two render states over one source are two entries and one module, and
@@ -1868,7 +1855,7 @@ struct CachedPipeline
  Pipelines by content hash.
 
  An agent iterating on a shader in a loop would otherwise create hundreds of
- `VkPipeline` objects in a session, and a hit must skip the Slang call entirely
+ `VkPipeline` objects in a session, and a hit must skip the compile entirely
  rather than just the pipeline creation, because compilation is the expensive
  half — about 17 ms per compile against roughly 1 ms for the pipeline.
 
@@ -1884,8 +1871,8 @@ struct PipelineCache
 	// Two levels, keyed differently. See `CachedModule` for why they are not one.
 	List{CachedModule*} modules;
 	List{CachedPipeline*} entries;
-	// How many times Slang was actually invoked, and how many acquires were
-	// answered without it. Not diagnostics: `the_pipeline_cache_skips_the_compile`
+	// How many times the compiler was actually invoked, and how many acquires
+	// were answered without it. Not diagnostics: `the_pipeline_cache_skips_the_compile`
 	// asserts on these, because "the same pointer came back" would also be true of
 	// a cache that recompiled and threw the result away.
 	uint compiles;
@@ -1894,10 +1881,10 @@ struct PipelineCache
 	// hit there, which is the case the disk cache exists for and the one the
 	// in-memory counters above cannot see.
 	// 
-	// `compiles` keeps meaning "Slang ran", which is why this is a counter of its
-	// own. Every existing test that asserts on `compiles` is asserting about
-	// *Slang*, and a disk hit that incremented it would turn all of them into tests
-	// of the wrong cache.
+	// `compiles` keeps meaning "the compiler ran", which is why this is a counter
+	// of its own. Every existing test that asserts on `compiles` is asserting
+	// about a compile, and a disk hit that incremented it would turn all of them
+	// into tests of the wrong cache.
 	uint disk_hits;
 	// How many `VkPipeline` objects were built. Separate from `compiles` because
 	// they are no longer the same number, and the whole point of the split is that
@@ -1939,18 +1926,49 @@ fn void PipelineCache.init(&self)
 }
 
 <*
- The compiled module for this source, compiling it if it is new.
+ The key a def compile is cached under: the pass and the scripted half's
+ declarations, in one canonical string.
+
+ The generated module text would be the exact key, but building it here would
+ mean assembling every module twice — once to key it and once to compile it. The
+ inputs decide the text, so keying on them is the same answer with half the
+ work; `disk_cache.c3` still keys the stored file on the text itself.
+*>
+fn String module_key(
+	ShaderPass pass,
+	String body,
+	MaterialUniform[] uniforms,
+	MaterialTexture[] textures,
+	String vertex,
+	bool bake) @local
+{
+	DString out;
+	out.tinit(256 + body.len + vertex.len);
+	out.appendf("pass=%d;bake=%s;", (int)pass, bake ? "1" : "0");
+	out.append_string(body);
+	out.append_char('\x1f');
+	foreach (uniform : uniforms)
+	{
+		out.appendf("%s:%d:%d;", uniform.name, uniform.components, uniform.rows);
+	}
+	out.append_char('\x1f');
+	foreach (texture : textures) out.appendf("%s;", texture.name);
+	out.append_char('\x1f');
+	out.append_string(vertex);
+	return out.copy_str(mem);
+}
+
+<*
+ The compiled module for these inputs, compiling it if it is new.
 
  Split out of `acquire` because it is the level with the cost in it: the SPIR-V
- depends on the source and on nothing else, so two render states over one shader
+ depends on the def and on nothing else, so two render states over one shader
  come through here once.
 
  @return `Borrowed from the cache, which owns it. Null is never returned — a failure is a fault.`
 *>
 fn CachedModule*? PipelineCache.module_for(
 	&self,
-	String source,
-	String name,
 	ShaderPass pass,
 	String* diagnostic,
 	String body = "",
@@ -1959,13 +1977,15 @@ fn CachedModule*? PipelineCache.module_for(
 	String vertex = "",
 	bool bake = false)
 {
-	ulong hash = content_hash((char[])source);
+	String key = module_key(pass, body, uniforms, textures, vertex, bake);
+	ulong hash = content_hash((char[])key);
 
 	foreach (existing : self.modules)
 	{
 		if (existing.hash != hash) continue;
-		// Identity, not the hash — see `CachedModule.source`.
-		if (existing.source != source) continue;
+		// Identity, not the hash — see `CachedModule.key`.
+		if (existing.key != key) continue;
+		key.free(mem);
 		self.hits++;
 		return existing;
 	}
@@ -1975,10 +1995,16 @@ fn CachedModule*? PipelineCache.module_for(
 	// line is unchanged by which side answered, the diagnostic included: a stored
 	// module carries the warning it was compiled with.
 	bool ran         = false;
-	ShaderModule mod = compile_shader(
-		pass, source, name, MESH_ENTRIES[..], &ran,
+	ShaderModule? maybe = compile_shader(
+		pass, &ran,
 		body: body, uniforms: uniforms, textures: textures, vertex: vertex, bake: bake
-	)!;
+	);
+	if (catch err = maybe)
+	{
+		key.free(mem);
+		return err~;
+	}
+	ShaderModule mod = maybe;
 	if (ran)
 	{
 		self.compiles++;
@@ -2002,58 +2028,55 @@ fn CachedModule*? PipelineCache.module_for(
 		// caller as though it were a shader, and the next caller is usually the
 		// agent having just fixed the typo.
 		mod.free();
+		key.free(mem);
 		return SHADER_COMPILE_FAILED~;
 	}
 	if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
 
 	CachedModule* entry = mem::new(CachedModule);
 	entry.hash = hash;
-	entry.source = source.copy(mem);
+	entry.key = key;
 	entry.mod = mod;
 	self.modules.push(entry);
 	return entry;
 }
 
 <*
- The pipeline for this source and this render state, compiling it if it is new.
+ The pipeline for this pass and this render state, compiling it if it is new.
 
- `diagnostic`, when non-null, receives Slang's text — on failure and on success
- alike, since a warning arrives with `ok == true` and is worth surfacing. The
- caller owns the string. Passing null prints to stderr instead, which is what the
- CLI and the built-in mesh pipeline want.
+ `diagnostic`, when non-null, receives the compiler's text — on failure and on
+ success alike, since a warning arrives with `ok == true` and is worth surfacing.
+ The caller owns the string. Passing null prints to stderr instead, which is what
+ the CLI and the built-in mesh pipeline want.
 
- @param name : `What diagnostics call the source.`
- @param state : `Topology, cull mode and depth behaviour. Part of the key, so two states over one source are two pipelines and one compile.`
- @param [out] diagnostic : `Receives Slang's output verbatim, or is left alone if null. Set on warnings as well as errors — check the fault, not this.`
+ @param state : `Topology, cull mode and depth behaviour. Part of the key, so two states over one module are two pipelines and one compile.`
+ @param [out] diagnostic : `Receives the compiler's output verbatim, or is left alone if null. Set on warnings as well as errors — check the fault, not this.`
  @return `A pointer owned by the cache. Valid until the cache is freed.`
 *>
 fn MeshPipeline*? PipelineCache.acquire(
 	&self,
 	Gpu* gpu,
 	Target* target,
-	String source,
-	String name,
 	PipelineState state,
 	ShaderPass pass,
 	String* diagnostic = null,
 	PushFieldLayout[] contract = MESH_PUSH_FIELDS[..],
 	// The script's half, for `MESH_MATERIAL`: the body to splice and the
-	// declarations the def emits around it. Empty for every built-in pass,
-	// which compiles the same source through either compiler.
+	// declarations the def emits around it. Empty for every built-in pass.
 	String body = "",
 	MaterialUniform[] uniforms = {},
 	MaterialTexture[] textures = { },
 	String vertex = "",
 	bool bake = false)
 {
-	// The module first, and by source alone. A state this cache has not seen before
-	// must not reach Slang: `CachedModule` has the measurement.
-	CachedModule* compiled = self.module_for(source, name, pass, diagnostic, body, uniforms, textures, vertex, bake)!;
+	// The module first, and by its inputs alone. A state this cache has not seen
+	// before must not reach the compiler: `CachedModule` has the measurement.
+	CachedModule* compiled = self.module_for(pass, diagnostic, body, uniforms, textures, vertex, bake)!;
 
 	foreach (entry : self.entries)
 	{
 		// Pointer identity is exact here in a way a hash is not — both entries came
-		// out of `module_for`, which has already confirmed the source.
+		// out of `module_for`, which has already confirmed the inputs.
 		if (entry.compiled != compiled || !entry.state.equals(state)) continue;
 		// A hit takes a borrow like a miss does, so the caller's `release` is the
 		// same call either way and does not have to know which it got.
@@ -2210,7 +2233,7 @@ fn void PipelineCache.drop_module(&self, CachedModule* compiled)
 		break;
 	}
 	compiled.mod.free();
-	if (compiled.source.ptr != null) compiled.source.free(mem);
+	if (compiled.key.ptr != null) compiled.key.free(mem);
 	mem::free(compiled);
 }
 
@@ -2230,7 +2253,7 @@ fn void PipelineCache.free(&self, Gpu* gpu)
 	foreach (compiled : self.modules)
 	{
 		compiled.mod.free();
-		if (compiled.source.ptr != null) compiled.source.free(mem);
+		if (compiled.key.ptr != null) compiled.key.free(mem);
 		mem::free(compiled);
 	}
 	self.modules.free();

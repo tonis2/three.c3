@@ -1,27 +1,16 @@
 <*
- A post-processing pass, as a string: the agent's `float3 post(Post p)` and
- everything Slang needs around it.
+ A post pass's declarations, checked before a module is generated around them.
 
  `material_source.c3`'s counterpart, applied to the frame instead of to a
- surface. The two share `shader/assemble.c3` — the marker walk and the `#line`
- arithmetic — and nothing else:
-
- material                post
- template         material.slang          post.slang
- body             float3 shade(Surface)   float3 post(Post)
- push block       76 bytes of mesh        16 bytes of `info`
- budget           52 bytes                112 bytes
- tables           yes, `//@rows`          no — there are no instances
- bindings         the base colour map     the frame before and image A
+ surface: the body is `fn float3 post(Post p)`, its uniforms are reached through
+ `p.uniforms`, and its samplers are declared beside the four the engine reserves.
 
  `info` is a `float4` at offset 0: the target's extent in `xy`, seconds since the
  shader was set in `z`, and a fourth component reserved rather than removed. A
  scalar-layout block wants four-byte alignment and nothing more, so the fourth
  float is free — a fifth *field* would not be, since every uniform after it would
- move and `POST_PUSH_FIELDS` pins `info` at 0+16. That leaves 112 of the 128
- every device must offer, against a material's 52: a post pass is the one shader
- here with almost the whole block to itself, which compensates for having no
- vertex data, no instance array and no scene at all.
+ move and `POST_PUSH_FIELDS` pins `info` at 0+16. That leaves 104 of the 128
+ every device must offer for a script's own uniforms.
 
  The diagnostic is a value rather than a line on stderr, so the text can go
  inside the exception a script catches. It uses a separate buffer from the
@@ -67,7 +56,7 @@ const uint POST_UNIFORM_BUDGET = 104;
 const uint POST_PUSH_START = 24;
 
 $assert POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].offset + POST_PUSH_FIELDS[POST_PUSH_FIELDS.len - 1].size
-	== POST_PUSH_START : "`info` moved; post uniforms no longer start where post.slang puts them";
+	== POST_PUSH_START : "`info` moved; post uniforms no longer start where the post contract ends";
 $assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET : "the post uniform budget and the push budget disagree";
 
 // What the agent's own lines are called in a diagnostic: `post:3:24` is a
@@ -75,18 +64,18 @@ $assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET : "the post uniform
 const String POST_BODY_NAME = "post";
 
 // What everything three.c3 generated is called. Self-describing rather than
-// short, because Slang's `candidate:` notes point into the preamble whatever the
-// body did.
+// short, because a note from inside the generated module names this file
+// whatever the body did.
 const String POST_PREAMBLE_NAME = "three.post";
 
 <*
  Names a post uniform may not take.
 
  The same two groups as `MATERIAL_RESERVED`: a short list of collisions turned
- into a good message, with the long tail left to fail as an ordinary Slang
+ into a good message, with the long tail left to fail as an ordinary compiler
  diagnostic at `post:<line>`, where the agent can act on it.
 
- The first group is what `shaders/post.slang` declares. Three break in ways the
+ The first group is what the generated module declares. Three break in ways the
  message would not otherwise explain:
 
  - `info` is a *field* of the same struct the uniforms are appended to, so a
@@ -200,9 +189,9 @@ char[POST_DIAGNOSTIC_MAX] post_message @local;
 usz post_message_len @local;
 
 <*
- What the last `post_source` refused, in words.
+ What the last `validate_post` refused, in words.
 
- @return `A view valid until the next call to post_source. Empty if the last call succeeded.`
+ @return `A view valid until the next call to validate_post. Empty if the last call succeeded.`
 *>
 fn String post_diagnostic() => (String)post_message[:post_message_len];
 
@@ -227,18 +216,18 @@ fn uint post_uniform_bytes(MaterialUniform[] uniforms)
 }
 
 <*
- Everything that can be refused before a line of Slang is written.
+ Everything that can be refused before a module is generated.
 
  The body first, then each name, then the budget — `validate_material`'s order
  and its argument: "these thirty floats do not fit" is only useful once each of
  them is known to be a real uniform.
 
  @return ? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return ? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the template already uses, is a Slang keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
+ @return ? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the generated module already uses, is a keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
  @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
  @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
 *>
-fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures) @local
+fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures)
 {
 	@pool()
 	{
@@ -310,8 +299,8 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 			// The one rule a material has that this inverts. A material's arrays
 			// are a table indexed by `Surface.variant`, the per-instance row
 			// selector — and a post pass draws one triangle over the whole frame,
-			// so there is no instance for a row to belong to and `post.slang` has
-			// no `//@rows` to generate a bound from. Refused with the reason
+			// so there is no instance for a row to belong to and the generated
+			// module has no row bound to clamp against. Refused with the reason
 			// rather than silently flattened, because a caller asking for four
 			// rows believes it can index them.
 			if (uniform_rows_of(uniform) > 1)
@@ -359,47 +348,4 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 
 		post_note("");
 	};
-}
-
-<*
- Assembles the full Slang module for a post pass.
-
- Self-contained, like `material_source`'s result: its own `PushData`, its own
- binding and both entry points, handed to `compile_slang_cached` as a string.
- Nothing is compiled here and no GPU is involved.
-
- @param fragment : `The agent's body. Must define float3 post(Post p); everything else is theirs.`
- @param uniforms : `Names and widths, in the order they should be laid out. Reached from the body as bare names. rows must be 0 or 1.`
- @param textures : `Samplers the body wants, in declaration order. Bindings 2..N, generated from that order — a post pass reserves two.`
- @return `The whole module, allocated from allocator and owned by the caller.`
- @return ? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence.`
- @return ? POST_NAME_INVALID : `A uniform or texture name, a width or a row count is one this cannot generate. post_diagnostic() names it.`
- @return ? POST_TOO_MANY_UNIFORMS : `The uniforms do not fit in what info leaves of the push block.`
- @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT. post_diagnostic() has the count.`
- @return ? SHADER_NOT_FOUND : `shaders/post.slang is not on the search path — the same condition, and the same fix, as a missing mesh.slang.`
-*>
-fn String? post_source(
-	String fragment,
-	MaterialUniform[] uniforms,
-	alloc::Allocator allocator = mem, // After the allocator, for `material_source`'s reason: every caller written
-	// before textures existed passes it positionally.
-	MaterialTexture[] textures = { }
-)
-{
-	validate_post(fragment, uniforms, textures)!;
-	// No vertex body, and no way to pass one: `post.slang` has no `//@vertex`
-	// marker, because a post pass's three vertices are `SV_VertexID` arithmetic
-	// with no geometry behind them and nothing an agent could usefully move.
-	return assemble_shader(
-		ShaderFile.POST_SLANG,
-		fragment,
-		uniforms,
-		textures,
-		"",
-		POST_BODY_NAME,
-		POST_BODY_NAME,
-		POST_PREAMBLE_NAME,
-		POST_BINDING_FIRST,
-		allocator
-	);
 }

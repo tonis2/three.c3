@@ -5,12 +5,12 @@
 #
 #     ./packaging/stage-libs.sh lib/vulkan.c3l/macos-aarch64 dist/three-macos-arm64
 #
-# The one caller left is the Vulkan driver — Slang is linked into the binary now
-# and has nothing to stage. `lib/vulkan.c3l/<target>/` holds a real file plus
-# aliases, and a directory of that shape is what this exists for: a plain
-# `cp -RL` dereferences each name separately and ships the same bytes once per
-# alias. Measured on the old Slang directory, where three of four names resolved
-# to the same 27 MB file: a 115 MB bundle holding 61 MB of content.
+# The one caller left is the Vulkan driver — every other library is linked into
+# the binary now and has nothing to stage. `lib/vulkan.c3l/<target>/` holds a
+# real file plus aliases, and a directory of that shape is what this exists for:
+# a plain `cp -RL` dereferences each name separately and ships the same bytes
+# once per alias. One measured case had three of four names resolving to the
+# same 27 MB file: a 115 MB bundle holding 61 MB of content.
 #
 # So: one real copy per distinct target, and every other name recreated as a
 # relative symlink beside it. The loader is looking for a NAME, and both the

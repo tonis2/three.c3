@@ -15,9 +15,9 @@
  `MeshPush`, walked from the C3 struct the pass fills.
 
  `built_in` is the one thing the material half cannot know about itself: the
- built-in draw path applies the record's COLOR_0 to the albedo the way
- `mesh.slang` does, and a scripted module hands the attribute to its body
- instead, which decides. The def writes that choice out as `MATERIAL_BUILT_IN`
+ built-in draw path applies the record's COLOR_0 to the albedo as the built-in
+ look in `material.shady` does, and a scripted module hands the attribute to its
+ body instead, which decides. The def writes that choice out as `MATERIAL_BUILT_IN`
  above the half that reads it, so it is part of the module's text and therefore
  of its pipeline's identity.
 
@@ -69,11 +69,11 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 
 		// **The one line that tells the material half which program it is.**
 		// The built-in draw path's fragment stage applies COLOR_0 to the albedo
-		// the way `mesh.slang` does, because it has no body to decide; a
-		// scripted module has one, so the attribute reaches it as a field and
-		// the body chooses. A plain constant rather than a spec constant: these
-		// are two texts with different pipelines, so the pipeline cache stays
-		// keyed by the source that produced it.
+		// as `material.shady`'s built-in look does, because it has no body to
+		// decide; a scripted module has one, so the attribute reaches it as a
+		// field and the body chooses. A plain constant rather than a spec
+		// constant: these are two texts with different pipelines, so the
+		// pipeline cache stays keyed by the source that produced it.
 		{ .name = "three.builtin", .source = built_in
 			? "const bool MATERIAL_BUILT_IN = true;\n"
 			: "const bool MATERIAL_BUILT_IN = false;\n" },
@@ -106,7 +106,7 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 
 <*
  What a material with no script gets as its `shade()` body: the built-in look,
- which is what `mesh.slang` computes for itself when nothing replaces it. It is
+ which is what `material.shady` computes when no body replaces it. It is
  passed with `built_in: true`, because the fragment half has to fold the record's
  COLOR_0 into the albedo and the alpha for exactly that shader's answer.
 *>

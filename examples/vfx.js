@@ -154,15 +154,15 @@ const shieldMat = new three.ShaderMaterial({
 	// darkest input comes back as the brightest colour, over the whole frame,
 	// which looks like a shader bug and is a wrap mode. Half a texel in at each
 	// end is the fix, and it is why every lookup here goes through this.
-	float2 lut(float k)
+	fn float2 lut(float k)
 	{
 	    return float2(0.0078 + saturate(k) * 0.9844, 0.5);
 	}
 
-	float3 shade(Surface s)
+	fn float3 shade(Surface s)
 	{
 	    float3 n = normalize(s.normal);
-	    float3 v = normalize(eye - s.position);
+	    float3 v = normalize(s.uniforms.eye - s.position);
 
 	    // The rim: everything that faces away from the camera glows.
 	    //
@@ -176,21 +176,21 @@ const shieldMat = new three.ShaderMaterial({
 
 	    // The lattice, drifting, broken up by the coarse field so it reads as
 	    // energy rather than as a decal.
-	    float drift = noise_map.Sample(s.uv * 2.0 + float2(t * 0.03, t * 0.02)).r;
-	    float cells = hex_map.Sample(s.uv * 3.0 + float2(t * 0.02, 0.0) + drift * 0.05).r;
+	    float drift = noise_map().Sample(s.uv * 2.0 + float2(s.uniforms.t * 0.03, s.uniforms.t * 0.02)).r;
+	    float cells = hex_map().Sample(s.uv * 3.0 + float2(s.uniforms.t * 0.02, 0.0) + drift * 0.05).r;
 
 	    // The impact ring: a band travelling down from the top of the dome,
 	    // expanding as it goes. hit is 1 at the moment of impact and decays.
-	    float band = 1.0 - abs(s.uv.y - (1.0 - hit)) * 8.0;
-	    float ring = saturate(band) * hit;
+	    float band = 1.0 - abs(s.uv.y - (1.0 - s.uniforms.hit)) * 8.0;
+	    float ring = saturate(band) * s.uniforms.hit;
 
 	    float energy = saturate(rim * 0.9 + cells * (0.12 + rim * 0.5) + ring * 1.6);
-	    float3 colour = ramp_map.Sample(lut(energy)).rgb;
+	    float3 colour = ramp_map().Sample(lut(energy)).rgb;
 
 	    // Channel view, for the 1 key: 1 rim, 2 lattice, 3 ring, 0 the lot.
-	    if (channel > 0.5 && channel < 1.5) return float3(rim);
-	    if (channel > 1.5 && channel < 2.5) return float3(cells);
-	    if (channel > 2.5) return float3(ring);
+	    if (s.uniforms.channel > 0.5 && s.uniforms.channel < 1.5) return float3(rim);
+	    if (s.uniforms.channel > 1.5 && s.uniforms.channel < 2.5) return float3(cells);
+	    if (s.uniforms.channel > 2.5) return float3(ring);
 
 	    return colour * energy * 1.5;
 	}`,
@@ -202,17 +202,17 @@ const shieldMat = new three.ShaderMaterial({
 	// `v.local` rather than `v.position`: the band should ride the dome's own
 	// parameterisation wherever the dome is, not a plane of the world.
 	vertex: `
-	void displace(inout Vertex v)
+	fn void displace(inout Vertex v)
 	{
-	    float band = 1.0 - abs(v.uv.y - (1.0 - hit)) * 8.0;
+	    float band = 1.0 - abs(v.uv.y - (1.0 - v.uniforms.hit)) * 8.0;
 	    // Not called push: a uniform reaches your body as push.name, so a local
 	    // of that name shadows the block every one of them goes through, and the
 	    // error arrives as "t is not a member of float" against a line of
 	    // generated code you have never seen.
-	    float bulge = saturate(band) * hit;
+	    float bulge = saturate(band) * v.uniforms.hit;
 	    // A little breathing even at rest, so the shield reads as held rather
 	    // than as a static mesh waiting for something to happen.
-	    float idle = sin(t * 1.6 + v.local.y * 0.8) * 0.03;
+	    float idle = sin(v.uniforms.t * 1.6 + v.local.y * 0.8) * 0.03;
 	    v.position += normalize(v.normal) * (bulge * 0.55 + idle);
 	}`,
 	bounds: 0.6,
@@ -241,25 +241,25 @@ const coreMat = new three.ShaderMaterial({
 	// darkest input comes back as the brightest colour, over the whole frame,
 	// which looks like a shader bug and is a wrap mode. Half a texel in at each
 	// end is the fix, and it is why every lookup here goes through this.
-	float2 lut(float k)
+	fn float2 lut(float k)
 	{
 	    return float2(0.0078 + saturate(k) * 0.9844, 0.5);
 	}
 
-	float3 shade(Surface s)
+	fn float3 shade(Surface s)
 	{
-	    float2 warp = warp_map.Sample(s.uv * 1.5 - float2(0.0, t * 0.10)).rg - 0.5;
+	    float2 warp = warp_map().Sample(s.uv * 1.5 - float2(0.0, s.uniforms.t * 0.10)).rg - 0.5;
 	    float2 uv = s.uv + warp * 0.22;
 
-	    float a = noise_map.Sample(uv * 2.0 - float2(0.0, t * 0.35)).r;
-	    float b = noise_map.Sample(uv * 4.0 + float2(t * 0.11, -t * 0.6)).r;
+	    float a = noise_map().Sample(uv * 2.0 - float2(0.0, s.uniforms.t * 0.35)).r;
+	    float b = noise_map().Sample(uv * 4.0 + float2(s.uniforms.t * 0.11, -s.uniforms.t * 0.6)).r;
 
 	    // Hotter towards the middle of the sphere's parameterisation, so the
 	    // shape reads as a core with a corona rather than as a noisy ball.
 	    float falloff = 1.0 - abs(s.uv.y - 0.5) * 1.7;
-	    float heat = saturate(a * b * 3.2 * saturate(falloff)) * gain;
+	    float heat = saturate(a * b * 3.2 * saturate(falloff)) * s.uniforms.gain;
 
-	    return ramp_map.Sample(lut(heat)).rgb * heat * 2.2;
+	    return ramp_map().Sample(lut(heat)).rgb * heat * 2.2;
 	}`,
 	// The core boils. Two noise taps at different speeds along the normal, which
 	// is what makes a sphere read as a mass of burning gas rather than as a
@@ -269,11 +269,11 @@ const coreMat = new three.ShaderMaterial({
 	// to derive a mip level from, so the LOD is stated. This is the one thing
 	// about sampling that differs between the two stages.
 	vertex: `
-	void displace(inout Vertex v)
+	fn void displace(inout Vertex v)
 	{
-	    float a = warp_map.SampleLevel(v.uv * 2.0 + float2(0.0, t * 0.20), 0).r;
-	    float b = noise_map.SampleLevel(v.uv * 3.0 - float2(t * 0.15, 0.0), 0).r;
-	    v.position += normalize(v.normal) * ((a + b - 1.0) * 0.42 * gain);
+	    float a = warp_map().SampleLevel(v.uv * 2.0 + float2(0.0, v.uniforms.t * 0.20), 0).r;
+	    float b = noise_map().SampleLevel(v.uv * 3.0 - float2(v.uniforms.t * 0.15, 0.0), 0).r;
+	    v.position += normalize(v.normal) * ((a + b - 1.0) * 0.42 * v.uniforms.gain);
 	}`,
 	bounds: 0.6,
 	uniforms: { t: 0, gain: 1 },
@@ -317,21 +317,21 @@ const dissolveMat = new three.ShaderMaterial({
 	// darkest input comes back as the brightest colour, over the whole frame,
 	// which looks like a shader bug and is a wrap mode. Half a texel in at each
 	// end is the fix, and it is why every lookup here goes through this.
-	float2 lut(float k)
+	fn float2 lut(float k)
 	{
 	    return float2(0.0078 + saturate(k) * 0.9844, 0.5);
 	}
 
-	float3 shade(Surface s)
+	fn float3 shade(Surface s)
 	{
-	    float n = noise_map.Sample(s.uv * 1.1).r;
+	    float n = noise_map().Sample(s.uv * 1.1).r;
 
 	    // Everything the front has already passed is gone. Not faded — gone:
 	    // there is no alpha to fade, and a discard leaves the depth buffer
 	    // correct for whatever is behind it.
-	    if (n < edge) discard;
+	    if (n < s.uniforms.edge) discard;
 
-	    float3 plate = plate_map.Sample(s.uv).rgb * lambert(s.normal);
+	    float3 plate = plate_map().Sample(s.uv).rgb * lambert(s, s.normal);
 
 	    // The band just ahead of the front, read through the burn ramp so the
 	    // edge glows white-hot and cools off over about a tenth of the range.
@@ -339,8 +339,8 @@ const dissolveMat = new three.ShaderMaterial({
 	    // Gated on the front having actually started: at edge 0 the band would
 	    // still cover every pixel whose noise is under about a tenth, which is a
 	    // crate speckled with embers before anything has been asked to dissolve.
-	    float heat = edge < 0.002 ? 0.0 : saturate(1.0 - (n - edge) * 9.0);
-	    float3 burn = ramp_map.Sample(lut(1.0 - heat)).rgb;
+	    float heat = s.uniforms.edge < 0.002 ? 0.0 : saturate(1.0 - (n - s.uniforms.edge) * 9.0);
+	    float3 burn = ramp_map().Sample(lut(1.0 - heat)).rgb;
 
 	    return lerp(plate, burn * 2.4, heat * heat);
 	}`,
@@ -351,15 +351,15 @@ const dissolveMat = new three.ShaderMaterial({
 	//
 	// `hash11` is in scope in a vertex body as well as a fragment one.
 	vertex: `
-	void displace(inout Vertex v)
+	fn void displace(inout Vertex v)
 	{
-	    if (edge < 0.002) return;
+	    if (v.uniforms.edge < 0.002) return;
 	    float3 dir = normalize(float3(
 	        hash11(float(v.index) * 1.0) - 0.5,
 	        hash11(float(v.index) * 2.3) * 0.6,
 	        hash11(float(v.index) * 3.7) - 0.5
 	    ) + 1e-5);
-	    v.position += dir * edge * edge * 0.9;
+	    v.position += dir * v.uniforms.edge * v.uniforms.edge * 0.9;
 	}`,
 	bounds: 1.0,
 	uniforms: { edge: 0 },
@@ -396,32 +396,32 @@ for (let i = 0; i < 24; i++) {
 const bannerMat = new three.ShaderMaterial({
 	side: three.DoubleSide,
 	vertex: `
-	void displace(inout Vertex v)
+	fn void displace(inout Vertex v)
 	{
 	    // Pinned at the top edge, free at the bottom: the amplitude grows with
 	    // distance from the pole, which is what stops it looking like a sheet
 	    // being waved from both ends.
 	    float droop = saturate(0.5 - v.local.y);
-	    float wave = sin(v.local.y * 2.6 - t * 2.4) + 0.4 * sin(v.local.x * 3.1 + t * 1.7);
+	    float wave = sin(v.local.y * 2.6 - v.uniforms.t * 2.4) + 0.4 * sin(v.local.x * 3.1 + v.uniforms.t * 1.7);
 	    v.position.z += wave * droop * 0.55;
 
 	    // The normal the wave implies: the surface tilts by the slope of the
 	    // displacement, so the derivative of the sine is the whole of it. Without
 	    // this the banner moves and the shading does not, which reads as a
 	    // texture sliding over a still object.
-	    float slope = cos(v.local.y * 2.6 - t * 2.4) * 2.6 * droop * 0.55;
+	    float slope = cos(v.local.y * 2.6 - v.uniforms.t * 2.4) * 2.6 * droop * 0.55;
 	    v.normal = normalize(float3(v.normal.x, v.normal.y - slope, 1.0));
 	}`,
 	bounds: 0.7,
 	fragment: `
-	float2 lut(float k)
+	fn float2 lut(float k)
 	{
 	    return float2(0.0078 + saturate(k) * 0.9844, 0.5);
 	}
-	float3 shade(Surface s)
+	fn float3 shade(Surface s)
 	{
-	    float3 cloth = ramp_map.Sample(lut(1.0 - s.uv.y * 0.8)).rgb;
-	    return cloth * s.color.rgb * (0.35 + 0.65 * lambert(s.normal));
+	    float3 cloth = ramp_map().Sample(lut(1.0 - s.uv.y * 0.8)).rgb;
+	    return cloth * s.color.rgb * (0.35 + 0.65 * lambert(s, s.normal));
 	}`,
 	uniforms: { t: 0 },
 	textures: { ramp_map: clothRamp },
@@ -451,18 +451,18 @@ const POST_BODY = `
 // The same half-texel inset the materials use: a lookup table sampled at 0 or 1
 // under a repeating sampler blends the two ends of the ramp together, and the
 // symptom is a frame that comes back the colour of the ramp's bright end.
-float2 lut(float k)
+fn float2 lut(float k)
 {
     return float2(0.0078 + saturate(k) * 0.9844, 0.5);
 }
 
-float3 post(Post p)
+fn float3 post(Post p)
 {
     float2 uv = p.uv;
 
     // The ring, in aspect-corrected space so it is a circle and not an ellipse.
     float aspect = p.resolution.x / p.resolution.y;
-    float2 d = float2((uv.x - centre.x) * aspect, uv.y - centre.y);
+    float2 d = float2((uv.x - p.uniforms.centre.x) * aspect, uv.y - p.uniforms.centre.y);
     float r = length(d);
 
     // The ring is computed whether or not it is showing, because the flash at
@@ -470,8 +470,8 @@ float3 post(Post p)
     // the one thing that cannot be got away with here. Near-black is 0.005 in
     // linear, so a flat 0.05 lifts the background to mid-grey and the effect
     // reads as the exposure breaking rather than as an impact.
-    float front = (1.0 - shock) * 0.9;
-    float ring = (1.0 - saturate(abs(r - front) * 14.0)) * shock;
+    float front = (1.0 - p.uniforms.shock) * 0.9;
+    float ring = (1.0 - saturate(abs(r - front) * 14.0)) * p.uniforms.shock;
     uv += normalize(d + 1e-5) * ring * 0.05;
 
     float3 c = scene.Sample(uv).rgb;
@@ -483,12 +483,12 @@ float3 post(Post p)
         grade_lut.Sample(lut(c.g)).g,
         grade_lut.Sample(lut(c.b)).b
     );
-    c = lerp(c, graded, amount);
+    c = lerp(c, graded, p.uniforms.amount);
 
     // Grain, tiled by the frame rather than by uv so it does not stretch with
     // the window, and scrolled so it is not a fixed pattern.
     float g = grain_map.Sample(p.uv * p.resolution / 128.0 + float2(frac(p.time * 7.0), frac(p.time * 3.0))).r;
-    c += (g - 0.5) * grain;
+    c += (g - 0.5) * p.uniforms.grain;
 
     // The flash, on the ring and nowhere else.
     c += float3(0.55, 0.75, 1.0) * ring * ring * 0.5;

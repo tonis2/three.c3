@@ -3,7 +3,7 @@
  wants.
 
  `shader/reflect.c3` reads the *layout* out of the compiled module —
- `MeshPipeline.init` hands Slang's answer to `vkCreateDescriptorSetLayout`
+ `MeshPipeline.init` hands that layout to `vkCreateDescriptorSetLayout`
  unchanged, and nothing in C3 names `base_color_map` or knows it is a combined
  image sampler. This file is the other end: the write site, keyed on those same
  reflected bindings, so a material with three samplers and a material with none
@@ -151,11 +151,11 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
  instead; this is what is left, and a post pass's samplers are still bindings of
  its own set.
 
- The name is looked up in what Slang said the module contains rather than in
- anything this side remembers, so a shader and the thing holding its textures
- cannot disagree about which sampler is which. It is also why nothing above
- `shader/assemble.c3` spells a binding number: a script writes `grade_lut`, and
- this is where that becomes a `4`.
+ The name is looked up in the module's own reflection rather than in anything
+ this side remembers, so a shader and the thing holding its textures cannot
+ disagree about which sampler is which. It is also why nothing in the script API
+ spells a binding number: a script writes `grade_lut`, and this is where that
+ becomes a `4`.
 
  Zero means no, and can, because zero is never a legal answer: binding 0 is the
  template's own `base_color_map` or `prev`, reached through `material.map` and
@@ -164,9 +164,9 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
  a post shader from reaching `scene` at binding 1 by declaring a texture called
  something else.
 
- A name the body declared and never sampled may be absent here — Slang may drop
- a parameter nothing reads — and that is indistinguishable from a typo, so the
- two setters answer with a sentence naming both possibilities.
+ A name the body declared and never sampled may be absent here — the compiler
+ may drop a parameter nothing reads — and that is indistinguishable from a typo,
+ so the two setters answer with a sentence naming both possibilities.
 
  @param first : `The first binding that is the agent's — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST.`
  @return `The binding index, or 0 for a name this shader has no sampler for.`
@@ -186,10 +186,11 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
  Does this pipeline's layout have a sampler at this exact binding?
 
  The question the *reserved* bindings have to ask, because the answer is not
- always yes: a template declares its own samplers unconditionally, but reflection
- reports the linked program and Slang may drop a parameter nothing reads. A post
- body that never touches `p.scene` gives it every reason to drop `scene`, and
- pushing a write for a binding the layout does not declare is a validation error.
+ always yes: a def declares its own samplers unconditionally, but reflection
+ reports the linked program and the compiler may drop a parameter nothing reads.
+ A post body that never touches `p.scene` gives it every reason to drop `scene`,
+ and pushing a write for a binding the layout does not declare is a validation
+ error.
 
  So the reserved bindings ask the same question the agent's own do
  (`sampler_binding_of`), by index instead of by name.

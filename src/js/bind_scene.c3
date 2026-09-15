@@ -1561,7 +1561,7 @@ fn void js_set_color(
  Negative is clamped to zero rather than refused: the row is a `uint` on the way
  to the GPU, and a script that computed `i - 1` at `i = 0` should get the first
  row rather than four billion. The far end is clamped in the shader against the
- rows the material actually declared — see `shaders/material.slang`.
+ rows the material actually declared — see `shaders/material.shady`.
 *>
 fn void js_set_variant(
 	qjs::ContextRef ctx,
