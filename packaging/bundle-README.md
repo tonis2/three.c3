@@ -71,16 +71,14 @@ against this bundle can read the API without one.
 
 ## What is in here
 
-    three            the engine, with the Slang shader compiler linked in
+    three            the engine, with the shader compiler linked in
     libvulkan_*      the GPU driver (macOS only — see below)
     SKILL.md         the guide
     docs/            the API reference — see above
     examples/        five scenes to run — see below
     LICENSE
 
-That is the whole list. Earlier releases also carried `libslang-*.dylib`
-beside the binary; the compiler is inside `three` now, so a bundle that still
-has those files is an old one.
+That is the whole list.
 
 ## Requirements
 
@@ -111,13 +109,11 @@ there, so there is nothing to install for Vulkan itself. If a run reports no
 device, update your graphics driver.
 
 One thing may be missing on a bare machine, and it fails before the program
-prints anything: `three.exe` imports `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`
-and `MSVCP140.dll`. Those are the Microsoft Visual C++ runtime — the shader
-compiler linked into the binary is C++ and is built against the shared CRT —
-and they come with almost every application that has ever been installed, so
-most machines already have them. A machine that does not exits with
-`0xC0000135` and no message at all. The fix is the Microsoft Visual C++
-Redistributable for x64, from Microsoft, or:
+prints anything: `three.exe` links the MSVC runtime dynamically, and the
+runtime comes with almost every application that has ever been installed, so
+most machines already have it. A machine that does not exits with `0xC0000135`
+and no message at all. The fix is the Microsoft Visual C++ Redistributable for
+x64, from Microsoft, or:
 
     winget install Microsoft.VCRedist.2015+.x64
 
@@ -140,7 +136,7 @@ somebody's progress — which is why the two are kept apart.
 A game says `three.save.path` if you want the exact folder from inside it.
 
 **Shipping a warm cache.** A `shader-cache/` directory beside the executable is
-read and never written. The `.slangmod` files in it are keyed on the shader
+read and never written. The `.shadymod` files in it are keyed on the shader
 source and the compiler, not on the machine, so the ones a release was built
 with are the ones any machine would compile for itself: copy them in and first
 start drops from about 3.5 seconds to 1.6.
