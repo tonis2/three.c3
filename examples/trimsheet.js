@@ -39,26 +39,26 @@ const PROBE_AMPLITUDE = 0.5;
 
 const SHEET = `
 // The layout, spliced in from the JavaScript above so there is one copy of it.
-static const float ASPECT = ${ASPECT}.0;
-static const float STRIP_ROUGH[${STRIPS}] = { ${LAYOUT.map((s) => s.rough.toFixed(3)).join(', ')} };
-static const float STRIP_METAL[${STRIPS}] = { ${LAYOUT.map((s) => s.metal.toFixed(3)).join(', ')} };
+const float ASPECT = ${ASPECT}.0;
+const float STRIP_ROUGH[${STRIPS}] = { ${LAYOUT.map((s) => s.rough.toFixed(3)).join(', ')} };
+const float STRIP_METAL[${STRIPS}] = { ${LAYOUT.map((s) => s.metal.toFixed(3)).join(', ')} };
 
 // One conversion, used for two opposite reasons. On a colour it is authoring:
 // the numbers below are written the way a picker shows them and this puts them
 // in the linear space the body works in. On a normal or a roughness it is the
 // pre-encode that cancels the target's sRGB write, so the byte in the PNG is the
 // value that was meant.
-float to_linear(float c)
+fn float to_linear(float c)
 {
     return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
 }
 
-float3 data(float3 c)
+fn float3 data(float3 c)
 {
     return float3(to_linear(c.r), to_linear(c.g), to_linear(c.b));
 }
 
-float wrap(float x, float period)
+fn float wrap(float x, float period)
 {
     return x - floor(x / period) * period;
 }
@@ -68,7 +68,7 @@ float wrap(float x, float period)
 // leaves it alone, which is what a strip wants — it has to tile along u and is
 // one band tall, so only x has a period to wrap at. A lattice that does not wrap
 // puts a visible seam at the end of every wall.
-float2 strip_period(float period)
+fn float2 strip_period(float period)
 {
     return float2(period, 0.0);
 }
@@ -83,11 +83,11 @@ struct Trim
     float3 albedo;
     float rough;
     float metal;
-};
+}
 
 // Boards running along u, three across the strip, with the gap between them cut
 // into the height rather than painted into the colour.
-Trim planks(float2 q)
+fn Trim planks(float2 q)
 {
     float rows = 3.0;
     float y = q.y * rows;
@@ -109,7 +109,7 @@ Trim planks(float2 q)
 }
 
 // A plate with a row of domed rivets down the middle and a chamfer at each edge.
-Trim rivets(float2 q)
+fn Trim rivets(float2 q)
 {
     // Both axes in the same units, so a circle here is a circle in texels: the
     // cell is half a q-unit wide and a whole one tall, and x carries the /2 for it.
@@ -133,13 +133,13 @@ Trim rivets(float2 q)
 
 // Running bond: eight bricks across, four courses down, every other course
 // shifted half a brick. The column index wraps so the colour does not seam.
-Trim brick(float2 q)
+fn Trim brick(float2 q)
 {
     float rows = 4.0;
     float y = q.y * rows;
     float course = floor(y);
     float ry = frac(y);
-    float x = q.x + fmod(course, 2.0) * 0.5;
+    float x = q.x + course % 2.0 * 0.5;
     float col = wrap(floor(x), ASPECT);
     float rx = frac(x);
 
@@ -163,7 +163,7 @@ Trim brick(float2 q)
 
 // Four recessed panels with a beveled border — the shape a door or a wainscot is
 // made of, and the one strip whose height is a distance field rather than noise.
-Trim panel(float2 q)
+fn Trim panel(float2 q)
 {
     float sections = 4.0;
     float sx = frac(q.x * sections / ASPECT);
@@ -184,7 +184,7 @@ Trim panel(float2 q)
 
 // A molding profile: it varies across the strip and not along it, which is what
 // makes it a length of trim rather than a pattern.
-Trim molding(float2 q)
+fn Trim molding(float2 q)
 {
     float t = q.y;
     float k = saturate((t - 0.30) / 0.24);
@@ -204,7 +204,7 @@ Trim molding(float2 q)
 
 // Thirty-two square tiles across, four down, each one its own shade and sitting
 // its own fraction of a texel proud of the grout.
-Trim tiles(float2 q)
+fn Trim tiles(float2 q)
 {
     float cells = 4.0;
     float2 g = q * cells;
@@ -225,7 +225,7 @@ Trim tiles(float2 q)
 }
 
 // Cast concrete: low-frequency lumps with pits punched out of them.
-Trim concrete(float2 q)
+fn Trim concrete(float2 q)
 {
     float lumps = fbm2(float2(q.x * 8.0, q.y * 8.0), strip_period(64.0), 5);
     float fine = fbm2(float2(q.x * 40.0, q.y * 40.0), strip_period(320.0), 3);
@@ -241,7 +241,7 @@ Trim concrete(float2 q)
 }
 
 // An ornamental band: a chain of raised lozenges between two rails.
-Trim gold(float2 q)
+fn Trim gold(float2 q)
 {
     float2 g = float2((frac(q.x * 2.0) - 0.5) * 0.5, q.y - 0.5);
     float diamond = abs(g.x) + abs(g.y);
@@ -261,13 +261,13 @@ Trim gold(float2 q)
 // The sheet, as one function of uv. The strip index comes out of v and the strip
 // gets the rest, in a space where one unit of x is one unit of y in texels —
 // which is what keeps a rivet round and a tile square.
-Trim sheet(float2 uv)
+fn Trim sheet(float2 uv)
 {
     float row = uv.y * ${STRIPS}.0;
     int k = int(clamp(floor(row), 0.0, ${STRIPS}.0 - 1.0));
     float2 q = float2(frac(uv.x) * ${ASPECT}.0, frac(row));
 
-    if (probe > 0.5)
+    if (push.uniforms.probe > 0.5)
     {
         // The calibration field: a sine along u, flat along v, amplitude and
         // frequency known to the caller. Nothing else about the sheet is in it.
@@ -295,18 +295,18 @@ Trim sheet(float2 uv)
 // recovered from a stored one. 'relief' is the height range in texels, so the
 // two differences and the constant 1.0 are in the same units and the arctangent
 // the normalize performs is the real slope of the surface.
-float3 surface_normal(float2 uv, float2 texel)
+fn float3 surface_normal(float2 uv, float2 texel)
 {
     float l = sheet(uv - float2(texel.x, 0.0)).h;
     float r = sheet(uv + float2(texel.x, 0.0)).h;
     float u = sheet(uv - float2(0.0, texel.y)).h;
     float d = sheet(uv + float2(0.0, texel.y)).h;
-    return normalize(float3(-(r - l) * 0.5 * relief, -(d - u) * 0.5 * relief, 1.0));
+    return normalize(float3(-(r - l) * 0.5 * push.uniforms.relief, -(d - u) * 0.5 * push.uniforms.relief, 1.0));
 }
 
 // Occlusion by a horizon sweep over the same height function: sixteen taps, and
 // each one asks how far above this texel the field gets in that direction.
-float occlusion(float2 uv, float2 texel)
+fn float occlusion(float2 uv, float2 texel)
 {
     float h0 = sheet(uv).h;
     float sum = 0.0;
@@ -317,21 +317,21 @@ float occlusion(float2 uv, float2 texel)
         for (int j = 1; j <= 2; j++)
         {
             float radius = float(j) * 5.0;
-            float rise = (sheet(uv + dir * texel * radius).h - h0) * relief;
+            float rise = (sheet(uv + dir * texel * radius).h - h0) * push.uniforms.relief;
             sum += saturate(rise / radius);
         }
     }
     return saturate(1.0 - sum / 16.0 * 1.6);
 }
 
-float3 post(Post p)
+fn float3 post(Post p)
 {
     float2 uv = p.uv;
     float2 texel = 1.0 / p.resolution;
 
-    if (channel < 0.5) return sheet(uv).albedo;
+    if (p.uniforms.channel < 0.5) return sheet(uv).albedo;
 
-    if (channel < 1.5)
+    if (p.uniforms.channel < 1.5)
     {
         float3 n = surface_normal(uv, texel);
         return data(n * 0.5 + 0.5);
@@ -375,7 +375,7 @@ const CRACK = `
 
 // The scalar field whose level set is the crack, warped so the level set
 // branches the way a fracture front does instead of meandering like a river.
-float field(float2 p)
+fn float field(float2 p)
 {
     p += 0.45 * float2(fbm2(p * 1.4 + 3.1, 4), fbm2(p * 1.4 - 1.4, 4));
     return fbm2(p, 4);
@@ -395,7 +395,7 @@ float field(float2 p)
 // plenty of places — the first version of this read as splatter. Dividing by the
 // local slope turns the value into a distance to the level set, so the line is
 // the same width along its whole length however the field is behaving under it.
-float crack(float2 uv, float seed, float taper)
+fn float crack(float2 uv, float seed, float taper)
 {
     float2 p = uv * 2.2 + seed * 31.7;
 
@@ -414,7 +414,7 @@ float crack(float2 uv, float seed, float taper)
     return 1.0 - smoothstep(width, width * 2.6, dist);
 }
 
-float3 shade(Surface s)
+fn float3 shade(Surface s)
 {
     // Where this copy stands, hashed — one number, and it is the whole of why
     // these are all different. See plan.md section 27.
@@ -437,7 +437,7 @@ float3 shade(Surface s)
     float depth = smoothstep(0.5, 1.0, core);
     float3 rim = float3(0.16, 0.13, 0.11);
     float3 void_ = float3(0.030, 0.026, 0.024);
-    return lerp(rim, void_, depth) * (0.45 + 0.55 * lambert(s.normal));
+    return lerp(rim, void_, depth) * (0.45 + 0.55 * lambert(s, s.normal));
 }`;
 
 // ---------------------------------------------------------------------------
