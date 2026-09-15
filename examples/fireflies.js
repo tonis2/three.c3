@@ -114,12 +114,12 @@ mat.leaf.repeat = [3, 2];
 // share the additive one; the star dome gets its own sampler.
 const glow = new three.ShaderMaterial({
 	uniforms: { tint: [1.0, 0.95, 0.55] },
-	fragment: `float3 shade(Surface s) { return tint * 1.35; }`,
+	fragment: `fn float3 shade(Surface s) { return s.uniforms.tint * 1.35; }`,
 	blending: three.AdditiveBlending,
 });
 const starMat = new three.ShaderMaterial({
 	textures: { sky: stars },
-	fragment: `float3 shade(Surface s) { return sky.Sample(s.uv).rgb; }`,
+	fragment: `fn float3 shade(Surface s) { return sky().Sample(s.uv).rgb; }`,
 	side: three.BackSide,
 });
 
@@ -175,7 +175,7 @@ for (const t of TREES) {
 // A soft vignette to close the night in.
 three.setPost({
 	fragment: `
-		float3 post(Post p) {
+		fn float3 post(Post p) {
 			float d = distance(p.uv, float2(0.5, 0.44));
 			float v = 1.0 - smoothstep(0.32, 0.82, d);
 			return p.color * lerp(0.5, 1.0, v);
