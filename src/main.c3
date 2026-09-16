@@ -218,13 +218,14 @@ fn void usage()
 	// the shipped binary is this binary — so the line is the same wherever it prints.
 	io::printn("  --debug turns on, in any build:");
 	io::printn("    Vulkan validation layers, if the Khronos layer is installed");
-	io::printn("    @debug_log — driver, driver cache and shader cache lines");
+	io::printn("    @debug_log — driver, driver cache, shader cache and shader source lines");
 	io::printn("    the device and limits table, at startup");
 	io::printn("    escape to quit and shift+R to reload, in the window");
 	io::printn("");
 	io::printn("  The shader sources and the compiler that builds them are inside this");
 	io::printn("  executable, so it runs from any directory. A shaders/ in the working");
-	io::printn("  directory is compiled instead of the built-in copy, and the run says so.");
+	io::printn("  directory is compiled instead of the built-in copy, and --debug names");
+	io::printn("  every file it read that way.");
 	io::printn("  Compiled shaders are cached under a checkout's build/, and otherwise in");
 	io::printn("  the platform's cache directory — --cache-dir or THREE_CACHE_DIR move it.");
 }

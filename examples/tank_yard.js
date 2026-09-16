@@ -16,13 +16,14 @@
 // ---------------------------------------------------------------------------
 // The level, as a picture
 //
-// `#` steel (forever), `b` brick (three hits), `E` an enemy spawn point,
-// `P` where the player starts, `A` the eagle you are defending.
+// `#` steel (forever), `b` brick (three hits), `P` where the player starts,
+// `A` the eagle you are defending. Nothing marks an enemy spawn point: they
+// come in along the top row, wherever it is open.
 // ---------------------------------------------------------------------------
 
 const MAP = [
 	'###############',
-	'#E....b.b....E#',
+	'#.....b.b.....#',
 	'#..bb.b.b.bb..#',
 	'#..bb.b.b.bb..#',
 	'#.....b.b.....#',
@@ -41,6 +42,8 @@ const MAP = [
 const CELL = 2;                       // world units per map square
 const HALF = (MAP.length - 1) / 2;    // so the middle of the map is the origin
 const WALL_H = 1.7;
+// The row enemies drive in on, counted from the steel wall at the top.
+const SPAWN_ROW = 1;
 
 const cellX = (col) => (col - HALF) * CELL;
 const cellZ = (row) => (row - HALF) * CELL;
@@ -308,6 +311,8 @@ const FIRE = new three.SphereGeometry(1, 16, 12);
 // ---------------------------------------------------------------------------
 
 const PLAYER_SPEED = 5.2, FOE_SPEED = 3.4, SHOT_SPEED = 15;
+// `FOES_AT_ONCE` are standing in the yard from the first frame of a round;
+// `FOE_EVERY` is how long one stays down before its replacement arrives.
 const FOES_AT_ONCE = 3, FOES_PER_ROUND = 12, FOE_EVERY = 3.2;
 
 // North, east, south, west — and the heading that faces each one, given that
@@ -555,7 +560,7 @@ Bullet.on('touch', Bullet, (a, b) => { a.pop(0.6); b.pop(0.6); });
 // handler or a system needs to reach has to live somewhere it can find.
 const G = globalThis.yard = {
 	scene, player: null, eagle: null, spawns: [], home: [0, 0],
-	round: 0, kills: 0, lost: 0, broken: 0, waiting: FOES_PER_ROUND,
+	round: 0, kills: 0, lost: 0, broken: 0, waiting: FOES_PER_ROUND, opening: false,
 	over: 0, since: 0, auto: true, held: new Set(),
 };
 
@@ -563,8 +568,12 @@ const G = globalThis.yard = {
 MAP.forEach((line, row) => {
 	[...line].forEach((c, col) => {
 		if (c === '#') Steel.spawn(col, row);
-		if (c === 'E') G.spawns.push([col, row]);
 		if (c === 'P') G.home = [col, row];
+		// Every open square of the top row is somewhere an enemy can come in, so
+		// a wave arrives across the whole width of the yard rather than out of
+		// the same two corners every round. A wall is not a door, which is the
+		// only thing this leaves out.
+		if (row === SPAWN_ROW && c !== '#' && c !== 'b') G.spawns.push([col, row]);
 	});
 });
 
@@ -587,6 +596,7 @@ function newRound() {
 	});
 	G.player = Tank.spawn(G.home[0], G.home[1], false);
 	G.waiting = FOES_PER_ROUND;
+	G.opening = true;
 	G.since = 0;
 	G.over = 0;
 	G.round++;
@@ -600,20 +610,44 @@ function newRound() {
 // `three.systems.report()` will say which of these it was.
 // ---------------------------------------------------------------------------
 
-// Enemies arrive at the top corners, a few at a time.
+// A spawn square with nobody standing on it, so a wave can put several enemies
+// in the yard at once instead of stacking them on one. Null when every open
+// square of the top row is still occupied, which the spawn system reads as "ask
+// again next tick" — sixty tries a second, and one that costs nothing when
+// there is nowhere to put a tank.
+function freeSpawn() {
+	for (let tries = 0; tries < 8; tries++) {
+		const [col, row] = G.spawns[three.randInt(0, G.spawns.length - 1)];
+		let clear = true;
+		for (const t of Tank) {
+			const c = t.centre();
+			if (Math.hypot(c[0] - cellX(col), c[2] - cellZ(row)) < 1.8) { clear = false; break; }
+		}
+		if (clear) return [col, row];
+	}
+	return null;
+}
+
+// Enemies arrive along the top row: the whole opening wave at the top of a
+// round, so the yard starts as the fight it is rather than filling up over ten
+// empty seconds, and then one replacement at a time on the `FOE_EVERY` clock.
 three.systems.step('spawn', (dt) => {
 	if (G.over) return;
 	G.since += dt;
-	if (G.since < FOE_EVERY || G.waiting <= 0) return;
+	if (G.waiting <= 0) return;
 	let alive = 0;
 	for (const t of Tank) if (t.foe) alive++;
-	if (alive >= FOES_AT_ONCE) return;
+	if (alive >= FOES_AT_ONCE) { G.opening = false; return; }
+	// The opening wave is gated by the yard rather than by the clock: every tick
+	// that finds a free square adds one until `FOES_AT_ONCE` are standing.
+	if (!G.opening && G.since < FOE_EVERY) return;
+	const at = freeSpawn();
+	if (at === null) return;
 	G.since = 0;
 	G.waiting--;
-	const [col, row] = G.spawns[three.randInt(0, G.spawns.length - 1)];
-	Tank.spawn(col, row, true);
+	Tank.spawn(at[0], at[1], true);
 	// A tank materialising is worth a puff of its own.
-	Blast.spawn([cellX(col), 0.7, cellZ(row)], 1.6, 0.5, [0.55, 0.80, 1.0]);
+	Blast.spawn([cellX(at[0]), 0.7, cellZ(at[1])], 1.6, 0.5, [0.55, 0.80, 1.0]);
 });
 
 // The player. Keys are polled rather than latched, because driving is a state
