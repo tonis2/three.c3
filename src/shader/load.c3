@@ -131,11 +131,13 @@ fn String? read_shader_source(ShaderFile file, alloc::Allocator allocator = mem)
 	if (path.len)
 	{
 		defer free(path);
-		// Said out loud, always. A source read off disk instead of out of the
-		// binary changes what the GPU runs, and when it is the wrong file the
-		// failure names a push block rather than a path - so the one line that
-		// would have explained it has to be printed before it can fail.
-		io::printfn("three: %s from %s (not the built-in)", file.name, path);
+		// A source read off disk instead of out of the binary changes what the GPU
+		// runs, and when it is the wrong file the failure names a push block
+		// rather than a path — so this line is the one that explains it. It is a
+		// `--debug` line because a checkout reads a dozen sources this way before
+		// the first frame, and a dozen of them is the whole output of an ordinary
+		// run.
+		@debug_log("three: %s from %s (not the built-in)", file.name, path);
 		return read_source(path, allocator);
 	}
 
