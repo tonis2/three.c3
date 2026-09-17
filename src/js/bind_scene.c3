@@ -147,6 +147,9 @@ fn void JsRuntime.install_bindings(&self)
 	// Navigation and steering (js/bind_nav.c3)
 	self.bind_nav_verbs(host);
 
+	// Buffers, kernels and dispatches (js/bind_compute.c3)
+	self.bind_compute_verbs(host);
+
 	// The frame
 	self.bind(host, "stats", &js_stats, 1);
 	self.bind(host, "debugWrite", &js_debug_write, 1);

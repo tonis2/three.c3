@@ -142,6 +142,7 @@ const char[*] PRELUDE_LEVEL    = $embed("prelude/level.js");
 const char[*] PRELUDE_GEOMETRY = $embed("prelude/geometry.js");
 const char[*] PRELUDE_FIELD    = $embed("prelude/field.js");
 const char[*] PRELUDE_HELPERS  = $embed("prelude/helpers.js");
+const char[*] PRELUDE_COMPUTE  = $embed("prelude/compute.js");
 const char[*] PRELUDE_QUERY    = $embed("prelude/query.js");
 const char[*] PRELUDE_NAV      = $embed("prelude/nav.js");
 const char[*] PRELUDE_PHYSICS  = $embed("prelude/physics.js");
@@ -166,7 +167,7 @@ const char[*] PRELUDE_DOCS_DATA = $embed("prelude/docs.data.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[25] parts;
+	static qjs::EmbeddedModule[26] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -182,6 +183,7 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:geometry.js", (char[])PRELUDE_GEOMETRY[..] },
 		{ "three:field.js", (char[])PRELUDE_FIELD[..] },
 		{ "three:helpers.js", (char[])PRELUDE_HELPERS[..] },
+		{ "three:compute.js", (char[])PRELUDE_COMPUTE[..] },
 		{ "three:query.js", (char[])PRELUDE_QUERY[..] },
 		{ "three:nav.js", (char[])PRELUDE_NAV[..] },
 		{ "three:physics.js", (char[])PRELUDE_PHYSICS[..] },
@@ -484,6 +486,19 @@ struct JsRuntime
 	List{uint} texture_handles;
 
 	<*
+	 The compute buffers and kernels this context's scripts made — `js/bind_compute.c3`.
+
+	 Two tables of slots rather than lists of live objects, because a script
+	 names them by handle and a handle has to survive being freed: the slot keeps
+	 its generation so that a handle kept past its `dispose()` is refused rather
+	 than reaching whatever was made in its place. Everything left here when the
+	 context closes is freed by `release_compute`, which is what stops a run's
+	 pipelines from outliving the context that compiled them.
+	*>
+	List{StorageSlot} storage_slots;
+	List{KernelSlot}  kernel_slots;
+
+	<*
 	 A `three.setRenderSize()` made from inside a frame, and not performed yet —
 	 `js/bind_scene.c3`. Zero width means nothing is pending.
 
@@ -583,6 +598,10 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
 	self.uploads.init(mem, 8);
 	// One entry per resident image, grown on demand — `hold_texture`.
 	self.texture_handles.init(mem, 8);
+	// The compute tables — `js/bind_compute.c3`. Grown on demand, and empty
+	// for a run that never dispatches anything.
+	self.storage_slots.init(mem, 4);
+	self.kernel_slots.init(mem, 4);
 	// One entry per node of the interface, and empty for every run that never
 	// draws one — `js/bind_ui.c3`.
 	self.ui_handlers.init(mem, 0);
@@ -636,6 +655,10 @@ fn void JsRuntime.close(&self)
 	// `Texture` objects own, which will never be disposed now that the context
 	// is going. See `release_script_textures`.
 	self.release_script_textures();
+	// And the compute buffers and kernels, which are the same case again: a
+	// script's `three.compute` objects are handles, and a run that made them and
+	// forgot them must not leave a pipeline pointing at a freed module.
+	self.release_compute();
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
