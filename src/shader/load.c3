@@ -58,6 +58,7 @@ const char[*] EMBED_SKY_SHADY             = $embed("../../shaders/sky.shady");
 const char[*] EMBED_MESH_SHADY            = $embed("../../shaders/mesh.shady");
 const char[*] EMBED_SKINNING_SHADY        = $embed("../../shaders/skinning.shady");
 const char[*] EMBED_SKIN_SHADY            = $embed("../../shaders/skin.shady");
+const char[*] EMBED_SKIN_MATH_SHADY       = $embed("../../shaders/skin_math.shady");
 const char[*] EMBED_CLUSTER_SHADY         = $embed("../../shaders/cluster.shady");
 const char[*] EMBED_SHADOW_SHADY          = $embed("../../shaders/shadow.shady");
 const char[*] EMBED_SHADOW_CUTOUT_SHADY   = $embed("../../shaders/shadow_cutout.shady");
@@ -89,6 +90,7 @@ enum ShaderFile : int (String name, String text)
 	MESH_SHADY           { "mesh.shady", EMBED_MESH_SHADY },
 	SKINNING_SHADY       { "skinning.shady", EMBED_SKINNING_SHADY },
 	SKIN_SHADY           { "skin.shady", EMBED_SKIN_SHADY },
+	SKIN_MATH_SHADY      { "skin_math.shady", EMBED_SKIN_MATH_SHADY },
 	CLUSTER_SHADY        { "cluster.shady", EMBED_CLUSTER_SHADY },
 	SHADOW_SHADY         { "shadow.shady", EMBED_SHADOW_SHADY },
 	SHADOW_CUTOUT_SHADY  { "shadow_cutout.shady", EMBED_SHADOW_CUTOUT_SHADY },

@@ -1,0 +1,131 @@
+// Dual-quaternion skinning, shared by the compute pass and the draw/shadow pass.
+//
+// `skin.shady` and `skinning.shady` both import this file, so `blend_joints`
+// exists once in the repository rather than once per module. It is the one
+// function the two passes must agree on to the bit — a compute pass that posed a
+// vertex differently from the draw that consumes it, or a shadow cast from a
+// different pose than the body, is a bug invisible in either one alone.
+//
+// The blend is of the joints' rigid transforms as DUAL QUATERNIONS, not an
+// average of their matrices. Averaging the matrices (plain linear-blend skinning)
+// collapses a twisted limb toward its bone axis — the "candy-wrapper" pinch;
+// blending the transforms keeps the cross-section round through a twist. The
+// palette the callers hand in is unchanged: each matrix is split back into the
+// rotation and translation it was composed from, blended, and rebuilt.
+//
+// Nothing here reads a push block or a wire struct, so it is the same in both
+// passes and depends on neither's ABI.
+
+// A rigid palette matrix's rotation as a quaternion (x, y, z, w). shady indexes a
+// matrix by column, so the basis is m[0..2].xyz and the trace method reads it
+// straight. The palette is rotation-and-translation only — no scale — so the
+// columns are orthonormal and the four-case form is exact and stable.
+fn float4 rotation_quat(float4x4 m)
+{
+	float3 cx = m[0].xyz;
+	float3 cy = m[1].xyz;
+	float3 cz = m[2].xyz;
+	float t;
+	float4 q;
+	if (cz.z < 0.0)
+	{
+		if (cx.x > cy.y)
+		{
+			t = 1.0 + cx.x - cy.y - cz.z;
+			q = float4(t, cy.x + cx.y, cz.x + cx.z, cy.z - cz.y);
+		}
+		else
+		{
+			t = 1.0 - cx.x + cy.y - cz.z;
+			q = float4(cy.x + cx.y, t, cz.y + cy.z, cz.x - cx.z);
+		}
+	}
+	else
+	{
+		if (cx.x < -cy.y)
+		{
+			t = 1.0 - cx.x - cy.y + cz.z;
+			q = float4(cz.x + cx.z, cz.y + cy.z, t, cx.y - cy.x);
+		}
+		else
+		{
+			t = 1.0 + cx.x + cy.y + cz.z;
+			q = float4(cy.z - cz.y, cz.x - cx.z, cx.y - cy.x, t);
+		}
+	}
+	return q * (0.5 * rsqrt(t));
+}
+
+// Hamilton product of two quaternions, vector part first.
+fn float4 quat_mul(float4 a, float4 b)
+{
+	return float4(
+		a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+		a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+		a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+		a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+
+// The four influences of one vertex against one palette, blended into the matrix
+// that poses it — see the file header for why it is dual quaternions.
+fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+	float4x4 mx = palette[base + joints.x];
+	float4x4 my = palette[base + joints.y];
+	float4x4 mz = palette[base + joints.z];
+	float4x4 mw = palette[base + joints.w];
+
+	float4 rx = rotation_quat(mx);
+	float4 ry = rotation_quat(my);
+	float4 rz = rotation_quat(mz);
+	float4 rw = rotation_quat(mw);
+
+	// Each rotation into the first's hemisphere, so the blend takes the short arc:
+	// the antipodal quaternion is the same rotation but averages the long way.
+	if (dot(rx, ry) < 0.0) ry = -ry;
+	if (dot(rx, rz) < 0.0) rz = -rz;
+	if (dot(rx, rw) < 0.0) rw = -rw;
+
+	// The dual part carries the translation: 0.5 * (t as a pure quaternion) * r.
+	float4 dx = 0.5 * quat_mul(float4(mx[3].xyz, 0.0), rx);
+	float4 dy = 0.5 * quat_mul(float4(my[3].xyz, 0.0), ry);
+	float4 dz = 0.5 * quat_mul(float4(mz[3].xyz, 0.0), rz);
+	float4 dw = 0.5 * quat_mul(float4(mw[3].xyz, 0.0), rw);
+
+	float4 real = weights.x * rx + weights.y * ry + weights.z * rz + weights.w * rw;
+	float4 dual = weights.x * dx + weights.y * dy + weights.z * dz + weights.w * dw;
+
+	float scale = length(real);
+	// Zero only if every weight is zero, which a skinned vertex never is; fall
+	// back to the first influence rather than normalize a zero quaternion.
+	if (scale < 0.00000001) return mx;
+	real = real / scale;
+	dual = dual / scale;
+
+	// The blended dual quaternion, back to the rotation-and-translation matrix the
+	// caller multiplies the vertex by.
+	float qx = real.x;
+	float qy = real.y;
+	float qz = real.z;
+	float qw = real.w;
+	float x2 = qx + qx;
+	float y2 = qy + qy;
+	float z2 = qz + qz;
+	float xx = qx * x2;
+	float xy = qx * y2;
+	float xz = qx * z2;
+	float yy = qy * y2;
+	float yz = qy * z2;
+	float zz = qz * z2;
+	float wx = qw * x2;
+	float wy = qw * y2;
+	float wz = qw * z2;
+
+	float4 col0 = float4(1.0 - (yy + zz), xy + wz, xz - wy, 0.0);
+	float4 col1 = float4(xy - wz, 1.0 - (xx + zz), yz + wx, 0.0);
+	float4 col2 = float4(xz + wy, yz - wx, 1.0 - (xx + yy), 0.0);
+	float3 translation = 2.0 * quat_mul(dual, float4(-real.x, -real.y, -real.z, real.w)).xyz;
+	float4 col3 = float4(translation, 1.0);
+
+	return float4x4(col0, col1, col2, col3);
+}

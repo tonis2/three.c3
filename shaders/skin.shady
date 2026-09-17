@@ -18,6 +18,10 @@
 //    displacement applied afterwards would move a vertex the joints already
 //    moved.
 
+// The dual-quaternion `blend_joints`, shared with the draw and shadow passes so
+// the compute pose and the draw that consumes it never drift apart.
+import "skin_math.shady";
+
 struct ComputeIn
 {
 	uint3 thread @builtin(global_invocation_id);
@@ -26,17 +30,6 @@ struct ComputeIn
 const uint FLAG_HAS_NORMALS = 1;
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
-
-// The four influences of one vertex against one palette, summed into the
-// matrix that poses it. `mesh.shady` carries the same function for the same
-// reason: a crossfade spends it twice, once per frame it sits between.
-fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
-{
-	return weights.x * palette[base + joints.x]
-	     + weights.y * palette[base + joints.y]
-	     + weights.z * palette[base + joints.z]
-	     + weights.w * palette[base + joints.w];
-}
 
 // One vertex of one instance, by dispatch thread. The index is the flattened
 // pair rather than a `(vertex, instance)` one, so a workgroup's threads read
