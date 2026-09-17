@@ -24,6 +24,10 @@
 // `SkinnedVertex`) come from `abi.c3`, so this file names them without
 // declaring them.
 
+// The dual-quaternion `blend_joints`, shared with the compute pass so the draw
+// and shadow pose a vertex exactly as the compute pass that feeds them did.
+import "skin_math.shady";
+
 const uint FLAG_HAS_NORMALS = 1;
 const uint FLAG_HAS_UVS = 2;
 const uint FLAG_HAS_COLORS = 4;
@@ -32,17 +36,6 @@ const uint FLAG_PRESKINNED = 16;
 
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
-
-// The four influences of one vertex against one palette, summed into the matrix
-// that poses it. Split out so a crossfade can spend it twice - the two frames a
-// fade sits between are two offsets into one buffer.
-fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)
-{
-	return weights.x * palette[base + joints.x]
-	     + weights.y * palette[base + joints.y]
-	     + weights.z * palette[base + joints.z]
-	     + weights.w * palette[base + joints.w];
-}
 
 // The four influences of one vertex, blended into the matrix that poses it.
 fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
