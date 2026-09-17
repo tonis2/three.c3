@@ -33,6 +33,7 @@ import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry,
 import { Field, scatter, catmullRom } from './field.js';
 import { Box3Helper, BoxHelper, AxesHelper, GridHelper, WireframeHelper } from './helpers.js';
 import { query, moveAndSlide, moveAndSlideAll, moveResult, moveBuffer, batch, TransformBatch, QueryResult } from './query.js';
+import { compute, ComputeBuffer, ComputeKernel } from './compute.js';
 import { steer, NavField, makeSceneNav } from './nav.js';
 import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
@@ -3011,6 +3012,17 @@ export const three = {
 	// `normal` and `point` mean something on a start and are zero on an end
 	// — there is no contact left to describe by then.
 	onContact(fn) { setScriptHandler('contact', fn, 'three.onContact'); },
+
+	// Buffers, kernels and dispatches — GPU work that is not a picture. The
+	// buffers own themselves and the kernels are compiled from shader source a
+	// script writes; nothing here needs a scene to exist.
+	//
+	//   const a = three.compute.f32(1024, values)
+	//   const out = three.compute.f32(1024)
+	//   const kernel = three.compute.kernel(shaderSource, { name: 'scale' })
+	//   kernel.run({ a, out }, { threads: 1024, push: { scale: 2 } })
+	//   console.log(out.f32(0))
+	compute,
 
 	// The documentation, designed to be READ rather than dumped. With no
 	// argument this is the index — everything short in full, and the names of
