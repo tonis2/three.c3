@@ -219,6 +219,11 @@ struct Renderer
 	// The scene graph, the asset table and the one pipeline that draws them. The
 	// frame path above does not know any of that is in there.
 	MeshPass pass;
+	// The compute half of the device — see `gpu/compute.c3`. A script's buffers
+	// and kernels live here, and none of it is touched by a frame: a dispatch is
+	// recorded, submitted and waited for when the script asks, because the thing
+	// compute is for is an answer and not a picture.
+	Compute compute;
 	// The one agent-written shader that runs over the finished frame, and the
 	// image the scene goes into while it does. Inert until something calls `set`
 	// — see `render/post.c3`.
@@ -336,6 +341,10 @@ fn Renderer? Renderer.init(
 
 	self.gpu.init(instance, surface, validate)!;
 	self.target.init(&self.gpu, width, height)!;
+	// After the device and before anything that could dispatch: a kernel's
+	// buffers are the script's, so this outlives every frame and owns nothing
+	// the render path frees.
+	self.compute.init(&self.gpu)!;
 	// Before anything can push a stage — an uninitialised `List` falls back to
 	// the temp allocator on its first push. `PostPass.init` has the note.
 	self.post.init();
@@ -442,6 +451,7 @@ fn void Renderer.free(&self)
 	self.post.free(&self.gpu);
 	self.scene_cache.free();
 	self.pass.free(&self.gpu);
+	self.compute.free();
 	self.timer.free(&self.gpu);
 	self.frames.free(&self.gpu);
 	self.composite.free(&self.gpu);

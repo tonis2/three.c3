@@ -3357,3 +3357,120 @@ The sky is not a surface and has no shadow, so a debug view colours only what th
 It is deliberately not scene state: `new three.Scene()` does not clear it, for the same reason it does not move
 the camera. Pair it with `three.light.shadow.fit` for the numbers, and with `--frames` if you are running
 headless.
+
+## three.compute
+
+GPU work that is not a picture: buffers a script owns, kernels compiled from shader source, and the
+dispatches between them. Nothing here needs a scene, a camera or a frame — it is the device, and it
+is why an inference step or a solver can be written in a script.
+
+```js
+const n = 4096;
+const a = three.compute.f32(n);
+const result = three.compute.f32(n);
+
+for (let i = 0; i < n; i++) a.bytes[i] = i;
+a.write(a.bytes);                       // one upload for the whole fill
+
+const kernel = three.compute.kernel(`
+float a[];
+float result[];
+
+struct Push @pushconstant
+{
+    float scale;
+    uint  n;
+}
+Push push;
+
+struct ComputeIn { uint3 thread @builtin(global_invocation_id); }
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    uint i = input.thread.x;
+    if (i >= push.n) return;
+    result[i] = a[i] * push.scale;
+}
+`, { name: 'scale' });
+
+kernel.run({ a, result }, { threads: n, push: { scale: 2, n: n | 0 } });
+result.read();
+console.log(result.f32(5));
+```
+
+### The two directions are explicit
+
+`write()` uploads and `read()` downloads, and `buffer(code, count, data)` does both at creation.
+Changing `buffer.bytes` changes the *host* copy; nothing reaches the GPU until `write()` submits it.
+That is not an oversight — a buffer is read by a kernel and not by JavaScript, and an implicit upload
+per element would be one submission per element for a fill a script meant as one.
+
+```js
+const weights = three.compute.f32(count, values);   // created and uploaded
+weights.write(moreValues);                          // uploaded again
+weights.read();                                     // downloaded into .bytes
+```
+
+### three.compute.f32(count, data?), u32, bytes
+
+A buffer of `count` elements. `'f32'` and `'u32'` are four bytes each, `'bytes'` is untyped — a pool,
+a packed block, whatever the shader says the bytes mean. The full list of element types is on
+`three.compute.buffer`.
+
+`data` is optional and becomes the buffer's first contents: a plain array of numbers for the typed
+kinds, bytes for `'bytes'`. Without it the buffer holds zeroes, which is what an output or a scratch
+buffer wants.
+
+```js
+const input = three.compute.f32(1024, values);
+const output = three.compute.f32(1024);
+const scratch = three.compute.bytes(4096);
+```
+
+### buffer.bytes, buffer.f32(i), buffer.dispose()
+
+`.bytes` is the live typed view — a `Float32Array` for an `'f32'` buffer, a `Uint8Array` for
+`'bytes'` — and `f32(i)`, `u32(i)`, `i32(i)`, `u8(i)` read one element of the host copy. `f32(0)` is
+a byte read where `f32()[0]` builds a view per call.
+
+`dispose()` frees the buffer. A handle kept past it is refused by name rather than reaching whatever
+was made in its place, and everything a run leaves behind is freed when the run ends.
+
+### three.compute.kernel(source, options)
+
+Compile one shader. The source is a complete program in the engine's own shader language: its
+`@storage` buffers — which are the names `run` binds by — its `@pushconstant` block, and a `@compute`
+entry point with `@threads`. A source that does not compile throws with the compiler's line, column
+and caret, prefixed by the kernel's name.
+
+- `name` — what a diagnostic blames. `'kernel'` when it is not given.
+- `entry` — which entry point to build the pipeline for. `'main'` when it is not given.
+
+### kernel.run(buffers, options), kernel.dispatch(...), three.compute.submit()
+
+`run` records a dispatch, submits it and waits. `dispatch` records without waiting, and
+`three.compute.submit()` runs everything recorded since the last submission — one round trip for a
+chain of kernels instead of one per step.
+
+`buffers` is either an object named by the shader's own bindings or an array in declaration order:
+
+```js
+kernel.run({ a, result }, { threads: n });     // named
+kernel.run([a, result], { threads: n });       // positional
+```
+
+The options:
+
+- `threads` — a work-item count, split by the entry point's own `@threads`. `threads: n`.
+- `workgroups` — group counts themselves, for a dispatch about groups rather than about items.
+  `workgroups: [32, 8]`.
+- `push` — the push block's fields as an object, in the shader's own order. A number is packed as a
+  float, which is what a shader reads by default; `n | 0` packs an integer for a `uint` field. Raw
+  bytes work too, for a block a script built itself.
+
+### What is not here
+
+No textures, no indirect dispatch, no atomics beyond what the shader language already has, and no
+frame integration: a `submit` is a device round trip the script asks for, not something the loop
+does. The boundary is also the safety valve — a command buffer that runs past the driver's watchdog
+timeout is a lost device, and only the caller knows where the work can be cut.

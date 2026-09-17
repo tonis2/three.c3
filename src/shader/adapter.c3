@@ -86,6 +86,310 @@ macro ShaderModule compile_shady(ShaderDef def, $Type)
 }
 
 <*
+ Compile one plain source string into a module, with no wire structs.
+
+ The render passes have `compile_shady`, which walks a C3 push struct into the
+ module so the block cannot drift from the struct the pass fills. A compute
+ shader has no such struct: its source is the whole program - a script's
+ string, or a `.shady` beside the engine's own - and its push block is a
+ `@pushconstant` struct in that source, like every other declaration it makes.
+
+ So this is the same compile without the walked half. The flags are the same
+ ones every module in this project gets, `scalar_layout` included: a shader
+ whose structs pack differently from the host that fills them is a wrong number
+ rather than an error. Storage buffers are the exception and say so in the
+ layout rules - see `Codegen.block_layout` in shady.
+
+ @param name : `What diagnostics call the source - a script's kernel name, a file's.`
+ @return `The module. A refused source answers with ok false and the compiler's message in the diagnostic, which callers show rather than throw: a bad shader is a thing a person fixes.`
+*>
+fn ShaderModule compile_compute_shader(String name, String source)
+{
+	ShaderModule mod = { };
+	mod.entries.init(mem, 4);
+	mod.layout.bindings.init(mem, 8);
+	// A compute shader's push block is a struct in its own source, so nothing
+	// walks one - and a zeroed list is what `ShaderModule.free` expects.
+	mod.layout.push_fields.init(mem, 1);
+
+	shady::Diagnostic diagnostic;
+	shady::DiagnosticList warnings;
+	warnings.init(mem, 4);
+
+	char[]? compiled = shady::compile(source, &diagnostic, scalar_layout: true, warnings: &warnings);
+	if (catch compiled)
+	{
+		mod.ok = false;
+		mod.diagnostic = diagnostic.render(mem);
+		diagnostic.free();
+		copy_compute_warnings(&mod, &warnings);
+		foreach (warning : warnings) warning.free();
+		warnings.free();
+		return mod;
+	}
+	diagnostic.free();
+
+	if (compiled.len < 4 || *(uint*)compiled.ptr != SPIRV_MAGIC)
+	{
+		// Unreachable for this emitter, but a module that is not SPIR-V is not
+		// something a pipeline can load.
+		mod.ok = false;
+		mod.diagnostic = "three: shady returned something that is not a SPIR-V module".copy(mem);
+		alloc::free(mem, compiled);
+		copy_compute_warnings(&mod, &warnings);
+		foreach (warning : warnings) warning.free();
+		warnings.free();
+		return mod;
+	}
+	mod.spirv = compiled;
+
+	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
+	mod.layout.stages = stage_union(mod.entries.array_view());
+	// Not walked from a C3 struct, so it is read out of the module's own
+	// `@pushconstant` block instead - see `reflect_push_block_size`.
+	mod.layout.push_size = reflect_push_block_size(mod.spirv);
+
+	mod.ok = true;
+	copy_compute_warnings(&mod, &warnings);
+	foreach (warning : warnings) warning.free();
+	warnings.free();
+	return mod;
+}
+
+fn void copy_compute_warnings(ShaderModule* mod, shady::DiagnosticList* warnings) @local
+{
+	@pool()
+	{
+		DString notes;
+		notes.tinit(256);
+		foreach (warning : *warnings)
+		{
+			if (notes.str_view().len > 0) notes.append_char('\n');
+			notes.append_string(warning.to_string(tmem));
+		}
+		if (notes.str_view().len > 0) mod.diagnostic = notes.copy_str(mem);
+	};
+}
+
+<*
+ The byte size of a module's `@pushconstant` block, read back out of the
+ SPIR-V.
+
+ Nothing walks a compute shader's push block the way `compile_shady` walks a
+ pass's - the block is a struct in the shader's own source - so the size is
+ what the module says it is: the last member's offset plus that member's own
+ size, with strides folded in for the arrays and matrices on the way.
+
+ Only what the walk needs is gathered, and only from `OpDecorate` /
+ `OpMemberDecorate`. A module with no push block answers zero, which is what
+ `Compute.dispatch` checks before pushing anything.
+
+ @return `Bytes, or zero when the module declares no push block.`
+*>
+fn uint reflect_push_block_size(char[] spirv) @local
+{
+	usz count = spirv.len / 4;
+	if (count < 5) return 0;
+	uint* words = (uint*)spirv.ptr;
+	uint bound = words[3];
+
+	// What the size walk needs: the type table, plus the three decorations that
+	// are part of a size rather than a binding.
+	ushort[] type_op   = alloc::new_array(mem, ushort, bound);
+	uint[]   op_a      = alloc::new_array(mem, uint, bound);
+	uint[]   op_b      = alloc::new_array(mem, uint, bound);
+	uint[]   op_c      = alloc::new_array(mem, uint, bound);
+	uint[]   array_stride  = alloc::new_array(mem, uint, bound);
+	uint[]   matrix_stride = alloc::new_array(mem, uint, bound);
+	uint[]   block_id  = alloc::new_array(mem, uint, 1);
+
+	defer
+	{
+		alloc::free(mem, type_op);
+		alloc::free(mem, op_a);
+		alloc::free(mem, op_b);
+		alloc::free(mem, op_c);
+		alloc::free(mem, array_stride);
+		alloc::free(mem, matrix_stride);
+		alloc::free(mem, block_id);
+	};
+
+	block_id[0] = 0;
+
+	// Two passes, because the block's pointer and the struct it points at are
+	// written wherever the emitter put them - the struct is declared after the
+	// variable that uses it, so one pass would look up a type table that is not
+	// filled in yet.
+	usz i = 5;
+	while (i < count)
+	{
+		uint word  = words[i];
+		usz length = (usz)(word >> 16);
+		if (length == 0 || i + length > count) break;
+
+		switch ((shady::Opcode)(word & 0xffff))
+		{
+			case shady::Opcode.TYPE_VECTOR:
+				if (length >= 4 && words[i + 1] < bound)
+				{
+					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_VECTOR;
+					op_a[words[i + 1]]    = words[i + 2]; // component
+					op_b[words[i + 1]]    = words[i + 3]; // count
+				}
+			case shady::Opcode.TYPE_MATRIX:
+				if (length >= 4 && words[i + 1] < bound)
+				{
+					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_MATRIX;
+					op_a[words[i + 1]]    = words[i + 2]; // column type
+					op_b[words[i + 1]]    = words[i + 3]; // columns
+				}
+			case shady::Opcode.TYPE_ARRAY:
+				if (length >= 4 && words[i + 1] < bound)
+				{
+					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_ARRAY;
+					op_a[words[i + 1]]    = words[i + 2]; // element
+					op_b[words[i + 1]]    = words[i + 3]; // length constant id
+				}
+			case shady::Opcode.TYPE_STRUCT:
+				if (length >= 2 && words[i + 1] < bound)
+				{
+					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_STRUCT;
+					// The member type ids, packed into the type's own slot in
+					// `op_a` - a struct is the one type with a list, and one
+					// id is enough to keep the others reachable.
+					op_a[words[i + 1]] = (uint)(i + 2);
+					op_b[words[i + 1]] = (uint)(length - 2);
+				}
+			case shady::Opcode.TYPE_POINTER:
+				if (length >= 4 && words[i + 1] < bound)
+				{
+					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_POINTER;
+					op_a[words[i + 1]]    = words[i + 2]; // storage class
+					op_b[words[i + 1]]    = words[i + 3]; // pointee
+				}
+			case shady::Opcode.CONSTANT:
+				if (length >= 4 && words[i + 2] < bound) op_c[words[i + 2]] = words[i + 3];
+			case shady::Opcode.DECORATE:
+				if (length >= 4 && words[i + 1] < bound && words[i + 2] == (uint)shady::Decoration.ARRAY_STRIDE)
+				{
+					array_stride[words[i + 1]] = words[i + 3];
+				}
+			case shady::Opcode.MEMBER_DECORATE:
+				if (length >= 5 && words[i + 1] < bound && words[i + 3] == (uint)shady::Decoration.MATRIX_STRIDE)
+				{
+					matrix_stride[words[i + 1]] = words[i + 4];
+				}
+			default:
+		}
+		i += length;
+	}
+
+	// The block's pointer, not the pointer to a member of it: a `@pushconstant`
+	// struct is reached both ways, and the one whose pointee is a struct is the
+	// block.
+	i = 5;
+	while (i < count)
+	{
+		uint word  = words[i];
+		usz length = (usz)(word >> 16);
+		if (length == 0 || i + length > count) break;
+
+		if ((shady::Opcode)(word & 0xffff) == shady::Opcode.TYPE_POINTER
+			&& length >= 4 && words[i + 1] < bound
+			&& words[i + 2] == (uint)shady::StorageClass.PUSH_CONSTANT
+			&& words[i + 3] < bound
+			&& type_op[words[i + 3]] == (ushort)shady::Opcode.TYPE_STRUCT)
+		{
+			block_id[0] = words[i + 3];
+		}
+		i += length;
+	}
+
+	if (block_id[0] == 0 || block_id[0] >= bound) return 0;
+	if (type_op[block_id[0]] != (ushort)shady::Opcode.TYPE_STRUCT) return 0;
+
+	// The last member's offset plus its own size: the end of a block, which is
+	// what a push range has to cover.
+	uint member_count = op_b[block_id[0]];
+	uint member_at    = op_a[block_id[0]];
+	if (member_count == 0) return 0;
+
+	uint last_offset = 0;
+	bool offset_found = false;
+	usz j = 5;
+	while (j < count)
+	{
+		uint word   = words[j];
+		usz length  = (usz)(word >> 16);
+		if (length == 0 || j + length > count) break;
+
+		if ((shady::Opcode)(word & 0xffff) == shady::Opcode.MEMBER_DECORATE
+			&& length >= 5 && words[j + 1] == block_id[0]
+			&& words[j + 3] == (uint)shady::Decoration.OFFSET
+			&& words[j + 2] + 1 == member_count)
+		{
+			last_offset  = words[j + 4];
+			offset_found = true;
+		}
+		j += length;
+	}
+	if (!offset_found) return 0;
+
+	uint last_type = words[member_at + member_count - 1];
+	return last_offset + type_size(last_type, type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, 0);
+}
+
+<*
+ One type's size, with this module's strides.
+
+ Scalars are four bytes - the only widths this emitter makes - and a struct is
+ the largest end of any of its members. That is enough for the push blocks a
+ compute shader writes: they hold counts, strides, scales and offsets, and the
+ one member that could be an array or a matrix is what the strides above are
+ for.
+*>
+fn uint type_size(
+	uint id, ushort[] type_op, uint[] op_a, uint[] op_b, uint[] op_c,
+	uint[] array_stride, uint[] matrix_stride, uint bound, uint depth) @local
+{
+	if (id >= bound || depth > 8) return 0;
+
+	switch ((shady::Opcode)type_op[id])
+	{
+		case shady::Opcode.TYPE_VECTOR:
+			return type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1) * op_b[id];
+		case shady::Opcode.TYPE_MATRIX:
+		{
+			uint column = matrix_stride[id] > 0
+				? matrix_stride[id]
+				: type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1);
+			return column * op_b[id];
+		}
+		case shady::Opcode.TYPE_ARRAY:
+		{
+			uint length = op_b[id] < bound ? op_c[op_b[id]] : 0;
+			uint stride = array_stride[id] > 0
+				? array_stride[id]
+				: type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1);
+			return length * stride;
+		}
+		case shady::Opcode.TYPE_STRUCT:
+		{
+			// The end of its last member, which is what `assign_offsets` rounds
+			// up to the struct's alignment - so this is an upper bound and a
+			// fine one for a push range that only has to be big enough.
+			uint member_count = op_b[id];
+			uint member_at    = op_a[id];
+			if (member_count == 0) return 0;
+			return type_size(op_a[member_at + member_count - 1], type_op, op_a, op_b, op_c,
+				array_stride, matrix_stride, bound, depth + 1);
+		}
+		default:
+			return 4;
+	}
+}
+
+<*
  `compile_shady`, with yesterday's answer if there is one.
 
  Same module, same layout, same diagnostics, same ownership as the uncached
@@ -583,7 +887,8 @@ fn void reflect_shady_module(
 	foreach (variable : variables)
 	{
 		if (variable.storage != (uint)shady::StorageClass.UNIFORM_CONSTANT
-			&& variable.storage != (uint)shady::StorageClass.UNIFORM) continue;
+			&& variable.storage != (uint)shady::StorageClass.UNIFORM
+			&& variable.storage != (uint)shady::StorageClass.STORAGE_BUFFER) continue;
 		if (variable.id >= bound || variable.pointer >= bound) continue;
 		if (kinds[variable.pointer] != ShadyType.POINTER_TYPE) continue;
 
@@ -621,7 +926,9 @@ fn void reflect_shady_module(
 			case ShadyType.STRUCT_TYPE:
 				type = blocks[pointee] && variable.storage == (uint)shady::StorageClass.UNIFORM
 					? DESCRIPTOR_TYPE_UNIFORM_BUFFER
-					: DESCRIPTOR_TYPE_UNBINDABLE;
+					: blocks[pointee] && variable.storage == (uint)shady::StorageClass.STORAGE_BUFFER
+						? DESCRIPTOR_TYPE_STORAGE_BUFFER
+						: DESCRIPTOR_TYPE_UNBINDABLE;
 			default:
 		}
 
