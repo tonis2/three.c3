@@ -293,3 +293,174 @@ fn void a_workgroup_reduces_through_shared_memory() @test
 		"the first workgroup should sum 0..63, got %f", result[0]);
 	test::@check(result[1] > result[0], "the second workgroup reads the second half, got %f", result[1]);
 }
+
+// One 16x16x16 integer matrix product per subgroup, the shape RADV's
+// `VK_KHR_cooperative_matrix` actually has: byte operands, a 32-bit
+// accumulator, and no float32 combination anywhere in the table.
+//
+// The inputs arrive word-packed and are unpacked into shared memory, because a
+// storage buffer of bytes would need `VK_KHR_8bit_storage` enabled as well and
+// the point here is the matrix instruction rather than the byte load.
+const String COOPMAT_TILE = `
+shared uint8 a_tile[256];
+shared uint8 b_tile[256];
+shared uint zero_tile[256];
+
+uint packed_a[];
+uint packed_b[];
+uint product[];
+
+struct ComputeIn { uint3 local @builtin(local_invocation_id); }
+
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.local.x;
+    uint word_a = packed_a[i];
+    uint word_b = packed_b[i];
+
+    for (uint j = 0; j < 4u; j++)
+    {
+        uint at4 = i * 4u + j;
+        a_tile[at4] = uint8(word_a >> (j * 8u));
+        b_tile[at4] = uint8(word_b >> (j * 8u));
+        zero_tile[at4] = 0u;
+    }
+    barrier;
+
+    coopmat<uint8, 16, 16, subgroup, a> a_mat;
+    coopmat<uint8, 16, 16, subgroup, b> b_mat;
+    coopmat<uint, 16, 16, subgroup, accumulator> acc;
+
+    coop_load(a_mat, &a_tile[0], 16u);
+    coop_load(b_mat, &b_tile[0], 16u);
+    coop_load(acc, &zero_tile[0], 16u);
+
+    coop_muladd(a_mat, b_mat, acc, acc);
+    barrier;
+
+    coop_store(&zero_tile[0], acc, 16u);
+    barrier;
+
+    // Four values per invocation, so the whole 16x16 tile comes back rather
+    // than the first quarter of it.
+    for (uint j = 0; j < 4u; j++)
+    {
+        product[i * 4u + j] = zero_tile[i * 4u + j];
+    }
+}
+`;
+
+
+fn void a_subgroup_multiplies_two_byte_tiles() @test
+{
+	three::Renderer* renderer = device::borrow(with_pass: false);
+	defer device::release();
+
+	if (!renderer.gpu.limits.cooperative_matrix)
+	{
+		// A device without the extension has nothing to prove here, and the
+		// suite runs on whatever is installed.
+		return;
+	}
+
+	three::Compute* compute = &renderer.compute;
+
+	three::ShaderModule shader = three::compile_compute_shader("coopmat_tile", COOPMAT_TILE);
+	defer shader.free();
+	test::@check(shader.ok, "the shader should compile: %s", shader.diagnostic);
+
+	three::ComputeKernel kernel;
+	if (catch kernel.create(compute, &shader, "coopmat_tile"))
+	{
+		test::@check(false, "kernel.create failed");
+		return;
+	}
+	defer kernel.free(renderer.gpu.handle);
+
+	// a[r][c] = (r * 16 + c) % 251, b[r][c] = (r + c) % 7: distinct, small
+	// enough that sixteen products stay far inside a uint32, and not
+	// symmetric, so a transposed read would be a different answer.
+	uint[64] packed_a;
+	uint[64] packed_b;
+	uint[256] expected;
+
+	for (int r = 0; r < 16; r++)
+	{
+		for (int c = 0; c < 16; c++)
+		{
+			uint av = (uint)((r * 16 + c) % 251);
+			uint bv = (uint)((r + c) % 7);
+			packed_a[r * 4 + c / 4] |= av << ((uint)(c % 4) * 8);
+			packed_b[r * 4 + c / 4] |= bv << ((uint)(c % 4) * 8);
+		}
+	}
+	for (int r = 0; r < 16; r++)
+	{
+		for (int c = 0; c < 16; c++)
+		{
+			uint sum = 0;
+			for (int k = 0; k < 16; k++)
+			{
+				uint av = (uint)((r * 16 + k) % 251);
+				uint bv = (uint)((k + c) % 7);
+				sum += av * bv;
+			}
+			expected[r * 16 + c] = sum;
+		}
+	}
+
+	three::StorageBuffer source_a;
+	if (catch source_a.create(&renderer.gpu, 256, &packed_a))
+	{
+		test::@check(false, "source_a.create failed");
+		return;
+	}
+	defer source_a.free();
+
+	three::StorageBuffer source_b;
+	if (catch source_b.create(&renderer.gpu, 256, &packed_b))
+	{
+		test::@check(false, "source_b.create failed");
+		return;
+	}
+	defer source_b.free();
+
+	three::StorageBuffer output;
+	if (catch output.create(&renderer.gpu, 1024))
+	{
+		test::@check(false, "output.create failed");
+		return;
+	}
+	defer output.free();
+
+	if (catch compute.dispatch(&kernel, { source_a, source_b, output }, null, 1))
+	{
+		test::@check(false, "dispatch failed");
+		return;
+	}
+	if (catch compute.submit())
+	{
+		test::@check(false, "submit failed");
+		return;
+	}
+
+	uint[256] result;
+	if (catch output.read(compute, 0, ((char*)&result)[:1024]))
+	{
+		test::@check(false, "reading the output failed");
+		return;
+	}
+
+	uint mismatches = 0;
+	uint first_bad = 0;
+	for (uint i = 0; i < 256; i++)
+	{
+		if (result[i] != expected[i])
+		{
+			if (mismatches == 0) first_bad = i;
+			mismatches++;
+		}
+	}
+	test::@check(mismatches == 0, "the tile product should match the reference, %d of 256 wrong, first at %d (%d, expected %d)",
+		mismatches, first_bad, result[first_bad], expected[first_bad]);
+}
