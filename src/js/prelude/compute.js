@@ -84,9 +84,24 @@ function asBytes(source, what) {
 // The floats, uints or bytes a script handed over, for a push block.
 //
 // A push block is bytes with a layout the shader wrote down, so a plain object
-// has to be packed in the order its keys are listed. Numbers are floats unless
-// they say otherwise: `{ n: count | 0 }` is the spelling for an integer, which
-// is one operator and reads better than a parallel array of field types.
+// has to be packed in the order its keys are listed, and each field in the
+// width its C3 type has.
+//
+// A JavaScript number is a double and nothing about it says whether the shader
+// field is a float or a `uint`, so the script says. Bare numbers are floats,
+// because that is what most push fields are and `{ scale: 2 }` should mean
+// 2.0; an integer field is written `three.compute.uint(n)`, which is one call
+// and says which side of the line it is on:
+//
+//     push: { scale: 0.5, count: three.compute.uint(count) }
+//
+// Guessing from the value would be worse than asking: `{ n: 4 }` is a float
+// field that happens to hold a whole number, and a packer that read integers
+// into a `float n;` would put 4.0e-45 there instead of 4.
+class UintValue {
+	constructor(value) { this.value = value; }
+}
+
 function packPush(push, spec) {
 	if (push === null || push === undefined) return null;
 	if (ArrayBuffer.isView(push)) return new Uint8Array(push.buffer, push.byteOffset, push.byteLength);
@@ -96,24 +111,21 @@ function packPush(push, spec) {
 	}
 
 	const fields = spec || Object.keys(push);
-	const floats = [];
+	const words = [];
 	for (const name of fields) {
-		const value = push[name];
+		const raw = push[name];
+		const whole = raw instanceof UintValue;
+		const value = whole ? raw.value : raw;
 		if (typeof value !== 'number' || !Number.isFinite(value)) {
 			throw new TypeError(`three.compute: push.${name} wants a finite number, and the command object gave '${value}'`);
 		}
-		// A float, unless the script said otherwise. A number is a float in a
-		// shader and this is the packing that matches the way sources are
-		// written; an integer field is the exception, and the spelling for it
-		// is `| 0` — the one operator JavaScript already has for "these are
-		// int32 bits":
-		//
-		//   push: { n: count | 0 }     // a `uint n;` field
-		floats.push(value instanceof Number ? floatBits(value.valueOf()) : floatBits(value));
+		// `>>> 0` is the uint32 the shader's `uint` field reads; `floatBits` the
+		// float its `float` field reads. Same four bytes, different meaning.
+		words.push(whole ? (value >>> 0) : floatBits(value));
 	}
-	const out = new Uint8Array(floats.length * 4);
+	const out = new Uint8Array(words.length * 4);
 	const view = new DataView(out.buffer);
-	floats.forEach((bits, i) => view.setUint32(i * 4, bits, true));
+	words.forEach((bits, i) => view.setUint32(i * 4, bits, true));
 	return out;
 }
 
@@ -385,6 +397,8 @@ export const compute = {
 
 	// A buffer of floats. The common case, spelled the common way.
 	f32(count, data) { return compute.buffer('f32', count, data); },
+	// A push field the shader declares as an integer: `three.compute.uint(n)`.
+	uint(value) { return new UintValue(value); },
 	// A buffer of unsigned ints.
 	u32(count, data) { return compute.buffer('u32', count, data); },
 	// A buffer of bytes.

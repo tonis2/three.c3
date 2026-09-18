@@ -93,6 +93,29 @@ fn String js_literal(String text)
 	return out.copy_str(tmem);
 }
 
+
+// `out[i] = a[i] * 2` for the first `push.n` elements: the bound is the whole
+// check, so a push block read as floats leaves the wrong elements written.
+const String COUNTED = `
+float a[];
+float result[];
+
+struct Push @pushconstant
+{
+    uint n;
+}
+Push push;
+
+struct ComputeIn { uint3 thread @builtin(global_invocation_id); }
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    uint i = input.thread.x;
+    if (i >= push.n) return;
+    result[i] = a[i] * 2.0;
+}
+`;
+
 fn void a_script_runs_a_kernel_and_reads_the_answer() @test
 {
 	@with_compute_js(; three::JsRuntime* run)
@@ -113,6 +136,40 @@ return out.f32(5);
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == "10", "element 5 should be 5 * 2, got '%s'", result.value);
+	};
+}
+
+
+<*
+ An integer push field, which is the one place the packer has to be told
+ something the value cannot say: `n: 64` is a float 64.0 or the uint 64, and a
+ shader reading the wrong one of those computes a garbage bound. The script
+ says `three.compute.uint(n)` and the shader's `uint n;` gets 64.
+*>
+fn void an_integer_push_field_arrives_as_bits() @test
+{
+	@with_compute_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(string::tformat(`
+const a = three.compute.f32(64);
+const out = three.compute.f32(64);
+for (let i = 0; i < 64; i++) { a.bytes[i] = i; out.bytes[i] = 100 + i; }
+a.write(a.bytes);
+out.write(out.bytes);
+
+const kernel = three.compute.kernel(%s, { name: 'counted' });
+kernel.run({ a, result: out }, { threads: 64, push: { n: three.compute.uint(33) } });
+out.read();
+
+// 33 was doubled and 40 was left where the script put it: the bound is what
+// tells the two packings apart, so both ends of it are checked.
+return { inside: out.f32(32), outside: out.f32(40) };
+`, js_literal(COUNTED)));
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"inside":64,"outside":140}`,
+			"32 should be 32 * 2 and 40 should still hold 140, got '%s'", result.value);
 	};
 }
 
