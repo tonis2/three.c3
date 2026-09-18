@@ -21,6 +21,7 @@ The `three.compute` verbs: buffers, kernels, dispatch, submit.
 module three;
 
 import std::collections::list;
+import std::io::file;
 import qjs;
 
 // A slot in one of the tables below, addressed by index and generation the way
@@ -74,7 +75,10 @@ fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
 	self.bind(host, "computeWriteBuffer", &js_compute_write_buffer, 4);
 	self.bind(host, "computeReadBuffer", &js_compute_read_buffer, 3);
 	self.bind(host, "computeFreeBuffer", &js_compute_free_buffer, 1);
-	self.bind(host, "computeCreateKernel", &js_compute_create_kernel, 4);
+	self.bind(host, "computeCreateKernel", &js_compute_create_kernel, 3);
+	self.bind(host, "computeCreateKernelSpirv", &js_compute_create_kernel_spirv, 3);
+	self.bind(host, "computeKernelThreads", &js_compute_kernel_threads, 1);
+	self.bind(host, "computeSpirv", &js_compute_spirv, 1);
 	self.bind(host, "computeFreeKernel", &js_compute_free_kernel, 1);
 	self.bind(host, "computeDispatch", &js_compute_dispatch, 6);
 	self.bind(host, "computeSubmit", &js_compute_submit, 0);
@@ -419,11 +423,166 @@ fn void js_compute_create_kernel(
 		return;
 	}
 
+	install_kernel(self, &js, &shader, name, entry, out);
+}
+
+<*
+ `computeCreateKernelSpirv(bytes, name, entry)` - build from a compiled module.
+
+ The bytes are a SPIR-V module: one a script read from disk with
+ `three.compute.spirv`, or built by a compiler that is not this one. Nothing is
+ compiled here, so nothing can be blamed on a line - a module this cannot read
+ is refused for what it is.
+
+ The workgroup size is the module's own `LocalSize` rather than something the
+ script passes: a precompiled kernel has no source to read it out of, and the
+ one place that knows is the module.
+*>
+fn void js_compute_create_kernel_spirv(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	char[] bytes = js.bytes(args[0]);
+	String name  = arg_text(&js, argc, args, 1, tmem);
+	String entry = arg_text(&js, argc, args, 2, tmem);
+	if (bytes.len == 0)
+	{
+		*out = js.raise("three.compute.kernel(module) wants the module's bytes");
+		return;
+	}
+	if (name.len == 0) name = "kernel";
+	if (entry.len == 0) entry = "main";
+
+	// Copied, because the module takes ownership of what it is given and these
+	// bytes belong to the script.
+	char[] owned = alloc::alloc_array(mem, char, bytes.len);
+	mem::copy(owned.ptr, bytes.ptr, bytes.len);
+
+	ShaderModule shader = three::adopt_spirv_module(name, owned);
+	defer shader.free();
+
+	if (!shader.ok)
+	{
+		*out = js.raise(shader.diagnostic.len > 0
+			? shader.diagnostic
+			: string::tformat("%s is not something this can dispatch", name));
+		return;
+	}
+
+	install_kernel(self, &js, &shader, name, entry, out);
+}
+
+<*
+ `computeKernelThreads(handle)` - the workgroup size, as `[x, y, z]`.
+
+ The module wrote it down and the host keeps it: a script that wants to reason
+ about a dispatch (how many groups a work-item count becomes, or what a
+ dispatch cost) should not have to parse it back out of a shader, and a
+ precompiled module has no source to parse.
+*>
+fn void js_compute_kernel_threads(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
+	if (slot == null) return;
+
+	qjs::Value array = js.array();
+	for (uint i = 0; i < 3; i++)
+	{
+		js.set_index(array, (uint)i, qjs::number_value((double)slot.threads[i]));
+	}
+	*out = array;
+}
+
+<*
+ `computeSpirv(path)` - a module read from disk, as bytes.
+
+ The path is the script's to write and is resolved like every other file here,
+ so `three.compute.spirv("../shaders/zimage.spv")` and a path from the command
+ line are the same thing. What comes back is a `Uint8Array` the script owns: it
+ can be handed to `kernel()` and kept for the next one.
+*>
+fn void js_compute_spirv(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	String asked = arg_text(&js, argc, args, 0, tmem);
+	if (asked.len == 0)
+	{
+		*out = js.raise("three.compute.spirv(path) wants the module's path");
+		return;
+	}
+
+	char[]? bytes = file::load(tmem, asked);
+	if (catch err = bytes)
+	{
+		*out = js.raise(string::tformat("could not read %s: %s", asked, err));
+		return;
+	}
+	if (bytes.len < 4 || *(uint*)bytes.ptr != SPIRV_MAGIC)
+	{
+		*out = js.raise(string::tformat(
+			"%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
+				"goes to three.compute.kernel as text",
+			asked));
+		return;
+	}
+
+	// `buffer_copy` so the bytes belong to the script: the file is read into
+	// temporary memory that is gone by the time the script runs. The view holds
+	// the buffer on its own, so the host's own reference to it goes.
+	qjs::Value buffer = js.buffer_copy(bytes.ptr, bytes.len);
+	defer js.release(buffer);
+	*out = js.typed_array(qjs::ARRAY_UINT8, buffer, 0, bytes.len);
+}
+
+<*
+ The tail both creation paths share: a slot, a pipeline, and the handle a
+ script holds.
+*>
+fn void install_kernel(
+	JsRuntime* self,
+	qjs::Context* js,
+	ShaderModule* shader,
+	String name,
+	String entry,
+	qjs::Value* out
+) @local
+{
 	uint index = kernel_slot_for(self);
 	KernelSlot* slot = &self.kernel_slots[index];
+	Compute* compute = &self.renderer.compute;
 
 	ComputeKernel* kernel = alloc::new(mem, ComputeKernel);
-	if (catch kernel.create(compute, &shader, name, entry))
+	if (catch kernel.create(compute, shader, name, entry))
 	{
 		alloc::free(mem, kernel);
 		self.kernel_slots[index].live = false;
@@ -433,13 +592,24 @@ fn void js_compute_create_kernel(
 		return;
 	}
 
+	// The module's own workgroup size, not a number from the script: `@threads`
+	// is in the module and a work-item count is divided by it, so a disagreeing
+	// value here would dispatch the wrong number of groups.
+	if (shader.local_size[0] == 0)
+	{
+		kernel.free(self.renderer.gpu.handle);
+		alloc::free(mem, kernel);
+		self.kernel_slots[index].live = false;
+		*out = js.raise(string::tformat(
+			"%s declares no compute workgroup size - a module whose size is an `OpExecutionModeId` "
+				"cannot be dispatched by this host yet",
+			name));
+		return;
+	}
+
 	slot.kernel  = kernel;
 	slot.live    = true;
-	slot.threads = {
-		argc >= 4 && arg_number(&js, argc, args, 3) > 0 ? (uint)arg_number(&js, argc, args, 3) : 64,
-		1,
-		1,
-	};
+	slot.threads = shader.local_size;
 	*out = compute_handle_value({ .index = index, .generation = slot.generation });
 }
 
