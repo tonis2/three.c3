@@ -183,3 +183,113 @@ fn void a_missing_entry_point_is_refused() @test
 	}
 	test::@check(false, "a missing entry should be refused rather than built");
 }
+
+<*
+ A workgroup reduction through shared memory, which is the only way to know
+ that a barrier synchronises anything: the second half of this kernel reads
+ what the first half wrote, and without the barrier it reads whatever was left
+ from a previous run.
+*>
+struct ReducePush
+{
+	float bias;
+}
+
+const String REDUCE = `
+shared float scratch[64];
+
+float source[];
+float output[];
+
+struct Push @pushconstant
+{
+    float bias;
+}
+Push push;
+
+struct ComputeIn
+{
+    uint3 group @builtin(workgroup_id);
+    uint3 local @builtin(local_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.local.x;
+    scratch[i] = source[at.group.x * 64u + i];
+    barrier;
+
+    // Tree reduction: halve the live range each step, with a barrier between
+    // so the next read sees the writes the step before it made.
+    for (uint step = 32u; step > 0u; step = step / 2u)
+    {
+        if (i < step) scratch[i] = scratch[i] + scratch[i + step];
+        barrier;
+    }
+
+    if (i == 0u) output[at.group.x] = scratch[0] + push.bias;
+}
+`;
+
+fn void a_workgroup_reduces_through_shared_memory() @test
+{
+	three::Renderer* renderer = device::borrow(with_pass: false);
+	defer device::release();
+	three::Compute* compute = &renderer.compute;
+
+	three::ShaderModule shader = three::compile_compute_shader("reduce", REDUCE);
+	defer shader.free();
+	test::@check(shader.ok, "the shader should compile: %s", shader.diagnostic);
+
+	three::ComputeKernel kernel;
+	if (catch kernel.create(compute, &shader, "reduce"))
+	{
+		test::@check(false, "kernel.create failed");
+		return;
+	}
+	defer kernel.free(renderer.gpu.handle);
+
+	// Two workgroups of 64: the first sums 0..63 = 2016, the second 64..127.
+	float[128] values;
+	for (uint i = 0; i < 128; i++) values[i] = (float)i;
+
+	three::StorageBuffer source;
+	if (catch source.create(&renderer.gpu, 128 * 4, &values))
+	{
+		test::@check(false, "source.create failed");
+		return;
+	}
+	defer source.free();
+
+	three::StorageBuffer output;
+	if (catch output.create(&renderer.gpu, 2 * 4))
+	{
+		test::@check(false, "output.create failed");
+		return;
+	}
+	defer output.free();
+
+	ReducePush push = { .bias = 0.5f };
+
+	if (catch compute.dispatch(&kernel, { source, output }, &push, 2))
+	{
+		test::@check(false, "dispatch failed");
+		return;
+	}
+	if (catch compute.submit())
+	{
+		test::@check(false, "submit failed");
+		return;
+	}
+
+	char[8] bytes;
+	output.read(compute, 0, bytes[..])!!;
+	float[] result = ((float*)&bytes)[:2];
+
+	float expected_a = 0;
+	for (uint i = 0; i < 64; i++) expected_a += (float)i;
+
+	test::@check(math::abs(result[0] - (expected_a + 0.5f)) < 0.5f,
+		"the first workgroup should sum 0..63, got %f", result[0]);
+	test::@check(result[1] > result[0], "the second workgroup reads the second half, got %f", result[1]);
+}
