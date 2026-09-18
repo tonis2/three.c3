@@ -3393,7 +3393,7 @@ fn void main(ComputeIn input) @compute @threads(64, 1, 1)
 }
 `, { name: 'scale' });
 
-kernel.run({ a, result }, { threads: n, push: { scale: 2, n: n | 0 } });
+kernel.run({ a, result }, { threads: n, push: { scale: 2, n: three.compute.uint(n) } });
 result.read();
 console.log(result.f32(5));
 ```
