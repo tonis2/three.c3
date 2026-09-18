@@ -345,17 +345,11 @@ export class ComputeKernel {
 	}
 }
 
-// The workgroup size out of `@threads(x, y, z)`, which the host needs to turn a
-// work-item count into group counts.
-//
-// Read out of the source because the source is the only place it is written:
-// the shader language has no reflection verb here and a script that wrote
-// `@threads(64, 1, 1)` should not have to say 64 again.
-function threadsOf(source) {
-	const match = /@threads\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/.exec(source);
-	if (!match) return 64;
-	const x = Number(match[1]);
-	return x > 0 ? x : 64;
+// Whether a value is bytes a compiled module could be in: a typed array or an
+// ArrayBuffer. A string is not, which is how `kernel` tells a shader source
+// from a module that is already SPIR-V.
+function hasBytes(value) {
+	return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 }
 
 export const compute = {
@@ -404,27 +398,54 @@ export const compute = {
 	// A buffer of bytes.
 	bytes(count, data) { return compute.buffer('bytes', count, data); },
 
-	// Compile a kernel.
+	// A kernel: from a shader source, or from a module that is already SPIR-V.
 	//
-	// The source is a complete shader: its `@storage` buffers, its push block,
-	// and a `@compute` entry point. `name` is what a compile error is blamed
-	// on; `entry` is which entry point, and is the first `@compute` one when
-	// the source has only that one. `pushFields` names the push block's fields
-	// in the shader's own order, which is what lets `run({ push: {...} })` pack
-	// them without a type table.
+	// A string is a complete shader — its `@storage` buffers, its push block,
+	// and a `@compute` entry point — and it is compiled here. A `Uint8Array`
+	// (or anything else with bytes) is a compiled module instead, dispatched as
+	// it is: `three.compute.spirv(path)` returns one, and a module built by
+	// another compiler works the same way.
+	//
+	// `name` is what an error is blamed on; `entry` is which entry point, and
+	// is `main` when the module has only that one. `pushFields` names the push
+	// block's fields in the shader's own order, which is what lets
+	// `run({ push: {...} })` pack them without a type table.
 	kernel(source, options = {}) {
-		if (typeof source !== 'string') throw new TypeError('three.compute.kernel(source) wants the shader source as a string');
+		const compiled = typeof source === 'string';
+		if (!compiled && !hasBytes(source)) {
+			throw new TypeError(
+				'three.compute.kernel(source) wants the shader source as a string, or a compiled module as bytes'
+			);
+		}
 		const name = options.name || 'kernel';
 		const entry = options.entry || 'main';
 		const pushFields = options.pushFields || null;
 
-		const handle = H.computeCreateKernel(source, name, entry, threadsOf(source));
-		const kernel = new ComputeKernel(handle, source, threadsOf(source));
+		const handle = compiled
+			? H.computeCreateKernel(source, name, entry)
+			: H.computeCreateKernelSpirv(source, name, entry);
+		// The workgroup size is the module's, and both paths ask for it rather
+		// than parsing `@threads` back out of the text: a dispatch splits a
+		// work-item count by this, so a wrong one is a wrong dispatch.
+		const kernel = new ComputeKernel(handle, compiled ? source : null, H.computeKernelThreads(handle));
 		// Kept for the dispatch's own packing. Not part of the class's story
 		// above the line — a field of the object that says which fields the
 		// push block has.
 		kernel.pushFields = pushFields;
 		return kernel;
+	},
+
+	// A compiled module read from disk, as bytes — `kernel(spirv(path), ...)`.
+	//
+	// The path is resolved the way every other file in the project is, so a
+	// module shipped next to the binary is `spirv('shaders/zimage.spv')`. The
+	// bytes come back a `Uint8Array` the script owns, so one module can be
+	// read once and used for several kernels.
+	spirv(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.compute.spirv(path) wants the module\'s path');
+		}
+		return H.computeSpirv(path);
 	},
 
 	// The shader language's own view of a buffer, for a script that wants to

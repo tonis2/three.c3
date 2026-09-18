@@ -35,6 +35,10 @@ struct ShaderModule
 	// The entry points the module really contains, read back from the module
 	// rather than from what was asked for.
 	List{ShaderEntry} entries;
+	// The compute entry point's workgroup size, from its own `OpExecutionMode
+	// LocalSize`. Zero when the module declares none - which is a module that
+	// cannot be dispatched, not one to guess a size for.
+	uint[3] local_size;
 }
 
 <*
