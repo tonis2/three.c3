@@ -84,9 +84,24 @@ function asBytes(source, what) {
 // The floats, uints or bytes a script handed over, for a push block.
 //
 // A push block is bytes with a layout the shader wrote down, so a plain object
-// has to be packed in the order its keys are listed. Numbers are floats unless
-// they say otherwise: `{ n: count | 0 }` is the spelling for an integer, which
-// is one operator and reads better than a parallel array of field types.
+// has to be packed in the order its keys are listed, and each field in the
+// width its C3 type has.
+//
+// A JavaScript number is a double and nothing about it says whether the shader
+// field is a float or a `uint`, so the script says. Bare numbers are floats,
+// because that is what most push fields are and `{ scale: 2 }` should mean
+// 2.0; an integer field is written `three.compute.uint(n)`, which is one call
+// and says which side of the line it is on:
+//
+//     push: { scale: 0.5, count: three.compute.uint(count) }
+//
+// Guessing from the value would be worse than asking: `{ n: 4 }` is a float
+// field that happens to hold a whole number, and a packer that read integers
+// into a `float n;` would put 4.0e-45 there instead of 4.
+class UintValue {
+	constructor(value) { this.value = value; }
+}
+
 function packPush(push, spec) {
 	if (push === null || push === undefined) return null;
 	if (ArrayBuffer.isView(push)) return new Uint8Array(push.buffer, push.byteOffset, push.byteLength);
@@ -96,24 +111,21 @@ function packPush(push, spec) {
 	}
 
 	const fields = spec || Object.keys(push);
-	const floats = [];
+	const words = [];
 	for (const name of fields) {
-		const value = push[name];
+		const raw = push[name];
+		const whole = raw instanceof UintValue;
+		const value = whole ? raw.value : raw;
 		if (typeof value !== 'number' || !Number.isFinite(value)) {
 			throw new TypeError(`three.compute: push.${name} wants a finite number, and the command object gave '${value}'`);
 		}
-		// A float, unless the script said otherwise. A number is a float in a
-		// shader and this is the packing that matches the way sources are
-		// written; an integer field is the exception, and the spelling for it
-		// is `| 0` — the one operator JavaScript already has for "these are
-		// int32 bits":
-		//
-		//   push: { n: count | 0 }     // a `uint n;` field
-		floats.push(value instanceof Number ? floatBits(value.valueOf()) : floatBits(value));
+		// `>>> 0` is the uint32 the shader's `uint` field reads; `floatBits` the
+		// float its `float` field reads. Same four bytes, different meaning.
+		words.push(whole ? (value >>> 0) : floatBits(value));
 	}
-	const out = new Uint8Array(floats.length * 4);
+	const out = new Uint8Array(words.length * 4);
 	const view = new DataView(out.buffer);
-	floats.forEach((bits, i) => view.setUint32(i * 4, bits, true));
+	words.forEach((bits, i) => view.setUint32(i * 4, bits, true));
 	return out;
 }
 
@@ -333,17 +345,11 @@ export class ComputeKernel {
 	}
 }
 
-// The workgroup size out of `@threads(x, y, z)`, which the host needs to turn a
-// work-item count into group counts.
-//
-// Read out of the source because the source is the only place it is written:
-// the shader language has no reflection verb here and a script that wrote
-// `@threads(64, 1, 1)` should not have to say 64 again.
-function threadsOf(source) {
-	const match = /@threads\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/.exec(source);
-	if (!match) return 64;
-	const x = Number(match[1]);
-	return x > 0 ? x : 64;
+// Whether a value is bytes a compiled module could be in: a typed array or an
+// ArrayBuffer. A string is not, which is how `kernel` tells a shader source
+// from a module that is already SPIR-V.
+function hasBytes(value) {
+	return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 }
 
 export const compute = {
@@ -385,32 +391,61 @@ export const compute = {
 
 	// A buffer of floats. The common case, spelled the common way.
 	f32(count, data) { return compute.buffer('f32', count, data); },
+	// A push field the shader declares as an integer: `three.compute.uint(n)`.
+	uint(value) { return new UintValue(value); },
 	// A buffer of unsigned ints.
 	u32(count, data) { return compute.buffer('u32', count, data); },
 	// A buffer of bytes.
 	bytes(count, data) { return compute.buffer('bytes', count, data); },
 
-	// Compile a kernel.
+	// A kernel: from a shader source, or from a module that is already SPIR-V.
 	//
-	// The source is a complete shader: its `@storage` buffers, its push block,
-	// and a `@compute` entry point. `name` is what a compile error is blamed
-	// on; `entry` is which entry point, and is the first `@compute` one when
-	// the source has only that one. `pushFields` names the push block's fields
-	// in the shader's own order, which is what lets `run({ push: {...} })` pack
-	// them without a type table.
+	// A string is a complete shader — its `@storage` buffers, its push block,
+	// and a `@compute` entry point — and it is compiled here. A `Uint8Array`
+	// (or anything else with bytes) is a compiled module instead, dispatched as
+	// it is: `three.compute.spirv(path)` returns one, and a module built by
+	// another compiler works the same way.
+	//
+	// `name` is what an error is blamed on; `entry` is which entry point, and
+	// is `main` when the module has only that one. `pushFields` names the push
+	// block's fields in the shader's own order, which is what lets
+	// `run({ push: {...} })` pack them without a type table.
 	kernel(source, options = {}) {
-		if (typeof source !== 'string') throw new TypeError('three.compute.kernel(source) wants the shader source as a string');
+		const compiled = typeof source === 'string';
+		if (!compiled && !hasBytes(source)) {
+			throw new TypeError(
+				'three.compute.kernel(source) wants the shader source as a string, or a compiled module as bytes'
+			);
+		}
 		const name = options.name || 'kernel';
 		const entry = options.entry || 'main';
 		const pushFields = options.pushFields || null;
 
-		const handle = H.computeCreateKernel(source, name, entry, threadsOf(source));
-		const kernel = new ComputeKernel(handle, source, threadsOf(source));
+		const handle = compiled
+			? H.computeCreateKernel(source, name, entry)
+			: H.computeCreateKernelSpirv(source, name, entry);
+		// The workgroup size is the module's, and both paths ask for it rather
+		// than parsing `@threads` back out of the text: a dispatch splits a
+		// work-item count by this, so a wrong one is a wrong dispatch.
+		const kernel = new ComputeKernel(handle, compiled ? source : null, H.computeKernelThreads(handle));
 		// Kept for the dispatch's own packing. Not part of the class's story
 		// above the line — a field of the object that says which fields the
 		// push block has.
 		kernel.pushFields = pushFields;
 		return kernel;
+	},
+
+	// A compiled module read from disk, as bytes — `kernel(spirv(path), ...)`.
+	//
+	// The path is resolved the way every other file in the project is, so a
+	// module shipped next to the binary is `spirv('shaders/zimage.spv')`. The
+	// bytes come back a `Uint8Array` the script owns, so one module can be
+	// read once and used for several kernels.
+	spirv(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.compute.spirv(path) wants the module\'s path');
+		}
+		return H.computeSpirv(path);
 	},
 
 	// The shader language's own view of a buffer, for a script that wants to

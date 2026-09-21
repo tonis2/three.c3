@@ -73,6 +73,10 @@ struct GpuLimits
 	bool buffer_device_address;
 	bool dynamic_rendering;
 	bool push_descriptor;
+	// `VK_KHR_cooperative_matrix`: the shader-side matrix tiles a workgroup
+	// computes together. Optional - the extension is only requested of a
+	// device that has it - so anything built on it must ask first.
+	bool cooperative_matrix;
 	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
 	// instanced draw tells six vertices which drawing they belong to. A
 	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
@@ -264,6 +268,35 @@ fn void push_surface_extensions(vk::ZStringList* out)
 {
 	out.push_all(vk::DEFAULT_EXTENSIONS);
 	out.push("VK_KHR_surface");
+}
+
+<*
+ Whether a device advertises an extension by name.
+
+ The three extensions `Gpu.init` requests unconditionally are baseline and do
+ not need this. Cooperative matrices are not: a driver that has never heard of
+ them fails device creation rather than skipping the request.
+*>
+fn bool device_extension_present(vk::PhysicalDevice device, String name)
+{
+	uint count = 0;
+	if (catch err = vk::enumerateDeviceExtensionProperties(device, null, &count, null)) return false;
+	if (count == 0) return false;
+
+	vk::ExtensionProperties[] properties = mem::new_array(vk::ExtensionProperties, count);
+	defer mem::free(properties);
+
+	if (catch err = vk::enumerateDeviceExtensionProperties(device, null, &count, properties.ptr)) return false;
+
+	foreach (property : properties)
+	{
+		// The name is a fixed-size char array, so the address of its first
+		// element is the string; comparing it needs a `String`, which is what
+		// `str_view` is for.
+		ZString advertised = (ZString)&property.extensionName[0];
+		if (advertised.str_view() == name) return true;
+	}
+	return false;
 }
 
 <*
@@ -539,6 +572,13 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	// VK_KHR_portability_subset would have to have it enabled, but no such device
 	// gets this far: `select_device` turns them away.
 
+	// Cooperative matrices are the exception to "the extensions above are
+	// baseline": asked for only of the device that was chosen, and the feature
+	// is chained only when the extension went in, because an unknown struct in
+	// the pNext chain is invalid usage rather than a struct the driver ignores.
+	bool has_cooperative_matrix = device_extension_present(selection.device, "VK_KHR_cooperative_matrix");
+	if (has_cooperative_matrix) extensions.push("VK_KHR_cooperative_matrix");
+
 	// Through properties2 rather than the v1 call, because that is the only way to
 	// reach `maxPushDescriptors`. A device without VK_KHR_push_descriptor walks
 	// past the struct it has never heard of and leaves it as it was, so the zero
@@ -579,9 +619,16 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
 		.pNext = &v13,
 	};
+	// Chained between the 1.1 and 1.2 structs, and only for a device with the
+	// extension: this one is not core in any version, so a driver that does
+	// not know it must not be handed it.
+	vk::PhysicalDeviceCooperativeMatrixFeaturesKHR coopmat = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+		.pNext = &v12,
+	};
 	vk::PhysicalDeviceVulkan11Features v11 = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-		.pNext = &v12,
+		.pNext = has_cooperative_matrix ? (void*)&coopmat : (void*)&v12,
 	};
 	vk::PhysicalDeviceFeatures2 features = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
 	vk::getPhysicalDeviceFeatures2(self.pdevice, &features);
@@ -597,6 +644,10 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.max_per_stage_samplers = properties.limits.maxPerStageDescriptorSamplers,
 		.max_per_stage_sampled_images = properties.limits.maxPerStageDescriptorSampledImages,
 		.max_push_descriptors = push_descriptor.maxPushDescriptors,
+		// Read off the same struct that goes to `deviceCreateInfo`, so what is
+		// reported is what the device will have. False on a device without the
+		// extension, because the struct was never chained there.
+		.cooperative_matrix = has_cooperative_matrix && coopmat.cooperativeMatrix == vk::TRUE,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim
