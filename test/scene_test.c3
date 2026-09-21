@@ -85,6 +85,62 @@ fn uint count_drawn(image::Image* shot, float[4] clear)
 	return drawn;
 }
 
+fn uint count_drawn_between(image::Image* shot, float[4] clear, uint from, uint to)
+{
+	char[3] background = {
+		(char)(uint)(clear[0] * 255.0 + 0.5),
+		(char)(uint)(clear[1] * 255.0 + 0.5),
+		(char)(uint)(clear[2] * 255.0 + 0.5),
+	};
+	uint drawn = 0;
+	for (uint y = 0; y < shot.height; y++)
+	{
+		for (uint x = from; x < to && x < shot.width; x++)
+		{
+			sz at = ((sz)y * shot.width + x) * 4;
+			int dr = (int)shot.pixels[at] - (int)background[0];
+			int dg = (int)shot.pixels[at + 1] - (int)background[1];
+			int db = (int)shot.pixels[at + 2] - (int)background[2];
+			if (dr * dr + dg * dg + db * db > 12) drawn++;
+		}
+	}
+	return drawn;
+}
+
+<*
+ One scene can be drawn into two rectangles with two cameras. The second
+ triangle is far outside the first camera, so this also pins the union cull.
+*>
+fn void additional_scene_views_draw_their_own_camera() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = renderer.pass.scene;
+		three::NodeId far = scene.add_mesh(TRIANGLE, 0);
+		scene.set_position(far, { 100, 0, 0 });
+
+		float aspect = ((float)W * 0.5f) / (float)H;
+		three::Camera left = three::default_camera();
+		left.frame_bounds({ -1, -1, -0.1f }, { 1, 1, 0.1f }, aspect);
+		three::Camera right = three::default_camera();
+		right.frame_bounds({ 99, -1, -0.1f }, { 101, 1, 0.1f }, aspect);
+
+		renderer.pass.camera = left;
+		renderer.pass.view_rect = { 0, 0, 0.5f, 1 };
+		three::SceneView[1] views = { { .camera = right, .rect = { 0.5f, 0, 0.5f, 1 } } };
+		renderer.pass.set_extra_views(views[..]);
+
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		uint split = shot.width / 2;
+		test::@check(count_drawn_between(&shot, renderer.clear, 0, split) > 20,
+			"the main scene view drew no triangle");
+		test::@check(count_drawn_between(&shot, renderer.clear, split, shot.width) > 20,
+			"the additional scene view drew no triangle from its camera");
+	};
+}
+
 // ============================================================================
 // Scene math — no GPU, no assets
 // ============================================================================

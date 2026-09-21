@@ -2354,11 +2354,14 @@ fn void Scene.update(
 	Matrix4f* light_view_projection = null,
 	InstanceReserve reserve = null,
 	void* reserve_context = null,
-	bool shadow_all = false
+	bool shadow_all = false,
+	Matrix4f[] extra_view_projections = { }
 )
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
+	Frustum[] extra_frustums = alloc::new_array(tmem, Frustum, (sz)extra_view_projections.len);
+	foreach (i, projection : extra_view_projections) extra_frustums[i] = frustum_of(projection);
 	// Two frustums, and `cull` gates only the camera's. A script turning culling
 	// off is asking for its own draws not to be dropped; it is not asking the
 	// shadow pass to rasterise the far side of the level, and a light box smaller
@@ -2378,7 +2381,8 @@ fn void Scene.update(
 		false,
 		reserve,
 		reserve_context,
-		shadow_all
+		shadow_all,
+		extra_frustums
 	);
 	// Promoted here rather than inside `build_draw_list`, because this call is what
 	// "a frame happened" means and the other caller is a query. Assigned
@@ -2456,7 +2460,8 @@ fn void Scene.build_draw_list(
 	bool counts_only = false,
 	InstanceReserve reserve = null,
 	void* reserve_context = null,
-	bool shadow_all = false
+	bool shadow_all = false,
+	Frustum[] extra_frustums = { }
 )
 {
 	self.draws.clear();
@@ -2511,7 +2516,7 @@ fn void Scene.build_draw_list(
 		// cost nothing: with no frustum and no light there is no box to compute and
 		// no test to run.
 		bool visible = true;
-		if (frustum != null || light != null || shadow_all || sorted)
+		if (frustum != null || extra_frustums.len > 0 || light != null || shadow_all || sorted)
 		{
 			// A skinned node is measured by the poses it can reach, not by the pose
 			// it was authored in. The bake unioned every joint matrix of every frame
@@ -2562,6 +2567,17 @@ fn void Scene.build_draw_list(
 				box = { .min = box.min - { m, m, m }, .max = box.max + { m, m, m } };
 			}
 			visible = frustum == null || frustum.contains(box);
+			if (!visible)
+			{
+				foreach (extra : extra_frustums)
+				{
+					if (extra.contains(box))
+					{
+						visible = true;
+						break;
+					}
+				}
+			}
 			if (!visible) self.culled++;
 
 			// The second test, and the reason a draw can survive the first rejection.

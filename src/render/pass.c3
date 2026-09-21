@@ -125,6 +125,25 @@ const uint DEBUG_VIEW_SHADOW_MAP = 2;
 // The highest view there is, so the binding can range-check without listing them.
 const uint DEBUG_VIEW_MAX        = DEBUG_VIEW_SHADOW_MAP;
 
+<*
+ One additional view of the active scene.
+
+ The main view remains `MeshPass.camera` plus `view_rect`; these are the views a
+ host composites beside it. Geometry, materials, poses and lights stay shared.
+*>
+struct SceneView
+{
+	Camera camera;
+	float[4] rect;
+}
+
+struct PreparedSceneView
+{
+	vk::Rect2D rect;
+	Matrix4f view_projection;
+	ulong frame_address;
+}
+
 struct MeshPass
 {
 	// Compiled on demand and kept by content hash. `pipeline` is borrowed from it
@@ -220,6 +239,8 @@ struct MeshPass
 	 field exists.
 	*>
 	float[4] view_rect;
+	List{SceneView} extra_views;
+	List{PreparedSceneView} prepared_views;
 	// `view_rect` in physical pixels, as `prepare` resolved it against the target,
 	// and whether it is anything other than the whole of it. `record` has no
 	// target to measure and runs immediately after `prepare`, so this is the one
@@ -246,6 +267,8 @@ struct MeshPass
 
 	// Per frame in flight — see the header.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
+	vk::Memory[MAX_FRAMES_IN_FLIGHT] extra_frame_blocks;
+	sz[MAX_FRAMES_IN_FLIGHT] extra_frame_capacity;
 	// Variable-length GPU light registry. The frame block carries its address.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] light_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] light_capacity;
@@ -470,6 +493,8 @@ const uint NOT_DRAWN = uint::max;
 fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 {
 	self.pipelines.init();
+	self.extra_views.init(mem);
+	self.prepared_views.init(mem);
 	// Nothing built yet; `ensure_reference_pipelines` sets this once a frame
 	// asks for the numeric draw path.
 	self.reference_ready = false;
@@ -969,15 +994,21 @@ fn void MeshPass.derive_camera_planes(&self)
 *>
 fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 {
+	self.scene_rect = resolved_view_rect(self.view_rect, extent);
+	self.scene_rect_partial = view_rect_partial(self.scene_rect, extent);
+}
+
+fn vk::Rect2D resolved_view_rect(float[4] rect, vk::Extent2D extent) @local
+{
 	float width  = (float)extent.width;
 	float height = (float)extent.height;
 
-	float x = math::clamp(self.view_rect[0], 0.0f, 1.0f) * width;
-	float y = math::clamp(self.view_rect[1], 0.0f, 1.0f) * height;
+	float x = math::clamp(rect[0], 0.0f, 1.0f) * width;
+	float y = math::clamp(rect[1], 0.0f, 1.0f) * height;
 	// Against what is left rather than against the whole, so a rect running off
 	// the right edge is trimmed rather than wrapped back to the origin.
-	float w = math::clamp(self.view_rect[2], 0.0f, 1.0f) * width;
-	float h = math::clamp(self.view_rect[3], 0.0f, 1.0f) * height;
+	float w = math::clamp(rect[2], 0.0f, 1.0f) * width;
+	float h = math::clamp(rect[3], 0.0f, 1.0f) * height;
 	if (x + w > width) w = width - x;
 	if (y + h > height) h = height - y;
 
@@ -988,8 +1019,34 @@ fn void MeshPass.resolve_view_rect(&self, vk::Extent2D extent)
 	if (rx + rw > extent.width) rx = extent.width - rw;
 	if (ry + rh > extent.height) ry = extent.height - rh;
 
-	self.scene_rect = { .offset = { (int)rx, (int)ry }, .extent = { .width = rw, .height = rh } };
-	self.scene_rect_partial = rx != 0 || ry != 0 || rw != extent.width || rh != extent.height;
+	return { .offset = { (int)rx, (int)ry }, .extent = { .width = rw, .height = rh } };
+}
+
+fn bool view_rect_partial(vk::Rect2D rect, vk::Extent2D extent) @local =>
+	rect.offset.x != 0 || rect.offset.y != 0
+		|| rect.extent.width != extent.width || rect.extent.height != extent.height;
+
+<*
+ Replaces the additional views drawn beside the main camera this frame.
+*>
+fn void MeshPass.set_extra_views(&self, SceneView[] views)
+{
+	self.extra_views.clear();
+	foreach (view : views) self.extra_views.push(view);
+}
+
+fn void MeshPass.prepare_extra_views(&self, vk::Extent2D extent)
+{
+	self.prepared_views.clear();
+	foreach (view : self.extra_views)
+	{
+		vk::Rect2D rect = resolved_view_rect(view.rect, extent);
+		float aspect = (float)rect.extent.width / (float)rect.extent.height;
+		self.prepared_views.push({
+			.rect = rect,
+			.view_projection = view.camera.view_projection(aspect),
+		});
+	}
 }
 
 <*
@@ -1073,6 +1130,13 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// and the sky draws for a scene with no geometry in it — which is exactly the
 	// case the `buckets.len() == 0` return further down takes.
 	self.frame_view_projection = view_projection;
+	self.prepare_extra_views(target.extent);
+	self.frame_key = @hash_value(self.frame_key, self.prepared_views.len());
+	foreach (view : self.prepared_views)
+	{
+		self.frame_key = @hash_value(self.frame_key, view.rect);
+		self.frame_key = @hash_value(self.frame_key, view.view_projection);
+	}
 
 	// The whole of what `Scene` is told about materials, and deliberately not a
 	// pointer to them. The scene graph has no view of `MeshPass.materials`, and
@@ -1142,6 +1206,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// The fit above wrote `light_view_projection`, so the box the pass will
 		// rasterise into and the box the cull is against are the same box by
 		// construction rather than by two agreeing derivations.
+		Matrix4f[] extra_projections = alloc::new_array(tmem, Matrix4f, (sz)self.prepared_views.len());
+		foreach (i, view : self.prepared_views) extra_projections[i] = view.view_projection;
 		self.scene.update(
 			&self.assets,
 			view_projection,
@@ -1150,7 +1216,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			self.shadows.live ? &self.shadows.light_view_projection : null,
 			&reserve_instances,
 			&copies,
-			self.point_shadows.live
+			self.point_shadows.live,
+			extra_projections
 		);
 	};
 	if (self.scene.buckets.len() == 0)
@@ -1202,6 +1269,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	};
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
+	self.write_extra_frame_blocks(gpu, slot, &frame)!;
 	// Already written, unless the growth inside the callback faulted — in which
 	// case the copies went into `Scene.instances` and this is the retry that both
 	// uploads them and produces the fault the callback could not return.
@@ -1566,14 +1634,24 @@ fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
 *>
 fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
+	self.record_view(cmd, self.scene_rect, self.frame_view_projection, self.frame_address, true);
+	foreach (view : self.prepared_views)
+	{
+		self.record_view(cmd, view.rect, view.view_projection, view.frame_address, false);
+	}
+}
+
+fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
+	Matrix4f view_projection, ulong frame_address, bool use_prepass)
+{
 	// Before the sky, so the background lands in the pane too — a sky drawn over
 	// the whole window behind an interface that only opens a hole for the pane
 	// would show through every gap the interface has.
 	// 
 	// Only when it is a pane. `begin_render` has already set the full viewport, so
 	// the ordinary full-target frame records nothing extra here and is unchanged.
-	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
-	if (self.cache_partial) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
+	set_viewport_rect(cmd, rect, true);
+	if (use_prepass && self.cache_partial) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
 
 	// First, and the ordering is load-bearing — `render/sky.c3` has why a sky
 	// drawn last would paint over glass.
@@ -1583,11 +1661,10 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 	// ordinary thing rather than a corner case — a level being framed, a sky an
 	// agent asked to look at. What this actually needs is `ready`: a pipeline, and
 	// the view-projection `prepare` writes before that early return.
-	if (self.ready) self.record_sky(cmd);
+	if (self.ready) self.record_sky(cmd, view_projection);
 
 	if (!self.prepared) return;
 
-	ulong frame_address    = self.frame_address;
 	ulong instance_address = self.instance_address;
 	ulong draw_address     = self.draw_address;
 
@@ -1641,7 +1718,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 		// The depth prepass already wrote this bucket's depth, so the fragment
 		// shader runs on the one layer that survived it and writes nothing back.
 		// Everything else keeps the state its pipeline was built with.
-		bool prepassed = self.prepassed(material);
+		bool prepassed = use_prepass && self.prepassed(material);
 		vk::cmdSetDepthWriteEnable(cmd, (!prepassed && pipeline.state.depth_write) ? vk::TRUE : vk::FALSE);
 		vk::cmdSetDepthCompareOp(cmd, prepassed ? COMPARE_OP_EQUAL : COMPARE_OP_LESS_OR_EQUAL);
 
@@ -2199,6 +2276,40 @@ fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* fra
 	}
 	self.frame_blocks[slot].upload(frame, FrameBlock::size);
 	return self.frame_blocks[slot].address;
+}
+
+fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* main)
+{
+	sz needed = (sz)self.prepared_views.len();
+	if (needed == 0) return;
+
+	if (self.extra_frame_capacity[slot] < needed)
+	{
+		sz capacity = self.extra_frame_capacity[slot] > 0 ? self.extra_frame_capacity[slot] : 2;
+		while (capacity < needed) capacity *= 2;
+		vk::Memory grown = gpu.create_dynamic(capacity * FrameBlock::size)!;
+		if (self.extra_frame_blocks[slot].buffer != null) self.extra_frame_blocks[slot].free();
+		self.extra_frame_blocks[slot] = grown;
+		self.extra_frame_capacity[slot] = capacity;
+	}
+
+	FrameBlock[] blocks = alloc::new_array(tmem, FrameBlock, needed);
+	foreach (i, view : self.prepared_views)
+	{
+		SceneView source = self.extra_views[i];
+		blocks[i] = *main;
+		blocks[i].view_projection = view.view_projection;
+		blocks[i].inverse_view_projection = invert(view.view_projection);
+		Vec3 eye = source.camera.eye();
+		blocks[i].camera = { eye.x, eye.y, eye.z, 0 };
+		blocks[i].ambient_occlusion[0] = 0;
+		blocks[i].cluster_grid[3] = 0;
+		blocks[i].cluster_screen[2] = source.camera.near_plane;
+		blocks[i].cluster_screen[3] = source.camera.far_plane;
+		self.prepared_views[i].frame_address = self.extra_frame_blocks[slot].address
+			+ (ulong)i * FrameBlock::size;
+	}
+	self.extra_frame_blocks[slot].upload(blocks.ptr, needed * FrameBlock::size);
 }
 
 fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
@@ -3789,6 +3900,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	for (uint i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		if (self.frame_blocks[i].buffer != null) self.frame_blocks[i].free();
+		if (self.extra_frame_blocks[i].buffer != null) self.extra_frame_blocks[i].free();
+		self.extra_frame_capacity[i] = 0;
 		if (self.light_buffers[i].buffer != null) self.light_buffers[i].free();
 		if (self.shadow_view_buffers[i].buffer != null) self.shadow_view_buffers[i].free();
 		if (self.cluster_counts[i].buffer != null) self.cluster_counts[i].free();
@@ -3827,6 +3940,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	self.posed_offsets.free();
 	self.soft_offsets.free();
 	self.draw_indices.free();
+	self.extra_views.free();
+	self.prepared_views.free();
 	self.free_scenes();
 	// Before `assets.free`, which frees every texture slot outright: releasing
 	// afterwards would decrement counts in a freed list. The device is idle by the
