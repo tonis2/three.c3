@@ -603,6 +603,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	if (posted) cache_global = @hash_value(cache_global, self.post.scene.image);
 	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
 	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial
+		&& self.pass.prepared_views.len() == 0
 		&& (posted || presenting || !self.ui.active());
 	vk::Rect2D cache_dirty = cache_full;
 	if (cache_safe) { cache_dirty = self.pass.scene_cache_update(&self.scene_cache, &self.target, cache_global); }

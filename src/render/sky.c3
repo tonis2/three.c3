@@ -164,7 +164,7 @@ fn float[4] MeshPass.environment_params(&self)
  and for the same reason: building it the first time somebody assigns a sky would
  put a shader compile inside that frame.
 *>
-fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
+fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f view_projection)
 {
 	if (self.sky_pipeline == null || self.scene == null) return;
 
@@ -188,7 +188,7 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd)
 	samplers.push(cmd, self.sky_pipeline);
 
 	SkyPush push = {
-		.inverse_view_projection = invert(self.frame_view_projection),
+		.inverse_view_projection = invert(view_projection),
 		.params = { sky.background_intensity, sky.rotation, 0, 0 },
 	};
 	vk::cmdPushConstants(cmd, self.sky_pipeline.layout, self.sky_pipeline.shader.stages, 0, SkyPush::size, &push);
