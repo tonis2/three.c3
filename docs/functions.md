@@ -3393,7 +3393,7 @@ fn void main(ComputeIn input) @compute @threads(64, 1, 1)
 }
 `, { name: 'scale' });
 
-kernel.run({ a, result }, { threads: n, push: { scale: 2, n: n | 0 } });
+kernel.run({ a, result }, { threads: n, push: { scale: 2, n: three.compute.uint(n) } });
 result.read();
 console.log(result.f32(5));
 ```
@@ -3438,13 +3438,39 @@ was made in its place, and everything a run leaves behind is freed when the run 
 
 ### three.compute.kernel(source, options)
 
-Compile one shader. The source is a complete program in the engine's own shader language: its
-`@storage` buffers — which are the names `run` binds by — its `@pushconstant` block, and a `@compute`
-entry point with `@threads`. A source that does not compile throws with the compiler's line, column
-and caret, prefixed by the kernel's name.
+One kernel: from a shader source, or from a module that is already SPIR-V.
+
+A **string** is a complete program in the engine's own shader language: its `@storage` buffers —
+which are the names `run` binds by — its `@pushconstant` block, and a `@compute` entry point with
+`@threads`. A source that does not compile throws with the compiler's line, column and caret,
+prefixed by the kernel's name.
+
+**Bytes** — a `Uint8Array` or `ArrayBuffer` — are a compiled module, dispatched as it is:
+
+```js
+const kernel = three.compute.kernel(three.compute.spirv('shaders/batched_matmul_q8.spv'), {
+	entry: 'batched_matmul_q8',
+});
+```
+
+That is the shape a shipped pipeline kernel has, and the module is read rather than trusted: its
+bindings, its push block's size and its workgroup size all come out of the module's own declarations.
 
 - `name` — what a diagnostic blames. `'kernel'` when it is not given.
-- `entry` — which entry point to build the pipeline for. `'main'` when it is not given.
+- `entry` — which entry point to build the pipeline for. `'main'` when it is not given, which a module
+  from another compiler rarely uses — `-fvk-use-entrypoint-name` names each entry after its function.
+- `pushFields` — the push block's field names in the shader's own order, for `run({ push: {...} })`.
+  Read from the module when it is not given.
+
+### three.compute.spirv(path)
+
+A compiled module read from disk, as bytes the script owns: `kernel(spirv(path), ...)`. The path is
+resolved like every other file in the project, so a module shipped next to the binary is
+`three.compute.spirv('shaders/zimage.spv')`. A file that is not a SPIR-V module is refused by name.
+One module can be read once and used for several kernels.
+
+`kernel.threads` is the entry point's workgroup size, `[x, y, z]` — the module's own `LocalSize`, so a
+script can split work-item counts itself or report what a dispatch cost.
 
 ### kernel.run(buffers, options), kernel.dispatch(...), three.compute.submit()
 
@@ -3465,8 +3491,8 @@ The options:
 - `workgroups` — group counts themselves, for a dispatch about groups rather than about items.
   `workgroups: [32, 8]`.
 - `push` — the push block's fields as an object, in the shader's own order. A number is packed as a
-  float, which is what a shader reads by default; `n | 0` packs an integer for a `uint` field. Raw
-  bytes work too, for a block a script built itself.
+  float, which is what a shader reads by default; `three.compute.uint(n)` packs an integer for a
+  `uint` field. Raw bytes work too, for a block a script built itself.
 
 ### What is not here
 

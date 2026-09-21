@@ -148,12 +148,117 @@ fn ShaderModule compile_compute_shader(String name, String source)
 	// Not walked from a C3 struct, so it is read out of the module's own
 	// `@pushconstant` block instead - see `reflect_push_block_size`.
 	mod.layout.push_size = reflect_push_block_size(mod.spirv);
+	mod.local_size = reflect_local_size(mod.spirv);
 
 	mod.ok = true;
 	copy_compute_warnings(&mod, &warnings);
 	foreach (warning : warnings) warning.free();
 	warnings.free();
 	return mod;
+}
+
+<*
+ A module this project did not compile: SPIR-V words from somewhere else -
+ `slangc`, `glslang`, a kernel shipped next to the binary.
+
+ The reflection is the same read the compiler's own output gets, because it is
+ a read of the module rather than a record of the compile: the entry points,
+ the storage buffers with their bindings, the push block's size, and the
+ compute entry's local size all come out of the words. What cannot be read is
+ anything the compiler knew and did not write down - there is no diagnostic to
+ carry, and no warnings.
+
+ The words are taken ownership of, like the compiler's output: the caller hands
+ them over and the module frees them.
+*>
+// SPIR-V's own numbers for the two operands read here: the execution model
+// that makes a stage compute, and the execution mode that carries a local size.
+const uint EXECUTION_MODEL_GL_COMPUTE = 5;
+const uint EXECUTION_MODE_LOCAL_SIZE  = 17;
+
+fn ShaderModule adopt_spirv_module(String name, char[] spirv)
+{
+	ShaderModule mod = { };
+	mod.entries.init(mem, 4);
+	mod.layout.bindings.init(mem, 8);
+	mod.layout.push_fields.init(mem, 1);
+
+	if (spirv.len < 20 || *(uint*)spirv.ptr != SPIRV_MAGIC)
+	{
+		mod.ok = false;
+		mod.diagnostic = string::tformat("three: %s is not a SPIR-V module", name).copy(mem);
+		alloc::free(mem, spirv);
+		return mod;
+	}
+	mod.spirv = spirv;
+
+	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
+	mod.layout.stages = stage_union(mod.entries.array_view());
+	mod.layout.push_size = reflect_push_block_size(mod.spirv);
+	mod.local_size = reflect_local_size(mod.spirv);
+
+	if (mod.entries.len() == 0)
+	{
+		mod.ok = false;
+		mod.diagnostic = string::tformat("three: %s declares no entry point", name).copy(mem);
+		return mod;
+	}
+
+	mod.ok = true;
+	return mod;
+}
+
+<*
+ The workgroup size of the module's compute entry point, out of
+ `OpExecutionMode ... LocalSize`.
+
+ Only a compute stage is asked about: `LocalSize` is the compute spelling, and
+ a module with two compute entries - which nothing here builds - answers with
+ the first, rather than with a sum of two.
+
+ @return `x, y and z, or zeroes when the module declares no compute local size.`
+*>
+fn uint[3] reflect_local_size(char[] spirv)
+{
+	uint[3] size = { 0, 0, 0 };
+	usz count = spirv.len / 4;
+	if (count < 5) return size;
+	uint* words = (uint*)spirv.ptr;
+
+	// The compute entry points, by result id: `LocalSize` is matched against
+	// these rather than taken from whichever `OpExecutionMode` comes first,
+	// which for a module with a fragment stage in it would be the wrong one.
+	// Entries are numbered from 1 and the bound is a ceiling on them.
+	uint bound = words[3];
+	bool[] compute_entry = alloc::new_array(mem, bool, bound);
+	defer alloc::free(mem, compute_entry);
+
+	usz i = 5;
+	while (i < count)
+	{
+		uint word = words[i];
+		usz length = (usz)(word >> 16);
+		if (length == 0 || i + length > count) break;
+		uint opcode = word & 0xffff;
+
+		// OpEntryPoint: execution model, entry id, name, interface...
+		if (opcode == 15 && length >= 4 && words[i + 1] == EXECUTION_MODEL_GL_COMPUTE)
+		{
+			uint entry = words[i + 2];
+			if (entry < bound) compute_entry[entry] = true;
+		}
+		// OpExecutionMode: entry id, mode, then its literals.
+		else if (opcode == 16 && length == 6 && words[i + 2] == EXECUTION_MODE_LOCAL_SIZE)
+		{
+			uint entry = words[i + 1];
+			if (entry < bound && compute_entry[entry])
+			{
+				size = { words[i + 3], words[i + 4], words[i + 5] };
+			}
+		}
+		i += length;
+	}
+	return size;
 }
 
 fn void copy_compute_warnings(ShaderModule* mod, shady::DiagnosticList* warnings) @local

@@ -13,6 +13,7 @@ module three_tests::js_compute;
 import three;
 import three_tests::device;
 import std::core::test;
+import std::io::file;
 
 <*
  A runtime with a headless device and no scene pipeline.
@@ -93,6 +94,29 @@ fn String js_literal(String text)
 	return out.copy_str(tmem);
 }
 
+
+// `out[i] = a[i] * 2` for the first `push.n` elements: the bound is the whole
+// check, so a push block read as floats leaves the wrong elements written.
+const String COUNTED = `
+float a[];
+float result[];
+
+struct Push @pushconstant
+{
+    uint n;
+}
+Push push;
+
+struct ComputeIn { uint3 thread @builtin(global_invocation_id); }
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    uint i = input.thread.x;
+    if (i >= push.n) return;
+    result[i] = a[i] * 2.0;
+}
+`;
+
 fn void a_script_runs_a_kernel_and_reads_the_answer() @test
 {
 	@with_compute_js(; three::JsRuntime* run)
@@ -113,6 +137,40 @@ return out.f32(5);
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == "10", "element 5 should be 5 * 2, got '%s'", result.value);
+	};
+}
+
+
+<*
+ An integer push field, which is the one place the packer has to be told
+ something the value cannot say: `n: 64` is a float 64.0 or the uint 64, and a
+ shader reading the wrong one of those computes a garbage bound. The script
+ says `three.compute.uint(n)` and the shader's `uint n;` gets 64.
+*>
+fn void an_integer_push_field_arrives_as_bits() @test
+{
+	@with_compute_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(string::tformat(`
+const a = three.compute.f32(64);
+const out = three.compute.f32(64);
+for (let i = 0; i < 64; i++) { a.bytes[i] = i; out.bytes[i] = 100 + i; }
+a.write(a.bytes);
+out.write(out.bytes);
+
+const kernel = three.compute.kernel(%s, { name: 'counted' });
+kernel.run({ a, result: out }, { threads: 64, push: { n: three.compute.uint(33) } });
+out.read();
+
+// 33 was doubled and 40 was left where the script put it: the bound is what
+// tells the two packings apart, so both ends of it are checked.
+return { inside: out.f32(32), outside: out.f32(40) };
+`, js_literal(COUNTED)));
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"inside":64,"outside":140}`,
+			"32 should be 32 * 2 and 40 should still hold 140, got '%s'", result.value);
 	};
 }
 
@@ -233,5 +291,87 @@ return 'unreachable';
 
 		test::@check(!result.ok, "reading a disposed buffer should throw");
 		test::@check(result.error.contains("disposed"), "and say that it was: %s", result.error);
+	};
+}
+
+
+<*
+ A kernel from a module that is already SPIR-V: compiled here, saved, and then
+ loaded and dispatched by the script rather than compiled by it.
+
+ That is the shape a shipped pipeline kernel has - the heavy kernels come from
+ another compiler and are files next to the binary - and it is the one path
+ where the host has nothing to fall back on: no source to compile, and no
+ source to read the workgroup size out of.
+*>
+fn void a_script_dispatches_a_compiled_module() @test
+{
+	three::ShaderModule shader = three::compile_compute_shader("spirv_kernel", SCALE);
+	defer shader.free();
+	test::@check(shader.ok, "the shader should compile: %s", shader.diagnostic);
+
+	if (catch file::save("build/js_spirv_kernel.spv", shader.spirv))
+	{
+		test::@check(false, "could not save the module");
+		return;
+	}
+
+	@with_compute_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+const module = three.compute.spirv('build/js_spirv_kernel.spv');
+const kernel = three.compute.kernel(module, { name: 'scale', pushFields: ['scale'] });
+
+const a = three.compute.f32(64);
+for (let i = 0; i < 64; i++) a.bytes[i] = i;
+a.write(a.bytes);
+const out = three.compute.f32(64);
+kernel.run({ a, result: out }, { threads: 64, push: { scale: 3 } });
+out.read();
+
+return [out.f32(5), kernel.threads[0], kernel.threads[1], kernel.threads[2]];
+`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[15,64,1,1]",
+			"element 5 should be 5 * 3 and the threads should come from the module, got '%s'", result.value);
+	};
+}
+
+
+<*
+ A module from another compiler, dispatched as it is.
+
+ This is what a shipped pipeline kernel is: `test/fixtures/scale_module.spv` was
+ built by `slangc` from a two-buffer GLSL-shaped kernel, and nothing here
+ compiles it - the reflection reads its bindings by the names it carries, its
+ push block by the offsets it carries, and its workgroup size out of its own
+ `LocalSize`.
+
+ The binding is by name, so this also checks that a module that is not this
+ compiler\'s still answers to the names a script binds against.
+*>
+fn void a_script_dispatches_a_module_from_another_compiler() @test
+{
+	@with_compute_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+const kernel = three.compute.kernel(three.compute.spirv('test/fixtures/scale_module.spv'), { name: 'scaled' });
+
+const a = three.compute.f32(64);
+for (let i = 0; i < 64; i++) a.bytes[i] = i;
+a.write(a.bytes);
+const out = three.compute.f32(64);
+kernel.run({ source: a, destination: out }, { threads: 64, push: { scale: 4 } });
+out.read();
+
+return [out.f32(5), kernel.threads[0]];
+`);
+		defer result.free();
+
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[20,64]",
+			"element 5 should be 5 * 4 and the threads should come from the module, got '%s'", result.value);
 	};
 }
