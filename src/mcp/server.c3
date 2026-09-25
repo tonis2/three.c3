@@ -57,7 +57,12 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	// `three.budget` still works, still clamps, and still persists exactly as it
 	// documents. Serving is what changes it, which is why this is in the function
 	// that builds the tools.
-	if (host != null && host.runtime != null) host.runtime.script_budget_ns = JS_MCP_BUDGET_MS * 1_000_000;
+	// Zero is a host that turned the interrupt off on purpose (a pipeline runner,
+	// whose work is minutes long); raising it would put the wall back.
+	if (host != null && host.runtime != null && host.runtime.script_budget_ns != 0)
+	{
+		host.runtime.script_budget_ns = JS_MCP_BUDGET_MS * 1_000_000;
+	}
 
 	// And the advice stops going to the terminal, for the same reason and in the
 	// same place. `run_script` answers with a `warnings` array, so under a server

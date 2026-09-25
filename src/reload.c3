@@ -46,6 +46,8 @@ import qjs;
  @param script : `The one .js file this process booted from, or empty.`
  @param boot : `False when this process booted with --no-boot, so a reload does not start the game the run deliberately did not.`
  @param entry_module : `The one .js file this process booted as a module, or empty.`
+ @param setup : `The host's own verbs, installed on the new runtime as they were on the first — see live.`
+ @param memory_limit : `The heap ceiling the first runtime was opened with.`
  @return ? JS_ENGINE_FAILED : `The engine would not start a second time, which is out of memory and nothing else.`
 *>
 fn void? reload(
@@ -56,7 +58,9 @@ fn void? reload(
 	String assets = "",
 	String script = "",
 	bool boot = true,
-	String entry_module = ""
+	String entry_module = "",
+	JsSetup setup = null,
+	usz memory_limit = JS_MEMORY_LIMIT
 )
 {
 	Gpu* gpu = renderer != null ? &renderer.gpu : null;
@@ -69,8 +73,9 @@ fn void? reload(
 	if (renderer != null) renderer.post.clear(gpu, &pass.assets);
 	pass.reset_world(gpu);
 
-	runtime.open(pass, renderer)!;
+	runtime.open(pass, renderer, memory_limit)!;
 	runtime.window = window;
+	if (setup != null) setup(runtime);
 	runtime.activate_scene(pass.scene);
 	runtime.restore_persist(kept);
 

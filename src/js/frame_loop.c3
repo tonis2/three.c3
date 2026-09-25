@@ -46,6 +46,7 @@ import std::io;
 import std::time;
 import std::math::vector;
 import qjs;
+import std::collections::list;
 
 // What one tick may take before the interrupt handler stops it. Two orders of
 // magnitude under a script's budget and one over a frame, which is the gap this
@@ -102,6 +103,7 @@ fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
 	self.bind(host, "setFrame", &js_set_frame, 1);
 	self.bind(host, "setFixed", &js_set_fixed, 1);
 	self.bind(host, "frameStats", &js_frame_stats, 0);
+	self.bind(host, "frameWait", &js_frame_wait, 1);
 }
 
 <*
@@ -213,6 +215,9 @@ fn void JsRuntime.play_frames(&self)
 fn bool JsRuntime.is_animating(&self)
 {
 	if (self.pass != null && self.pass.scene.is_animating()) return true;
+	// A promise waiting on a frame, or work a handler queued: both are JavaScript
+	// that has to run on the next tick, so both are a reason to have one.
+	if (self.frame_waiters.len() > 0 || (self.ready && self.js.jobs_waiting())) return true;
 	return self.frame_active || self.fixed_active || self.key_handler_count > 0 || self.click_active;
 }
 
@@ -406,7 +411,11 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	long budget = self.budget_ns;
 	// A game gets the long wall and a soft warning; an agent's script gets the
 	// short wall and no second chance. See `JS_GAME_FRAME_SOFT_MS`.
-	self.budget_ns = (self.game_frames ? JS_BUDGET_MS : JS_FRAME_BUDGET_MS) * 1_000_000;
+	//
+	// A host that turned the script budget off — a pipeline runner, whose one
+	// step of work is longer than any frame — has turned this wall off too: the
+	// work it awaits across frames runs here, in the job drain.
+	self.budget_ns = self.script_budget_ns == 0 ? 0 : (self.game_frames ? JS_BUDGET_MS : JS_FRAME_BUDGET_MS) * 1_000_000;
 	self.started = clock::now();
 	self.timed_out = false;
 	self.in_frame = true;
@@ -442,6 +451,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	long after_fixed = (long)self.started.to_now();
 	if (!self.timed_out && self.frame_active) self.call_frame(self.pass.clock.time * 1000.0);
 	long after_frame = (long)self.started.to_now();
+	if (!self.timed_out) self.wake_frame_waiters();
 	if (!self.timed_out) self.drain_frame_jobs();
 	long after_jobs = (long)self.started.to_now();
 
@@ -600,6 +610,37 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what,
 		}
 	};
 	return survived;
+}
+
+<*
+ Settles every `three.nextFrame()` promise that was waiting when this tick began.
+
+ The list is taken whole before any is called: a continuation that awaits the
+ next frame again adds to the fresh list, and is woken by the next tick rather
+ than by this one — which is what makes `while (busy) await three.nextFrame()`
+ one iteration a frame.
+*>
+fn void JsRuntime.wake_frame_waiters(&self)
+{
+	if (self.frame_waiters.len() == 0) return;
+	List{qjs::Value} waking = self.frame_waiters;
+	self.frame_waiters = { };
+	self.frame_waiters.init(mem, 4);
+	defer waking.free();
+	foreach (resolve : waking)
+	{
+		qjs::Value[1] arguments = { qjs::undefined_value() };
+		qjs::Value? called = self.js.call(resolve, qjs::undefined_value(), arguments[..]);
+		if (try called) self.js.release(called);
+		self.js.release(resolve);
+	}
+}
+
+// Releases every waiter without settling it — the context is going.
+fn void JsRuntime.clear_frame_waiters(&self)
+{
+	foreach (resolve : self.frame_waiters) self.js.release(resolve);
+	self.frame_waiters.free();
 }
 
 <*
@@ -1034,4 +1075,28 @@ fn void JsRuntime.follow_camera(&self, double dt_ms)
 	// The orbit point moved, so the reach the planes were derived against did too.
 	// `Controls` calls this after every gesture for the same reason.
 	self.pass.derive_camera_planes();
+}
+
+<*
+ `three.nextFrame()`'s host half: keeps the promise's resolve function until the
+ next tick. See `wake_frame_waiters`.
+*>
+fn void js_frame_wait(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+)
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	*out = qjs::undefined_value();
+	if (argc < 1 || !js.is_function(args[0]))
+	{
+		*out = js.raise("frameWait wants the promise's resolve function");
+		return;
+	}
+	self.frame_waiters.push(js.retain(args[0]));
 }

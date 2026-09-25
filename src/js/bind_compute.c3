@@ -82,6 +82,8 @@ fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
 	self.bind(host, "computeFreeKernel", &js_compute_free_kernel, 1);
 	self.bind(host, "computeDispatch", &js_compute_dispatch, 7);
 	self.bind(host, "computeSubmit", &js_compute_submit, 0);
+	self.bind(host, "computeSubmitAsync", &js_compute_submit_async, 0);
+	self.bind(host, "computeBusy", &js_compute_busy, 0);
 	self.bind(host, "computeCopy", &js_compute_copy, 6);
 	self.bind(host, "computeFill", &js_compute_fill, 5);
 	self.bind(host, "computeBarrier", &js_compute_barrier, 0);
@@ -999,6 +1001,56 @@ fn void js_compute_submit(
 	if (compute == null) return;
 
 	if (catch compute.submit()) *out = js.raise("the compute submission failed");
+}
+
+<*
+ `computeSubmitAsync()` - send what is recorded and return at once.
+
+ The script then asks `computeBusy()` once a frame; see `Compute.submit_async`.
+*>
+fn void js_compute_submit_async(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	if (catch compute.submit_async()) *out = js.raise("the compute submission failed");
+}
+
+<*
+ `computeBusy()` - whether the GPU is still running the last async submission.
+*>
+fn void js_compute_busy(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	bool? busy = compute.busy();
+	if (catch busy)
+	{
+		*out = js.raise("the compute submission failed");
+		return;
+	}
+	*out = qjs::bool_value(busy);
 }
 
 <*

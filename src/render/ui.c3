@@ -93,7 +93,7 @@ const char[*] UI_FONT = $embed("fonts/DejaVuSans.ttf");
 // ============================================================================
 
 <*
- The seven things cui can draw, and the whole of them.
+ The seven things cui can draw, and a picture.
 
  Every built-in widget's `paint` is some arrangement of these calls and nothing
  else, which is what makes a script handed this list as capable as a widget
@@ -109,6 +109,10 @@ enum UiOpKind : char
 	ARC,
 	TEXT,
 	SHADOW,
+	// A rect filled with a texture from `UiLayer.texture` — a rendered image in
+	// a panel. Not an eighth primitive: cui's rect already samples a texture
+	// across its box, and this is that with the handle a script holds.
+	IMAGE,
 }
 
 <*
@@ -144,6 +148,8 @@ struct UiOp
 	// Per-corner radius {TL, TR, BR, BL}.
 	Vec4 corners;
 	String text;
+	// IMAGE only: a handle `UiLayer.texture` gave out.
+	uint texture;
 }
 
 <*
@@ -235,6 +241,18 @@ fn void UiPainting.paint(&self, cui::Element* elem, cui::Painter* painter) @dyna
 				painter.text(op.at, op.text, { .font = op.font, .size = op.size, .color = (cui::Color)op.color });
 			case SHADOW:
 				painter.rect_shadow(op.at, op.to, op.blur, (cui::Color)op.color, op.corners);
+			case IMAGE:
+				if (op.texture == 0) break;
+				painter.rect(
+					op.at,
+					op.to,
+					{
+						.texture = (cui::Texture)op.texture,
+						.border_color = (cui::Color)op.border_color,
+						.border_width = op.border_width,
+						.border_radius = op.corners,
+					}
+				);
 		}
 	}
 }
@@ -557,6 +575,9 @@ struct UiNodeSpec
 	bool solid;
 	// A `stack` that sizes to its last child instead of filling — see `UiWrap`.
 	bool wrap;
+	// A `textfield` of paragraphs: it wraps, Return is a newline, and `size.y`
+	// is its height. See cui's `TextField.multiline`.
+	bool multiline;
 
 	// A `dialog`'s two behaviours, and they belong to that one kind.
 	//
@@ -991,6 +1012,24 @@ struct UiLayer
 	// Held keys, rebuilt each `feed` from the window's bitset. A field so the
 	// list's storage is reused instead of reallocated sixty times a second.
 	List{cui::Key} held;
+
+	<*
+	 The textures a script made with `three.ui.texture`, and the ones it gave back.
+
+	 cui's texture array only grows — a handle is an index into the sampler array
+	 the pipeline is built for — so a texture is never destroyed, only handed on.
+	 A freed handle, or every handle of a context that closed, goes to `spare`,
+	 and the next `texture` call reuses one before it grows the array. A gallery
+	 of thumbnails that is rebuilt a hundred times therefore stays the size of
+	 one gallery.
+	*>
+	List{uint} textures;
+	List{uint} spare;
+
+	// What a text field's ctrl+c and ctrl+v reach: the window's clipboard once
+	// `use_window` has named one, and cui's own in-process copy before that or
+	// without a window.
+	cui::Clipboard clipboard;
 }
 
 <*
@@ -1032,6 +1071,8 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 	self.held.init(mem, 0);
 	self.nodes.init(mem, 0);
 	self.building.init(mem, 0);
+	self.textures.init(mem, 0);
+	self.spare.init(mem, 0);
 
 	self.font = self.ui.load_font_bytes(UI_FONT[..])!;
 
@@ -1051,6 +1092,7 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 	// Button's callback finds its way back here — cui has no app type to name,
 	// and this is its answer to that.
 	self.ui.provide(self);
+	self.ui.provide(&self.clipboard);
 
 	// An empty label pinned to the top-left. It measures to nothing and paints
 	// nothing until `set_overlay` gives it a string, so bringing the layer up
@@ -1149,6 +1191,8 @@ fn void UiLayer.free(&self)
 	self.slot = null;
 	self.overlay_text.free();
 	self.held.free();
+	self.textures.free();
+	self.spare.free();
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.free();
 	foreach (i, node : self.building) self.building[i].free();
@@ -1939,6 +1983,11 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 						.text_size = spec.text_size > 0
 							? spec.text_size
 							: cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size,
+						// The box grows and shrinks with the text, so a small
+						// label does not sit beside a full-size square.
+						.box = cui::widgets::DEFAULT_CHECKBOX_STYLE.box * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
+						.gap = cui::widgets::DEFAULT_CHECKBOX_STYLE.gap * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
+						.thickness = cui::widgets::DEFAULT_CHECKBOX_STYLE.thickness * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
 					},
 				}
 			);
@@ -1977,6 +2026,7 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 					.width = spec.size.x,
 					.open = keep_open,
 					.on_change = spec.on_change ? &ui_pick : null,
+					.style = ui_select_style(spec.text_size),
 				}
 			);
 		case TREE:
@@ -1999,6 +2049,8 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				(cui::widgets::TextField){
 					.placeholder = suffix,
 					.width = spec.size.x,
+					.multiline = spec.multiline,
+					.height = spec.multiline ? spec.size.y : 0,
 					.on_change = spec.on_change ? &ui_typed : null,
 					.on_submit = spec.on_submit ? &ui_submit : null,
 					.style = {
@@ -2010,6 +2062,11 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 						.text_size = spec.text_size > 0
 							? spec.text_size
 							: cui::widgets::DEFAULT_TEXT_FIELD_STYLE.text_size,
+						// Padding in proportion to the text, so a field drawn
+						// small (a zoomed-out node) is a smaller field and not
+						// small text in a full-size box.
+						.padding = cui::widgets::DEFAULT_TEXT_FIELD_STYLE.padding
+							* ui_text_scale(spec.text_size, cui::widgets::DEFAULT_TEXT_FIELD_STYLE.text_size),
 					},
 				}
 			);
@@ -2787,6 +2844,27 @@ fn void ui_slide(cui::Ui* ui, float value) @local
 	ui_signal(ui, UiNodeKind.SLIDER, { .kind = UiEventKind.SLIDE, .value = value });
 }
 
+<*
+ How much bigger than a widget's default text a snapshot's `textSize` is: what
+ its padding and boxes are scaled by, so the whole widget follows the text.
+*>
+fn float ui_text_scale(float text_size, float default_size) @local
+{
+	return text_size > 0 ? text_size / default_size : 1.0f;
+}
+
+<*
+ A Select's style for a `textSize`: the default, with its rows and padding
+ scaled to the text. Zero is the default whole.
+*>
+fn cui::widgets::MenuStyle ui_select_style(float text_size) @local
+{
+	if (text_size <= 0) return { };
+	cui::widgets::MenuStyle base = cui::widgets::DEFAULT_MENU_STYLE;
+	float k = text_size / base.text_size;
+	return { ...base, .text_size = text_size, .bar_height = base.bar_height * k, .item_height = base.item_height * k, .pad_x = base.pad_x * k };
+}
+
 fn void ui_commit(cui::Ui* ui, float value) @local
 {
 	ui_signal(ui, UiNodeKind.SLIDER, { .kind = UiEventKind.COMMIT, .value = value });
@@ -3055,6 +3133,18 @@ fn void ui_file_directory(cui::Ui* ui, String path) @local
 // ============================================================================
 
 <*
+ Send the interface's copy and paste through this window's clipboard.
+*>
+fn void UiLayer.use_window(&self, c3w::Window* window)
+{
+	if (window == null || self.clipboard.user == window) return;
+	self.clipboard = { .read = &window_clipboard_read, .write = &window_clipboard_write, .user = window };
+}
+
+fn String window_clipboard_read(void* window, std::core::mem::alloc::Allocator alloc) @local => ((c3w::Window*)window).get_clipboard(alloc);
+fn void window_clipboard_write(void* window, String text) @local => ((c3w::Window*)window).set_clipboard(text);
+
+<*
  One frame of input, and the two questions the rest of the loop asks afterwards.
 
  `Cursor` is already in the interface's coordinates — image pixels, top-left
@@ -3127,6 +3217,73 @@ fn c3w::CursorShape UiLayer.cursor_shape(&self)
 		case cui::Cursor.RESIZE_V: return c3w::CursorShape.RESIZE_V;
 		default: return c3w::CursorShape.ARROW;
 	}
+}
+
+<*
+ Puts RGBA pixels on the GPU for an IMAGE op, or replaces the ones behind a
+ handle this layer gave out before.
+
+ Replacing at the same size is a copy into the image already there, which is
+ what makes a preview that changes every step affordable. See
+ `CanvasPass.update_pixels` for what a new size costs.
+
+ @param handle : `0 for a new texture; otherwise one this returned and nobody has released.`
+ @param linear : `Bilinear sampling, for a picture shown at a size other than its own.`
+ @return `The handle to draw with — handle itself when one was given. UI_NO_SUCH_KEY when handle is not a live texture of this layer, UI_NO_TREE before ensure, or the device's own fault.`
+*>
+fn uint? UiLayer.texture(&self, char[] rgba, uint width, uint height, uint handle = 0, bool linear = true)
+{
+	if (self.ui == null) return UI_NO_TREE~;
+	// Every picture is a frame to draw, including one whose element did not
+	// change: the drawings name the handle, and the handle's pixels are new.
+	self.ui.frame_requested = true;
+	if (handle != 0)
+	{
+		if (!self.owns_texture(handle)) return UI_NO_SUCH_KEY~;
+		self.pass.update_pixels((cui::Texture)handle, rgba, width, height, linear)!;
+		return handle;
+	}
+	if (self.spare.len() > 0)
+	{
+		uint reused = self.spare.pop()!!;
+		self.pass.update_pixels((cui::Texture)reused, rgba, width, height, linear)!;
+		self.textures.push(reused);
+		return reused;
+	}
+	uint made = (uint)self.pass.load_pixels(rgba, width, height, linear)!;
+	self.textures.push(made);
+	return made;
+}
+
+fn bool UiLayer.owns_texture(&self, uint handle)
+{
+	foreach (t : self.textures) if (t == handle) return true;
+	return false;
+}
+
+<*
+ Gives a texture back for the next `texture` call to reuse. Drawing with it
+ afterwards draws whatever it is reused for, so a script lets go of it first.
+*>
+fn void UiLayer.release_texture(&self, uint handle)
+{
+	foreach (i, t : self.textures)
+	{
+		if (t != handle) continue;
+		self.textures.remove_at(i);
+		self.spare.push(handle);
+		return;
+	}
+}
+
+<*
+ Every texture the closing context made, back to the spare list — a reload or a
+ new runtime reuses them instead of growing the array again.
+*>
+fn void UiLayer.release_textures(&self)
+{
+	foreach (t : self.textures) self.spare.push(t);
+	self.textures.clear();
 }
 
 <*

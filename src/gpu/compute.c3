@@ -143,6 +143,9 @@ struct Compute
 	// `write`, a `read` - know whether the GPU still owes it work that was
 	// recorded first, and what lets an empty `submit` cost nothing.
 	uint             pending;
+	// Sent by `submit_async` and not yet waited for: the command buffer is the
+	// GPU's until `settle` takes it back, and every recording verb settles first.
+	bool             in_flight;
 }
 
 fn void? Compute.init(&self, Gpu* gpu)
@@ -222,7 +225,7 @@ fn void? StorageBuffer.write(&self, Compute* compute, usz offset, void* data, us
 	// The copy below goes out on its own submission, so anything recorded before
 	// it has to reach the GPU first: a dispatch that reads this buffer, recorded
 	// and not yet submitted, would otherwise run after the new bytes landed.
-	if (compute.pending > 0) compute.submit()!;
+	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
 
 	// In pieces, through one staging buffer: a weights upload is gigabytes, and a
 	// host-visible copy of all of it at once is a second copy of the model.
@@ -389,6 +392,7 @@ fn void? Compute.dispatch_views(&self, ComputeKernel* kernel, BufferView[] views
 	uint groups_x, uint groups_y = 1, uint groups_z = 1, bool barrier = true)
 {
 	if (views.len < kernel.binding_count) return COMPUTE_NOT_READY~;
+	self.settle()!;
 
 	vk::cmdBindPipeline(self.cmd, vk::PipelineBindPoint.PIPELINE_BIND_POINT_COMPUTE, kernel.pipeline);
 
@@ -445,6 +449,7 @@ fn void Compute.barrier(&self)
 		.setDstStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
 		.setDstAccessMask(ACCESS_2_SHADER_READ_BIT | ACCESS_2_SHADER_WRITE_BIT
 			| ACCESS_2_TRANSFER_READ_BIT | ACCESS_2_TRANSFER_WRITE_BIT);
+	if (catch self.settle()) return;
 	vk::cmdPipelineBarrier2(self.cmd, &&vk::dependencyInfo().setMemoryBarriers({ barrier }));
 }
 
@@ -461,6 +466,7 @@ fn void? Compute.copy(&self, StorageBuffer* source, usz source_offset,
 	if (size == 0) return;
 	if (source_offset + size > source.size) return COMPUTE_NOT_READY~;
 	if (destination_offset + size > destination.size) return COMPUTE_NOT_READY~;
+	self.settle()!;
 
 	vk::cmdCopyBuffer(self.cmd, source.memory.buffer, destination.memory.buffer, 1, (vk::BufferCopy[]){
 		{
@@ -481,6 +487,7 @@ fn void? Compute.copy(&self, StorageBuffer* source, usz source_offset,
 *>
 fn void Compute.clear(&self, StorageBuffer* buffer)
 {
+	if (catch self.settle()) return;
 	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, 0, vk::WHOLE_SIZE, 0);
 	self.pending++;
 	self.barrier();
@@ -497,6 +504,7 @@ fn void? Compute.fill(&self, StorageBuffer* buffer, usz offset, usz size, uint w
 	if (size == 0) return;
 	if (offset % 4 != 0 || size % 4 != 0) return COMPUTE_NOT_READY~;
 	if (offset + size > buffer.size) return COMPUTE_NOT_READY~;
+	self.settle()!;
 
 	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, (vk::DeviceSize)offset, (vk::DeviceSize)size, word);
 	self.pending++;
@@ -513,6 +521,21 @@ fn void? Compute.fill(&self, StorageBuffer* buffer, usz offset, usz size, uint w
 *>
 fn void? Compute.submit(&self)
 {
+	self.submit_async()!;
+	self.settle()!;
+}
+
+<*
+ Send everything recorded since the last submit, and return without waiting.
+
+ What lets a script keep a window drawing while a long chain runs: it sends a
+ piece, lets frames go by until `busy` says the GPU is done, and records the
+ next. Recording anything before then waits for it (`settle`), so a caller who
+ forgets to ask is slower, not wrong.
+*>
+fn void? Compute.submit_async(&self)
+{
+	self.settle()!;
 	if (!self.recording) return;
 	// Nothing recorded is nothing to wait for. A `read` submits first whether or
 	// not a script dispatched anything, and that should not cost a round trip.
@@ -524,9 +547,33 @@ fn void? Compute.submit(&self)
 	vk::SubmitInfo2 submit = vk::submitInfo2().setCommandBufferInfos({ cmd_info });
 
 	vk::queueSubmit2(self.gpu.graphics.handle, 1, &submit, self.fence)!;
+	self.in_flight = true;
+	return;
+}
+
+<*
+ Whether the GPU is still running what `submit_async` sent. The answer false
+ also takes the command buffer back, so the next dispatch records at once.
+*>
+fn bool? Compute.busy(&self)
+{
+	if (!self.in_flight) return false;
+	vk::Result status = vk::vkGetFenceStatus(self.gpu.handle, self.fence);
+	if (status == NOT_READY) return true;
+	if (status != SUCCESS) return vk::E_ERROR_DEVICE_LOST~;
+	self.settle()!;
+	return false;
+}
+
+<*
+ Wait for what `submit_async` sent and open the command buffer again.
+*>
+fn void? Compute.settle(&self)
+{
+	if (!self.in_flight) return;
+	self.in_flight = false;
 	self.fence.wait(self.gpu.handle)!;
 	self.fence.reset(self.gpu.handle)!;
-
 	vk::beginCommandBuffer(self.cmd, &&vk::commandBufferBeginInfo())!;
 	return;
 }
@@ -545,7 +592,7 @@ fn void? StorageBuffer.read(&self, Compute* compute, usz offset, char[] into)
 
 	// A read of work that is recorded and not submitted would copy the buffer as
 	// it was before that work.
-	if (compute.pending > 0) compute.submit()!;
+	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
 
 	usz chunk = into.len < COMPUTE_STAGING_CHUNK ? into.len : COMPUTE_STAGING_CHUNK;
 	vk::Memory stage = vk::new_buffer(
