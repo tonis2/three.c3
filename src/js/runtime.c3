@@ -562,12 +562,13 @@ struct PendingUpload
 
  @param pass : `The scene, assets and camera the bindings drive. Must outlive the runtime.`
  @param renderer : `Null for a context with no device: three.load and three.render then throw, and everything else works.`
+ @param memory_limit : `The JS heap's ceiling. A host that runs pipelines rather than scenes - token lists, embeddings read back for a check - raises it; zero is no limit.`
  @return ? JS_ENGINE_FAILED : `QuickJS could not be created — out of memory, and nothing else.`
  @return ? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
 *>
-fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null)
+fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz memory_limit = JS_MEMORY_LIMIT)
 {
-	self.js = qjs::open(JS_MEMORY_LIMIT, JS_STACK_LIMIT)!;
+	self.js = qjs::open(memory_limit, JS_STACK_LIMIT)!;
 	self.pass = pass;
 	self.renderer = renderer;
 	self.controls = DEFAULT_CONTROLS;
