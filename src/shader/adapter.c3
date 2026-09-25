@@ -158,6 +158,41 @@ fn ShaderModule compile_compute_shader(String name, String source)
 }
 
 <*
+ `compile_compute_shader`, with the shader cache in front.
+
+ A script's kernels are compiled every time it runs, and a pipeline has dozens
+ of them - a model's worth of matmuls, norms and attention - so a warm start
+ should read them rather than compile them. The key is the source and the name,
+ like every other module's; the workgroup size is not in the file and is read
+ back out of the module, which is where it came from the first time.
+*>
+fn ShaderModule compile_compute_shader_cached(String name, String source)
+{
+	if (shader_cache_dir().len == 0) return compile_compute_shader(name, source);
+
+	@pool()
+	{
+		ShaderCacheKey key = {
+			.compiler = "shady-compute",
+			.arguments = shader_cache_argument_blob(SHADY_ARGUMENTS[..]),
+			.name = name,
+			.source = source,
+		};
+
+		ShaderModule loaded;
+		if (shader_cache_try_load(key, &loaded))
+		{
+			loaded.local_size = reflect_local_size(loaded.spirv);
+			return loaded;
+		}
+
+		ShaderModule mod = compile_compute_shader(name, source);
+		if (mod.ok) shader_cache_save(key, &mod);
+		return mod;
+	};
+}
+
+<*
  A module this project did not compile: SPIR-V words from somewhere else -
  `slangc`, `glslang`, a kernel shipped next to the binary.
 
@@ -176,7 +211,7 @@ fn ShaderModule compile_compute_shader(String name, String source)
 const uint EXECUTION_MODEL_GL_COMPUTE = 5;
 const uint EXECUTION_MODE_LOCAL_SIZE  = 17;
 
-fn ShaderModule adopt_spirv_module(String name, char[] spirv)
+fn ShaderModule adopt_spirv_module(String name, char[] spirv, String entry = "")
 {
 	ShaderModule mod = { };
 	mod.entries.init(mem, 4);
@@ -192,10 +227,20 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv)
 	}
 	mod.spirv = spirv;
 
-	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
+	// One entry of a module that holds many - a Slang file compiled whole, a
+	// kernel per entry point - is described by what that entry uses rather than
+	// by the whole module: its own push block, only its own buffers, its own
+	// workgroup size. SPIR-V 1.4 made an entry's interface list every global it
+	// touches, which is what makes the question answerable; an older module, or
+	// no entry named, is described whole as before.
+	uint entry_id = 0;
+	bool[] used = entry_interface(mod.spirv, entry, &entry_id);
+	defer if (used.len > 0) alloc::free(mem, used);
+
+	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count, used);
 	mod.layout.stages = stage_union(mod.entries.array_view());
-	mod.layout.push_size = reflect_push_block_size(mod.spirv);
-	mod.local_size = reflect_local_size(mod.spirv);
+	mod.layout.push_size = reflect_push_block_size(mod.spirv, used);
+	mod.local_size = reflect_local_size(mod.spirv, entry_id);
 
 	if (mod.entries.len() == 0)
 	{
@@ -209,6 +254,51 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv)
 }
 
 <*
+ The globals one entry point uses, as a set of ids, when the module says.
+
+ Empty when there is no such entry, no entry was named, or the module predates
+ SPIR-V 1.4 - before which an entry's interface listed only its inputs and
+ outputs, and a buffer it reads would be missing from the set.
+
+ @param [out] entry_id : `The entry's function id, or 0.`
+*>
+fn bool[] entry_interface(char[] spirv, String entry, uint* entry_id) @local
+{
+	*entry_id = 0;
+	usz count = spirv.len / 4;
+	if (entry.len == 0 || count < 5) return {};
+	uint* words = (uint*)spirv.ptr;
+	if (words[1] < 0x10400) return {};
+	uint bound = words[3];
+
+	usz i = 5;
+	while (i < count)
+	{
+		uint word = words[i];
+		usz length = (usz)(word >> 16);
+		if (length == 0 || i + length > count) break;
+		if ((word & 0xffff) == 15 && length >= 4)
+		{
+			// OpEntryPoint: model, id, name (a padded string), interface ids.
+			String name = spirv_string(words, i + 3, i + length);
+			if (name == entry)
+			{
+				usz first = i + 3 + (name.len + 4) / 4;
+				bool[] used = alloc::new_array(mem, bool, bound);
+				for (usz j = first; j < i + length; j++)
+				{
+					if (words[j] < bound) used[words[j]] = true;
+				}
+				*entry_id = words[i + 2];
+				return used;
+			}
+		}
+		i += length;
+	}
+	return {};
+}
+
+<*
  The workgroup size of the module's compute entry point, out of
  `OpExecutionMode ... LocalSize`.
 
@@ -218,7 +308,7 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv)
 
  @return `x, y and z, or zeroes when the module declares no compute local size.`
 *>
-fn uint[3] reflect_local_size(char[] spirv)
+fn uint[3] reflect_local_size(char[] spirv, uint only_entry = 0)
 {
 	uint[3] size = { 0, 0, 0 };
 	usz count = spirv.len / 4;
@@ -251,7 +341,7 @@ fn uint[3] reflect_local_size(char[] spirv)
 		else if (opcode == 16 && length == 6 && words[i + 2] == EXECUTION_MODE_LOCAL_SIZE)
 		{
 			uint entry = words[i + 1];
-			if (entry < bound && compute_entry[entry])
+			if (entry < bound && compute_entry[entry] && (only_entry == 0 || entry == only_entry))
 			{
 				size = { words[i + 3], words[i + 4], words[i + 5] };
 			}
@@ -291,7 +381,7 @@ fn void copy_compute_warnings(ShaderModule* mod, shady::DiagnosticList* warnings
 
  @return `Bytes, or zero when the module declares no push block.`
 *>
-fn uint reflect_push_block_size(char[] spirv) @local
+fn uint reflect_push_block_size(char[] spirv, bool[] used = {}) @local
 {
 	usz count = spirv.len / 4;
 	if (count < 5) return 0;
@@ -399,13 +489,27 @@ fn uint reflect_push_block_size(char[] spirv) @local
 		usz length = (usz)(word >> 16);
 		if (length == 0 || i + length > count) break;
 
-		if ((shady::Opcode)(word & 0xffff) == shady::Opcode.TYPE_POINTER
+		if (used.len == 0
+			&& (shady::Opcode)(word & 0xffff) == shady::Opcode.TYPE_POINTER
 			&& length >= 4 && words[i + 1] < bound
 			&& words[i + 2] == (uint)shady::StorageClass.PUSH_CONSTANT
 			&& words[i + 3] < bound
 			&& type_op[words[i + 3]] == (ushort)shady::Opcode.TYPE_STRUCT)
 		{
 			block_id[0] = words[i + 3];
+		}
+		// With an entry's interface in hand, the block is the one behind the
+		// push-constant variable that entry uses: OpVariable's result type is
+		// its pointer, and the pointer's pointee is the block.
+		if (used.len > 0
+			&& (shady::Opcode)(word & 0xffff) == shady::Opcode.VARIABLE
+			&& length >= 4 && words[i + 2] < bound && used[words[i + 2]]
+			&& words[i + 3] == (uint)shady::StorageClass.PUSH_CONSTANT
+			&& words[i + 1] < bound
+			&& type_op[words[i + 1]] == (ushort)shady::Opcode.TYPE_POINTER)
+		{
+			uint pointee = op_b[words[i + 1]];
+			if (pointee < bound && type_op[pointee] == (ushort)shady::Opcode.TYPE_STRUCT) block_id[0] = pointee;
 		}
 		i += length;
 	}
@@ -855,7 +959,8 @@ fn void reflect_shady_module(
 	char[] spirv,
 	List{ShaderEntry}* entries,
 	List{ShaderBinding}* bindings,
-	uint* set_count) @local
+	uint* set_count,
+	bool[] used = {}) @local
 {
 	usz count = spirv.len / 4;
 	if (count < 5) return;
@@ -995,6 +1100,7 @@ fn void reflect_shady_module(
 			&& variable.storage != (uint)shady::StorageClass.UNIFORM
 			&& variable.storage != (uint)shady::StorageClass.STORAGE_BUFFER) continue;
 		if (variable.id >= bound || variable.pointer >= bound) continue;
+		if (used.len > 0 && !used[variable.id]) continue;
 		if (kinds[variable.pointer] != ShadyType.POINTER_TYPE) continue;
 
 		// A runtime-sized array unwraps to its element - it is the one resource

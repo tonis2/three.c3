@@ -72,16 +72,20 @@ struct KernelSlot
 fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
 {
 	self.bind(host, "computeCreateBuffer", &js_compute_create_buffer, 4);
-	self.bind(host, "computeWriteBuffer", &js_compute_write_buffer, 4);
-	self.bind(host, "computeReadBuffer", &js_compute_read_buffer, 3);
+	self.bind(host, "computeWriteBuffer", &js_compute_write_buffer, 5);
+	self.bind(host, "computeReadBuffer", &js_compute_read_buffer, 4);
 	self.bind(host, "computeFreeBuffer", &js_compute_free_buffer, 1);
 	self.bind(host, "computeCreateKernel", &js_compute_create_kernel, 3);
 	self.bind(host, "computeCreateKernelSpirv", &js_compute_create_kernel_spirv, 3);
 	self.bind(host, "computeKernelThreads", &js_compute_kernel_threads, 1);
 	self.bind(host, "computeSpirv", &js_compute_spirv, 1);
 	self.bind(host, "computeFreeKernel", &js_compute_free_kernel, 1);
-	self.bind(host, "computeDispatch", &js_compute_dispatch, 6);
+	self.bind(host, "computeDispatch", &js_compute_dispatch, 7);
 	self.bind(host, "computeSubmit", &js_compute_submit, 0);
+	self.bind(host, "computeCopy", &js_compute_copy, 6);
+	self.bind(host, "computeFill", &js_compute_fill, 5);
+	self.bind(host, "computeBarrier", &js_compute_barrier, 0);
+	self.bind(host, "computeLimits", &js_compute_limits, 0);
 }
 
 // --- Handles -----------------------------------------------------------------
@@ -146,6 +150,55 @@ fn uint kernel_slot_for(JsRuntime* self) @local
 	}
 	self.kernel_slots.push({ .generation = 1 });
 	return (uint)(self.kernel_slots.len() - 1);
+}
+
+<*
+ Hand a buffer the host made to the script, as a handle `three.compute.adopt`
+ wraps.
+
+ For an embedding program with data of its own to put on the GPU - a model's
+ weights, streamed out of a mapped file - which it fills with `StorageBuffer`'s
+ own verbs and then gives to JavaScript to bind. The runtime owns the buffer from
+ here: `dispose()` or the end of the context frees it.
+
+ @param [&inout] buffer : `Allocated with mem, created. Ownership moves to the runtime.`
+ @return `The handle, as the script's integer.`
+*>
+fn int JsRuntime.adopt_storage_buffer(&self, StorageBuffer* buffer)
+{
+	uint index = storage_slot_for(self);
+	StorageSlot* slot = &self.storage_slots[index];
+	slot.buffer = buffer;
+	slot.live   = true;
+	return (int)((slot.generation << 16) | index);
+}
+
+<*
+ The buffer behind a script's handle, or null when the handle is not live.
+
+ The host-side half of `adopt_storage_buffer`: a verb an embedding program adds
+ takes a `ComputeBuffer`'s handle and writes into, or reads out of, the buffer
+ behind it.
+*>
+fn StorageBuffer* JsRuntime.storage_buffer_of(&self, int encoded)
+{
+	ComputeHandle handle = compute_handle_of(encoded);
+	if (handle.index >= self.storage_slots.len()) return null;
+	StorageSlot* slot = &self.storage_slots[handle.index];
+	if (!slot.live || slot.generation != handle.generation) return null;
+	return slot.buffer;
+}
+
+<*
+ Submit whatever is recorded and wait for the device, before something a
+ recorded command names is freed. A failed submit is a lost device, and the
+ free that follows is then the least of anybody's problems.
+*>
+fn void flush_compute(JsRuntime* self) @local
+{
+	if (self.renderer == null) return;
+	if (catch self.renderer.compute.submit()) { }
+	self.renderer.gpu.handle.waitIdle();
 }
 
 fn Compute* runtime_compute(JsRuntime* self, qjs::Context* js, qjs::Value* out) @local
@@ -230,14 +283,19 @@ fn void js_compute_create_buffer(
 		return;
 	}
 
+	// Zeroes, as a script expects of a buffer it has not written: the memory
+	// may be a freed buffer's, and a kernel that accumulates into it would add to
+	// that buffer's numbers. Recorded, so it costs nothing until the next submit.
+	if (upload.len == 0) compute.clear(buffer);
+
 	slot.buffer = buffer;
 	slot.live   = true;
 	*out = compute_handle_value({ .index = index, .generation = slot.generation });
 }
 
 <*
- `computeWriteBuffer(handle, data, byteOffset, count)` - stage `count` bytes
- from the view into the buffer at byte zero.
+ `computeWriteBuffer(handle, data, byteOffset, count, at)` - stage `count` bytes
+ from the view into the buffer, starting at byte `at` (zero when left out).
 
  The write is submitted and waited for here, so a dispatch recorded afterwards
  reads the new bytes. That is the same rule `StorageBuffer.write` follows and
@@ -262,11 +320,8 @@ fn void js_compute_write_buffer(
 	char[] whole = js.bytes(args[1]);
 	long offset  = (long)arg_number(&js, argc, args, 2);
 	long count   = (long)arg_number(&js, argc, args, 3);
-	{
-		float first = 0;
-		if (count >= 4) mem::copy(&first, whole.ptr + offset, 4);
-	}
-	if (offset < 0 || count <= 0)
+	long at      = argc >= 5 ? (long)arg_number(&js, argc, args, 4) : 0;
+	if (offset < 0 || count <= 0 || at < 0)
 	{
 		*out = js.raise("three.compute.write(handle, data, byteOffset, byteCount) was given a negative or empty view");
 		return;
@@ -287,11 +342,11 @@ fn void js_compute_write_buffer(
 	}
 
 	Compute* compute = &self.renderer.compute;
-	if (catch buffer.write(compute, 0, whole.ptr + offset, (usz)count))
+	if (catch buffer.write(compute, (usz)at, whole.ptr + offset, (usz)count))
 	{
 		*out = js.raise(string::tformat(
-			"three.compute.write wanted %d bytes and the buffer holds %d",
-			(int)count, (int)buffer.size));
+			"three.compute.write wanted %d bytes at %d and the buffer holds %d",
+			(long)count, at, (long)buffer.size));
 		return;
 	}
 }
@@ -325,16 +380,22 @@ fn void js_compute_read_buffer(
 
 	char[] target = js.bytes(args[1]);
 	long count    = (long)arg_number(&js, argc, args, 2);
+	long at       = argc >= 4 ? (long)arg_number(&js, argc, args, 3) : 0;
+	if (at < 0)
+	{
+		*out = js.raise("three.compute.read(handle, target, byteCount, at) was given a negative offset");
+		return;
+	}
 	if (count <= 0 || count > (long)target.len)
 	{
 		*out = js.raise("three.compute.read(handle, target, byteCount) wants a target at least as long as the count");
 		return;
 	}
-	if ((usz)count > buffer.size)
+	if ((usz)(count + at) > buffer.size)
 	{
 		*out = js.raise(string::tformat(
-			"three.compute.read wanted %d bytes and the buffer holds %d",
-			(int)count, (int)buffer.size));
+			"three.compute.read wanted %d bytes at %d and the buffer holds %d",
+			(long)count, at, (long)buffer.size));
 		return;
 	}
 
@@ -344,7 +405,7 @@ fn void js_compute_read_buffer(
 		*out = js.raise("the compute submission failed before the readback");
 		return;
 	}
-	if (catch buffer.read(compute, 0, target[:(usz)count]))
+	if (catch buffer.read(compute, (usz)at, target[:(usz)count]))
 	{
 		*out = js.raise("the compute readback could not copy those bytes out");
 		return;
@@ -366,7 +427,9 @@ fn void js_compute_free_buffer(
 	StorageSlot* slot = storage_slot(self, arg_int(&js, argc, args, 0), &js, out);
 	if (slot == null) return;
 
-	if (self.renderer != null) self.renderer.gpu.handle.waitIdle();
+	// A dispatch recorded and not yet submitted may still name this buffer, and
+	// `waitIdle` only waits for what has been submitted.
+	flush_compute(self);
 	slot.buffer.free();
 	alloc::free(mem, slot.buffer);
 	slot.buffer = null;
@@ -409,7 +472,7 @@ fn void js_compute_create_kernel(
 	if (name.len == 0) name = "kernel";
 	if (entry.len == 0) entry = "main";
 
-	ShaderModule shader = compile_compute_shader(name, source);
+	ShaderModule shader = compile_compute_shader_cached(name, source);
 	defer shader.free();
 
 	if (!shader.ok)
@@ -469,7 +532,7 @@ fn void js_compute_create_kernel_spirv(
 	char[] owned = alloc::alloc_array(mem, char, bytes.len);
 	mem::copy(owned.ptr, bytes.ptr, bytes.len);
 
-	ShaderModule shader = three::adopt_spirv_module(name, owned);
+	ShaderModule shader = three::adopt_spirv_module(name, owned, entry);
 	defer shader.free();
 
 	if (!shader.ok)
@@ -628,7 +691,7 @@ fn void js_compute_free_kernel(
 	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
 	if (slot == null) return;
 
-	if (self.renderer != null) self.renderer.gpu.handle.waitIdle();
+	flush_compute(self);
 	slot.kernel.free(self.renderer.gpu.handle);
 	alloc::free(mem, slot.kernel);
 	slot.kernel = null;
@@ -669,12 +732,14 @@ fn void js_compute_dispatch(
 
 	// The buffers, in binding order: a plain Array whose length is checked
 	// against the kernel's own count, so a script that forgot one is told which
-	// one it forgot rather than dispatching against a stale binding.
+	// one it forgot rather than dispatching against a stale binding. An element
+	// is a handle, or `[handle, byteOffset, byteSize]` for a range of one - a
+	// size of zero runs to the end of the buffer.
 	qjs::Value list = argc >= 2 ? args[1] : qjs::undefined_value();
 	int given = (int)js.length(list);
 	if (given < 0) given = 0;
 
-	StorageBuffer[COMPUTE_MAX_BINDINGS] buffers;
+	BufferView[COMPUTE_MAX_BINDINGS] views;
 	if ((uint)given != kernel.binding_count)
 	{
 		*out = js.raise(string::tformat(
@@ -682,12 +747,49 @@ fn void js_compute_dispatch(
 			(int)kernel.binding_count, given));
 		return;
 	}
+	ulong alignment = self.renderer.gpu.limits.min_storage_buffer_offset_alignment;
+	if (alignment == 0) alignment = 1;
 	for (int i = 0; i < given; i++)
 	{
 		qjs::Value element = js.index(list, (uint)i);
-		StorageBuffer* buffer = storage_buffer(self, (int)js.number(element), &js, out);
+		defer js.release(element);
+		long handle = 0;
+		long offset = 0;
+		long size   = 0;
+		if (js.length(element) >= 2)
+		{
+			qjs::Value h = js.index(element, 0);
+			qjs::Value o = js.index(element, 1);
+			qjs::Value n = js.index(element, 2);
+			handle = (long)js.number(h);
+			offset = (long)js.number(o);
+			size   = (long)js.number(n);
+			js.release(h);
+			js.release(o);
+			js.release(n);
+		}
+		else
+		{
+			handle = (long)js.number(element);
+		}
+
+		StorageBuffer* buffer = storage_buffer(self, (int)handle, &js, out);
 		if (buffer == null) return;
-		buffers[i] = *buffer;
+		if (offset < 0 || size < 0 || (usz)(offset + size) > buffer.size || (usz)offset >= buffer.size)
+		{
+			*out = js.raise(string::tformat(
+				"binding %d (%s) asks for %d bytes at %d of a buffer of %d",
+				i, kernel.binding_names[i], size, offset, (long)buffer.size));
+			return;
+		}
+		if ((ulong)offset % alignment != 0)
+		{
+			*out = js.raise(string::tformat(
+				"binding %d (%s) starts at byte %d, and this device binds at multiples of %d",
+				i, kernel.binding_names[i], offset, (long)alignment));
+			return;
+		}
+		views[i] = buffer.view((usz)offset, (usz)size);
 	}
 
 	char[] push = argc >= 3 ? js.bytes(args[2]) : (char[]){ };
@@ -722,31 +824,157 @@ fn void js_compute_dispatch(
 	if (groups_y == 0) groups_y = 1;
 	if (groups_z == 0) groups_z = 1;
 
-	if (push.len >= 4)
-	{
-		uint word = 0;
-		mem::copy(&word, push.ptr, 4);
-	}
-	else
-	{
-	}
-	{
-	}
-	if (catch compute.dispatch(kernel, buffers[0..kernel.binding_count - 1],
-		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z))
+	// The seventh argument is `independent`: true skips the barrier after this
+	// dispatch, for a caller that knows the next command does not read it.
+	bool barrier = !(argc >= 7 && js.truth(args[6]));
+
+	if (catch compute.dispatch_views(kernel, views[:kernel.binding_count],
+		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z, barrier))
 	{
 		*out = js.raise("the dispatch could not be recorded");
 		return;
 	}
-	if (catch compute.submit()) { }
+}
+
+<*
+ `computeCopy(source, sourceOffset, destination, destinationOffset, byteCount,
+ independent)` - a GPU-side copy, recorded in order with the dispatches.
+*>
+fn void js_compute_copy(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	StorageBuffer* source = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
+	if (source == null) return;
+	StorageBuffer* destination = storage_buffer(self, arg_int(&js, argc, args, 2), &js, out);
+	if (destination == null) return;
+
+	long source_offset      = (long)arg_number(&js, argc, args, 1);
+	long destination_offset = (long)arg_number(&js, argc, args, 3);
+	long count              = (long)arg_number(&js, argc, args, 4);
+	bool barrier            = !(argc >= 6 && js.truth(args[5]));
+
+	if (source_offset < 0 || destination_offset < 0 || count <= 0
+		|| (usz)(source_offset + count) > source.size
+		|| (usz)(destination_offset + count) > destination.size)
 	{
-		char[16] peek;
-		if (catch buffers[1].read(compute, 0, peek[..])) { }
-		else
-		{
-			float* f = (float*)&peek;
-			}
+		*out = js.raise(string::tformat(
+			"three.compute.copy of %d bytes from %d (of %d) to %d (of %d) does not fit",
+			count, source_offset, (long)source.size, destination_offset, (long)destination.size));
+		return;
 	}
+
+	if (catch compute.copy(source, (usz)source_offset, destination, (usz)destination_offset, (usz)count, barrier))
+	{
+		*out = js.raise("the copy could not be recorded");
+	}
+}
+
+<*
+ `computeFill(buffer, byteOffset, byteCount, word, independent)` - a recorded
+ fill with one 32-bit word. Offset and count are whole words.
+*>
+fn void js_compute_fill(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	StorageBuffer* buffer = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
+	if (buffer == null) return;
+
+	long offset  = (long)arg_number(&js, argc, args, 1);
+	long count   = (long)arg_number(&js, argc, args, 2);
+	uint word    = (uint)(ulong)arg_number(&js, argc, args, 3);
+	bool barrier = !(argc >= 5 && js.truth(args[4]));
+
+	if (offset < 0 || count <= 0 || offset % 4 != 0 || count % 4 != 0 || (usz)(offset + count) > buffer.size)
+	{
+		*out = js.raise(string::tformat(
+			"three.compute.fill of %d bytes at %d does not fit a buffer of %d, or is not in whole 4-byte words",
+			count, offset, (long)buffer.size));
+		return;
+	}
+
+	if (catch compute.fill(buffer, (usz)offset, (usz)count, word, barrier))
+	{
+		*out = js.raise("the fill could not be recorded");
+	}
+}
+
+<*
+ `computeBarrier()` - the barrier a run of `independent` commands skipped.
+*>
+fn void js_compute_barrier(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+	compute.barrier();
+}
+
+<*
+ `computeLimits()` - what this device lets a kernel do, so a script can choose
+ between variants: a cooperative-matrix matmul or a tiled one, a subgroup
+ reduction or a shared-memory one.
+*>
+fn void js_compute_limits(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+
+	GpuLimits* limits = &self.renderer.gpu.limits;
+	qjs::Value object = js.object();
+	js.set_property(object, "device", js.string(((ZString)&limits.device_name).str_view()));
+	js.set_property(object, "cooperativeMatrix", qjs::bool_value(limits.cooperative_matrix));
+	js.set_property(object, "subgroupSize", qjs::number_value((double)limits.subgroup_size));
+	js.set_property(object, "maxSharedMemory", qjs::number_value((double)limits.max_compute_shared_memory));
+	js.set_property(object, "maxWorkgroupInvocations", qjs::number_value((double)limits.max_compute_workgroup_invocations));
+	js.set_property(object, "maxBindingRange", qjs::number_value((double)limits.max_storage_buffer_range));
+	js.set_property(object, "maxAllocation", qjs::number_value((double)limits.max_memory_allocation_size));
+	js.set_property(object, "bindingAlignment", qjs::number_value((double)limits.min_storage_buffer_offset_alignment));
+	js.set_property(object, "maxPushConstants", qjs::number_value((double)limits.max_push_constants_size));
+	js.set_property(object, "maxBindings", qjs::number_value((double)COMPUTE_MAX_BINDINGS));
+	*out = object;
 }
 
 <*
@@ -782,7 +1010,7 @@ fn void js_compute_submit(
 *>
 fn void JsRuntime.release_compute(&self)
 {
-	if (self.renderer != null) self.renderer.gpu.handle.waitIdle();
+	flush_compute(self);
 
 	foreach (&slot : self.storage_slots)
 	{

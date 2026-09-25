@@ -1,0 +1,76 @@
+; A kernel from a compiler that is not shady, as SPIR-V assembly: a
+; two-buffer `destination[i] = source[i] * scale` over 64-wide workgroups, with
+; the buffer names and the push block's offsets the reflection reads.
+; Rebuild the binary with
+;   spirv-as --target-env spv1.5 test/fixtures/scale_module.spvasm -o test/fixtures/scale_module.spv
+               OpCapability Shader
+               OpExtension "SPV_KHR_storage_buffer_storage_class"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %1 "main" %2 %3 %4 %5
+               OpExecutionMode %1 LocalSize 64 1 1
+               OpName %6 "i"
+               OpName %7 "RWStructuredBuffer"
+               OpMemberName %7 0 "__member0"
+               OpName %2 "destination"
+               OpName %3 "source"
+               OpName %8 "Push_std430"
+               OpMemberName %8 0 "scale"
+               OpName %4 "push"
+               OpName %1 "main"
+               OpDecorate %5 BuiltIn GlobalInvocationId
+               OpDecorate %9 ArrayStride 4
+               OpDecorate %10 ArrayStride 4
+               OpDecorate %7 Block
+               OpMemberDecorate %7 0 Offset 0
+               OpDecorate %2 Binding 1
+               OpDecorate %2 DescriptorSet 0
+               OpDecorate %3 Binding 0
+               OpDecorate %3 DescriptorSet 0
+               OpDecorate %8 Block
+               OpMemberDecorate %8 0 Offset 0
+         %11 = OpTypeVoid
+         %12 = OpTypeFunction %11
+         %13 = OpTypeInt 32 0
+         %14 = OpTypeVector %13 3
+         %15 = OpTypePointer Input %14
+         %16 = OpTypeBool
+         %17 = OpConstant %13 64
+         %18 = OpTypeInt 32 1
+         %19 = OpConstant %18 0
+         %20 = OpTypeFloat 32
+          %9 = OpTypePointer StorageBuffer %20
+         %10 = OpTypeRuntimeArray %20
+          %7 = OpTypeStruct %10
+         %21 = OpTypePointer StorageBuffer %7
+          %8 = OpTypeStruct %20
+         %22 = OpTypePointer PushConstant %8
+         %23 = OpTypePointer PushConstant %20
+          %5 = OpVariable %15 Input
+          %2 = OpVariable %21 StorageBuffer
+          %3 = OpVariable %21 StorageBuffer
+          %4 = OpVariable %22 PushConstant
+         %24 = OpConstant %13 0
+          %1 = OpFunction %11 None %12
+         %25 = OpLabel
+               OpSelectionMerge %26 None
+               OpSwitch %24 %27
+         %27 = OpLabel
+         %28 = OpLoad %14 %5
+          %6 = OpCompositeExtract %13 %28 0
+         %29 = OpUGreaterThanEqual %16 %6 %17
+               OpSelectionMerge %30 None
+               OpBranchConditional %29 %31 %30
+         %31 = OpLabel
+               OpBranch %26
+         %30 = OpLabel
+         %32 = OpAccessChain %9 %2 %19 %6
+         %33 = OpAccessChain %9 %3 %19 %6
+         %34 = OpLoad %20 %33
+         %35 = OpAccessChain %23 %4 %19
+         %36 = OpLoad %20 %35
+         %37 = OpFMul %20 %34 %36
+               OpStore %32 %37
+               OpBranch %26
+         %26 = OpLabel
+               OpReturn
+               OpFunctionEnd

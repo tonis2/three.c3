@@ -159,15 +159,28 @@ export class ComputeBuffer {
 		this._handle = handle;
 		this._type = code;
 		this._count = count;
-		this._bytes = new Uint8Array(count * type.width);
-		this._view = type.view === null ? null : new type.view(this._bytes.buffer);
+		this._byteLength = count * type.width;
+		// The host copy is made the first time a script looks at it. A weights
+		// buffer is gigabytes that JavaScript never reads, and the JS heap is
+		// nowhere near that size.
+		this._host = null;
+		this._view = null;
 		this.disposed = false;
 	}
 
 	// How many elements, as the buffer was made.
 	get count() { return this._count; }
 	// How many bytes those are.
-	get byteLength() { return this._bytes.length; }
+	get byteLength() { return this._byteLength; }
+
+	get _bytes() {
+		if (this._host === null) {
+			this._host = new Uint8Array(this._byteLength);
+			const type = typeOf(this._type);
+			this._view = type.view === null ? null : new type.view(this._host.buffer);
+		}
+		return this._host;
+	}
 	// The element type's name.
 	get type() { return this._type; }
 
@@ -185,7 +198,7 @@ export class ComputeBuffer {
 	// The two directions are separate on purpose: a buffer is read by a kernel,
 	// not by JavaScript, and an implicit upload per element write would be `n`
 	// submissions for a fill a script meant as one.
-	get bytes() { return this._view === null ? this._bytes : this._view; }
+	get bytes() { const bytes = this._bytes; return this._view === null ? bytes : this._view; }
 
 	// One element, by index. `buf.f32(0)` rather than `buf.f32()[0]`, because
 	// the second is a view per call and the first is a byte read.
@@ -213,33 +226,55 @@ export class ComputeBuffer {
 	// caller was going to pay anyway.
 	read() {
 		this._assertLive();
-		H.computeReadBuffer(this._handle, this._bytes, this._bytes.length);
+		H.computeReadBuffer(this._handle, this._bytes, this._byteLength);
 		return this;
 	}
 
+	// `byteCount` bytes from `byteOffset`, as a new Uint8Array — a slice of a
+	// buffer too large to want whole on the host, or a check of one row of it.
+	readBytes(byteOffset = 0, byteCount = this._byteLength - byteOffset) {
+		this._assertLive();
+		const out = new Uint8Array(byteCount);
+		H.computeReadBuffer(this._handle, out, byteCount, byteOffset);
+		return out;
+	}
+
 	// Replace the buffer's contents and upload them.
-	write(source) {
+	//
+	// `byteOffset` is where in the buffer they go, zero when left out.
+	write(source, byteOffset = 0) {
 		this._assertLive();
 		const bytes = asBytes(source, 'write()');
-		if (bytes.length > this._bytes.length) {
+		if (bytes.length + byteOffset > this._byteLength) {
 			throw new RangeError(
-				`three.compute: write() was given ${bytes.length} bytes for a buffer of ${this._bytes.length}`
+				`three.compute: write() was given ${bytes.length} bytes at ${byteOffset} for a buffer of ${this._byteLength}`
 			);
 		}
-		this._bytes.set(bytes);
-		// A Uint8Array over the same memory, not the element view: the host
-		// verb reads bytes, and `js.bytes` takes a Uint8Array or an
-		// ArrayBuffer and nothing else — handing it the Buffer's own
-		// Float32Array is a silent no-op, which is a write that appears to
-		// work and a buffer that never changes.
-		H.computeWriteBuffer(
-			this._handle,
-			new Uint8Array(this._bytes.buffer, this._bytes.byteOffset, this._bytes.length),
-			0,
-			bytes.length
-		);
+		// The host copy follows along only when there already is one: `read()` is
+		// how a script asks for the GPU's bytes, and a write of a weights buffer
+		// should not be the thing that allocates its twin in the JS heap.
+		if (this._host !== null) this._host.set(bytes, byteOffset);
+		// Bytes, not the element view: `js.bytes` takes a Uint8Array or an
+		// ArrayBuffer and nothing else — handing it a Float32Array is a silent
+		// no-op, which is a write that appears to work and a buffer that never
+		// changes. `asBytes` has already made that view.
+		H.computeWriteBuffer(this._handle, bytes, 0, bytes.length, byteOffset);
 		return this;
 	}
+
+	// A range of this buffer, to bind where a whole buffer would go:
+	//
+	//   attention.dispatch({ q, k: cache.view(layer * layerBytes, layerBytes), ... })
+	//
+	// Offsets are bytes and must be multiples of `three.compute.limits.bindingAlignment`.
+	// A size left out runs to the end of the buffer.
+	view(byteOffset = 0, byteSize = 0) {
+		this._assertLive();
+		return new ComputeView(this, byteOffset, byteSize);
+	}
+
+	// What a dispatch binds: the handle, or the handle and a range.
+	get _binding() { return this._h; }
 
 	dispose() {
 		if (this.disposed) return;
@@ -254,6 +289,21 @@ export class ComputeBuffer {
 
 	// The handle, for the dispatch verb. Not part of the API a script reads.
 	get _h() { this._assertLive(); return this._handle; }
+}
+
+// A range of a buffer, made by `buffer.view(offset, size)`.
+export class ComputeView {
+	constructor(buffer, byteOffset, byteSize) {
+		if (!(byteOffset >= 0) || !(byteSize >= 0) || byteOffset + byteSize > buffer.byteLength) {
+			throw new RangeError(
+				`three.compute: view(${byteOffset}, ${byteSize}) is outside a buffer of ${buffer.byteLength} bytes`
+			);
+		}
+		this.buffer = buffer;
+		this.byteOffset = byteOffset;
+		this.byteSize = byteSize;
+	}
+	get _binding() { return [this.buffer._h, this.byteOffset, this.byteSize]; }
 }
 
 // A compiled kernel: one shader, its bindings, and the workgroup size it was
@@ -292,7 +342,7 @@ export class ComputeKernel {
 			? buffers
 			: this._byName(buffers, options.bindings);
 
-		const push = packPush(options.push, options.pushFields);
+		const push = packPush(options.push, options.pushFields || this.pushFields);
 		const threads = options.threads === undefined ? null : options.threads;
 		const workgroups = options.workgroups === undefined ? null : options.workgroups;
 
@@ -308,7 +358,9 @@ export class ComputeKernel {
 			y = (items[1] === undefined ? 1 : items[1]) | 0;
 		}
 
-		H.computeDispatch(this._handle, list.map((b) => b._h), push, x, y, z);
+		// `independent: true` leaves out the barrier after this dispatch: the
+		// caller is saying the next command does not read what this one wrote.
+		H.computeDispatch(this._handle, list.map((b) => b._binding), push, x, y, z, options.independent === true);
 		return this;
 	}
 
@@ -323,7 +375,7 @@ export class ComputeKernel {
 		const out = [];
 		for (const name of fields) {
 			const buffer = named[name];
-			if (!buffer || typeof buffer._h !== 'number') {
+			if (!buffer || buffer._binding === undefined) {
 				throw new TypeError(
 					`three.compute: run() was given no buffer for '${name}' — name the shader's own bindings`
 				);
@@ -397,6 +449,15 @@ export const compute = {
 	u32(count, data) { return compute.buffer('u32', count, data); },
 	// A buffer of bytes.
 	bytes(count, data) { return compute.buffer('bytes', count, data); },
+	// A buffer the host made and handed over by handle — a weights tensor an
+	// embedding program streamed onto the GPU itself. `code` and `count` say how
+	// the script should read it; the bytes are already there.
+	adopt(handle, code = 'bytes', count) {
+		if (typeof handle !== 'number' || handle < 0) {
+			throw new TypeError('three.compute.adopt(handle) wants a buffer handle from the host');
+		}
+		return new ComputeBuffer(handle, code, count);
+	},
 
 	// A kernel: from a shader source, or from a module that is already SPIR-V.
 	//
@@ -458,4 +519,36 @@ export const compute = {
 	// the one case that wants them apart: a chain of dispatches that should
 	// reach the GPU as one submission rather than one each.
 	submit() { H.computeSubmit(); },
+
+	// A GPU-side copy, recorded in order with the dispatches around it — no
+	// round trip, no submission of its own.
+	//
+	//   three.compute.copy(latent, saved)                                  // whole buffer
+	//   three.compute.copy(k, cache, { dstOffset: pos * rowBytes, size: rowBytes })
+	copy(source, destination, options = {}) {
+		const srcOffset = options.srcOffset || 0;
+		const dstOffset = options.dstOffset || 0;
+		const size = options.size === undefined
+			? Math.min(source.byteLength - srcOffset, destination.byteLength - dstOffset)
+			: options.size;
+		H.computeCopy(source._h, srcOffset, destination._h, dstOffset, size, options.independent === true);
+	},
+
+	// Fill a buffer, or a range of it, with one repeated 32-bit word. Offset and
+	// size are bytes, in whole words.
+	fill(buffer, word = 0, options = {}) {
+		const offset = options.offset || 0;
+		const size = options.size === undefined ? buffer.byteLength - offset : options.size;
+		H.computeFill(buffer._h, offset, size, word >>> 0, options.independent === true);
+	},
+	// `fill(buffer, 0)`.
+	zero(buffer, options = {}) { compute.fill(buffer, 0, options); },
+
+	// The barrier a run of `independent` commands left out.
+	barrier() { H.computeBarrier(); },
+
+	// What this device lets a kernel do: `{ device, cooperativeMatrix,
+	// subgroupSize, maxSharedMemory, maxWorkgroupInvocations, maxBindingRange,
+	// maxAllocation, bindingAlignment, maxPushConstants, maxBindings }`.
+	get limits() { return H.computeLimits(); },
 };

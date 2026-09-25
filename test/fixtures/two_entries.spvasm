@@ -1,0 +1,116 @@
+; Two compute entries in one module, with different buffers and push blocks -
+; the shape a file of many kernels compiles to. `scaled` binds two buffers and a
+; 4-byte push block, `affine` one buffer and 16 bytes; SPIR-V 1.5, so each
+; entry's interface names the globals it uses.
+; Rebuild the binary with
+;   spirv-as --target-env spv1.5 test/fixtures/two_entries.spvasm -o test/fixtures/two_entries.spv
+               OpCapability Shader
+               OpExtension "SPV_KHR_storage_buffer_storage_class"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %1 "scaled" %2 %3 %4 %5
+               OpEntryPoint GLCompute %6 "affine" %7 %8 %5
+               OpExecutionMode %1 LocalSize 64 1 1
+               OpExecutionMode %6 LocalSize 32 1 1
+               OpName %9 "RWStructuredBuffer"
+               OpMemberName %9 0 "__member0"
+               OpName %2 "scale_dst"
+               OpName %3 "scale_src"
+               OpName %10 "ScaleParams_std430"
+               OpMemberName %10 0 "scale"
+               OpName %4 "scale_pc"
+               OpName %1 "scaled"
+               OpName %11 "AffineParams_std430"
+               OpMemberName %11 0 "n"
+               OpMemberName %11 1 "mul"
+               OpMemberName %11 2 "add"
+               OpMemberName %11 3 "pad"
+               OpName %7 "affine_pc"
+               OpName %8 "affine_data"
+               OpName %6 "affine"
+               OpDecorate %5 BuiltIn GlobalInvocationId
+               OpDecorate %12 ArrayStride 4
+               OpDecorate %13 ArrayStride 4
+               OpDecorate %9 Block
+               OpMemberDecorate %9 0 Offset 0
+               OpDecorate %2 Binding 1
+               OpDecorate %2 DescriptorSet 0
+               OpDecorate %3 Binding 0
+               OpDecorate %3 DescriptorSet 0
+               OpDecorate %10 Block
+               OpMemberDecorate %10 0 Offset 0
+               OpDecorate %11 Block
+               OpMemberDecorate %11 0 Offset 0
+               OpMemberDecorate %11 1 Offset 4
+               OpMemberDecorate %11 2 Offset 8
+               OpMemberDecorate %11 3 Offset 12
+               OpDecorate %8 Binding 0
+               OpDecorate %8 DescriptorSet 0
+         %14 = OpTypeVoid
+         %15 = OpTypeFunction %14
+         %16 = OpTypeInt 32 0
+         %17 = OpTypeVector %16 3
+         %18 = OpTypePointer Input %17
+         %19 = OpTypeInt 32 1
+         %20 = OpConstant %19 0
+         %21 = OpTypeFloat 32
+         %12 = OpTypePointer StorageBuffer %21
+         %13 = OpTypeRuntimeArray %21
+          %9 = OpTypeStruct %13
+         %22 = OpTypePointer StorageBuffer %9
+         %10 = OpTypeStruct %21
+         %23 = OpTypePointer PushConstant %10
+         %24 = OpTypePointer PushConstant %21
+         %11 = OpTypeStruct %16 %21 %21 %16
+         %25 = OpTypePointer PushConstant %11
+         %26 = OpTypePointer PushConstant %16
+         %27 = OpTypeBool
+         %28 = OpConstant %19 1
+         %29 = OpConstant %19 2
+          %5 = OpVariable %18 Input
+          %2 = OpVariable %22 StorageBuffer
+          %3 = OpVariable %22 StorageBuffer
+          %4 = OpVariable %23 PushConstant
+          %7 = OpVariable %25 PushConstant
+          %8 = OpVariable %22 StorageBuffer
+         %30 = OpConstant %16 0
+          %1 = OpFunction %14 None %15
+         %31 = OpLabel
+         %32 = OpLoad %17 %5
+         %33 = OpCompositeExtract %16 %32 0
+         %34 = OpAccessChain %12 %2 %20 %33
+         %35 = OpAccessChain %12 %3 %20 %33
+         %36 = OpLoad %21 %35
+         %37 = OpAccessChain %24 %4 %20
+         %38 = OpLoad %21 %37
+         %39 = OpFMul %21 %36 %38
+               OpStore %34 %39
+               OpReturn
+               OpFunctionEnd
+          %6 = OpFunction %14 None %15
+         %40 = OpLabel
+               OpSelectionMerge %41 None
+               OpSwitch %30 %42
+         %42 = OpLabel
+         %43 = OpLoad %17 %5
+         %44 = OpCompositeExtract %16 %43 0
+         %45 = OpAccessChain %26 %7 %20
+         %46 = OpLoad %16 %45
+         %47 = OpUGreaterThanEqual %27 %44 %46
+               OpSelectionMerge %48 None
+               OpBranchConditional %47 %49 %48
+         %49 = OpLabel
+               OpBranch %41
+         %48 = OpLabel
+         %50 = OpAccessChain %12 %8 %20 %44
+         %51 = OpLoad %21 %50
+         %52 = OpAccessChain %24 %7 %28
+         %53 = OpLoad %21 %52
+         %54 = OpFMul %21 %51 %53
+         %55 = OpAccessChain %24 %7 %29
+         %56 = OpLoad %21 %55
+         %57 = OpFAdd %21 %54 %56
+               OpStore %50 %57
+               OpBranch %41
+         %41 = OpLabel
+               OpReturn
+               OpFunctionEnd

@@ -3436,6 +3436,25 @@ a byte read where `f32()[0]` builds a view per call.
 `dispose()` frees the buffer. A handle kept past it is refused by name rather than reaching whatever
 was made in its place, and everything a run leaves behind is freed when the run ends.
 
+The host copy behind `.bytes` is made the first time it is used, so a weights buffer the script never
+reads costs nothing in the JS heap.
+
+### buffer.write(data, byteOffset?), buffer.readBytes(byteOffset?, byteCount?)
+
+`write` with an offset replaces that range and leaves the rest alone. `readBytes` downloads a range
+into a new `Uint8Array` without touching `.bytes`, which is how to check one row of a buffer too big
+to want whole. Both submit what was recorded first, so they see the work before them.
+
+### buffer.view(byteOffset, byteSize?)
+
+A range of a buffer, bound where a whole one would go: a KV cache's layer, one half of a packed pair.
+The offset must be a multiple of `three.compute.limits.bindingAlignment`, and a size left out runs to
+the end of the buffer.
+
+```js
+attention.dispatch({ q, k: cache.view(layer * layerBytes, layerBytes), out }, { threads: n });
+```
+
 ### three.compute.kernel(source, options)
 
 One kernel: from a shader source, or from a module that is already SPIR-V.
@@ -3459,8 +3478,17 @@ bindings, its push block's size and its workgroup size all come out of the modul
 - `name` — what a diagnostic blames. `'kernel'` when it is not given.
 - `entry` — which entry point to build the pipeline for. `'main'` when it is not given, which a module
   from another compiler rarely uses — `-fvk-use-entrypoint-name` names each entry after its function.
+  In a module of many entries (SPIR-V 1.4 or later), the kernel is
+  described by that entry alone: its own buffers, its own push block and its own `@threads`.
 - `pushFields` — the push block's field names in the shader's own order, for `run({ push: {...} })`.
   Read from the module when it is not given.
+
+### three.compute.adopt(handle, type?, count?)
+
+A buffer the host program made, wrapped for binding: an embedding program that streams a model's weights
+onto the GPU itself hands the script a handle (`JsRuntime.adopt_storage_buffer` on the C3 side), and this
+makes it a `ComputeBuffer` like any other. `type` and `count` say how `.bytes` should read it — `'bytes'`
+and its byte length when left out. The runtime owns the buffer from then on.
 
 ### three.compute.spirv(path)
 
@@ -3493,6 +3521,32 @@ The options:
 - `push` — the push block's fields as an object, in the shader's own order. A number is packed as a
   float, which is what a shader reads by default; `three.compute.uint(n)` packs an integer for a
   `uint` field. Raw bytes work too, for a block a script built itself.
+- `independent` — `true` leaves out the barrier after this dispatch: the next command does not read
+  what this one writes, so the GPU may overlap them. `three.compute.barrier()`, or any later command
+  without the flag, is the barrier that covers them.
+
+### three.compute.copy(source, destination, options?), fill, zero, barrier
+
+GPU-side commands recorded in order with the dispatches. `copy` takes `{ srcOffset, dstOffset, size,
+independent }` in bytes and copies as much as both sides hold when `size` is left out. `fill(buffer,
+word, { offset, size })` writes one repeated 32-bit word in whole-word ranges, and `zero(buffer)` is
+`fill(buffer, 0)`.
+
+```js
+three.compute.copy(latent, saved);        // before the conditional pass
+three.compute.copy(saved, latent);        // back before the unconditional one
+three.compute.zero(accumulator);
+```
+
+### three.compute.limits
+
+What this device lets a kernel do: `{ device, cooperativeMatrix, subgroupSize, maxSharedMemory,
+maxWorkgroupInvocations, maxBindingRange, maxAllocation, bindingAlignment, maxPushConstants,
+maxBindings }`. It is for choosing between kernel variants, such as a cooperative-matrix matmul or a
+tiled one.
+
+Kernels compiled from source are cached on disk in the shader cache, keyed by name and source, so a
+warm start reads them rather than compiling them again.
 
 ### What is not here
 

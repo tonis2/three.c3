@@ -135,6 +135,16 @@ struct GpuLimits
 	// wherever it is offered and used by nothing yet — it is what would fuse the
 	// pointwise post passes, at no image and no barrier.
 	bool dynamic_rendering_local_read;
+	// What a compute dispatch is bounded by, for `three.compute.limits`: where a
+	// binding may start inside a buffer, how much of one it may cover, the
+	// workgroup's shared memory and thread count, the subgroup width a
+	// reduction can lean on, and the largest single allocation.
+	ulong min_storage_buffer_offset_alignment;
+	uint max_storage_buffer_range;
+	uint max_compute_shared_memory;
+	uint max_compute_workgroup_invocations;
+	uint subgroup_size;
+	ulong max_memory_allocation_size;
 	char[256] device_name;
 }
 
@@ -593,9 +603,14 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
 		.pNext = &push_descriptor,
 	};
+	// The subgroup width and the largest allocation, core in 1.1.
+	vk::PhysicalDeviceVulkan11Properties v11_properties = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES,
+		.pNext = &v12_properties,
+	};
 	vk::PhysicalDeviceProperties2 properties2 = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-		.pNext = &v12_properties,
+		.pNext = &v11_properties,
 	};
 	vk::getPhysicalDeviceProperties2(self.pdevice, &properties2);
 	vk::PhysicalDeviceProperties properties = properties2.properties;
@@ -670,6 +685,12 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.max_update_after_bind_samplers = v12_properties.maxPerStageDescriptorUpdateAfterBindSamplers,
 		.max_set_update_after_bind_sampled_images = v12_properties.maxDescriptorSetUpdateAfterBindSampledImages,
 		.max_set_update_after_bind_samplers = v12_properties.maxDescriptorSetUpdateAfterBindSamplers,
+		.min_storage_buffer_offset_alignment = (ulong)properties.limits.minStorageBufferOffsetAlignment,
+		.max_storage_buffer_range = properties.limits.maxStorageBufferRange,
+		.max_compute_shared_memory = properties.limits.maxComputeSharedMemorySize,
+		.max_compute_workgroup_invocations = properties.limits.maxComputeWorkGroupInvocations,
+		.subgroup_size = v11_properties.subgroupSize,
+		.max_memory_allocation_size = (ulong)v11_properties.maxMemoryAllocationSize,
 		.device_name = properties.deviceName,
 	};
 

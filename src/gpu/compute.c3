@@ -46,6 +46,10 @@ faultdef COMPUTE_NOT_READY, COMPUTE_KERNEL_NO_ENTRY, COMPUTE_UNSUPPORTED_BINDING
 // report far more, and a kernel that wants more than this is a kernel to split.
 const uint COMPUTE_MAX_BINDINGS = 8;
 
+// The largest host-visible staging copy a write or read makes at once. A
+// transfer bigger than this goes through the same staging buffer in pieces.
+const usz COMPUTE_STAGING_CHUNK = 64 * 1024 * 1024;
+
 <*
  One buffer the GPU reads or writes, with the size it was made at.
 
@@ -64,6 +68,27 @@ fn void StorageBuffer.free(&self)
 	if (self.memory.page != null) self.memory.free();
 	*self = { };
 }
+
+<*
+ A range of one buffer, as a binding sees it: a KV cache's layer, one half of a
+ CFG pair, the slice of a packed weights pool a kernel reads.
+
+ A size of zero is "to the end of the buffer", which is what a whole-buffer
+ binding means and what `StorageBuffer.view` makes.
+*>
+struct BufferView
+{
+	StorageBuffer* buffer;
+	usz            offset;
+	usz            size;
+}
+
+fn BufferView StorageBuffer.view(&self, usz offset = 0, usz size = 0)
+{
+	return { .buffer = self, .offset = offset, .size = size };
+}
+
+fn usz BufferView.range(&self) => self.size == 0 ? self.buffer.size - self.offset : self.size;
 
 <*
  A compiled kernel: the pipeline, the layout of its descriptors, and what to
@@ -114,6 +139,10 @@ struct Compute
 	vk::Fence        fence;
 	List{ComputeKernel} kernels;
 	bool             recording;
+	// Commands recorded since the last submit. What lets a host-side copy - a
+	// `write`, a `read` - know whether the GPU still owes it work that was
+	// recorded first, and what lets an empty `submit` cost nothing.
+	uint             pending;
 }
 
 fn void? Compute.init(&self, Gpu* gpu)
@@ -148,11 +177,12 @@ fn void Compute.free(&self)
 // --- Buffers -----------------------------------------------------------------
 
 <*
- A device-local buffer of `size` bytes, zero-filled.
+ A device-local buffer of `size` bytes.
 
  `data` may be null, and the usual case is that it is: a kernel's output buffer
- has no host-side shape until the kernel has written it, and a buffer whose
- contents are about to be overwritten is one upload of zeroes saved.
+ has no host-side shape until the kernel has written it. Its contents are then
+ whatever the memory held before - `Compute.clear` is the zero fill, recorded
+ rather than uploaded.
 
  The upload path is `vk::new_buffer`'s: when data is given, it stages the copy
  through a host-visible buffer and waits, which is worth it for a weights
@@ -169,7 +199,9 @@ fn void? StorageBuffer.create(&self, Gpu* gpu, usz size, void* data = null)
 			| BUFFER_USAGE_TRANSFER_DST_BIT,
 		properties: MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 		data: data,
-		data_size: (sz)size,
+		// Whole words, so a fill of the whole buffer reaches its last byte:
+		// `cmdFillBuffer` writes words, and leaves a trailing part-word alone.
+		data_size: (sz)((size + 3) / 4 * 4),
 	)!;
 	return;
 }
@@ -185,22 +217,36 @@ fn void? StorageBuffer.create(&self, Gpu* gpu, usz size, void* data = null)
 fn void? StorageBuffer.write(&self, Compute* compute, usz offset, void* data, usz size)
 {
 	if (offset + size > self.size) return COMPUTE_NOT_READY~;
+	if (size == 0) return;
 
+	// The copy below goes out on its own submission, so anything recorded before
+	// it has to reach the GPU first: a dispatch that reads this buffer, recorded
+	// and not yet submitted, would otherwise run after the new bytes landed.
+	if (compute.pending > 0) compute.submit()!;
+
+	// In pieces, through one staging buffer: a weights upload is gigabytes, and a
+	// host-visible copy of all of it at once is a second copy of the model.
+	usz chunk = size < COMPUTE_STAGING_CHUNK ? size : COMPUTE_STAGING_CHUNK;
 	vk::Memory stage = vk::new_buffer(
 		&compute.gpu.allocator,
 		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
 		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: data,
-		data_size: (sz)size,
+		data: null,
+		data_size: (sz)chunk,
 	)!;
 	defer stage.free();
 
-	compute.gpu.handle.@single_time_command(queue: compute.gpu.graphics; vk::CommandBuffer cmd)
+	for (usz done = 0; done < size; done += chunk)
 	{
-		vk::cmdCopyBuffer(cmd, stage.buffer, self.memory.buffer, 1, (vk::BufferCopy[]){
-			{ .srcOffset = 0, .dstOffset = (vk::DeviceSize)offset, .size = (vk::DeviceSize)size }
-		});
-	}!;
+		usz part = chunk < size - done ? chunk : size - done;
+		mem::copy(stage.data(), &((char*)data)[done], (sz)part);
+		compute.gpu.handle.@single_time_command(queue: compute.gpu.graphics; vk::CommandBuffer cmd)
+		{
+			vk::cmdCopyBuffer(cmd, stage.buffer, self.memory.buffer, 1, (vk::BufferCopy[]){
+				{ .srcOffset = 0, .dstOffset = (vk::DeviceSize)(offset + done), .size = (vk::DeviceSize)part }
+			});
+		}!;
+	}
 	return;
 }
 
@@ -322,6 +368,27 @@ fn void? Compute.dispatch(&self, ComputeKernel* kernel, StorageBuffer[] buffers,
 	uint groups_x, uint groups_y = 1, uint groups_z = 1)
 {
 	if (buffers.len < kernel.binding_count) return COMPUTE_NOT_READY~;
+	BufferView[COMPUTE_MAX_BINDINGS] views;
+	for (uint i = 0; i < kernel.binding_count; i++) views[i] = buffers[i].view();
+	return self.dispatch_views(kernel, views[:kernel.binding_count], push_constants, groups_x, groups_y, groups_z);
+}
+
+<*
+ `dispatch`, over ranges of buffers rather than whole ones.
+
+ `barrier` false is the caller saying the next command does not read what this
+ one writes - the Q, K and V projections of one layer, three matmuls over the
+ same input - so the GPU may overlap them. The barrier then comes from whichever
+ command after them does ask for one, and it covers all of them.
+
+ Each view's offset has to be a multiple of the device's
+ `minStorageBufferOffsetAlignment`. The caller checks that, because the caller
+ knows which binding it was and can say so.
+*>
+fn void? Compute.dispatch_views(&self, ComputeKernel* kernel, BufferView[] views, void* push_constants,
+	uint groups_x, uint groups_y = 1, uint groups_z = 1, bool barrier = true)
+{
+	if (views.len < kernel.binding_count) return COMPUTE_NOT_READY~;
 
 	vk::cmdBindPipeline(self.cmd, vk::PipelineBindPoint.PIPELINE_BIND_POINT_COMPUTE, kernel.pipeline);
 
@@ -329,7 +396,13 @@ fn void? Compute.dispatch(&self, ComputeKernel* kernel, StorageBuffer[] buffers,
 	vk::WriteDescriptorSet[COMPUTE_MAX_BINDINGS]   writes;
 	for (uint i = 0; i < kernel.binding_count; i++)
 	{
-		infos[i] = { .buffer = buffers[i].memory.buffer, .offset = 0, .range = (vk::DeviceSize)buffers[i].size };
+		BufferView view = views[i];
+		if (view.offset + view.range() > view.buffer.size) return COMPUTE_NOT_READY~;
+		infos[i] = {
+			.buffer = view.buffer.memory.buffer,
+			.offset = (vk::DeviceSize)view.offset,
+			.range = (vk::DeviceSize)view.range(),
+		};
 		writes[i] = vk::writeDescriptorSet()
 			.setDstBinding(i)
 			.setDescriptorType(DESCRIPTOR_TYPE_STORAGE_BUFFER)
@@ -351,13 +424,83 @@ fn void? Compute.dispatch(&self, ComputeKernel* kernel, StorageBuffer[] buffers,
 	}
 
 	vk::cmdDispatch(self.cmd, groups_x, groups_y, groups_z);
+	self.pending++;
+	if (barrier) self.barrier();
+	return;
+}
 
+<*
+ Everything written before this - by a dispatch, a copy or a fill - is visible
+ to everything recorded after it.
+
+ One barrier for all three kinds of command, because a pipeline mixes them
+ freely (a copy of a latent between two kernels, a cleared accumulator before a
+ matmul) and the cost of the wider stage mask is nothing next to a missed one.
+*>
+fn void Compute.barrier(&self)
+{
 	vk::MemoryBarrier2 barrier = vk::memoryBarrier2()
-		.setSrcStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
-		.setSrcAccessMask(ACCESS_2_SHADER_WRITE_BIT)
-		.setDstStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
-		.setDstAccessMask(ACCESS_2_SHADER_READ_BIT | ACCESS_2_SHADER_WRITE_BIT);
+		.setSrcStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
+		.setSrcAccessMask(ACCESS_2_SHADER_WRITE_BIT | ACCESS_2_TRANSFER_WRITE_BIT)
+		.setDstStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
+		.setDstAccessMask(ACCESS_2_SHADER_READ_BIT | ACCESS_2_SHADER_WRITE_BIT
+			| ACCESS_2_TRANSFER_READ_BIT | ACCESS_2_TRANSFER_WRITE_BIT);
 	vk::cmdPipelineBarrier2(self.cmd, &&vk::dependencyInfo().setMemoryBarriers({ barrier }));
+}
+
+<*
+ Record a GPU-side copy of `size` bytes, in order with the dispatches around it.
+
+ This is how a pipeline saves a latent before the conditional pass and puts it
+ back before the unconditional one, or writes a step's keys into a cache: no
+ round trip through the host, and no submission of its own.
+*>
+fn void? Compute.copy(&self, StorageBuffer* source, usz source_offset,
+	StorageBuffer* destination, usz destination_offset, usz size, bool barrier = true)
+{
+	if (size == 0) return;
+	if (source_offset + size > source.size) return COMPUTE_NOT_READY~;
+	if (destination_offset + size > destination.size) return COMPUTE_NOT_READY~;
+
+	vk::cmdCopyBuffer(self.cmd, source.memory.buffer, destination.memory.buffer, 1, (vk::BufferCopy[]){
+		{
+			.srcOffset = (vk::DeviceSize)source_offset,
+			.dstOffset = (vk::DeviceSize)destination_offset,
+			.size = (vk::DeviceSize)size,
+		}
+	});
+	self.pending++;
+	if (barrier) self.barrier();
+	return;
+}
+
+<*
+ Record a zero fill of the whole buffer: what a new buffer holds before anything
+ writes it, so an accumulator starts at nought rather than at whatever the last
+ buffer in that memory left behind.
+*>
+fn void Compute.clear(&self, StorageBuffer* buffer)
+{
+	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, 0, vk::WHOLE_SIZE, 0);
+	self.pending++;
+	self.barrier();
+}
+
+<*
+ Record a fill of `size` bytes with one repeated 32-bit word - zero, usually,
+ for an accumulator or a cache that has to start empty.
+
+ Vulkan wants both the offset and the size in whole words.
+*>
+fn void? Compute.fill(&self, StorageBuffer* buffer, usz offset, usz size, uint word = 0, bool barrier = true)
+{
+	if (size == 0) return;
+	if (offset % 4 != 0 || size % 4 != 0) return COMPUTE_NOT_READY~;
+	if (offset + size > buffer.size) return COMPUTE_NOT_READY~;
+
+	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, (vk::DeviceSize)offset, (vk::DeviceSize)size, word);
+	self.pending++;
+	if (barrier) self.barrier();
 	return;
 }
 
@@ -371,6 +514,10 @@ fn void? Compute.dispatch(&self, ComputeKernel* kernel, StorageBuffer[] buffers,
 fn void? Compute.submit(&self)
 {
 	if (!self.recording) return;
+	// Nothing recorded is nothing to wait for. A `read` submits first whether or
+	// not a script dispatched anything, and that should not cost a round trip.
+	if (self.pending == 0) return;
+	self.pending = 0;
 	vk::endCommandBuffer(self.cmd)!;
 
 	vk::CommandBufferSubmitInfo cmd_info = vk::commandBufferSubmitInfo().setCommandBuffer(self.cmd);
@@ -394,23 +541,32 @@ fn void? Compute.submit(&self)
 fn void? StorageBuffer.read(&self, Compute* compute, usz offset, char[] into)
 {
 	if (offset + into.len > self.size) return COMPUTE_NOT_READY~;
+	if (into.len == 0) return;
 
+	// A read of work that is recorded and not submitted would copy the buffer as
+	// it was before that work.
+	if (compute.pending > 0) compute.submit()!;
+
+	usz chunk = into.len < COMPUTE_STAGING_CHUNK ? into.len : COMPUTE_STAGING_CHUNK;
 	vk::Memory stage = vk::new_buffer(
 		&compute.gpu.allocator,
 		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
 		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
 		data: null,
-		data_size: (sz)into.len,
+		data_size: (sz)chunk,
 	)!;
 	defer stage.free();
 
-	compute.gpu.handle.@single_time_command(queue: compute.gpu.graphics; vk::CommandBuffer cmd)
+	for (usz done = 0; done < into.len; done += chunk)
 	{
-		vk::cmdCopyBuffer(cmd, self.memory.buffer, stage.buffer, 1, (vk::BufferCopy[]){
-			{ .srcOffset = (vk::DeviceSize)offset, .dstOffset = 0, .size = (vk::DeviceSize)into.len }
-		});
-	}!;
-
-	mem::copy(into.ptr, stage.data(), into.len);
+		usz part = chunk < into.len - done ? chunk : into.len - done;
+		compute.gpu.handle.@single_time_command(queue: compute.gpu.graphics; vk::CommandBuffer cmd)
+		{
+			vk::cmdCopyBuffer(cmd, self.memory.buffer, stage.buffer, 1, (vk::BufferCopy[]){
+				{ .srcOffset = (vk::DeviceSize)(offset + done), .dstOffset = 0, .size = (vk::DeviceSize)part }
+			});
+		}!;
+		mem::copy(&into[done], stage.data(), (sz)part);
+	}
 	return;
 }
