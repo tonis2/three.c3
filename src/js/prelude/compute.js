@@ -519,6 +519,13 @@ export const compute = {
 	// the one case that wants them apart: a chain of dispatches that should
 	// reach the GPU as one submission rather than one each.
 	submit() { H.computeSubmit(); },
+	// `submit()` without the wait: send the chain and let frames draw while the
+	// GPU runs it. Recording anything before it is done waits for it.
+	//
+	//   three.compute.submitAsync();
+	//   while (three.compute.busy()) await three.nextFrame();
+	submitAsync() { H.computeSubmitAsync(); },
+	busy() { return H.computeBusy(); },
 
 	// A GPU-side copy, recorded in order with the dispatches around it — no
 	// round trip, no submission of its own.

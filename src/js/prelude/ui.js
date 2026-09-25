@@ -43,8 +43,8 @@ const KIND = {
 	confirmDialog: 17, menu: 18, fileBrowser: 19, dialog: 20,
 };
 
-// The seven Painter primitives, in the order `UiOpKind` declares them.
-const OP = { rect: 0, circle: 1, ellipse: 2, line: 3, arc: 4, text: 5, shadow: 6 };
+// The seven Painter primitives and a picture, in the order `UiOpKind` declares them.
+const OP = { rect: 0, circle: 1, ellipse: 2, line: 3, arc: 4, text: 5, shadow: 6, image: 7 };
 
 const MAIN = { start: 0, center: 1, centre: 1, end: 2, between: 3, 'space-between': 3, spaceBetween: 3 };
 const CROSS = { start: 0, center: 1, centre: 1, end: 2, stretch: 0 };
@@ -190,6 +190,15 @@ function normaliseOp(op, at) {
 			out.to = pair(op.size, `${where} size`, [0, 0]);
 			out.blur = num(op.blur, `${where} blur`);
 			break;
+		case 'image':
+			// { op: 'image', at, size, texture } — `texture` is what
+			// `three.ui.texture` answered. The picture fills the box, so a
+			// caller keeps the aspect by choosing the size.
+			out.at = pair(op.at ?? op.pos, `${where} at`, [0, 0]);
+			out.to = pair(op.size, `${where} size`, [0, 0]);
+			out.tex = num(op.texture, `${where} texture`);
+			delete out.color;
+			break;
 	}
 	return out;
 }
@@ -294,6 +303,9 @@ function normalise(node, path) {
 			break;
 		case 'textfield':
 			if (node.text !== undefined && node.text !== null) out.text = String(node.text);
+			// Paragraphs: wraps, Return is a newline (ctrl+Return submits), and
+			// `size[1]` is the box's height.
+			if (node.multiline) out.multiline = true;
 			if (node.placeholder !== undefined) out.suffix = String(node.placeholder);
 			break;
 		case 'scroll':
@@ -671,4 +683,34 @@ export const ui = {
 	//   three.ui.draw([{ op: 'circle', center: [p.x / s, p.y / s], radius: 8 }]);
 	get scale() { return H.uiScale(); },
 	set scale(value) { H.uiScale(value); },
+
+	// Pixels on the GPU for an `image` op, answered as a handle:
+	//
+	//   const tex = three.ui.texture({ width, height, channels: 3, pixels });
+	//   three.ui.draw([{ op: 'image', at: [10, 10], size: [256, 256], texture: tex }]);
+	//
+	// Pass the handle back to replace its pixels — the same size is a copy
+	// into the image already there, cheap enough for a preview that changes
+	// every step:
+	//
+	//   three.ui.texture(nextImage, tex);
+	//
+	// `pixels` is a Uint8Array of 1 (grey), 3 (RGB) or 4 (RGBA) channels per
+	// pixel; `channels` defaults to what the length says. Pictures are sampled
+	// bilinearly; `{ nearest: true }` in the third argument keeps pixel art crisp.
+	texture(image, handle = 0, options = {}) {
+		if (image === null || typeof image !== 'object') {
+			throw new TypeError('three.ui.texture(image, handle?) takes { width, height, pixels }');
+		}
+		const width = num(image.width, 'three.ui.texture width');
+		const height = num(image.height, 'three.ui.texture height');
+		const pixels = image.pixels ?? image.data;
+		if (!ArrayBuffer.isView(pixels)) throw new TypeError('three.ui.texture: pixels is a Uint8Array');
+		const bytes = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+		const channels = image.channels ?? (width * height > 0 ? bytes.length / (width * height) : 0);
+		return H.uiTexture(bytes, width, height, channels, handle ?? 0, !options.nearest);
+	},
+
+	// Gives a texture back; the next `texture` call may reuse it.
+	freeTexture(handle) { if (handle) H.uiTextureFree(handle); },
 };

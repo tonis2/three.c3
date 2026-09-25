@@ -276,7 +276,8 @@ fn WindowFrame drive_window(
 	Clock since_start,
 	long* last_ns,
 	bool quiet,
-	SyntheticPointer* scripted = null
+	SyntheticPointer* scripted = null,
+	KeyBits scripted_keys = {}
 )
 {
 	if (window.should_close()) return { .closed = true };
@@ -339,7 +340,10 @@ fn WindowFrame drive_window(
 
 	// First, and this is the whole of the arbitration: nothing else can answer
 	// "is the pointer over a widget" until cui has hit-tested this frame.
-	renderer.ui.feed(cursor, keys.down, typed, dt_ms);
+	// The keys a script is holding go to the interface too, as its pointer does
+	// above: a text field driven from a test gets the same ctrl+v a hand would.
+	renderer.ui.use_window(window);
+	renderer.ui.feed(cursor, keys.down.with(scripted_keys), typed, dt_ms);
 
 	bool ui_pointer = renderer.ui.wants_pointer && !controls.dragging;
 	bool ui_keys    = renderer.ui.wants_keys;
@@ -454,6 +458,8 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @param script : `One .js file, or empty. Run once, as a script, before the first frame — see boot_script.`
  @param boot : `False for --no-boot: take the assets directory as a root and leave its main.js alone.`
  @param entry_module : `One .js file, or empty. Evaluated as an ES module before the first frame — see boot_module.`
+ @param setup : `Called on the fresh runtime before anything is booted, and again after every reload — where an application that links these sources installs verbs of its own. Null for none.`
+ @param memory_limit : `The JS heap's ceiling, as JsRuntime.open takes it.`
  @require port > 0 || assets.len > 0 || script.len > 0 || entry_module.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
 fn void? live(
@@ -467,18 +473,21 @@ fn void? live(
 	uint every = 0,
 	String camera = "",
 	bool boot = true,
-	String entry_module = ""
+	String entry_module = "",
+	JsSetup setup = null,
+	usz memory_limit = JS_MEMORY_LIMIT
 )
 {
 	bool serving = port > 0;
 
 	JsRuntime runtime;
-	runtime.open(&renderer.pass, renderer)!;
+	runtime.open(&renderer.pass, renderer, memory_limit)!;
 	defer runtime.close();
 	// The one thing a script may ask of the window rather than of the scene —
 	// `three.input.pointerLock`. Null under `--headless`, which the verb reports
 	// rather than pretends about.
 	runtime.window = window;
+	if (setup != null) setup(&runtime);
 
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
@@ -522,7 +531,7 @@ fn void? live(
 	// is not there would be the startup line telling a small lie.
 	if (assets.len > 0)
 	{
-		if (wants_entry_module(assets, script))
+		if (boot && wants_entry_module(assets, script))
 		{
 			io::printfn("game: %s/%s", assets, ENTRY_MODULE);
 		}
@@ -600,7 +609,8 @@ fn void? live(
 				// The runtime's own, for `controls`' reason: a script writes
 				// `three.input.movePointer` into the same struct this loop reads,
 				// so there is one pointer rather than two answers about one.
-				&runtime.pointer
+				&runtime.pointer,
+				runtime.synthetic.active ? runtime.synthetic.held : (KeyBits){}
 			);
 			if (poll.closed) break;
 			camera_moved = poll.camera_moved;
@@ -645,7 +655,7 @@ fn void? live(
 		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
-			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, entry_module)!;
+			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, entry_module, setup, memory_limit)!;
 			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
 		}
 
@@ -687,8 +697,11 @@ fn void? live(
 			//   panel that a click has just changed still owes a frame. Read
 			//   unconditionally rather than inside the `&&` chain, because reading
 			//   is what clears it and a short-circuit would leave it standing.
+			// - `quit_wanted`, `reload_wanted` — asked for during this tick and
+			//   acted on at the top of the next iteration, which a sleep would
+			//   put off until the mouse moved.
 			quiet = presented && !runtime.is_animating() && !runtime.is_simulating() && !camera_moved && handled == 0
-				&& ui_idle;
+				&& ui_idle && !runtime.quit_wanted && !runtime.reload_wanted;
 
 			// A quiet loop is about to sleep in the kernel anyway, and holding it
 			// here first would only delay the event that wakes it.
@@ -730,6 +743,13 @@ fn void? live(
 			said.clear();
 			runtime.take_frame_output(&said);
 			if (said.len() > 0) io::print(said.str_view());
+			// A callback that was stopped says so once, here, where somebody is
+			// watching - otherwise the window just stops moving.
+			if (runtime.frame_error.len() > 0)
+			{
+				io::printfn("three: %s", runtime.frame_error.str_view());
+				runtime.frame_error.clear();
+			}
 		}
 	}
 }

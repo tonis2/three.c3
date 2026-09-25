@@ -113,6 +113,8 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "windowResize", &js_window_resize, 2);
 	self.bind(host, "windowTitleGet", &js_window_title_get, 0);
 	self.bind(host, "windowTitleSet", &js_window_title_set, 1);
+	self.bind(host, "clipboardRead", &js_clipboard_read, 0);
+	self.bind(host, "clipboardWrite", &js_clipboard_write, 1);
 	self.bind(host, "windowFullscreenGet", &js_window_fullscreen_get, 0);
 	self.bind(host, "windowFullscreenSet", &js_window_fullscreen_set, 1);
 	self.bind(host, "windowMaxFpsGet", &js_window_max_fps_get, 0);
@@ -1205,6 +1207,73 @@ fn void js_window_title_set(
 		}
 		self.window.set_title(window_title);
 		*out = qjs::bool_value(true);
+	};
+}
+
+<*
+ The clipboard under `--headless`, where there is no system one to reach: a
+ copy is pasteable inside this process and nowhere else.
+*>
+String headless_clipboard @local;
+
+<*
+ `clipboardRead()` — the system clipboard's text, or "".
+
+ It asks whoever owns the clipboard and waits for the answer, which is a round
+ trip to another process: fine for a paste, wrong for every frame.
+*>
+fn void js_clipboard_read(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.window == null)
+	{
+		*out = js.string(headless_clipboard);
+		return;
+	}
+	@pool()
+	{
+		*out = js.string(self.window.get_clipboard(tmem));
+	};
+}
+
+<*
+ `clipboardWrite(text)` — put text on the system clipboard.
+
+ On Wayland the compositor only accepts this from a window that has just had a
+ key or button event, so it belongs in an input handler (ctrl+c), not in a
+ timer.
+*>
+fn void js_clipboard_write(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	@pool()
+	{
+		String text = arg_text(&js, argc, args, 0, tmem);
+		if (self.window == null)
+		{
+			if (headless_clipboard.ptr != null) headless_clipboard.free(mem);
+			headless_clipboard = text.copy(mem);
+			return;
+		}
+		self.window.set_clipboard(text);
 	};
 }
 

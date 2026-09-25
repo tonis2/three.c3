@@ -55,6 +55,13 @@ faultdef SCRIPT_NOT_READABLE;
 *>
 const String WINDOW_DEFAULT_TITLE = "three.c3";
 
+<*
+ What an application that links these sources does to a runtime the loop opened:
+ install its own host verbs, set a budget, run a config script. `live` calls it
+ on the first runtime and `reload` on every one after.
+*>
+alias JsSetup = fn void(JsRuntime* runtime);
+
 struct Options
 {
 	// The game directory: `.js` to run, `.glb` to describe.

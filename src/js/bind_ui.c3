@@ -119,6 +119,8 @@ fn void JsRuntime.bind_ui_verbs(&self, qjs::Value host)
 	self.bind(host, "uiMeasure", &js_ui_measure, 3);
 	self.bind(host, "uiSlot", &js_ui_slot, 0);
 	self.bind(host, "uiScale", &js_ui_scale, 1);
+	self.bind(host, "uiTexture", &js_ui_texture, 6);
+	self.bind(host, "uiTextureFree", &js_ui_texture_free, 1);
 }
 
 // ============================================================================
@@ -611,7 +613,9 @@ fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::V
 fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
 {
 	String asked = spec.text;
-	String root = self.modules.root;
+	// A host whose scripts already reach the whole disk — a desktop tool whose
+	// plugins read model files wherever they are — confines nothing here either.
+	String root = self.browse_anywhere ? "" : self.modules.root;
 
 	spec.root = root;
 	spec.scheme = "";
@@ -673,6 +677,7 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 		.anchor_v = (uint)math::max(prop_number(js, value, "av"), 0.0),
 		.solid = prop_truth(js, value, "solid"),
 		.wrap = prop_truth(js, value, "wrap"),
+		.multiline = prop_truth(js, value, "multiline"),
 		.modal = prop_truth(js, value, "modal"),
 		.close_outside = prop_truth(js, value, "closeOutside"),
 
@@ -806,7 +811,7 @@ fn void read_ops(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) 
 		defer js.release(entry);
 
 		int kind = (int)prop_number(js, entry, "o", -1);
-		if (kind < 0 || kind > UiOpKind.SHADOW.ordinal) continue;
+		if (kind < 0 || kind > UiOpKind.IMAGE.ordinal) continue;
 
 		layer.push_op(
 			index,
@@ -826,6 +831,7 @@ fn void read_ops(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) 
 				.border_width = prop_float(js, entry, "bw"),
 				.corners = prop_vec4(js, entry, "corners"),
 				.text = prop_text(js, entry, "text", tmem),
+				.texture = (uint)math::max(prop_number(js, entry, "tex"), 0.0),
 			}
 		);
 	}
@@ -1242,4 +1248,103 @@ fn void JsRuntime.release_ui(&self)
 	if (self.renderer == null) return;
 	self.renderer.ui.clear_tree();
 	self.renderer.ui.on_event(null, null);
+	self.renderer.ui.release_textures();
+}
+
+<*
+ `three.ui.texture(pixels, width, height, channels, handle, linear)` — pixels for
+ an `image` op. `ui.js` reads the image object; this is the crossing.
+
+ One, three or four channels of bytes, widened to RGBA here: an image a pipeline
+ made is RGB, and a copy in JavaScript to add the alpha would be a second
+ full-size buffer on the JS heap for every preview.
+
+ Answers the handle, or throws with the reason — a buffer that is not the size
+ the dimensions say is a script's mistake, and silently drawing garbage from it
+ is not a better answer.
+*>
+fn void js_ui_texture(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	UiLayer* layer = self.ui_layer(&js, out) ?? null;
+	if (layer == null) return;
+
+	char[] bytes  = argc > 0 ? js.bytes(args[0]) : (char[]){ };
+	int width     = arg_int(&js, argc, args, 1);
+	int height    = arg_int(&js, argc, args, 2);
+	int channels  = arg_int(&js, argc, args, 3);
+	uint handle   = (uint)math::max(arg_int(&js, argc, args, 4), 0);
+	bool linear   = argc <= 5 || js.truth(args[5]);
+	if (width <= 0 || height <= 0 || (channels != 1 && channels != 3 && channels != 4))
+	{
+		*out = js.raise("three.ui.texture: an image is { width, height, channels: 1, 3 or 4, pixels }");
+		return;
+	}
+	usz texels = (usz)width * (usz)height;
+	if (bytes.len < texels * (usz)channels)
+	{
+		*out = js.raise("three.ui.texture: pixels holds fewer bytes than width * height * channels");
+		return;
+	}
+
+	@pool()
+	{
+		char[] rgba = bytes;
+		if (channels != 4)
+		{
+			rgba = mem::talloc_array(char, (sz)(texels * 4));
+			for (usz i = 0; i < texels; i++)
+			{
+				char* src = &bytes[i * (usz)channels];
+				char* dst = &rgba[i * 4];
+				if (channels == 1)
+				{
+					dst[0] = dst[1] = dst[2] = src[0];
+				}
+				else
+				{
+					dst[0] = src[0];
+					dst[1] = src[1];
+					dst[2] = src[2];
+				}
+				dst[3] = 255;
+			}
+		}
+		uint? made = layer.texture(rgba, (uint)width, (uint)height, handle, linear);
+		if (catch err = made)
+		{
+			*out = err == UI_NO_SUCH_KEY
+				? js.raise("three.ui.texture: that handle is not a live texture — it was freed, or came from another context")
+				: js.raise("three.ui.texture: the GPU could not take the image");
+			return;
+		}
+		*out = qjs::int_value((int)made);
+	};
+}
+
+// `three.ui.freeTexture(handle)` — the handle goes back for reuse.
+fn void js_ui_texture_free(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	*out = qjs::undefined_value();
+	if (self.renderer == null) return;
+	int handle = arg_int(&js, argc, args, 0);
+	if (handle > 0) self.renderer.ui.release_texture((uint)handle);
 }

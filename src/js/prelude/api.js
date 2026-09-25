@@ -1262,6 +1262,21 @@ const windowSurface = {
 	set renderScale(scale) { setRenderScale(scale); },
 };
 
+// The system clipboard, as text.
+//
+//   three.clipboard.write(selectedText);          // in a ctrl+c handler
+//   const pasted = three.clipboard.read();        // '' when it holds no text
+//
+// `read` asks whichever program owns the clipboard and waits for its answer
+// (up to about a second), so it belongs in a paste handler, not a frame
+// callback. On Wayland, `write` only counts from inside a key or pointer
+// handler: the compositor checks it was a person asking. Under `--headless`
+// both work on a clipboard kept inside the process.
+const clipboard = {
+	read() { return H.clipboardRead(); },
+	write(text) { H.clipboardWrite(String(text ?? '')); },
+};
+
 // null, undefined and 1 all mean full resolution; anything else has to be a
 // finite number, and the host bounds it to 0.25 .. 2.0.
 function setRenderScale(scale) {
@@ -2798,6 +2813,24 @@ export const three = {
 	// this argument would be a still world with the propellers still
 	// turning — most of what moves in most of these scenes is a function of
 	// this number.
+	// A promise that settles on the next frame, for long work that has to
+	// let the window draw:
+	//
+	//   for (let step = 0; step < steps; step++) {
+	//       denoise(step);
+	//       progress.text = `${step + 1}/${steps}`;
+	//       await three.nextFrame();      // the frame is drawn here
+	//   }
+	//
+	// The code after the `await` runs on the next tick, inside its job drain,
+	// and the frame is drawn when it next awaits. One step between awaits is
+	// one frame's worth of stall, so the window stays responsive to the
+	// extent the steps are short. Resolved with nothing; read `three.clock`
+	// for the time.
+	nextFrame() {
+		return new Promise((resolve) => H.frameWait(resolve));
+	},
+
 	setAnimationLoop(fn) {
 		if (fn === null || fn === undefined) { systems.remove(ANIMATION_SYSTEM); return; }
 		if (typeof fn !== 'function') {
@@ -2882,6 +2915,9 @@ export const three = {
 	// How big the window is, what it is called, and whether it fills a
 	// display. Zero and false everywhere under `--headless`.
 	window: windowSurface,
+
+	// Copy and paste text through the system clipboard.
+	clipboard,
 
 	// Read and write the game's own save folder. See the block above `save`.
 	save,

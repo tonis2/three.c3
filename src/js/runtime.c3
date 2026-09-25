@@ -468,6 +468,22 @@ struct JsRuntime
 	 instead of inside one.
 	*>
 	List{PendingUpload} uploads;
+	<*
+	 The resolve functions of every `three.nextFrame()` promise still waiting.
+
+	 Settled by the next `tick`, just before it drains the jobs, so the code after
+	 the `await` runs in that tick and the frame is drawn after it. While any are
+	 waiting the runtime counts as animating: the loop must not sleep through the
+	 frame somebody is waiting for.
+	*>
+	List{qjs::Value} frame_waiters;
+	<*
+	 Whether a `fileBrowser` may leave the assets root. False for a game, whose
+	 scripts are confined to their directory; a host sets it when its scripts
+	 are trusted with the disk anyway, and a browser that could not reach a
+	 model file would only be in the way. Set after `open`, like `window`.
+	*>
+	bool browse_anywhere;
 
 	<*
 	 How many texture references this context has handed to JavaScript, one
@@ -597,6 +613,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
 	// that never asks for one, which is most of them.
 	self.uploads.init(mem, 8);
+	self.frame_waiters.init(mem, 4);
 	// One entry per resident image, grown on demand — `hold_texture`.
 	self.texture_handles.init(mem, 8);
 	// The compute tables — `js/bind_compute.c3`. Grown on demand, and empty
@@ -646,6 +663,7 @@ fn void JsRuntime.close(&self)
 	self.clear_click_handler();
 	self.clear_physics_handlers();
 	self.clear_uploads();
+	self.clear_frame_waiters();
 	// The interface's callbacks, and then the interface itself: the layer belongs
 	// to the Renderer and outlives this context, so a reload must not leave it
 	// holding a listener into the one that just went.
