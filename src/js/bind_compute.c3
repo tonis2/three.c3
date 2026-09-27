@@ -647,13 +647,20 @@ fn void install_kernel(
 	Compute* compute = &self.renderer.compute;
 
 	ComputeKernel* kernel = alloc::new(mem, ComputeKernel);
-	if (catch kernel.create(compute, shader, name, entry))
+	if (catch err = kernel.create(compute, shader, name, entry))
 	{
 		alloc::free(mem, kernel);
 		self.kernel_slots[index].live = false;
-		*out = js.raise(string::tformat(
-			"%s has no usable compute entry point `%s`, or binds something other than storage buffers",
-			name, entry));
+		GpuLimits* limits = &self.renderer.gpu.limits;
+		*out = err == COMPUTE_UNSUPPORTED_SUBGROUP_SIZE
+			? js.raise(string::tformat(
+				"%s is written for a subgroup of %d lanes, and this device %s", name, shader.subgroup_size,
+				limits.subgroup_size_control
+					? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
+					: "cannot be asked for a subgroup size"))
+			: js.raise(string::tformat(
+				"%s has no usable compute entry point `%s`, or binds something other than storage buffers",
+				name, entry));
 		return;
 	}
 

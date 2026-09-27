@@ -115,6 +115,7 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "windowTitleSet", &js_window_title_set, 1);
 	self.bind(host, "clipboardRead", &js_clipboard_read, 0);
 	self.bind(host, "clipboardWrite", &js_clipboard_write, 1);
+	self.bind(host, "dropsTake", &js_drops_take, 0);
 	self.bind(host, "windowFullscreenGet", &js_window_fullscreen_get, 0);
 	self.bind(host, "windowFullscreenSet", &js_window_fullscreen_set, 1);
 	self.bind(host, "windowMaxFpsGet", &js_window_max_fps_get, 0);
@@ -1242,6 +1243,39 @@ fn void js_clipboard_read(
 	@pool()
 	{
 		*out = js.string(self.window.get_clipboard(tmem));
+	};
+}
+
+<*
+ `dropsTake()` — the paths of the files dropped on the window since the last
+ call, oldest first; empty under `--headless` and on backends that do not
+ report drops.
+*>
+fn void js_drops_take(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+	qjs::Value paths = js.array();
+	*out = paths;
+	if (self.window == null) return;
+	@pool()
+	{
+		String list = self.window.take_drops(tmem);
+		uint at = 0;
+		usz start = 0;
+		for (usz i = 0; i <= list.len; i++)
+		{
+			if (i < list.len && list[i] != '\n') continue;
+			if (i > start) js.set_index(paths, at++, js.string(list[start:i - start]));
+			start = i + 1;
+		}
 	};
 }
 

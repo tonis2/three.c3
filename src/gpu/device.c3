@@ -144,6 +144,11 @@ struct GpuLimits
 	uint max_compute_shared_memory;
 	uint max_compute_workgroup_invocations;
 	uint subgroup_size;
+	// Whether a compute pipeline may be asked for a subgroup size, and the
+	// sizes it may ask for (Vulkan 1.3's subgroup size control).
+	bool subgroup_size_control;
+	uint min_subgroup_size;
+	uint max_subgroup_size;
 	ulong max_memory_allocation_size;
 	char[256] device_name;
 }
@@ -599,9 +604,15 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	// The update-after-bind counts, on the same terms: core in 1.2, and a device
 	// that has never heard of the struct leaves the zeros it was initialised with
 	// — which reads as "no room", which is the right answer.
+	// The subgroup sizes a pipeline may ask for, core in 1.3 - which this
+	// device is, since its 1.3 features are chained below unconditionally.
+	vk::PhysicalDeviceVulkan13Properties v13_properties = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES,
+		.pNext = &push_descriptor,
+	};
 	vk::PhysicalDeviceVulkan12Properties v12_properties = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
-		.pNext = &push_descriptor,
+		.pNext = &v13_properties,
 	};
 	// The subgroup width and the largest allocation, core in 1.1.
 	vk::PhysicalDeviceVulkan11Properties v11_properties = {
@@ -690,6 +701,10 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.max_compute_shared_memory = properties.limits.maxComputeSharedMemorySize,
 		.max_compute_workgroup_invocations = properties.limits.maxComputeWorkGroupInvocations,
 		.subgroup_size = v11_properties.subgroupSize,
+		.subgroup_size_control = v13.subgroupSizeControl == vk::TRUE
+			&& (uint)(v13_properties.requiredSubgroupSizeStages & SHADER_STAGE_COMPUTE_BIT) != 0,
+		.min_subgroup_size = v13_properties.minSubgroupSize,
+		.max_subgroup_size = v13_properties.maxSubgroupSize,
 		.max_memory_allocation_size = (ulong)v11_properties.maxMemoryAllocationSize,
 		.device_name = properties.deviceName,
 	};

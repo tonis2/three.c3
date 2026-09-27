@@ -1191,6 +1191,17 @@ const windowSurface = {
 	// three.window.width back on a later frame. False under --headless.
 	resize(width, height) { return H.windowResize(width, height); },
 
+	// The files dropped on the window since the last call, as paths, oldest
+	// first — call it every frame and act on what comes back. The pointer
+	// follows a drag while it is over the window, so three.input.pointer on
+	// the frame they arrive is where they were dropped. Local files only;
+	// empty under --headless, and on X11, macOS and Windows for now.
+	//
+	//   three.systems.frame('drops', () => {
+	//     for (const path of three.window.takeDrops()) open(path);
+	//   });
+	takeDrops() { return H.dropsTake(); },
+
 	// What the title bar says. Writable at any time, which is the point:
 	// a boot-time name belongs in three.configure, and this is what a
 	// pause menu or a level change uses.

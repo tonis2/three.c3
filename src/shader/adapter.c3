@@ -149,6 +149,7 @@ fn ShaderModule compile_compute_shader(String name, String source)
 	// `@pushconstant` block instead - see `reflect_push_block_size`.
 	mod.layout.push_size = reflect_push_block_size(mod.spirv);
 	mod.local_size = reflect_local_size(mod.spirv);
+	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
 
 	mod.ok = true;
 	copy_compute_warnings(&mod, &warnings);
@@ -183,6 +184,7 @@ fn ShaderModule compile_compute_shader_cached(String name, String source)
 		if (shader_cache_try_load(key, &loaded))
 		{
 			loaded.local_size = reflect_local_size(loaded.spirv);
+			loaded.subgroup_size = reflect_subgroup_size(loaded.spirv);
 			return loaded;
 		}
 
@@ -241,6 +243,7 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv, String entry = "")
 	mod.layout.stages = stage_union(mod.entries.array_view());
 	mod.layout.push_size = reflect_push_block_size(mod.spirv, used);
 	mod.local_size = reflect_local_size(mod.spirv, entry_id);
+	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
 
 	if (mod.entries.len() == 0)
 	{
@@ -296,6 +299,45 @@ fn bool[] entry_interface(char[] spirv, String entry, uint* entry_id) @local
 		i += length;
 	}
 	return {};
+}
+
+<*
+ The subgroup size a module asks for: shady writes a kernel's
+ `@subgroup_size(n)` as `OpModuleProcessed "shady.subgroup_size n"`, since a
+ Vulkan module has no execution mode for it. Zero when there is none.
+*>
+fn uint reflect_subgroup_size(char[] spirv)
+{
+	usz count = spirv.len / 4;
+	if (count < 5) return 0;
+	uint* words = (uint*)spirv.ptr;
+	String prefix = "shady.subgroup_size ";
+	usz i = 5;
+	while (i < count)
+	{
+		uint word = words[i];
+		usz length = (usz)(word >> 16);
+		if (length == 0 || i + length > count) break;
+		// OpModuleProcessed: one literal string.
+		if ((word & 0xffff) == 330 && length >= 2)
+		{
+			char* text = (char*)&words[i + 1];
+			usz limit = (length - 1) * 4;
+			usz n = 0;
+			while (n < limit && text[n] != 0) n++;
+			String note = (String)text[:n];
+			if (note.starts_with(prefix))
+			{
+				uint size = 0;
+				foreach (c : note[prefix.len..]) size = size * 10 + (uint)(c - '0');
+				return size;
+			}
+		}
+		// Past the debug section there are no more notes to find.
+		if ((word & 0xffff) == 71) break; // OpDecorate
+		i += length;
+	}
+	return 0;
 }
 
 <*

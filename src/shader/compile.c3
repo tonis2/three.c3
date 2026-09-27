@@ -39,6 +39,10 @@ struct ShaderModule
 	// LocalSize`. Zero when the module declares none - which is a module that
 	// cannot be dispatched, not one to guess a size for.
 	uint[3] local_size;
+	// The subgroup size the module was written for, from its own
+	// `OpModuleProcessed "shady.subgroup_size n"`. Zero when it names none,
+	// and then the driver picks.
+	uint subgroup_size;
 }
 
 <*

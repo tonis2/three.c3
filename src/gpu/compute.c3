@@ -39,7 +39,7 @@ module three;
 import vk;
 import std::collections::list;
 
-faultdef COMPUTE_NOT_READY, COMPUTE_KERNEL_NO_ENTRY, COMPUTE_UNSUPPORTED_BINDING;
+faultdef COMPUTE_NOT_READY, COMPUTE_KERNEL_NO_ENTRY, COMPUTE_UNSUPPORTED_BINDING, COMPUTE_UNSUPPORTED_SUBGROUP_SIZE;
 
 // How many storage buffers one dispatch may bind. Vulkan's guaranteed minimum
 // for `maxPerStageDescriptorStorageBuffers` is 4; the drivers this runs on
@@ -266,6 +266,7 @@ fn void? StorageBuffer.write(&self, Compute* compute, usz offset, void* data, us
  @param entry : `Which compute entry point in it to build the pipeline for.`
  @return ? COMPUTE_KERNEL_NO_ENTRY : `The module has no such compute entry.`
  @return ? COMPUTE_UNSUPPORTED_BINDING : `The shader binds something other than storage buffers.`
+ @return ? COMPUTE_UNSUPPORTED_SUBGROUP_SIZE : `The shader asks for a subgroup size the device cannot give it.`
  @return ? COMPUTE_NOT_READY : `More storage buffers than COMPUTE_MAX_BINDINGS.`
 *>
 fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, String name, String entry = "main")
@@ -340,8 +341,24 @@ fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, Str
 	vk::ShaderModule shader_module = vk::loadShaderModule(gpu.handle, shader.spirv)!;
 	defer shader_module.free(gpu.handle);
 
+	// A kernel written for a subgroup size (`@subgroup_size(n)`) gets exactly
+	// that one; a device that cannot promise it cannot run the kernel.
+	uint lanes = shader.subgroup_size;
+	if (lanes != 0)
+	{
+		GpuLimits* limits = &gpu.limits;
+		if (!limits.subgroup_size_control || lanes < limits.min_subgroup_size || lanes > limits.max_subgroup_size)
+		{
+			return COMPUTE_UNSUPPORTED_SUBGROUP_SIZE~;
+		}
+	}
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
+		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+		.requiredSubgroupSize = lanes,
+	};
 	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
 		.setStage(vk::pipelineShaderStageCreateInfo()
+			.setNext(lanes != 0 ? (void*)&required_lanes : null)
 			.setStage(SHADER_STAGE_COMPUTE_BIT)
 			.setMod(shader_module)
 			.setName(entry))
