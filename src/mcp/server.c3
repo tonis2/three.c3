@@ -81,7 +81,7 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 				"Call get_api_docs first if you have not seen it. Use three.debug.write(x) to send a "
 				"value back — from anywhere in the script, including from inside a system or an "
 				"animation callback.",
-			.input_schema = `{"type":"object","properties":{"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"required":["source"]}`,
+			.input_schema = `{"type":"object","properties":{"code":{"type":"string","description":"Alias of source."},"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"anyOf":[{"required":["source"]},{"required":["code"]}]}`,
 			.handler = &tool_run_script,
 			.user_data = host,
 			.raw_content = true,
@@ -135,17 +135,19 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 
 	if (args == null)
 	{
-		detail.append_string("run_script needs a `source` string: the JavaScript to run");
+		detail.append_string("run_script needs a `source` (or `code`) string: the JavaScript to run");
 		return TOOL_NEEDS_SOURCE~;
 	}
 
+	// `code` is accepted as an alias: it is the name callers reach for first.
 	String? source = args.get_string("source");
+	if (catch err = source) source = args.get_string("code");
 	if (catch err = source)
 	{
 		// Naming the argument and its type is the difference between a retry that
 		// works and one that guesses again, and it applies most to the one tool an
 		// agent calls on every turn.
-		detail.append_string("run_script needs a `source` string: the JavaScript to run");
+		detail.append_string("run_script needs a `source` (or `code`) string: the JavaScript to run");
 		return TOOL_NEEDS_SOURCE~;
 	}
 

@@ -510,6 +510,18 @@ fn void a_call_with_no_source_says_what_it_wanted() @test
 	};
 }
 
+fn void code_is_accepted_for_source() @test
+{
+	@with_server(; mcp::Server* server)
+	{
+		String response = call(server, "run_script", `{"code":"1+1"}`);
+		defer response.free(mem);
+
+		test::@check(!response.contains("needs a"), "code ran as the script: %s", response);
+		test::@check(response.contains(`\"ok\":true`), "and reported success: %s", response);
+	};
+}
+
 // ============================================================================
 // The command line: what it takes, and what it no longer takes
 // ============================================================================
