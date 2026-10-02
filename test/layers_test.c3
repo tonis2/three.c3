@@ -336,6 +336,50 @@ fn void the_pbr_half_crosses_and_only_subsurface_is_left_behind() @test
 // ============================================================================
 
 <*
+ `bump.steps` marches the base height instead of stepping it once, and the march
+ is what moves the mask's uv too. A layer's bump refuses the option by name.
+*>
+fn void a_marched_base_height_generates_the_march() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "a marched stack compiles", `
+			const px = new Uint8Array(4 * 4 * 4).fill(128);
+			const data = () => new three.DataTexture(px, 4, 4, { colorSpace: three.LinearSRGBColorSpace });
+			const mat = new three.LayeredMaterial({
+				height: data(),
+				mask: data(),
+				bump: { distance: 0.05, steps: 24 },
+				layers: [{ tint: [1, 0, 0], mask: 'r' }],
+			});
+			let refused = '';
+			try {
+				new three.LayeredMaterial({ layers: [{ height: data(), bump: { steps: 8 } }] });
+			} catch (e) { refused = e.message; }
+			return mat.fragment + '|' + refused;
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(
+			answer.contains("float2 puv = parallax_occlusion_uv(s, base_height_map(), s.uv, ddx(s.uv), ddy(s.uv), 0.05, 24u, bh);"),
+			"the base height is marched: %s",
+			answer
+		);
+		test::@check(
+			answer.contains("float2 muv = s.mesh_uv + parallax_mesh_shift(puv - s.uv);"),
+			"and the mask follows the marched uv: %s",
+			answer
+		);
+		test::@check(!answer.contains("parallax_shift("), "with no single-step solve beside it: %s", answer);
+		test::@check(
+			answer.contains("bump.steps is only on the material's own bump"),
+			"a layer's bump refuses steps: %s",
+			answer
+		);
+	};
+}
+
+<*
  A stack imported from a file compiles, and the body says what it did.
 
  The whole five-layer stack, as the file wrote it. Every assertion here is on a

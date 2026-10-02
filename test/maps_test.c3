@@ -663,3 +663,179 @@ fn void a_map_loaded_as_a_picture_is_refused() @test
 		);
 	};
 }
+
+// ============================================================================
+// The height map
+// ============================================================================
+
+// The same plane and light as `a_normal_map_set_from_a_script_changes_the_frame`,
+// wearing a checker as its base map and a checker as its height map, so a uv
+// the march moves is a pixel that changes. `tilt` turns the plane away from
+// the camera, in radians.
+fn String relief_scene(float tilt)
+{
+	return string::tformat(
+		`const scene = new three.Scene();
+		three.light.set([0, 0, 1], 0);
+		const checker = (n) => {
+			const px = new Uint8Array(16 * 16 * 4);
+			for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+				const v = ((x >> 2) + (y >> 2)) & 1 ? 255 : 0;
+				const i = (y * 16 + x) * 4;
+				px[i] = v; px[i + 1] = v; px[i + 2] = v; px[i + 3] = 255;
+			}
+			return new three.DataTexture(px, 16, 16, n);
+		};
+		globalThis.HEIGHT = checker({ colorSpace: three.LinearSRGBColorSpace });
+		globalThis.MAT = new three.MeshLambertMaterial({ map: checker({}) });
+		const plane = new three.Mesh(new three.PlaneGeometry(2, 2), globalThis.MAT);
+		plane.rotation.x = %f;
+		scene.add(plane);
+		three.camera.frameAll();
+		return 'built';`,
+		tilt
+	);
+}
+
+// How many pixels of two frames differ by more than a rounding step.
+fn usz frame_difference(image::Image* a, image::Image* b)
+{
+	usz changed = 0;
+	sz bpp = a.bytes_per_pixel();
+	for (sz at = 0; at + bpp <= a.pixels.len; at += bpp)
+	{
+		if (math::abs((int)a.pixels[at + 1] - (int)b.pixels[at + 1]) > 2) changed++;
+	}
+	return changed;
+}
+
+<*
+ The three relief numbers read back, start at their defaults, and refuse what
+ they cannot mean.
+*>
+fn void the_relief_settings_read_back() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(
+			`const mat = new three.MeshLambertMaterial({ });
+			const was = [mat.heightScale, mat.parallaxSteps, mat.parallaxShadow];
+			mat.heightScale = 0.2; mat.parallaxSteps = 32; mat.parallaxShadow = 0.5;
+			let steps = '';
+			try { mat.parallaxSteps = 65; } catch (e) { steps = e.message; }
+			const set = new three.MeshLambertMaterial({ heightScale: 0.1, parallaxSteps: 8 });
+			return {
+				was: was.map((v) => Math.round(v * 1000) / 1000),
+				now: [Math.round(mat.heightScale * 1000) / 1000, mat.parallaxSteps, mat.parallaxShadow],
+				steps: steps.includes('1 to 64'),
+				options: [Math.round(set.heightScale * 1000) / 1000, set.parallaxSteps],
+			};`
+		);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `{"was":[0.05,16,0],"now":[0.2,32,0.5],"steps":true,"options":[0.1,8]}`,
+			"the defaults are 5 cm, 16 steps and no shadow, and every write reads back: %s",
+			result.value
+		);
+	};
+}
+
+<*
+ Looked at head-on, a height map moves nothing: the view goes straight down
+ into the relief, so there is no parallax to see and the march fades out.
+*>
+fn void a_height_map_head_on_is_the_flat_surface() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(relief_scene(0.0f));
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		image::Image flat = renderer.capture()!!;
+		defer flat.free();
+
+		three::RunResult set = run.run(
+			`globalThis.MAT.heightScale = 0.02; globalThis.MAT.heightMap = globalThis.HEIGHT; return 'set';`
+		);
+		defer set.free();
+		test::@check(set.ok, "the map was assigned: %s", set.error);
+
+		image::Image marched = renderer.capture()!!;
+		defer marched.free();
+
+		usz changed = frame_difference(&flat, &marched);
+		test::@check(changed == 0, "a head-on height map changed %d pixels", changed);
+	};
+}
+
+<*
+ At a grazing angle the march moves the texture, and clearing the map puts it
+ back exactly.
+*>
+fn void a_height_map_moves_the_surface_at_an_angle() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(relief_scene(-1.1f));
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		image::Image flat = renderer.capture()!!;
+		defer flat.free();
+
+		three::RunResult set = run.run(
+			`globalThis.MAT.heightScale = 0.3; globalThis.MAT.heightMap = globalThis.HEIGHT; return 'set';`
+		);
+		defer set.free();
+		test::@check(set.ok, "the map was assigned: %s", set.error);
+
+		image::Image marched = renderer.capture()!!;
+		defer marched.free();
+
+		usz changed = frame_difference(&flat, &marched);
+		test::@check(changed > (usz)(W * H / 50), "the relief moved only %d pixels", changed);
+
+		three::RunResult cleared = run.run(`globalThis.MAT.heightMap = null; return 'cleared';`);
+		defer cleared.free();
+		image::Image back = renderer.capture()!!;
+		defer back.free();
+		usz left = frame_difference(&flat, &back);
+		test::@check(left == 0, "and clearing it left %d pixels changed", left);
+	};
+}
+
+<*
+ A cut-out with a height map is kept out of the depth prepass: the colour pass
+ would cut at the marched uv and the prepass at the flat one, and every pixel
+ they disagree on is a hole.
+*>
+fn void a_marched_cut_out_is_not_prepassed() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		uint material     = renderer.pass.create_texture_material(three::NO_TEXTURE)!!;
+		three::NodeId lit = lit_plane(renderer);
+		renderer.pass.scene.set_material(lit, material);
+		renderer.pass.materials[material].alpha_test = 0.5f;
+		centre(renderer);
+
+		bool plain = renderer.pass.prepassed(&renderer.pass.materials[material]);
+		if (!plain) return; // No prepass or no cut-out prepass here: nothing to keep out.
+
+		int height = tilt_map(renderer, 1.0f);
+		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_HEIGHT, height)!!;
+		test::@check(
+			!renderer.pass.prepassed(&renderer.pass.materials[material]),
+			"a cut-out with a height map is drawn without the prepass"
+		);
+
+		renderer.pass.materials[material].alpha_test = 0.0f;
+		test::@check(
+			renderer.pass.prepassed(&renderer.pass.materials[material]),
+			"and an opaque one keeps it: the march moves no depth"
+		);
+	};
+}

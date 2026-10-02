@@ -1340,6 +1340,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
  - A cut-out sampled stochastically. `material.stochastic` blends three taps in
    the colour pass and the depth shader takes one, so the two cut different
    shapes out of the same leaf.
+ - A cut-out with a height map. The colour pass tests the alpha at the uv the
+   parallax march found, and the depth shader at the flat one.
  - A cut-out at all, when the cut-out pipeline is not built.
 *>
 fn bool MeshPass.prepassed(&self, Material* material)
@@ -1352,6 +1354,7 @@ fn bool MeshPass.prepassed(&self, Material* material)
 	if (material.alpha_test > 0.0f)
 	{
 		if (!self.prepass.cutout_ready || material.stochastic) return false;
+		if ((self.map_flags(material) & FLAG_HAS_HEIGHT_MAP) != 0) return false;
 	}
 	return true;
 }
@@ -1572,6 +1575,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.emissive = material.emissive_value(),
 			.texture_index = texture_index_row(&self.assets, material, mesh),
 			.material_rows = material_rows(material.declared_uniforms),
+			.relief = material.relief(),
 		};
 
 		self.draw_indices.push(recorded);
@@ -3438,6 +3442,41 @@ fn void? MeshPass.set_material_emissive(&self, uint index, float r, float g, flo
 }
 
 <*
+ `material.heightScale`, `.parallaxSteps` and `.parallaxShadow` — how the
+ built-in look marches its height map.
+
+ One verb for the three, for `set_material_emissive`'s reason: they are one
+ `float4` in the draw record. Free to change between frames.
+
+ The prelude has refused a negative scale or shadow; the steps are clamped here
+ to `MAX_PARALLAX_STEPS`, so a script cannot ask the GPU for a thousand taps a
+ pixel. Zero steps is the default.
+
+ @return ? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
+*>
+fn void? MeshPass.set_material_relief(&self, uint index, float scale, uint steps, float shadow)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+
+	Material* material = &self.materials[index];
+	material.height_scale_over_default = max(scale, 0.0f) - DEFAULT_HEIGHT_SCALE;
+	material.parallax_steps = min(steps, MAX_PARALLAX_STEPS);
+	material.parallax_shadow = min(max(shadow, 0.0f), 1.0f);
+}
+
+<*
+ Those three as `[scale, steps, shadow]`. A material that does not exist answers
+ the defaults.
+*>
+fn float[3] MeshPass.material_relief(&self, uint index)
+{
+	if (index >= self.materials.len()) return { DEFAULT_HEIGHT_SCALE, (float)DEFAULT_PARALLAX_STEPS, 0 };
+
+	Material* material = &self.materials[index];
+	return { material.height_scale(), (float)material.parallax_step_count(), material.parallax_shadow };
+}
+
+<*
  What those four read back as: the colour as it was written, and the strength
  beside it rather than folded in.
 
@@ -3770,6 +3809,10 @@ fn uint MeshPass.map_flags(&self, Material* material)
 	}
 	if (material.textures.at(OCCLUSION_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_OCCLUSION_MAP;
 	if (material.textures.at(EMISSIVE_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_EMISSIVE_MAP;
+	if (material.textures.at(HEIGHT_MAP_BINDING) != NO_TEXTURE && material.height_scale() > 0.0f)
+	{
+		flags |= FLAG_HAS_HEIGHT_MAP;
+	}
 	return flags;
 }
 

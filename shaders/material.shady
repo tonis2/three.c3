@@ -315,9 +315,10 @@ struct Surface
 
 	// How far this point stands out of the surface the mesh has, and **0.5 is
 	// that surface**: half the range stands proud of it and half sinks in, which
-	// is the convention `parallax_uv` reads a height map by. 0.5 everywhere
-	// today, because nothing writes it yet - a body with a height map of its own
-	// samples it itself. The field is here for the channel a bake writes.
+	// is the convention `parallax_uv` reads a height map by. Where the
+	// built-in look marched `material.heightMap` this is the height the ray
+	// stopped at; 0.5 everywhere else - a body with a height map of its own
+	// samples it itself.
 	float height;
 
 	float roughness;
@@ -631,16 +632,12 @@ fn float3 mapped_normal(Surface s, float3 texel)
 // what the surface actually has.
 fn float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)
 {
-	// Where the texture slides to is a fact about where the camera is, and a
-	// baked image is looked at from everywhere.
-	if (MATERIAL_BAKE) return float2(0.0, 0.0);
-	if (depth == 0.0) return float2(0.0, 0.0);
-
-	float3 n = normalize(s.normal);
-	float3 view = normalize(push.frame[0].camera.xyz - s.position);
-
-	float3 dp_dx = ddx(s.position);
-	float3 dp_dy = ddy(s.position);
+	float3 n;
+	float3 view;
+	float3 du;
+	float3 dv;
+	float pixel;
+	if (!parallax_basis(s, duv_dx, duv_dy, depth, n, view, du, dv, pixel)) return float2(0.0, 0.0);
 
 	// The view flattened into the surface. Its length is the sine of the angle
 	// to the normal, which is the offset limiting everybody uses: head-on it is
@@ -652,22 +649,188 @@ fn float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)
 	// Half the depth is as far as a texel can travel - the map runs either side
 	// of the plane the mesh has - and this is that distance against the world
 	// size of one pixel.
-	float pixel = max(max(length(dp_dx), length(dp_dy)), 1e-9);
 	float fade = saturate(0.5 * depth * length(along) / pixel - 0.5);
 	if (fade <= 0.0) return float2(0.0, 0.0);
 
+	return fade * float2(dot(along, du) / dot(du, du), dot(along, dv) / dot(dv, dv));
+}
+
+// The frame every parallax helper works in: the normal, the direction to the
+// camera, the world directions one unit of u and one unit of v run along, and
+// the world size of a pixel here. False where there is nothing to shift - a
+// bake, no depth, or a uv that does not move across the pixel.
+fn bool parallax_basis(
+	Surface s,
+	float2 duv_dx,
+	float2 duv_dy,
+	float depth,
+	out float3 n,
+	out float3 view,
+	out float3 du,
+	out float3 dv,
+	out float pixel)
+{
+	n = normalize(s.normal);
+	view = normalize(push.frame[0].camera.xyz - s.position);
+	du = float3(0.0);
+	dv = float3(0.0);
+	pixel = 1.0;
+
+	// Where the texture slides to is a fact about where the camera is, and a
+	// baked image is looked at from everywhere.
+	if (MATERIAL_BAKE) return false;
+	if (depth == 0.0) return false;
+
+	float3 dp_dx = ddx(s.position);
+	float3 dp_dy = ddy(s.position);
+	pixel = max(max(length(dp_dx), length(dp_dy)), 1e-9);
+
 	float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
-	if (abs(det) < 1e-12) return float2(0.0, 0.0);
+	if (abs(det) < 1e-12) return false;
 
-	// The world directions one unit of u and one unit of v run along, by
-	// solving the two screen steps against each other.
-	float3 du = (dp_dx * duv_dy.y - dp_dy * duv_dx.y) / det;
-	float3 dv = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / det;
-	float du2 = dot(du, du);
-	float dv2 = dot(dv, dv);
-	if (du2 <= 0.0 || dv2 <= 0.0) return float2(0.0, 0.0);
+	// Solving the two screen steps against each other.
+	du = (dp_dx * duv_dy.y - dp_dy * duv_dx.y) / det;
+	dv = (dp_dy * duv_dx.x - dp_dx * duv_dy.x) / det;
+	return dot(du, du) > 0.0 && dot(dv, dv) > 0.0;
+}
 
-	return fade * float2(dot(along, du) / du2, dot(along, dv) / dv2);
+// A world direction in the surface's own terms: xy how far along u and v it
+// runs, z how far out of the surface.
+fn float3 parallax_tangent(float3 direction, float3 n, float3 du, float3 dv)
+{
+	return float3(dot(direction, du) / dot(du, du), dot(direction, dv) / dot(dv, dv), dot(direction, n));
+}
+
+// Parallax occlusion mapping: the march `parallax_uv` leaves out. The view ray
+// enters the relief at its top and steps down through it until it is below the
+// height map, then one secant step between the last two samples places the
+// hit. Relief in front of relief hides it, which a single step cannot do.
+//
+// The same conventions as `parallax_uv`: `depth` in metres, the map's red
+// channel, 0.5 the plane the mesh has. `duv_dx` and `duv_dy` are the gradients
+// of the *unshifted* uv - every sample in the loop reads with them, so the mip
+// does not jump where the march does.
+//
+// Cheap where it cannot be seen. Head-on the ray goes straight down and takes
+// `MIN` steps; at a grazing angle it takes `max_steps`. Where the deepest
+// relief would move the texel less than half a pixel - far away, or shallow -
+// it fades to the flat uv and takes none.
+//
+// `hit` is the height the ray stopped at, for `parallax_self_shadow`.
+fn float2 parallax_occlusion_uv(
+	Surface s,
+	Map height,
+	float2 uv,
+	float2 duv_dx,
+	float2 duv_dy,
+	float depth,
+	uint max_steps,
+	out float hit)
+{
+	hit = 0.5;
+	float3 n;
+	float3 view;
+	float3 du;
+	float3 dv;
+	float pixel;
+	if (!parallax_basis(s, duv_dx, duv_dy, depth, n, view, du, dv, pixel)) return uv;
+
+	// The view in uv per metre of rise. Clamped rather than divided straight
+	// through: at the silhouette the true ray runs off to infinity, and the
+	// texture with it.
+	float3 t = parallax_tangent(view, n, du, dv);
+	float rise = max(t.z, 0.2);
+	float2 ray = t.xy / rise;
+
+	float3 along = view - n * dot(view, n);
+	float fade = saturate(0.5 * depth * length(along) / (rise * pixel) - 0.5);
+	if (fade <= 0.0) return uv;
+
+	const float MIN = 4.0;
+	float most = max((float)max_steps, MIN);
+	float steps = floor(lerp(most, MIN, saturate(t.z)) + 0.5);
+	float layer = 1.0 / steps;
+
+	// From the top of the relief, height 1, down to its floor, height 0.
+	float2 top = uv + 0.5 * depth * ray;
+	float2 down = -depth * ray;
+
+	float above = 1.0;
+	float before = height.SampleGrad(top, duv_dx, duv_dy).r;
+	float2 found = top;
+	float level = 1.0;
+	if (before < 1.0)
+	{
+		level = 0.0;
+		found = top + down;
+		for (float i = 1.0; i <= steps; i += 1.0)
+		{
+			float below = 1.0 - i * layer;
+			float2 at = top + (1.0 - below) * down;
+			float sampled = height.SampleGrad(at, duv_dx, duv_dy).r;
+			if (sampled >= below)
+			{
+				// Where the line between the two samples crosses the ray.
+				float over = before - above;
+				float under = sampled - below;
+				float cut = abs(over - under) < 1e-6 ? 0.0 : over / (over - under);
+				level = lerp(above, below, saturate(cut));
+				found = top + (1.0 - level) * down;
+				break;
+			}
+			above = below;
+			before = sampled;
+		}
+	}
+
+	hit = lerp(0.5, level, fade);
+	return lerp(uv, found, fade);
+}
+
+fn float2 parallax_occlusion_uv(Surface s, Map height, float2 uv, float depth, uint max_steps)
+{
+	float hit;
+	return parallax_occlusion_uv(s, height, uv, ddx(uv), ddy(uv), depth, max_steps, hit);
+}
+
+// How much of the light reaches the point `parallax_occlusion_uv` found, with
+// the relief in between: a short march from `hit` toward `toward` (surface to
+// light, world space) that keeps the deepest the ray went under the map.
+// 1 is lit. Soft rather than hard, because a height map has no thickness and a
+// hard edge would be one the map does not hold.
+fn float parallax_self_shadow(
+	Surface s,
+	Map height,
+	float2 uv,
+	float2 duv_dx,
+	float2 duv_dy,
+	float depth,
+	float hit,
+	float3 toward)
+{
+	float3 n;
+	float3 view;
+	float3 du;
+	float3 dv;
+	float pixel;
+	if (!parallax_basis(s, duv_dx, duv_dy, depth, n, view, du, dv, pixel)) return 1.0;
+
+	float3 t = parallax_tangent(normalize(toward), n, du, dv);
+	if (t.z <= 0.0 || hit >= 1.0) return 1.0;
+	float2 ray = t.xy / max(t.z, 0.1);
+
+	const float STEPS = 6.0;
+	float climb = (1.0 - hit) / STEPS;
+	float under = 0.0;
+	for (float i = 1.0; i <= STEPS; i += 1.0)
+	{
+		float level = hit + i * climb;
+		float2 at = uv + (level - hit) * depth * ray;
+		float sampled = height.SampleGrad(at, duv_dx, duv_dy).r;
+		// Nearer occluders darken more than far ones at the same overlap.
+		under = max(under, (sampled - level) * (1.0 - (i - 1.0) / STEPS));
+	}
+	return 1.0 - saturate(under * 8.0);
 }
 
 // The same shift, read in the mesh's own uv - `material.repeat` is all that
@@ -697,6 +860,16 @@ fn float2 parallax_uv(Surface s, float2 uv, float2 duv_dx, float2 duv_dy, float 
 fn float2 parallax_uv(Surface s, float2 uv, float height, float depth)
 {
 	return parallax_uv(s, uv, ddx(uv), ddy(uv), height, depth);
+}
+
+// One of the built-in maps at the surface's uv, always with the flat uv's
+// gradients: a marched uv's own jump at every step of the relief. Unmarched
+// they are the same gradients a plain sample takes, and branching between the
+// two measured slower than not.
+fn float4 map_texel(Map image, float2 uv, float2 dx, float2 dy, bool scattered)
+{
+	if (scattered) return stochastic_sample(image, uv, dx, dy);
+	return image.SampleGrad(uv, dx, dy);
 }
 
 // The fragment stage: build the record from the interpolated varyings, hand it
@@ -750,6 +923,23 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	float occlusion = 1.0;
 	float3 emissive = draw.emissive.rgb;
 
+	// The flat uv and its gradients, taken before any branch. With a height map
+	// every map below reads at the marched uv with *these* gradients: the
+	// marched uv's own jump at every step of the relief, and the mip with them.
+	float2 flat_uv = s.uv;
+	float2 uv_dx = ddx(s.uv);
+	float2 uv_dy = ddy(s.uv);
+	// Not in either bake: a baked image is looked at from everywhere.
+	bool relief = !MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE
+		&& (draw.flags & FLAG_HAS_HEIGHT_MAP) != 0 && (draw.flags & FLAG_HAS_UVS) != 0;
+	float relief_height = 0.5;
+	if (relief)
+	{
+		Map height_map = map_at(SLOT_HEIGHT);
+		s.uv = parallax_occlusion_uv(s, height_map, flat_uv, uv_dx, uv_dy, draw.relief.x, (uint)draw.relief.y, relief_height);
+		s.mesh_uv += parallax_mesh_shift(s.uv - flat_uv);
+	}
+
 	// **One test for every map.** A map is a picture laid on a surface by its
 	// uvs, and a mesh with none - a convex hull, a debug line - has nowhere to
 	// put any of them.
@@ -770,19 +960,17 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		// rather than dissolve, or the cut-out shadow, which has no per-copy
 		// colour, would cut a different shape.
 		Map base_color_map = map_at(SLOT_BASE_COLOR);
-		float4 base = scattered
-			? stochastic_sample(base_color_map, s.uv)
-			: base_color_map.Sample(s.uv);
+		float4 base = map_texel(base_color_map, s.uv, uv_dx, uv_dy, scattered);
 		if (base.a * draw.base_color.a < draw.surface.w) discard;
 		s.albedo *= base.rgb;
 
 		if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
 		{
 			Map normal_map = map_at(SLOT_NORMAL);
-			float3 texel = scattered
-				? stochastic_sample(normal_map, s.uv).rgb
-				: normal_map.Sample(s.uv).rgb;
-			s.normal = mapped_normal_frame(geometric, s.position, s.uv, texel);
+			float3 texel = map_texel(normal_map, s.uv, uv_dx, uv_dy, scattered).rgb;
+			// The frame from the flat uv: the marched one's derivatives would
+			// tear it at every step.
+			s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel);
 		}
 
 		// glTF's channels: green is roughness, blue is metalness. **Multiplied
@@ -793,9 +981,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
 		{
 			Map metalness_roughness_map = map_at(SLOT_METALNESS_ROUGHNESS);
-			float2 pair = scattered
-				? stochastic_sample(metalness_roughness_map, s.uv).gb
-				: metalness_roughness_map.Sample(s.uv).gb;
+			float2 pair = map_texel(metalness_roughness_map, s.uv, uv_dx, uv_dy, scattered).gb;
 			surface.x *= pair.x;
 			surface.y *= pair.y;
 		}
@@ -803,9 +989,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
 		{
 			Map occlusion_map = map_at(SLOT_OCCLUSION);
-			occlusion = scattered
-				? stochastic_sample(occlusion_map, s.uv).r
-				: occlusion_map.Sample(s.uv).r;
+			occlusion = map_texel(occlusion_map, s.uv, uv_dx, uv_dy, scattered).r;
 		}
 
 		// The map multiplies the factor, which is glTF's rule and the same one
@@ -815,9 +999,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
 		{
 			Map emissive_map = map_at(SLOT_EMISSIVE);
-			emissive *= scattered
-				? srgb_to_linear(stochastic_sample(emissive_map, s.uv).rgb)
-				: srgb_to_linear(emissive_map.Sample(s.uv).rgb);
+			emissive *= srgb_to_linear(map_texel(emissive_map, s.uv, uv_dx, uv_dy, scattered).rgb);
 		}
 	}
 
@@ -839,6 +1021,23 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// map may have tilted. All three use the *geometric* normal, the one before
 	// the normal map, exactly as `mesh.slang` does.
 	s.shadow = shadow_factor(s.position, geometric);
+	// The relief shading itself, toward the sun only: light zero is the one
+	// `s.shadow` is the visibility of.
+	if (relief && draw.relief.z > 0.0 && push.frame[0].lighting.y > 0.0)
+	{
+		Light sun = push.frame[0].lights[0];
+		if (sun.meta.z == LIGHT_DIRECTIONAL)
+		{
+			float reach;
+			float3 toward = light_toward(sun.direction, s.position, reach);
+			// The frame the march stepped through, not the normal map's tilt.
+			float3 mapped = s.normal;
+			s.normal = geometric;
+			float lit = parallax_self_shadow(s, map_at(SLOT_HEIGHT), s.uv, uv_dx, uv_dy, draw.relief.x, relief_height, toward);
+			s.normal = mapped;
+			s.shadow *= lerp(1.0, lit, saturate(draw.relief.z));
+		}
+	}
 	float3 face_normal = normalize(cross(ddx(s.position), ddy(s.position)));
 	s.receiver_normal = dot(face_normal, geometric) < 0.0 ? -face_normal : face_normal;
 	// The occlusion map folds into the crevice rather than into a field of its
@@ -868,9 +1067,9 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	s.metalness = surface.y;
 	s.reflectance = surface.z;
 	s.emissive = emissive;
-	// The plane the mesh already has. Nothing writes relief into this yet, and
-	// 0.5 is the neutral a body stepping its own height map reads.
-	s.height = 0.5;
+	// Where the march stopped, or 0.5 - the plane the mesh already has, and the
+	// neutral a body stepping its own height map reads.
+	s.height = relief_height;
 	s.time = push.frame[0].lighting.z;
 	s.screen_position = input.sv_position;
 

@@ -159,7 +159,7 @@ fn PipelineState state_for_blend(BlendMode blend)
  `NORMAL_MAP_BINDING`, which is where these become binding indices and where the
  argument for not spelling `normal_map` in a script lives.
 
- Four constants rather than four verbs, unlike `map`: they differ only in which
+ Five constants rather than five verbs, unlike `map`: they differ only in which
  binding they write, they take and give back references identically, and one door
  means one place where the retain and the release cannot get out of step.
 *>
@@ -167,6 +167,14 @@ const int MATERIAL_SLOT_NORMAL               = 0;
 const int MATERIAL_SLOT_METALNESS_ROUGHNESS  = 1;
 const int MATERIAL_SLOT_OCCLUSION            = 2;
 const int MATERIAL_SLOT_EMISSIVE             = 3;
+const int MATERIAL_SLOT_HEIGHT               = 4;
+
+// `material.heightScale` and `material.parallaxSteps` on a material nobody set
+// them on: five centimetres of relief, and a march of at most sixteen steps.
+const float DEFAULT_HEIGHT_SCALE = 0.05f;
+const uint DEFAULT_PARALLAX_STEPS = 16;
+// Past this a march stops buying detail and starts buying frame time.
+const uint MAX_PARALLAX_STEPS = 64;
 
 <*
  The binding one of those slots means.
@@ -184,6 +192,7 @@ fn uint binding_for_material_slot(int slot)
 		case MATERIAL_SLOT_METALNESS_ROUGHNESS: return METALNESS_ROUGHNESS_MAP_BINDING;
 		case MATERIAL_SLOT_OCCLUSION: return OCCLUSION_MAP_BINDING;
 		case MATERIAL_SLOT_EMISSIVE: return EMISSIVE_MAP_BINDING;
+		case MATERIAL_SLOT_HEIGHT: return HEIGHT_MAP_BINDING;
 		default: return 0;
 	}
 }
@@ -454,6 +463,15 @@ struct Material
 	// 
 	// Never read directly outside `Material.emissive_value`.
 	float one_minus_emissive_intensity;
+	// `material.heightScale` less its default, for the complement's reason: the
+	// zero fill has to mean the default, and a zero *depth* is a height map that
+	// does nothing. Never read directly outside `Material.height_scale`.
+	float height_scale_over_default;
+	// `material.parallaxSteps`, the most a march takes. Zero is the default.
+	uint parallax_steps;
+	// `material.parallaxShadow`, 0 to 1 — how dark the relief shades itself
+	// toward the sun. Zero, the fill, is off: it costs a second march.
+	float parallax_shadow;
 	char[PUSH_BUDGET] block;
 	// The uniform table, when it did not fit the block. Empty for every material
 	// whose uniforms fit — almost all of them — and then nothing below this line
@@ -690,6 +708,28 @@ fn float[4] Material.emissive_value(&self)
 	// `emissive` holds what the script wrote, which is what the getter answers.
 	float[4] linear = srgb_to_linear_rgb({ self.emissive[0], self.emissive[1], self.emissive[2], 1 });
 	return { linear[0] * strength, linear[1] * strength, linear[2] * strength, 0 };
+}
+
+<*
+ `material.heightScale` — how deep the height map's relief is, in metres.
+*>
+fn float Material.height_scale(&self)
+{
+	return self.height_scale_over_default + DEFAULT_HEIGHT_SCALE;
+}
+
+fn uint Material.parallax_step_count(&self)
+{
+	return self.parallax_steps == 0 ? DEFAULT_PARALLAX_STEPS : self.parallax_steps;
+}
+
+<*
+ The four numbers `DrawRecord.relief` carries: depth, most steps, self-shadow
+ strength, and a spare.
+*>
+fn float[4] Material.relief(&self)
+{
+	return { self.height_scale(), (float)self.parallax_step_count(), self.parallax_shadow, 0 };
 }
 
 <*

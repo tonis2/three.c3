@@ -55,6 +55,7 @@ const UV_VARIANTS = 8;
 const SLOT_METALNESS_ROUGHNESS = 1;
 const SLOT_OCCLUSION = 2;
 const SLOT_EMISSIVE = 3;
+const SLOT_HEIGHT = 4;
 
 // What `material.roughnessMap` and `material.metalnessMap` answer. Three.js
 // keeps the two apart and glTF packs them into one image, and this renderer
@@ -597,7 +598,7 @@ export class Material {
 // and still be one draw call — a colour here would be a second way to say the
 // same thing that also splits the batch.
 //
-// **Four images, not one.** `map` is the base colour; `normalMap`,
+// **Several images, not one.** `map` is the base colour; `normalMap`,
 // `metalnessRoughnessMap` and `aoMap` are the three the built-in shader reads
 // beside it, and none of them compiles anything either — they are three more
 // sampler bindings on the pipeline that already existed. The last three are
@@ -607,7 +608,7 @@ export class MeshLambertMaterial extends Material {
 	constructor(options = {}) {
 		if (options === null || typeof options !== 'object') {
 			throw new TypeError(
-				'new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity }) wants an options object'
+				'new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, heightMap, heightScale, parallaxSteps, parallaxShadow, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity }) wants an options object'
 			);
 		}
 		const { map = null, side = FrontSide } = options;
@@ -631,6 +632,7 @@ export class MeshLambertMaterial extends Material {
 		this._metalnessRoughnessMap = null;
 		this._aoMap = null;
 		this._emissiveMap = null;
+		this._heightMap = null;
 		// After `super`, because it is a write through the handle rather than a
 		// part of it — and the setter is what refuses a value outside 0..1, so
 		// the option and the property are checked by exactly one piece of code.
@@ -645,6 +647,10 @@ export class MeshLambertMaterial extends Material {
 		}
 		if (options.aoMap !== undefined) this.aoMap = options.aoMap;
 		if (options.emissiveMap !== undefined) this.emissiveMap = options.emissiveMap;
+		if (options.heightMap !== undefined) this.heightMap = options.heightMap;
+		if (options.heightScale !== undefined) this.heightScale = options.heightScale;
+		if (options.parallaxSteps !== undefined) this.parallaxSteps = options.parallaxSteps;
+		if (options.parallaxShadow !== undefined) this.parallaxShadow = options.parallaxShadow;
 	}
 
 	// A tangent-space normal map, or null.
@@ -725,6 +731,58 @@ export class MeshLambertMaterial extends Material {
 		return texture;
 	}
 
+	// A height map, red channel, or null: parallax occlusion mapping. White
+	// stands out of the surface, black sinks into it, and **0.5 is the plane
+	// the mesh already has** — `layers.js`'s `height` reads it the same way.
+	//
+	// The view ray is marched through the relief per pixel, so bumps hide what
+	// is behind them; nothing is tessellated and the silhouette stays flat.
+	// The march fades out where its relief would move less than half a pixel,
+	// so a distant field of it costs what a flat one does.
+	//
+	// Data, so loaded linear, for `normalMap`'s reason.
+	get heightMap() { return this._heightMap; }
+
+	set heightMap(v) { this._heightMap = this._setSlot(SLOT_HEIGHT, v, 'heightMap'); }
+
+	// How deep the height map's relief is, top to bottom, in metres — 0.05 by
+	// default. Half of it stands out of the surface and half sinks in. Read
+	// against the world rather than the uv, so `repeat` does not change it.
+	get heightScale() { return H.getRelief(this._index())[0]; }
+
+	set heightScale(v) {
+		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+			throw new TypeError('`heightScale` wants a depth in metres from 0 up, not ' + String(v));
+		}
+		const was = H.getRelief(this._index());
+		H.setRelief(this._index(), v, was[1], was[2]);
+	}
+
+	// The most steps the march takes, at a grazing angle — 16 by default, at
+	// most 64. Head-on it takes 4 whatever this says.
+	get parallaxSteps() { return H.getRelief(this._index())[1]; }
+
+	set parallaxSteps(v) {
+		if (!Number.isInteger(v) || v < 1 || v > 64) {
+			throw new TypeError('`parallaxSteps` wants a whole number from 1 to 64, not ' + String(v));
+		}
+		const was = H.getRelief(this._index());
+		H.setRelief(this._index(), was[0], v, was[2]);
+	}
+
+	// How dark the relief shades itself toward the sun, 0 to 1 — 0, off, by
+	// default. A second, shorter march toward the first directional light; it
+	// darkens what the sun's own shadow already reaches and nothing else.
+	get parallaxShadow() { return H.getRelief(this._index())[2]; }
+
+	set parallaxShadow(v) {
+		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+			throw new TypeError('`parallaxShadow` wants a number from 0 to 1, not ' + String(v));
+		}
+		const was = H.getRelief(this._index());
+		H.setRelief(this._index(), was[0], was[1], v);
+	}
+
 	// Three.js has these two as separate images and this renderer does not —
 	// glTF packs them into one, `ref.material` hands one over, and the shader
 	// reads two channels of it. Refused by name rather than ignored, because a
@@ -767,6 +825,10 @@ export class MeshLambertMaterial extends Material {
 			metalnessRoughnessMap: this._metalnessRoughnessMap?.toJSON() ?? null,
 			aoMap: this._aoMap?.toJSON() ?? null,
 			emissiveMap: this._emissiveMap?.toJSON() ?? null,
+			heightMap: this._heightMap?.toJSON() ?? null,
+			heightScale: this.alive ? this.heightScale : null,
+			parallaxSteps: this.alive ? this.parallaxSteps : null,
+			parallaxShadow: this.alive ? this.parallaxShadow : null,
 		};
 	}
 }

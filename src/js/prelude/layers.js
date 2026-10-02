@@ -247,14 +247,24 @@ function surfaces(layer) {
 // to be retuned per mesh. `strength` is the 0-to-1 amount beside it, and the two
 // multiply into the single depth the generated source carries — nothing needs
 // them apart except the exporter, which is handed both.
-function readBump(raw, what) {
-	if (raw === null || raw === undefined) return { strength: 1, distance: 1 };
+//
+// `steps` is this renderer's own, and only the material's bump takes it: above
+// 1 the base height is ray-marched (`parallax_occlusion_uv`) rather than
+// stepped once, so relief hides relief. A layer's height stays one step.
+function readBump(raw, what, marches) {
+	if (raw === null || raw === undefined) return { strength: 1, distance: 1, steps: 1 };
+	const keys = marches ? 'strength, distance, steps' : 'strength, distance';
 	if (typeof raw !== 'object' || Array.isArray(raw)) {
-		throw new TypeError(`${what}: bump wants { strength, distance }, like { distance: 0.05 }`);
+		throw new TypeError(`${what}: bump wants { ${keys} }, like { distance: 0.05 }`);
 	}
 	for (const key of Object.keys(raw)) {
-		if (key !== 'strength' && key !== 'distance') {
-			throw new TypeError(`${what}: bump has no option called '${key}' — it takes strength, distance`);
+		if (key === 'steps' && !marches) {
+			throw new TypeError(
+				`${what}: bump.steps is only on the material's own bump — a layer's height is one step`
+			);
+		}
+		if (key !== 'strength' && key !== 'distance' && key !== 'steps') {
+			throw new TypeError(`${what}: bump has no option called '${key}' — it takes ${keys}`);
 		}
 	}
 	const strength = raw.strength ?? 1;
@@ -264,7 +274,11 @@ function readBump(raw, what) {
 			throw new TypeError(`${what}: bump.${pair[0]} wants a finite number, not ${String(pair[1])}`);
 		}
 	}
-	return { strength, distance };
+	const steps = raw.steps ?? 1;
+	if (!Number.isInteger(steps) || steps < 1 || steps > 64) {
+		throw new TypeError(`${what}: bump.steps wants a whole number from 1 to 64, not ${String(steps)}`);
+	}
+	return { strength, distance, steps };
 }
 
 // One layer, checked and reduced to the handful of facts the emitter needs.
@@ -394,7 +408,7 @@ function readLayer(raw, at) {
 	// defaults, which are a strength and a distance of 1 — a metre of relief,
 	// which is a great deal of it and is what the file says when it says nothing.
 	const height = checkTexture(raw.height, `${label}: height`);
-	const bump = readBump(raw.bump, label);
+	const { steps: _steps, ...bump } = readBump(raw.bump, label, false);
 
 	return {
 		at,
@@ -592,8 +606,10 @@ function emit(base, layers) {
 	// The deepest relief on the stack is what the fade is measured against — see
 	// `parallax_shift` — because a layer with more relief than the base must not
 	// be faded out by the base's.
+	// A marched base height solves its own frame, so it is not one of these.
+	const marched = base.height !== null && base.depth !== 0 && base.bump.steps > 1;
 	const reliefs = [];
-	if (base.height !== null && base.depth !== 0) reliefs.push(Math.abs(base.depth));
+	if (base.height !== null && base.depth !== 0 && !marched) reliefs.push(Math.abs(base.depth));
 	for (const l of layers) if (l.height !== null && l.depth !== 0) reliefs.push(Math.abs(l.depth));
 	const deepest = reliefs.length === 0 ? 0 : Math.max(...reliefs);
 	if (deepest !== 0) {
@@ -603,7 +619,23 @@ function emit(base, layers) {
 			+ `${num(deepest, 'LayeredMaterial: bump')});`
 		);
 	}
-	if (base.height !== null && base.depth !== 0) {
+	if (marched) {
+		textures.base_height_map = base.height;
+		// A tap per step at most; the march fades to none where it cannot be seen.
+		stats.taps += base.bump.steps;
+		stats.sampleGradTaps += base.bump.steps;
+		body.push(
+			`    float bh;`,
+			`    float2 puv = parallax_occlusion_uv(s, base_height_map(), s.uv, ddx(s.uv), ddy(s.uv), `
+			+ `${num(base.depth, 'LayeredMaterial: bump')}, ${base.bump.steps}u, bh);`
+		);
+		if (anyMask) {
+			body.push(`    float2 muv = s.mesh_uv + parallax_mesh_shift(puv - s.uv);`);
+			mask_uv = 'muv';
+		}
+		surface = 'puv';
+		albedo = 'base_albedo(s, puv)';
+	} else if (base.height !== null && base.depth !== 0) {
 		textures.base_height_map = base.height;
 		body.push(
 			`    float bh = ${read('base_height_map', 's.uv')}.r;`
@@ -1130,7 +1162,7 @@ export class LayeredMaterial extends ShaderMaterial {
 		if (!Array.isArray(raw)) {
 			throw new TypeError('`layers` wants an array of layer descriptions, outermost last');
 		}
-		const bump = readBump(options.bump, 'LayeredMaterial');
+		const bump = readBump(options.bump, 'LayeredMaterial', true);
 		const name = options.name === undefined || options.name === null ? '' : String(options.name);
 		const base = {
 			map: checkTexture(options.map, 'LayeredMaterial: map'),

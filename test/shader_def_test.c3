@@ -525,13 +525,16 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("if (base.a * draw.base_color.a < draw.surface.w) discard;"),
 		"and the alpha test is before the body, on the map's alpha times the material's");
 	test::@check(source.contains("if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)")
-		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, s.uv, texel);"),
+		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel);"),
 		"a normal map bends the shading normal through the shared frame, not the geometric one");
+	test::@check(source.contains("&& (draw.flags & FLAG_HAS_HEIGHT_MAP) != 0 && (draw.flags & FLAG_HAS_UVS) != 0;")
+		&& source.contains("s.uv = parallax_occlusion_uv(s, height_map, flat_uv, uv_dx, uv_dy,"),
+		"a height map marches the uv every map below reads at");
 	test::@check(source.contains("surface.x *= pair.x;") && source.contains("surface.y *= pair.y;"),
 		"the metallic-roughness map multiplies the material's own roughness and metalness");
-	test::@check(source.contains("occlusion = scattered"),
+	test::@check(source.contains("occlusion = map_texel(occlusion_map,"),
 		"the occlusion map reaches the crevice the ambient terms scale by");
-	test::@check(source.contains("emissive *= scattered"),
+	test::@check(source.contains("emissive *= srgb_to_linear(map_texel(emissive_map,"),
 		"and the emissive map multiplies what the record set");
 	test::@check(source.contains("Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);")
 		&& source.contains("Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);"),

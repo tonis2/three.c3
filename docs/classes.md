@@ -431,7 +431,7 @@ device is needed, because the image is on it.
 ## MeshLambertMaterial
 
 ```js
-new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity })
+new three.MeshLambertMaterial({ map, normalMap, metalnessRoughnessMap, aoMap, emissiveMap, heightMap, heightScale, parallaxSteps, parallaxShadow, side, transparent, blending, opacity, roughness, metalness, reflectance, emissive, emissiveIntensity })
 ```
 
 The built-in shader with an image on it — the material to reach for when what you want is a picture
@@ -444,12 +444,12 @@ It has no `color`, because `mesh.color` is the per-copy channel and multiplies i
 — so one material tints a thousand copies differently and is still one draw call. With no map it is
 the cheapest way to ask for a side, which is what a skydome needs.
 
-**Five images, not one.** `map` is the base colour and the other four are the maps the built-in
-shader reads beside it — a normal map, glTF's packed metallic-roughness pair, an occlusion map and an
-emissive map. None of them compiles anything either: they are sampler bindings on the pipeline that
-already existed.
+**Six images, not one.** `map` is the base colour and the other five are the maps the built-in
+shader reads beside it — a normal map, glTF's packed metallic-roughness pair, an occlusion map, an
+emissive map and a height map. None of them compiles anything either: they are sampler bindings on
+the pipeline that already existed.
 
-Three of those four are *data* rather than pictures and have to be loaded
+Four of those five are *data* rather than pictures and have to be loaded
 `{ colorSpace: three.LinearSRGBColorSpace }`; assigning an sRGB texture throws, because through an
 sRGB view every value in them arrives bent and the result reads as a bad file. `emissiveMap` is the
 exception and goes the other way: it is the colour of the light coming off the surface, so it loads
@@ -462,6 +462,10 @@ sRGB — the default — and a linear one is refused.
 - `metalnessRoughnessMap` — glTF's packed pair: green is roughness, blue is metalness
 - `aoMap` — an occlusion map, red channel; darkens the ambient floor and the environment only
 - `emissiveMap` — where this surface glows; multiplies `emissive`, and loads sRGB rather than linear
+- `heightMap` — parallax occlusion mapping, red channel, 0.5 the mesh's own plane; must be loaded linear
+- `heightScale` — how deep that relief is, in metres; 0.05 by default
+- `parallaxSteps` — the most steps the march takes, 1 to 64; 16 by default
+- `parallaxShadow` — 0 to 1, how dark the relief shades itself toward the sun; 0, off, by default
 - `roughnessMap` — Three.js has this and here it is half of `metalnessRoughnessMap`; assigning throws
 - `metalnessMap` — the other half, and throws for the same reason
 - `side` — `three.FrontSide`, `three.BackSide` or `three.DoubleSide`; settable
@@ -548,6 +552,53 @@ light is pointing, which looks plausible enough to ship and is wrong.
 
 So on a scene with `three.light.ambient` at 0 and no `scene.environment`, this correctly changes
 nothing.
+
+#### heightMap
+
+A height map, red channel: parallax occlusion mapping. White stands out of the surface, black sinks
+into it, and **0.5 is the plane the mesh already has** — the convention LayeredMaterial's `height`
+reads by.
+
+```js
+const floor = new three.MeshLambertMaterial({
+  map: bricks,
+  heightMap: brickHeight,   // loaded { colorSpace: three.LinearSRGBColorSpace }
+  heightScale: 0.06,        // six centimetres of relief, top to bottom
+  parallaxShadow: 1,        // and let the bricks shade their own mortar
+});
+```
+
+The view ray is marched through the relief per pixel, so a brick hides the mortar behind it. Nothing
+is tessellated: the silhouette and the depth buffer stay the flat mesh, so shadows cast by the
+surface, ambient occlusion and anything meeting it see the plane rather than the relief.
+
+It costs only on the pixels you see, and less on most of them. The depth prepass still runs first, so
+the march is paid once per visible pixel and never for overdraw. Head-on it takes 4 steps, at a
+grazing angle `parallaxSteps`, and where the relief would move less than half a pixel — far away, or
+shallow — it fades to the flat surface and takes none. `parallaxShadow` is a second, shorter march
+toward the first directional light.
+
+A cut-out with a height map (`alphaTest` above 0) is drawn without the depth prepass, because the
+colour pass cuts at the marched uv and the prepass could only cut at the flat one.
+
+#### heightScale
+
+How deep `heightMap`'s relief is, top to bottom, in metres — 0.05 by default. Half of it stands out of
+the surface and half sinks in. It is measured against the world rather than the uv, so `repeat` does
+not change it, and 0 turns the march off without clearing the map.
+
+#### parallaxSteps
+
+The most steps the march takes, a whole number from 1 to 64 — 16 by default. That is the count at a
+grazing angle; head-on it takes 4 whatever this says, and where the relief is under half a pixel it
+takes none. Raise it when steep relief seen edge-on shows layers; lower it to pay less.
+
+#### parallaxShadow
+
+How dark the relief shades itself toward the sun, 0 to 1 — 0, off, by default. A second, shorter
+march from where the view ray landed toward the first directional light: a brick darkens the mortar on
+its far side. It multiplies the sun's own shadow and touches no other light, and it costs six more
+taps on every marched pixel, so it is off until asked for.
 
 #### roughnessMap
 
@@ -874,8 +925,14 @@ nothing about `metalness`, and the material's own value carries through.
 `height` is parallax: `bump: { strength, distance }` scales it, `distance` in metres, and the uv moves
 under everything sampled after it. A height on the LayeredMaterial itself moves the whole stack — base
 colour, base normal, the mask and every layer; a height on a layer moves that layer's own maps and
-nothing else. 0.5 in the map is the plane the mesh already has. It is one step rather than a march, so
-it shifts convincingly and does not occlude, and it does nothing in a bake.
+nothing else. 0.5 in the map is the plane the mesh already has. By default it is one step rather than a
+march, so it shifts convincingly and does not occlude, and it does nothing in a bake.
+
+`bump: { distance: 0.05, steps: 24 }` on the material's own bump marches its height instead —
+parallax occlusion mapping, the same march `MeshLambertMaterial.heightMap` uses, so relief hides the
+relief behind it. `steps` is the most it takes, 1 to 64, and 1 is the single step. A layer's height is
+always one step, and `steps` on a layer's bump throws. `steps` is this renderer's own and is not
+written back by `scene.export`.
 
 A layer's `subsurface` is the one thing refused rather than ignored: it needs a light transport this
 renderer does not have, and a material property that provably changes no pixel is worse than an error.

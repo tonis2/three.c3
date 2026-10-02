@@ -119,6 +119,10 @@ const uint FLAG_HAS_EMISSIVE_MAP            = 512;
  the paint is on the mesh either way and the alternative is a rainbow.
 *>
 const uint FLAG_COLORS_ARE_MASK             = 1024;
+// Whether the material carries a height map — `material.heightMap`, which the
+// built-in look ray-marches for parallax occlusion. `DrawRecord.relief` holds
+// how deep and how many steps.
+const uint FLAG_HAS_HEIGHT_MAP              = 2048;
 
 <*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
@@ -574,6 +578,10 @@ struct DrawRecord
 	// At least one, so the clamp's subtraction cannot wrap on a material with no
 	// tables at all.
 	uint material_rows;
+	// x the height map's depth in metres, y the most march steps, z the sun
+	// self-shadow strength, w unused — `material.heightScale`, `.parallaxSteps`
+	// and `.parallaxShadow`. Read only under `FLAG_HAS_HEIGHT_MAP`.
+	float[4] relief;
 }
 
 struct MeshPush
@@ -679,9 +687,9 @@ $assert @layout_matches(
 // every offset in the module rather than fail. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block moved off its pinned size";
-// 388 bytes of fields and four of the struct's own tail alignment: the padding is
+// 404 bytes of fields and four of the struct's own tail alignment: the padding is
 // not a field and not part of the wire format, which is why the new field is last.
-$assert DrawRecord::size == 392 : "DrawRecord moved off its pinned size";
+$assert DrawRecord::size == 408 : "DrawRecord moved off its pinned size";
 $assert FrameBlock::size == 400 : "FrameBlock moved off its pinned size";
 $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
@@ -811,6 +819,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "emissive", 272, 16 },
 	{ "texture_index", 288, 96 },
 	{ "material_rows", 384, 4 },
+	{ "relief", 388, 16 },
 };
 
 // How many of those the shader's generated declaration carries. All of them,

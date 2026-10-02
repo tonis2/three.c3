@@ -613,6 +613,26 @@ This documentation, four ways.
 Over MCP these are `get_api_docs`'s arguments, plus a `path` that writes the whole surface to a
 Markdown file — one heading per entry — which is how you grep it with your own tools.
 
+## three.nextFrame()
+
+A promise that resolves after the next frame has been drawn.
+
+`await three.nextFrame();` in a script is how it waits for what it just changed to reach the screen — a screenshot taken straight after `scene.add` would otherwise see the old frame. Every waiting promise resolves together when the frame ends, so awaiting it twice in a row is two frames.
+
+```js
+scene.add(mesh);
+await three.nextFrame();      // the frame is drawn here
+```
+
+## three.clipboard
+
+The system clipboard, as text.
+
+- `three.clipboard.write(text)` puts a string on it, for a ctrl+c handler.
+- `three.clipboard.read()` answers with what it holds, and `''` when it holds no text.
+
+`read` asks whichever program owns the clipboard and waits for its answer. Where there is no system clipboard (headless, or a process with no window) both work on a clipboard kept inside the process, so a copy and paste inside one script still round-trips.
+
 ## three.searchDocs(term)
 
 Where does the API mention X, over the whole documentation rather than only the differences.

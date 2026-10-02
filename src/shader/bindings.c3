@@ -123,6 +123,7 @@ const uint NORMAL_MAP_BINDING              = 5;
 const uint METALNESS_ROUGHNESS_MAP_BINDING = 6;
 const uint OCCLUSION_MAP_BINDING           = 7;
 const uint EMISSIVE_MAP_BINDING            = 8;
+const uint HEIGHT_MAP_BINDING              = 9;
 
 // A declared row count of zero means "not a table", which is the same thing as
 // one row. Written once here because the budget arithmetic, the clamp and the

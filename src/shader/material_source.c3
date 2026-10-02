@@ -337,6 +337,8 @@ const String[*] MATERIAL_RESERVED @local = { // What the generated module declar
 	"FLAG_HAS_METALNESS_ROUGHNESS_MAP",
 	"FLAG_HAS_OCCLUSION_MAP",
 	"FLAG_HAS_EMISSIVE_MAP",
+	"FLAG_HAS_HEIGHT_MAP",
+	"SLOT_HEIGHT",
 	"mapped_normal_frame", // The relief helpers a layered body calls, and the `Surface` spelling of
 	// the base colour and the mapped normal beside them.
 	"base_albedo",
@@ -345,6 +347,11 @@ const String[*] MATERIAL_RESERVED @local = { // What the generated module declar
 	"parallax_mesh_shift",
 	"parallax_step",
 	"parallax_uv",
+	"parallax_basis",
+	"parallax_tangent",
+	"parallax_occlusion_uv",
+	"parallax_self_shadow",
+	"map_texel",
 	// The three push fields the mesh contract pins, and the record the third of
 	// them points at. `frame`, `instances` and `draw` would be a second field of
 	// the same name in `PushData`; the six after them are `Draw`'s members, which

@@ -35,6 +35,8 @@ const uint SLOT_NORMAL = 5;
 const uint SLOT_METALNESS_ROUGHNESS = 6;
 const uint SLOT_OCCLUSION = 7;
 const uint SLOT_EMISSIVE = 8;
+// `material.heightMap`, read by its red channel - data, so uploaded linear.
+const uint SLOT_HEIGHT = 9;
 
 // `material.stochastic`: sample the base map through `stochastic_sample` so a
 // tiled surface stops having a period.
@@ -47,6 +49,7 @@ const uint FLAG_HAS_NORMAL_MAP = 32;
 const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64;
 const uint FLAG_HAS_OCCLUSION_MAP = 128;
 const uint FLAG_HAS_EMISSIVE_MAP = 512;
+const uint FLAG_HAS_HEIGHT_MAP = 2048;
 
 struct Map
 {
@@ -160,14 +163,18 @@ fn void triangle_cell(
 // the weights sum to one. That is the property the test pins.
 fn float4 stochastic_sample(Map image, float2 uv)
 {
+	return stochastic_sample(image, uv, ddx(uv), ddy(uv));
+}
+
+// The same with the gradients given, for a uv a parallax march has bent: its
+// own derivatives jump at every step of the relief.
+fn float4 stochastic_sample(Map image, float2 uv, float2 dx, float2 dy)
+{
 	float3 weights;
 	float2 a;
 	float2 b;
 	float2 c;
 	triangle_cell(uv, weights, a, b, c);
-
-	float2 dx = ddx(uv);
-	float2 dy = ddy(uv);
 
 	return weights.x * image.SampleGrad(uv + hash_cell(a), dx, dy)
 	     + weights.y * image.SampleGrad(uv + hash_cell(b), dx, dy)

@@ -155,7 +155,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -177,6 +177,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -258,7 +259,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -280,6 +281,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -347,7 +349,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -369,6 +371,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -437,7 +440,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -459,6 +462,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -529,7 +533,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -551,6 +555,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -625,7 +630,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -647,6 +652,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -718,7 +724,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -740,6 +746,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -815,7 +822,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -837,6 +844,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -908,7 +916,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -930,6 +938,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
@@ -997,7 +1006,7 @@ struct_field Instance.pose_from offset=152 size=4
 struct_field Instance.blend offset=156 size=4
 struct_field Instance.morph offset=160 size=4
 struct_field Instance.lightmap offset=164 size=16
-struct Draw size=388 stride=392
+struct Draw size=404 stride=408
 struct_field Draw.positions offset=0 size=8
 struct_field Draw.normals offset=8 size=8
 struct_field Draw.uvs offset=16 size=8
@@ -1019,6 +1028,7 @@ struct_field Draw.uv_variants offset=144 size=128
 struct_field Draw.emissive offset=272 size=16
 struct_field Draw.texture_index offset=288 size=96
 struct_field Draw.material_rows offset=384 size=4
+struct_field Draw.relief offset=388 size=16
 struct SkinnedVertex size=24 stride=24
 struct_field SkinnedVertex.position offset=0 size=12
 struct_field SkinnedVertex.normal offset=12 size=12
