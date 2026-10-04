@@ -6878,6 +6878,58 @@ fn void a_uniform_name_collision_cannot_reach_the_body() @test
 	};
 }
 
+<*
+ A body may be only the statements of its hole, and the two forms say the same
+ things about their own lines.
+
+ The template declares `shade`, `displace` and `post`, so the host wraps a bare
+ body in the signature the template wrote - `return s.albedo * 2.0;` is a whole
+ material. What has to hold is that every diagnostic still names the line the
+ author typed, and that the mistakes the full form can make are reported at the
+ author's line with the template's signature quoted.
+*>
+fn void a_bare_body_is_a_whole_shader() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			const err = (options) => {
+				try { new three.ShaderMaterial(options); return ''; } catch (e) { return e.message; }
+			};
+			let post = '';
+			try { three.setPost({ fragment: 'return p.color * p.uniforms.time;', uniforms: { time: 0.5 } }); }
+			catch (e) { post = e.message; }
+			return {
+				bare: err({ fragment: 'return s.albedo * 2.0;' }),
+				vertexOnly: err({ vertex: 'v.position += v.normal * 0.1;' }),
+				textured: err({ textures: { noise: tex }, fragment: 'return s.textures.noise.Sample(s.uv).rgb;' }),
+				line: err({ fragment: 'float3 a = s.albedo;\nreturn a * nope;' }),
+				hole: err({ fragment: 'fn float4 shade(Surface s) { return float4(1.0); }' }),
+				twin: err({ fragment: 'fn float3 standard(Surface s) { return s.albedo; }\nfn float3 shade(Surface s) { return standard(s); }' }),
+				old: err({ textures: { noise_map: tex }, fragment: 'return noise_map().Sample(s.uv).rgb;' }),
+				neither: err({}),
+				post,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		String v = result.value;
+		test::@check(v.contains(`"bare":""`), "a bare fragment body compiles: %s", v);
+		test::@check(v.contains(`"vertexOnly":""`), "a bare vertex body alone keeps the default shading: %s", v);
+		test::@check(v.contains(`"textured":""`), "a texture is read as s.textures.<name>: %s", v);
+		test::@check(v.contains(`"post":""`), "a bare post body with a uniform called time compiles: %s", v);
+		test::@check(v.contains("material:2:12"), "an error on a bare body's second line names material:2: %s", v);
+		test::@check(v.contains("is a hole the template declares as `fn float3 shade(Surface s)`"),
+			"a mistyped shade quotes the hole: %s", v);
+		test::@check(v.contains("`standard` is already defined with this signature"),
+			"a helper redefining the template's is refused at the author's line: %s", v);
+		test::@check(v.contains("s.textures.noise_map.Sample(uv)"),
+			"the old texture call is answered with the new spelling: %s", v);
+		test::@check(v.contains("needs a `fragment` or a `vertex` body"), "and a material with neither is refused: %s", v);
+	};
+}
+
 // ============================================================================
 // Terrain, fields and scatter — plan.md §18.4 and §18.6
 //

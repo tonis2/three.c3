@@ -617,7 +617,13 @@ The other half of the same sentence — see `roughnessMap`.
 new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, transparent, blending, opacity, roughness, metalness, reflectance })
 ```
 
-`fragment` is a function `float3 shade(Surface s)` returning linear rgb.
+`fragment` is the body of `float3 shade(Surface s)`, returning linear rgb. Write only its
+statements — `fragment: 'return s.albedo * 2.0;'` — and the signature is the template's own; or
+write whole functions, `fn float3 shade(Surface s) { ... }` with any helpers beside it, and the
+template takes yours. A diagnostic names the line you wrote either way. A `shade` with a different
+signature is refused at your line, quoting the one it must have, rather than compiled as an
+overload nothing calls; so is a helper with the same name and signature as one of the template's
+(`standard`, `lambert`), which would otherwise be ambiguous at the call.
 
 `Surface` carries:
 
@@ -652,11 +658,14 @@ new three.ShaderMaterial({ fragment, vertex, uniforms, textures, bounds, side, t
   phase is the tree rather than the leaf. A merged mesh is one copy, so it is per merge and not per
   piece.
 
-Each uniform is readable in the body by its own name; a uniform written as an array of arrays is a
-table column, read as `name[s.variant]`.
+Each uniform is a field of `s.uniforms` — `s.uniforms.tint` — and a uniform written as an array of
+arrays is a table column, read as `s.uniforms.name[s.variant]`. Being a field, a uniform can be called
+anything that is not a shady keyword: `normal`, `time` and `shade` are all fine, and none of them
+touches `s.normal` or the template's `shade`.
 
-`textures` is the same idea for images: `{ noise_map: tex }` declares an image called `noise_map`
-the body samples by that name, up to nineteen. You never write a binding number — every image on the
+`textures` is the same idea for images: `{ noise_map: tex }` declares an image the body samples as
+`s.textures.noise_map.Sample(uv)` (and a vertex body as `v.textures.noise_map`), up to nineteen. A
+texture may share a name with a uniform, since the two are fields of different structs. You never write a binding number — every image on the
 device lives in one array and a material carries indices into it, so a declared texture costs the
 pipeline no descriptor at all and the count is bounded by the draw record rather than by the card.
 Sample with any uv you like, which is the point: `s.uv + float2(t, 0)` scrolls, `s.uv * 4` tiles,
@@ -673,9 +682,9 @@ These are already in scope in a body:
   ORM map in the order it packs them:
 
   ```shady
-  float3 orm = rust_orm.Sample(s.uv).rgb;
-  float3 n = mapped_normal(s, rust_normal.Sample(s.uv).rgb);
-  return standard(s, srgb_to_linear(rust.Sample(s.uv).rgb), n, orm.g, orm.b, orm.r);
+  float3 orm = s.textures.rust_orm.Sample(s.uv).rgb;
+  float3 n = mapped_normal(s, s.textures.rust_normal.Sample(s.uv).rgb);
+  return standard(s, srgb_to_linear(s.textures.rust.Sample(s.uv).rgb), n, orm.g, orm.b, orm.r);
   ```
 
   `ao` multiplies what the sky delivers — the ambient floor and the environment reflection — and never
@@ -710,8 +719,8 @@ These are already in scope in a body:
   own, for a body doing its own taps.
 
   ```shady
-  float3 c = triplanar_sample(rock, s.position, s.normal, 0.5, 6.0).rgb;
-  float3 n = triplanar_normal(rock_n, s.position, s.normal, 0.5, 6.0);
+  float3 c = triplanar_sample(s.textures.rock, s.position, s.normal, 0.5, 6.0).rgb;
+  float3 n = triplanar_normal(s.textures.rock_n, s.position, s.normal, 0.5, 6.0);
   return standard(s, c, n);
   ```
 
@@ -735,7 +744,7 @@ These are already in scope in a body:
   them reads a derivative.
 
 ```shady
-float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb);
+float3 n = mapped_normal(s, s.textures.bumps.Sample(s.uv).rgb);
 return s.albedo * lambert(n);
 ```
 
@@ -763,7 +772,9 @@ Waves, flags, breathing, jitter, explosions, a mesh that inflates on a hit — a
 here and none costs a draw call, because the geometry never changes. The normal is not recomputed from
 what you do to the position: write `v.normal` yourself if you moved the surface enough for the lighting
 to care. A sampler reads with `SampleLevel(uv, 0)` in a vertex body, not `Sample` — there are no
-derivatives to pick a mip with. Omitting `fragment` is allowed once `vertex` is given.
+derivatives to pick a mip with. Like `fragment`, it may be only the statements —
+`vertex: 'v.position += v.normal * 0.1;'` — or the whole function. Either body may be left out: the
+other keeps the template's own, which is the built-in shading or a vertex stage that moves nothing.
 
 `bounds` is what a vertex body owes the renderer: how far, in world units, it can move a vertex.
 Culling tests a mesh's own bounds, so a body that pushes geometry outside them draws something the

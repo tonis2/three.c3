@@ -627,8 +627,8 @@ fn void? PostPass.set_uniform(&self, String name, float[] values, uint stage = 0
 	PostStage* target = self.stage(stage);
 	if (target == null) return MATERIAL_UNIFORM_UNKNOWN~;
 
-	ShaderField* field = target.pipeline.shader.field_of(name);
-	if (field == null || field.offset < POST_PUSH_START) return MATERIAL_UNIFORM_UNKNOWN~;
+	ShaderField* field = target.pipeline.shader.uniform_of(name);
+	if (field == null) return MATERIAL_UNIFORM_UNKNOWN~;
 
 	uint width = (uint)(values.len * float::size);
 	if (width == 0 || field.size != width) return MATERIAL_UNIFORM_WIDTH~;
@@ -651,7 +651,7 @@ fn void PostPass.uniform_fields(&self, List{ShaderField}* out, uint stage = 0)
 	if (target == null) return;
 	foreach (field : target.pipeline.shader.push_fields)
 	{
-		if (field.offset >= POST_PUSH_START) out.push(field);
+		if (field.uniform) out.push(field);
 	}
 }
 

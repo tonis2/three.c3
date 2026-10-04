@@ -30,6 +30,49 @@ struct ShaderSource
 }
 
 <*
+ Where a script's uniforms live, which is also whether the module has a set.
+
+ Decided by the builder from the list - `material_spills` is the one place a
+ material's answer is made - and read here and by the compile, so the emitted
+ region, the push block and the reflected offsets cannot disagree.
+*>
+enum UniformForm : char
+{
+	NONE,    // no `Uniforms` and no push member: a pass with nothing declared
+	PUSHED,  // the struct is a member of the push block
+	SPILLED, // the struct is in a device buffer and the push block points at it
+}
+
+<*
+ How a script's declared images are spelled in the module.
+*>
+enum TextureForm : char
+{
+	NONE,
+	MAPS,     // a `Textures` struct of `Map`s, rows of the device-wide table - a material
+	SAMPLERS, // a `Sampler2D` per name in the pass's own set - a post pass
+}
+
+<*
+ Text that fills one of a template's holes - a `@required` or `@fallback`
+ function the template's own code calls.
+
+ The text is either whole functions, the hole's among them and helpers beside
+ it as the author likes, or only the statements of the hole's body, which the
+ def wraps in the hole's signature as the template wrote it. `shady` tells the
+ two apart (`defines_functions`); either way every line keeps its own number
+ under `region`, so a diagnostic names the line its author typed. Empty text
+ fills nothing: a `@fallback` hole keeps its default, and a `@required` one is
+ refused at the template.
+*>
+struct HoleFill
+{
+	String hole;   // the template's function: "shade", "displace", "post"
+	String region; // what diagnostics call the text: "material", "vertex", "post_body"
+	String text;
+}
+
+<*
  A whole program.
 
  The wire structs and the push block are written by `append_shader_def` from the
@@ -38,27 +81,31 @@ struct ShaderSource
  written twice, and a declaration only the shader cares about - the stage
  interface, a binding it reads, its own entry points - is in the file, where a
  person reading the shader will find it.
+
+ What a script declared - uniforms, images, the text of its holes - is carried
+ as the lists themselves rather than as text generated from them, so the one
+ emitter writes the region and the compile computes the offsets from the same
+ list instead of reading its own output back.
 *>
 struct ShaderDef
 {
 	String name;   // diagnostics and cache identity: "sky", "material"
 
-	// The uniforms struct, emitted from the uniform list a script declared, and
-	// empty for a pass that has none. It is a *source region* like any other, so
-	// the module's `#line` map and a body's diagnostics treat it as one more file.
-	String uniforms;
+	UniformForm uniform_form;
+	MaterialUniform[] uniforms;
 
-	// Whether that region is the spilled shape: the set lives in the device
-	// buffer the push block points at rather than in the block itself. The
-	// caller passes the decision it already made when it emitted the region -
-	// `material_spills` is the one place it is made - so the region and the push
-	// block cannot disagree about which storage a material got.
-	bool uniforms_spilled;
+	TextureForm texture_form;
+	MaterialTexture[] textures;
+	uint texture_first; // the table row or binding the first texture gets
 
 	// The module's text, in the order it is written out. A pass whose source is
 	// more than one file lists them here - a shared piece first, then the file
 	// that is the pass - and the whole of what a reader needs is in them.
 	ShaderSource[] sources;
+
+	// The author's text, after every source: whatever it defines is then the
+	// second definition of its name, so a clash is reported on the author's line.
+	HoleFill[] fills;
 }
 
 // --- Emitters ----------------------------------------------------------------
@@ -119,16 +166,32 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 
 	// Above the push block, because the push block has a member of it - or a
 	// pointer to it, when the set spilled.
-	if (def.uniforms.len > 0)
+	if (def.uniform_form != UniformForm.NONE)
 	{
-		append_shader_source(out, { .name = "uniforms", .source = def.uniforms }, restore);
-		append_push_block(out, $Type, def.uniforms_spilled
+		bool spilled = def.uniform_form == UniformForm.SPILLED;
+		DString region;
+		region.tinit(256);
+		append_shady_uniforms(&region, def.uniforms, spilled);
+		append_shader_source(out, { .name = "uniforms", .source = region.str_view() }, restore);
+		append_push_block(out, $Type, spilled
 			? string::tformat("Uniforms* %s", MATERIAL_TABLE_FIELD)
 			: "Uniforms uniforms");
 	}
 	else
 	{
 		append_push_block(out, $Type);
+	}
+
+	if (def.texture_form != TextureForm.NONE)
+	{
+		bool maps = def.texture_form == TextureForm.MAPS;
+		DString region;
+		region.tinit(256);
+		append_shady_textures(&region, def.textures, def.texture_first, maps);
+		if (region.str_view().len > 0)
+		{
+			append_shader_source(out, { .name = maps ? "material_textures" : "post_textures", .source = region.str_view() }, restore);
+		}
 	}
 
 	foreach (source : def.sources)
@@ -146,4 +209,56 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 		// by the next compile without the def changing.
 		append_shader_source(out, { .name = source.name, .source = load_source(source.file, tmem)!! }, restore);
 	}
+
+	foreach (fill : def.fills) append_hole_fill(out, def, fill, restore);
+}
+
+<*
+ One hole's text, after the module it fills.
+
+ Whole functions go in as they are. A bare body is wrapped in the hole's own
+ signature, read off the template by `shady::holes`: the signature line and the
+ body's first line are both numbered 1 under the region, so a "missing return"
+ against the signature and an error on the first statement both read as the
+ author's line one. When the template has no such hole the text goes in as it
+ is, and the compiler's refusal of a stray `return` is the message.
+*>
+fn void append_hole_fill(DString* out, ShaderDef def, HoleFill fill, String restore)
+{
+	if (fill.text.trim().len == 0) return;
+
+	bool? whole = shady::defines_functions(fill.text);
+	String signature = "";
+	if (try whole && !whole) signature = hole_signature(def, fill.hole);
+
+	if (signature.len == 0)
+	{
+		append_shader_source(out, { .name = fill.region, .source = fill.text }, restore);
+		return;
+	}
+
+	out.appendf("#line 1 \"%s\"\n%s\n{\n#line 1 \"%s\"\n", fill.region, signature, fill.region);
+	append_shader_body(out, fill.text);
+	uint next = shader_lines(out.str_view()) + 2;
+	out.appendf("#line %d \"%s\"\n}\n", (int)next, restore);
+}
+
+<*
+ The signature the def's template gives a hole, or "" when no source declares
+ it. Asked of the shipped files only - a hole is the template's, never the
+ author's - and only for a bare body, which is the one case that needs it.
+*>
+fn String hole_signature(ShaderDef def, String hole)
+{
+	foreach (source : def.sources)
+	{
+		if (source.file == ShaderFile.NONE) continue;
+		String? text = load_source(source.file, tmem);
+		if (catch text) continue;
+		if (!text.contains("@required") && !text.contains("@fallback")) continue;
+		shady::Hole[]? holes = shady::holes(text, tmem);
+		if (catch holes) continue;
+		foreach (h : holes) if (h.name == hole) return h.signature;
+	}
+	return "";
 }

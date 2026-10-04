@@ -30,7 +30,15 @@ module three;
 
 import shady;
 
-macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vertex_code = "", bool built_in = false, String textures = "", bool bake = false, bool lightmap = false, bool reference = false)
+macro ShaderDef mesh_def(
+	String fragment_code = "",
+	MaterialUniform[] uniforms = {},
+	String vertex_code = "",
+	bool built_in = false,
+	MaterialTexture[] textures = {},
+	bool bake = false,
+	bool lightmap = false,
+	bool reference = false)
 {
 	ShaderSource[] sources = {
 		// The lighting library first: the shared half and the one area
@@ -79,46 +87,30 @@ macro ShaderDef mesh_def(String fragment_code, String uniforms = "", String vert
 			: "const bool MATERIAL_BUILT_IN = false;\n" },
 
 		{ .name = "three.material", .file = ShaderFile.MATERIAL_SHADY },
-
-		// The names a script's textures are read by. A function per texture, so
-		// the name is a `Map` built from `map_at` - a material's images are rows
-		// of the device-wide table and never descriptors of their own.
-		{ .name = "material_textures", .source = textures },
-
-		// **The body is its own region.** `append_shader_source` brackets it
-		// with `#line 1 "material"`, so a fault in it names `material` and the
-		// line the author typed - not the line of the module it was spliced
-		// into. The vertex body is the second one, and a material that wrote
-		// none gets the empty function, so the call in `mesh.shady` is
-		// unconditional and there is no second vertex path.
-		{ .name = "material", .source = fragment_code },
-		{ .name = "vertex", .source = vertex_code.len > 0 ? vertex_code : IDENTITY_DISPLACE_SHADY },
-
 		{ .name = "mesh", .file = ShaderFile.MESH_SHADY },
+	};
+
+	// **The bodies are the template's holes**, filled after everything else:
+	// `shade` and `displace` are `@fallback`s in `material.shady`, so a material
+	// that wrote neither is the built-in look and one that wrote a vertex body
+	// alone keeps the default shading. Each is its own region, so a fault in it
+	// names `material` or `vertex` and the line the author typed.
+	HoleFill[] fills = {
+		{ .hole = "shade", .region = "material", .text = fragment_code },
+		{ .hole = "displace", .region = "vertex", .text = vertex_code },
 	};
 
 	return (ShaderDef) {
 		.name = reference ? "mesh_reference" : (bake ? "mesh_bake" : "mesh"),
+		// Every mesh module has the set, the built-in one included: `Surface`
+		// carries `Uniforms` whatever the material, so a material without
+		// declarations gets the reserved empty one rather than a second struct.
+		.uniform_form = material_spills(uniforms) ? UniformForm.SPILLED : UniformForm.PUSHED,
 		.uniforms = uniforms,
+		.texture_form = TextureForm.MAPS,
+		.textures = textures,
+		.texture_first = MATERIAL_BINDING_FIRST,
 		.sources = sources,
+		.fills = fills,
 	};
 }
-
-<*
- What a material with no script gets as its `shade()` body: the built-in look,
- which is what `material.shady` computes when no body replaces it. It is
- passed with `built_in: true`, because the fragment half has to fold the record's
- COLOR_0 into the albedo and the alpha for exactly that shader's answer.
-*>
-const String DEFAULT_SHADE_SHADY @private = "fn float3 shade(Surface s)\n{\n\treturn standard(s);\n}\n";
-
-<*
- What a material with no vertex body gets instead of one.
-
- An empty function rather than an absent one, so `mesh_vertex` calls `displace`
- unconditionally the way the fragment entry calls `mesh_fragment` - and every
- compiler folds the call away, so a material that moves nothing costs nothing.
- The fragment half's default is not empty (`standard(s)`), which is why this one
- is generated here and that one is a body a caller writes.
-*>
-const String IDENTITY_DISPLACE_SHADY @private = "fn void displace(inout Vertex v)\n{\n}\n";

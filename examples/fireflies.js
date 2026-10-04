@@ -119,7 +119,7 @@ const glow = new three.ShaderMaterial({
 });
 const starMat = new three.ShaderMaterial({
 	textures: { sky: stars },
-	fragment: `fn float3 shade(Surface s) { return sky().Sample(s.uv).rgb; }`,
+	fragment: `fn float3 shade(Surface s) { return s.textures.sky.Sample(s.uv).rgb; }`,
 	side: three.BackSide,
 });
 

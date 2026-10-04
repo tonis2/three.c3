@@ -339,36 +339,36 @@ fn void a_post_pass_without_uniforms_is_exactly_info() @test
 }
 
 <*
- The names `shaders/post.shady` uses for itself are refused, with the reason.
+ A post uniform may take a name `shaders/post.shady` uses for itself.
 
- Four of them, because the generated module already uses all four: `info` is a
- member of the struct the uniforms are appended to, `push` and `p` are the push
- block and the body's own parameter, and `post` is the body's function name. A
- collision here surfaces as a compiler error against generated code the agent
- cannot see, which is why the names are refused before the compile.
-
- **Proved by injection.** `"info"` removed from `POST_RESERVED`: "a uniform
- called 'info' was accepted" — and what the agent would have got instead is a
- duplicate-member error against a line of the preamble it has never seen, which
- is the outcome the list exists to prevent. Restored, green again.
+ These four were refused while a uniform was a `#define`: `info` is a member of
+ the push block, `push` and `p` are the block and the body's parameter, and
+ `post` is the hole. As fields of `p.uniforms` none of them meets the template's
+ own, and `time` - the single most likely uniform anybody writes - is free beside
+ `p.time`. `set_uniform` reaches the uniform, never the contract field of the
+ same name.
 *>
-fn void a_post_uniform_the_template_already_uses_is_refused() @test
+fn void a_post_uniform_may_take_a_template_name() @test
 {
-	String[4] taken = { "info", "push", "p", "post" };
-	foreach (name : taken)
-	{
-		three::MaterialUniform[1] mine = { { name, 1, 1 } };
-		String? refused = check_post(IDENTITY, mine[..]);
-		fault why = @catch(refused);
+	three::MaterialUniform[5] mine = {
+		{ "info", 1, 1 }, { "push", 1, 1 }, { "p", 1, 1 }, { "post", 1, 1 }, { "time", 1, 1 },
+	};
+	three::ShaderModule mod = compile_post(
+		"return p.color * p.uniforms.info * p.uniforms.push * p.uniforms.p * p.uniforms.post * p.uniforms.time * p.time;",
+		mine[..])!!;
+	defer mod.free();
+	test::@check(mod.ok, "every one of them is a field: %s", mod.diagnostic);
 
-		test::@check(why == three::POST_NAME_INVALID, "a uniform called '%s' was accepted", name);
-		test::@check(
-			three::post_diagnostic().contains(name) && three::post_diagnostic().contains("reserved"),
-			"the refusal for '%s' should name it and say reserved: %s",
-			name,
-			three::post_diagnostic()
-		);
-	}
+	three::ShaderField* info = mod.layout.uniform_of("info");
+	test::@check(info != null && info.offset == three::POST_PUSH_START,
+		"`info` the uniform is the first byte past the contract");
+	three::ShaderField* contract = mod.layout.walked_of("info");
+	test::@check(contract != null && contract.offset == 0, "and `info` the contract field is still at 0");
+
+	three::MaterialUniform[1] keyword = { { "in", 1, 1 } };
+	fault why = @catch(check_post(IDENTITY, keyword[..]));
+	test::@check(why == three::POST_NAME_INVALID, "a keyword is refused, got %s", why);
+	test::@check(three::post_diagnostic().contains("keyword"), "as one: %s", three::post_diagnostic());
 }
 
 <*
@@ -916,11 +916,12 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 }
 
 <*
- `scene` cannot be taken by a post texture, and neither can a uniform's name.
+ `scene` cannot be taken by a post texture; a uniform's name can.
 
- `scene` is the sampler the template declares, so a second one is a redefinition
- in generated code — and it is the one name in `POST_RESERVED` whose collision is
- specifically about a *texture* rather than about a `#define`.
+ A post pass's samplers are module-level resources, so unlike its uniforms they
+ share the template's namespace, and `scene` is a sampler the template declares.
+ The list is read off the template itself, so a helper added to `post.shady`
+ is reserved without anyone remembering to.
 *>
 fn void a_post_texture_name_the_template_already_uses_is_refused() @test
 {
@@ -933,10 +934,15 @@ fn void a_post_texture_name_the_template_already_uses_is_refused() @test
 		three::post_diagnostic()
 	);
 
+	// Not only the samplers: any top-level name of the template, a struct included.
+	three::MaterialTexture[1] type = { { "Post" } };
+	fault taken = @catch(check_post(IDENTITY, {}, mem, type[..]));
+	test::@check(taken == three::POST_NAME_INVALID, "the template's struct name is taken too, got %s", taken);
+
 	three::MaterialUniform[1] uniforms = { { "amount", 1, 1 } };
-	three::MaterialTexture[1] clashing = { { "amount" } };
-	fault both = @catch(check_post(IDENTITY, uniforms[..], mem, clashing[..]));
-	test::@check(both == three::POST_NAME_INVALID, "a uniform's name is refused too, got %s", both);
+	three::MaterialTexture[1] shared = { { "amount" } };
+	test::@check(@ok(check_post(IDENTITY, uniforms[..], mem, shared[..])),
+		"a uniform and a texture may share a name: %s", three::post_diagnostic());
 
 	three::MaterialTexture[5] too_many = {
 		{ "a_map" }, { "b_map" }, { "c_map" }, { "d_map" }, { "e_map" },

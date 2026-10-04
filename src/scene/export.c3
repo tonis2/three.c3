@@ -2357,7 +2357,7 @@ fn bool Exporter.loses_its_shader(&self, uint material)
 {
 	if (material == DEFAULT_MATERIAL) return false;
 	if (material >= self.pass.materials.len()) return false;
-	return self.pass.materials[material].fragment.len > 0;
+	return self.pass.materials[material].scripted();
 }
 
 <*

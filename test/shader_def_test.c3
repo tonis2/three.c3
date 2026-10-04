@@ -323,11 +323,8 @@ fn void the_ported_post_is_generated() @test
 	// A post pass with no uniforms of its own: the identity body reads none, and the
 	// push block still carries the struct - one field of padding - so a body that
 	// reads nothing and a body that reads four floats are the same module shape.
-	DString no_uniforms;
-	no_uniforms.tinit(128);
-	three::append_shady_uniforms(&no_uniforms, {});
 
-	three::ShaderDef def = three::post_def(identity_post(), no_uniforms.str_view());
+	three::ShaderDef def = three::post_def(identity_post(), {});
 
 	DString out;
 	out.tinit(16384);
@@ -380,11 +377,8 @@ fn void a_post_body_reads_its_uniforms_and_its_depth() @test
 		{ "gain", 1, 1 },
 		{ "near_scale", 1, 1 },
 	};
-	DString uniforms;
-	uniforms.tinit(512);
-	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::post_def(graded_post(), uniforms.str_view());
+	three::ShaderDef def = three::post_def(graded_post(), declared);
 
 	DString out;
 	out.tinit(16384);
@@ -402,8 +396,8 @@ fn void a_post_body_reads_its_uniforms_and_its_depth() @test
 		"and the body's own text reads both");
 	test::@check(source.contains("fn float3 post(Post p)\n{\n\tfloat gain = p.uniforms.gain;"),
 		"with the body spliced as a region of its own");
-	test::@check(source.index_of("#line 1 \"post_body\"")!! < source.index_of("#line 1 \"post\"")!!,
-		"ahead of the fixed half it plugs into");
+	test::@check(source.index_of("#line 1 \"post\"")!! < source.index_of("#line 1 \"post_body\"")!!,
+		"after the fixed half it plugs into, so a clash is reported on the body's line");
 
 	check_compiles(source, "a post body reading p.uniforms and p.depth");
 }
@@ -450,12 +444,7 @@ fn float3 shade(Surface s)
 *>
 macro String material_module(MaterialUniform[] declared, bool spilled, String body, String vertex = "")
 {
-	DString uniforms;
-	uniforms.tinit(1024);
-	three::append_shady_uniforms(&uniforms, declared, spilled);
-
-	three::ShaderDef def = three::mesh_def(body, uniforms.str_view(), vertex);
-	def.uniforms_spilled = spilled;
+	three::ShaderDef def = three::mesh_def(body, declared, vertex);
 
 	DString out;
 	out.tinit(32768);
@@ -469,11 +458,8 @@ fn void the_ported_mesh_is_lit() @test
 		{ "tint", 4, 1 },
 		{ "colors", 4, 4 },
 	};
-	DString uniforms;
-	uniforms.tinit(256);
-	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), built_in: true);
+	three::ShaderDef def = three::mesh_def(default_shade(), declared, built_in: true);
 
 	DString out;
 	out.tinit(32768);
@@ -600,11 +586,7 @@ fn void the_ported_mesh_is_lit() @test
 *>
 fn void the_ported_mesh_reference_module_is_generated() @test
 {
-	DString uniforms;
-	uniforms.tinit(128);
-	three::append_shady_uniforms(&uniforms, {});
-
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), built_in: true, reference: true);
+	three::ShaderDef def = three::mesh_def(default_shade(), {}, built_in: true, reference: true);
 
 	DString out;
 	out.tinit(32768);
@@ -729,12 +711,12 @@ macro String relief_shade()
 fn float3 shade(Surface s)
 {
 	float2 pshift = parallax_shift(s, ddx(s.uv), ddy(s.uv), 0.05);
-	float bh = base_height_map().Sample(s.uv).r;
+	float bh = s.textures.base_height_map.Sample(s.uv).r;
 	float2 puv = parallax_step(s.uv, pshift, bh, 0.05);
 	float2 puv2 = parallax_uv(s, s.uv, bh, 0.05);
 	float2 muv = parallax_step(s.mesh_uv, parallax_mesh_shift(pshift), bh, 0.05);
 	float3 c = base_albedo(s, puv) + float3(puv2.x - puv.x, muv.y, 0.0);
-	float3 n = mapped_normal(s, normal_map().Sample(puv).rgb);
+	float3 n = mapped_normal(s, s.textures.normal_map.Sample(puv).rgb);
 	return standard(s, c, n, 0.8);
 }
 `;
@@ -743,15 +725,8 @@ fn float3 shade(Surface s)
 fn void a_relief_body_compiles_against_the_material_half() @test
 {
 	MaterialTexture[2] textures = { { "base_height_map" }, { "normal_map" } };
-	DString declared;
-	declared.tinit(256);
-	three::append_shady_textures(&declared, textures[..], three::MATERIAL_BINDING_FIRST, true);
 
-	DString uniforms;
-	uniforms.tinit(256);
-	three::append_shady_uniforms(&uniforms, {});
-
-	three::ShaderDef def = three::mesh_def(relief_shade(), uniforms.str_view(), textures: declared.str_view());
+	three::ShaderDef def = three::mesh_def(relief_shade(), {}, textures: textures[..]);
 
 	DString out;
 	out.tinit(32768);
@@ -787,15 +762,8 @@ fn void a_relief_body_compiles_against_the_material_half() @test
 fn void the_bake_module_shades_unlit_and_places_by_uv() @test
 {
 	MaterialTexture[1] textures = { { "noise_map" } };
-	DString declared;
-	declared.tinit(128);
-	three::append_shady_textures(&declared, textures[..], three::MATERIAL_BINDING_FIRST, true);
 
-	DString uniforms;
-	uniforms.tinit(128);
-	three::append_shady_uniforms(&uniforms, {});
-
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view(), textures: declared.str_view(), bake: true);
+	three::ShaderDef def = three::mesh_def(default_shade(), {}, textures: textures[..], bake: true);
 
 	DString out;
 	out.tinit(32768);
@@ -855,8 +823,8 @@ fn void a_vertex_body_moves_the_vertex_in_object_space() @test
 		&& source.contains("\tfloat4 color;") && source.contains("\tuint variant;")
 		&& source.contains("\tuint index;") && source.contains("Uniforms uniforms;"),
 		"the body-facing struct is material.shady's: %s", source);
-	test::@check(source.contains("fn void displace(inout Vertex v) @required;"),
-		"beside the declaration a body satisfies");
+	test::@check(source.contains("fn void displace(inout Vertex v) @fallback"),
+		"beside the fallback a body replaces");
 
 	// The splice, the call, and the transform the call has to precede.
 	sz body_at  = source.index_of("float gain = v.uniforms.gain;")!!;
@@ -864,7 +832,7 @@ fn void a_vertex_body_moves_the_vertex_in_object_space() @test
 	sz model_at = source.index_of("float4 world = instance.model * float4(v.position, 1.0);")!!;
 	test::@check(body_at > source.index_of("struct Vertex")!!,
 		"the body is spliced behind the contract it defines");
-	test::@check(call_at > body_at && model_at > call_at,
+	test::@check(model_at > call_at,
 		"and the displacement lands in object space, before the model transform");
 
 	// What the body wrote comes back out of the vertex's fields, and what it did
@@ -888,18 +856,19 @@ fn void a_vertex_body_moves_the_vertex_in_object_space() @test
 <*
  A material that wrote no vertex body still compiles.
 
- `mesh_vertex` calls `displace` unconditionally, so the def generates the empty
- function the way the caller generates `standard(s)` for a fragment that wrote
- none: the call is folded away, and the module is the one it was before the
- vertex stage existed.
+ `mesh_vertex` calls `displace` unconditionally, and the empty function is the
+ template's own `@fallback`: nothing is generated for a material that wrote no
+ vertex body, the call is folded away, and the module is the one it was before
+ the vertex stage existed.
 *>
 fn void a_material_without_a_vertex_body_moves_nothing() @test
 {
 	MaterialUniform[] declared = {};
 	String source = material_module(declared, false, default_shade());
 
-	test::@check(source.contains("fn void displace(inout Vertex v)\n{\n}"),
-		"the def splices the empty function in: %s", source);
+	test::@check(source.contains("fn void displace(inout Vertex v) @fallback\n{\n}"),
+		"the template's empty fallback stands in: %s", source);
+	test::@check(!source.contains("#line 1 \"vertex\""), "and no vertex region is spliced");
 	test::@check(source.contains("displace(v);"), "and the call is still there to be folded");
 	check_compiles(source, "a material with no vertex body");
 }
@@ -998,11 +967,8 @@ fn void a_vertex_body_error_names_the_bodys_own_line() @test
 fn void a_post_body_error_names_the_bodys_own_line() @test
 {
 	MaterialUniform[] declared = { { "gain", 1, 1 } };
-	DString uniforms;
-	uniforms.tinit(128);
-	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::post_def(broken_post(), uniforms.str_view());
+	three::ShaderDef def = three::post_def(broken_post(), declared);
 	DString out;
 	out.tinit(16384);
 	three::append_shader_def(&out, def, three::PostPush);
@@ -1103,11 +1069,7 @@ fn void the_ported_mesh_module_is_generated() @test
 	String geometry = three::read_source("shaders/mesh.shady")!!;
 	defer geometry.free(mem);
 
-	DString uniforms;
-	uniforms.tinit(128);
-	three::append_shady_uniforms(&uniforms, {});
-
-	three::ShaderDef def = three::mesh_def(mesh_test_shade(), uniforms.str_view());
+	three::ShaderDef def = three::mesh_def(mesh_test_shade(), {});
 
 	DString out;
 	out.tinit(32768);
@@ -1160,10 +1122,8 @@ fn void the_ported_mesh_module_is_generated() @test
 		&& source.contains("\tfloat4 color;") && source.contains("\tfloat4 vertex_color;")
 		&& source.contains("\tuint variant;"),
 		"the body-facing struct is declared by the material half");
-	test::@check(source.contains("fn void displace(inout Vertex v) @required;"),
-		"beside the declaration a body satisfies");
-	test::@check(source.contains("fn void displace(inout Vertex v)\n{\n}"),
-		"and the def splices the empty function in when the material wrote none");
+	test::@check(source.contains("fn void displace(inout Vertex v) @fallback\n{\n}"),
+		"the template's empty fallback stands in when the material wrote none");
 	test::@check(source.contains("displace(v);"), "which the vertex path calls unconditionally");
 
 	path::mkdir("build/shaderdef", recursive: true)!!;
@@ -1323,7 +1283,7 @@ fn void a_scripted_material_compiles_through_the_switch() @test
 		three::ShaderPass.MESH_MATERIAL,
 		body: `fn float3 shade(Surface s)
 {
-	return s.uniforms.tint.rgb * s.uniforms.colors[s.variant].rgb * noise_map().Sample(s.uv).rgb;
+	return s.uniforms.tint.rgb * s.uniforms.colors[s.variant].rgb * s.textures.noise_map.Sample(s.uv).rgb;
 }
 `,
 		uniforms: uniforms[..],

@@ -30,7 +30,7 @@
  the body is spliced as its own region, the declared uniforms are emitted into
  the `Uniforms` the push block carries, and every declared texture is a name the
  body reads. A body is shady text - `fn float3 shade(Surface s)`, its uniforms
- through `s.uniforms`, a declared texture as `name().Sample(uv)` - which the
+ through `s.uniforms`, a declared texture as `s.textures.name.Sample(uv)` - which the
  engine's own generators emit and a user's script spells for itself. The two
  helpers a script body reaches for are ported: the diffuse is
  `lambert(s, normal[, occlusion])` because the file-scope values the original
@@ -121,61 +121,32 @@ fn ShaderModule? compile_shader(
 			ShaderModule sky = compile_shady_cached(sky_def(), SkyPush, compiled, specs);
 			return sky;
 		case ShaderPass.MESH:
-		{
-			// The built-in material: no script wrote a body, so the spliced
-			// half is `standard(s)` and the uniform set is the reserved empty
-			// one every material without a declaration emits. `built_in` is
-			// what makes the half fold COLOR_0 the way the original does,
-			// which a script's body would decide for itself.
-			DString emitted;
-			emitted.tinit(64);
-			append_shady_uniforms(&emitted, {});
-			ShaderModule mesh = compile_shady_cached(
-				mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true),
-				MeshPush, compiled, specs);
-			emitted.free();
-			return mesh;
-		}
+			// The built-in material: no script wrote a body, so both holes keep
+			// the template's fallbacks and the uniform set is the reserved empty
+			// one. `built_in` is what makes the half fold COLOR_0 the way the
+			// original does, which a script's body would decide for itself.
+			return compile_shady_cached(mesh_def(built_in: true), MeshPush, compiled, specs);
 		case ShaderPass.MESH_REFERENCE:
-		{
 			// The same built-in module with the area algorithm's numeric
 			// half: no fit table, no binding for one, and the quadrature the
 			// fit is measured against. A module of its own because that is a
 			// resource difference rather than a value.
-			DString emitted;
-			emitted.tinit(64);
-			append_shady_uniforms(&emitted, {});
-			ShaderModule reference = compile_shady_cached(
-				mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true, reference: true),
-				MeshPush, compiled, specs);
-			emitted.free();
-			return reference;
-		}
+			return compile_shady_cached(mesh_def(built_in: true, reference: true), MeshPush, compiled, specs);
 		case ShaderPass.LIGHTMAP:
-		{
 			// The built-in material's lightmap bake: the default body, the
 			// chart-space vertex stage, and the LTC half - whose
 			// `area_diffuse` is the polygon form factor the original's bake
 			// stores. The fit table that half declares is never read, and
 			// the bake's descriptor walk binds the shared white to every
 			// sampler a module declares.
-			DString emitted;
-			emitted.tinit(64);
-			append_shady_uniforms(&emitted, {});
-			ShaderModule lightmap = compile_shady_cached(
-				mesh_def(DEFAULT_SHADE_SHADY, emitted.str_view(), built_in: true, lightmap: true),
-				MeshPush, compiled, specs);
-			emitted.free();
-			return lightmap;
-		}
+			return compile_shady_cached(mesh_def(built_in: true, lightmap: true), MeshPush, compiled, specs);
 		case ShaderPass.MESH_MATERIAL:
 		case ShaderPass.LIGHTMAP_MATERIAL:
-		{
 			// A script's own half: the same files as the built-in path,
 			// with `built_in: false` so the record's COLOR_0 reaches the
-			// body instead of being folded into the albedo. The uniforms
-			// decide their storage once - `material_spills` - and the
-			// region and the push block are passed the same answer.
+			// body instead of being folded into the albedo. The def decides
+			// the uniforms' storage once - `material_spills` - for the
+			// region, the push block and the offsets together.
 			//
 			// The lightmap row is the same half compiled as a lightmap
 			// bake: `MATERIAL_LIGHTMAP_BAKE` makes `standard` answer with
@@ -184,56 +155,25 @@ fn ShaderModule? compile_shader(
 			// second module rather than a spec constant because both of
 			// those are interface changes.
 			bool as_lightmap = pass == ShaderPass.LIGHTMAP_MATERIAL;
-			bool spilled = material_spills(uniforms);
-
-			DString emitted;
-			emitted.tinit(512);
-			append_shady_uniforms(&emitted, uniforms, spilled);
-
-			DString declared;
-			declared.tinit(256);
-			append_shady_textures(&declared, textures, MATERIAL_BINDING_FIRST, true);
-
-			ShaderDef def = mesh_def(
-				body,
-				emitted.str_view(),
-				vertex,
-				built_in: false,
-				textures: declared.str_view(),
-				bake: bake && !as_lightmap,
-				lightmap: as_lightmap
-			);
-			def.uniforms_spilled = spilled;
-			ShaderModule mesh = compile_shady_cached(def, MeshPush, compiled, specs);
-			declared.free();
-			emitted.free();
-			return mesh;
-		}
+			return compile_shady_cached(
+				mesh_def(
+					body,
+					uniforms,
+					vertex,
+					built_in: false,
+					textures: textures,
+					bake: bake && !as_lightmap,
+					lightmap: as_lightmap
+				),
+				MeshPush, compiled, specs);
 		case ShaderPass.POST:
 		case ShaderPass.TONEMAP:
-		{
 			// The one def whose body is not a file: a script's `post` for
-			// POST, the engine's own curve for TONEMAP, spliced in ahead of
-			// the fixed half. The `Uniforms` struct the body reads is emitted
-			// from the declared list, the same region the walker parses, and
-			// `body_shady` is the spelling to splice when the two languages
-			// disagree about a body.
-			DString emitted;
-			emitted.tinit(256);
-			append_shady_uniforms(&emitted, uniforms);
-
-			DString declared;
-			declared.tinit(256);
-			append_shady_textures(&declared, textures, POST_BINDING_FIRST, false);
-
+			// POST, the engine's own curve for TONEMAP, filling the hole the
+			// fixed half declares. `body_shady` is the spelling to splice
+			// when the two languages disagree about a body.
 			String spliced = body_shady.len > 0 ? body_shady : body;
-			ShaderModule post = compile_shady_cached(
-				post_def(spliced, emitted.str_view(), declared.str_view()),
-				PostPush, compiled, specs);
-			declared.free();
-			emitted.free();
-			return post;
-		}
+			return compile_shady_cached(post_def(spliced, uniforms, textures), PostPush, compiled, specs);
 		default:
 			@advise("three: no module is wired for pass %d", (int)pass);
 			return SHADY_PASS_UNWIRED~;

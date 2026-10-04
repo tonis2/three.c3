@@ -32,19 +32,29 @@ struct PostPush
 // here because the engine's own post path writes bytes rather than this struct.
 $assert @layout_matches(PostPush, POST_PUSH_FIELDS) : "PostPush no longer lays out the way POST_PUSH_FIELDS says";
 
-macro ShaderDef post_def(String body, String uniforms, String textures = "")
+macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialTexture[] textures = {})
 {
 	ShaderSource[] sources = {
-		// The script's own samplers, declared beside the four the pass reserves.
-		// A post pass's images are bindings of its own set - unlike a material's,
-		// which are rows of the device-wide table - so these are ordinary
-		// resources and the body reads them by name, as it did before the port.
-		{ .name = "post_textures", .source = textures },
-		// The body next: it defines `post`, which the module's fragment entry
-		// calls.
-		{ .name = "post_body", .source = body },
 		{ .name = "post", .file = ShaderFile.POST_SHADY },
 	};
 
-	return (ShaderDef) { .name = "post", .uniforms = uniforms, .sources = sources };
+	// The body fills `post`, the hole the module's fragment entry calls - whole
+	// functions, or only the statements of `post`'s body.
+	HoleFill[] fills = {
+		{ .hole = "post", .region = "post_body", .text = body },
+	};
+
+	return (ShaderDef) {
+		.name = "post",
+		.uniform_form = UniformForm.PUSHED,
+		.uniforms = uniforms,
+		// The script's own samplers are bindings of the pass's own set -
+		// unlike a material's, which are rows of the device-wide table - so
+		// they are ordinary resources the body reads by name.
+		.texture_form = TextureForm.SAMPLERS,
+		.textures = textures,
+		.texture_first = POST_BINDING_FIRST,
+		.sources = sources,
+		.fills = fills,
+	};
 }

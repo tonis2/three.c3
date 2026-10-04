@@ -206,15 +206,17 @@ screen.
 
 ## one-module
 
-The vertex body and the fragment body compile into one module, vertex first. A helper function
-may therefore be declared in only one of them: declaring `float3 ripple(float2 q)` in both is
-`error[E30201]: function 'ripple' already has a body`, which is correct and surprising. Put shared
-helpers in `vertex`, which comes first, and call them from `fragment`.
+The vertex body and the fragment body compile into one module. A helper function may therefore be
+declared in only one of them: declaring `float3 ripple(float2 q)` in both is refused at the second,
+`` `ripple` is already defined with this signature at material:3``, which is correct and surprising.
+Put a shared helper in either body and call it from the other — a call may come before the function
+it names.
 
 ## material-samplers
 
 A ShaderMaterial may declare up to nineteen samplers of its own and a post pass up to four:
-`{ textures: { noise_map: tex } }` makes `noise_map.Sample(uv)` work in the body.
+`{ textures: { noise_map: tex } }` makes `s.textures.noise_map.Sample(uv)` work in a ShaderMaterial body
+(`v.textures.noise_map` in a vertex body), and a bare `noise_map.Sample(uv)` in a post body.
 
 You never write a binding number — every image on the device lives in one array and a material
 carries indices into it, so a declared texture costs the pipeline no descriptor and adding one at the
@@ -789,26 +791,13 @@ ShaderMaterial takes a fragment function, not a whole program: you write `float3
 supplies the vertex stage, the Surface and the uniform block. Uniforms are flat values, not Three.js's
 `{ value }` wrappers.
 
-## uniform-names-are-not-shadowed
+## uniform-names-are-fields
 
-A local with the same name as a uniform is an error, not a shadow. `{ uniforms: { gain: 0.5 } }` beside
-`float gain = 0.25;` in the body is
-
-```
-error[E30011]: left of '=' is not an l-value
-```
-
-and a helper whose *parameter* is called `gain` is `error[E20001]: unexpected token`. Both are true of a
-ShaderMaterial body and of a post body, and in both the line and column point at your own source.
-
-The reason is how a uniform gets its name: it is a `#define`, so the identifier in your body **is** the push
-field textually — which is what lets `plan.md`'s one-line examples read the way they do, with no push block
-for an agent to learn about. `float gain = 0.25` therefore expands to `float (push.gain) = 0.25`, which is
-the message. A shadow, which is what every other language would give you, would need the uniforms to be real
-declarations in an enclosing scope.
-
-Rename the local. Reserved names are refused up front with a sentence saying so; this is the other half —
-a name that is yours to use, used twice.
+A uniform is a field, not a name in your body's scope: `{ uniforms: { gain: 0.5 } }` is read as
+`s.uniforms.gain` in a ShaderMaterial and `p.uniforms.gain` in a post body. So a local, a parameter or
+a helper called `gain` is simply yours, and a uniform may be called `normal`, `time` or `color` without
+touching `s.normal`, `p.time` or `p.color`. The only names refused are shady's keywords — `for`, `in`,
+`out`, `default` and the rest.
 
 ## post-is-a-chain
 

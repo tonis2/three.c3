@@ -501,7 +501,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 		uint compiled = renderer.pass.create_material(
 			&renderer.gpu,
 			&renderer.target,
-			"fn float3 shade(Surface s) { return noise_map().Sample(s.uv).rgb; }",
+			"fn float3 shade(Surface s) { return s.textures.noise_map.Sample(s.uv).rgb; }",
 			{ },
 			three::SIDE_FRONT,
 			three::BLENDING_NONE,

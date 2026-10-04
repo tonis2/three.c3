@@ -40,7 +40,7 @@ fn three::ShaderModule? compile_material(
 	String vertex = "",
 	bool bake = false)
 {
-	three::validate_material(fragment, uniforms, textures)!;
+	three::validate_material(fragment, uniforms, textures, vertex)!;
 	return three::compile_shader(
 		three::ShaderPass.MESH_MATERIAL,
 		body: fragment,
@@ -60,7 +60,7 @@ fn String? check_material(
 	three::MaterialTexture[] textures = { },
 	String vertex = "")
 {
-	three::validate_material(fragment, uniforms, textures)!;
+	three::validate_material(fragment, uniforms, textures, vertex)!;
 	return "";
 }
 
@@ -543,31 +543,29 @@ fn void a_uniform_name_that_is_not_an_identifier_is_refused() @test
 }
 
 <*
- A uniform name the template already uses is refused, and so is a shady keyword.
+ A uniform may take a name the template uses; a shady keyword it may not.
 
- Two cases in one test because they are the same failure with different blast
- radii: `push` breaks the module it is substituted into, and `float` turns every
- declaration after it into something no diagnostic explains.
+ A uniform is a field of `Uniforms`, read as `s.uniforms.push`, so the names the
+ template declares - `push`, `shade`, `Surface` - and the types are all free. A
+ keyword is not: `float for;` is not a member declaration.
 *>
-fn void a_uniform_name_the_template_already_uses_is_refused() @test
+fn void a_uniform_may_take_a_template_name_but_not_a_keyword() @test
 {
-	three::MaterialUniform[1] mine = { { "push", 4, 1 } };
-	String? theirs = check_material(PLAN_EXAMPLE, mine[..]);
-	fault refused = @catch(theirs);
-	test::@check(refused == three::MATERIAL_NAME_INVALID, "'push' is refused, got %s", refused);
-	test::@check(
-		three::material_diagnostic().contains("push") && three::material_diagnostic().contains("reserved"),
-		"as reserved, by name: %s",
-		three::material_diagnostic()
-	);
+	three::MaterialUniform[3] mine = { { "push", 4, 1 }, { "shade", 1, 1 }, { "float", 1, 1 } };
+	three::ShaderModule mod = compile_material(
+		"return s.albedo * s.uniforms.push.rgb * s.uniforms.shade * s.uniforms.float;", mine[..])!!;
+	defer mod.free();
+	test::@check(mod.ok, "push, shade and float are fields like any other: %s", mod.diagnostic);
+	three::ShaderField* push = mod.layout.uniform_of("push");
+	test::@check(push != null && push.offset == three::MATERIAL_PUSH_START && push.size == 16,
+		"and `push` is the uniform, not the block");
 
-	three::MaterialUniform[1] keyword = { { "float", 1, 1 } };
-	String? typed = check_material(PLAN_EXAMPLE, keyword[..]);
-	fault also = @catch(typed);
-	test::@check(also == three::MATERIAL_NAME_INVALID, "'float' is refused, got %s", also);
+	three::MaterialUniform[1] keyword = { { "for", 1, 1 } };
+	fault also = @catch(check_material(PLAN_EXAMPLE, keyword[..]));
+	test::@check(also == three::MATERIAL_NAME_INVALID, "'for' is refused, got %s", also);
 	test::@check(
-		three::material_diagnostic().contains("float"),
-		"by name too: %s",
+		three::material_diagnostic().contains("for") && three::material_diagnostic().contains("keyword"),
+		"as a keyword, by name: %s",
 		three::material_diagnostic()
 	);
 }
@@ -876,6 +874,10 @@ fn void a_table_costs_a_row_at_a_time() @test
 		test::@check(cached.indirect,
 			"the column came back off disk looking like a push field, at offset %d",
 			cached.offset);
+		test::@check(cached.uniform && loaded.layout.uniform_of("palette") == cached,
+			"and still tagged as the script's uniform rather than a contract field");
+		three::ShaderField* cached_pointer = loaded.layout.walked_of(three::MATERIAL_TABLE_FIELD);
+		test::@check(cached_pointer != null && !cached_pointer.uniform, "the table pointer came back untagged");
 		test::@check(cached.offset == column.offset && cached.size == column.size,
 			"and at %d/%d rather than %d/%d",
 			cached.offset, cached.size, column.offset, column.size);
@@ -942,9 +944,9 @@ fn void a_forgotten_opacity_still_renders_opaque() @test
 const String SAMPLING_BODY = `
 fn float3 shade(Surface s)
 {
-    float3 n = noise_map().Sample(s.uv).rgb;
-    float3 g = ramp_map().Sample(float2(s.uv.x, 0.5)).rgb;
-    return lerp(n, g, mask_map().Sample(s.uv).r);
+    float3 n = s.textures.noise_map.Sample(s.uv).rgb;
+    float3 g = s.textures.ramp_map.Sample(float2(s.uv.x, 0.5)).rgb;
+    return lerp(n, g, s.textures.mask_map.Sample(s.uv).r);
 }`;
 
 <*
@@ -1033,7 +1035,7 @@ fn void textures_cost_the_push_block_nothing() @test
 	String body = `
 	fn float3 shade(Surface s)
 	{
-	    return s.albedo * s.uniforms.tint * s.uniforms.gain * noise_map().Sample(s.uv).rgb * ramp_map().Sample(s.uv).rgb;
+	    return s.albedo * s.uniforms.tint * s.uniforms.gain * s.textures.noise_map.Sample(s.uv).rgb * s.textures.ramp_map.Sample(s.uv).rgb;
 	}`;
 
 	three::ShaderModule a = compile_material(body, uniforms[..], mem, {})!!;
@@ -1058,52 +1060,41 @@ fn void textures_cost_the_push_block_nothing() @test
 }
 
 <*
- A name that is both a uniform and a texture is refused.
+ A name may be both a uniform and a texture.
 
- A collision with no symptom worth reading: both names reach the generated
- module, so one would shadow the other wherever both are in scope. Refused before
- the compiler sees it.
+ They are fields of two structs - `s.uniforms.tint` and `s.textures.tint` - so
+ the two never meet.
 *>
-fn void a_texture_name_that_is_also_a_uniform_is_refused() @test
+fn void a_texture_may_share_a_uniforms_name() @test
 {
 	three::MaterialUniform[1] uniforms = { { "tint", 3, 1 } };
 	three::MaterialTexture[1] textures = { { "tint" } };
 
-	String? assembled = check_material(PLAN_EXAMPLE, uniforms[..], mem, textures[..]);
-	fault refused = @catch(assembled);
-
-	test::@check(refused == three::MATERIAL_NAME_INVALID, "refused, got %s", refused);
-	test::@check(
-		three::material_diagnostic().contains("tint") && three::material_diagnostic().contains("both"),
-		"saying it is both: %s",
-		three::material_diagnostic()
-	);
+	three::ShaderModule mod = compile_material(
+		"return s.uniforms.tint * s.textures.tint.Sample(s.uv).rgb;", uniforms[..], mem, textures[..])!!;
+	defer mod.free();
+	test::@check(mod.ok, "both compile under the one name: %s", mod.diagnostic);
 }
 
 <*
- A texture name the template already uses is refused, and so is a repeat.
+ A texture may take a name the template uses; a repeat it may not.
 
- `base_color_map` is the one that matters: it is a real declaration in
- `material.shady`, so a second one is a redefinition a hundred lines from
- anything the agent wrote — and it is also the binding a script is *meant* to
- reach through `material.map`, so taking the name would be shadowing the property
- that already does the job.
+ `base_color_map` is a real declaration in `material.shady`, and a texture of
+ that name used to be a redefinition a hundred lines from anything the agent
+ wrote. As a field of `Textures` it is `s.textures.base_color_map`, beside the
+ template's own and not instead of it.
 *>
-fn void a_texture_name_the_template_already_uses_is_refused() @test
+fn void a_texture_may_take_a_template_name_but_not_twice() @test
 {
 	three::MaterialTexture[1] theirs = { { "base_color_map" } };
-	fault refused = @catch(check_material(PLAN_EXAMPLE, {}, mem, theirs[..]));
-	test::@check(refused == three::MATERIAL_NAME_INVALID, "'base_color_map' is refused, got %s", refused);
-	test::@check(
-		three::material_diagnostic().contains("base_color_map")
-			&& three::material_diagnostic().contains("reserved"),
-		"as reserved, by name: %s",
-		three::material_diagnostic()
-	);
+	three::ShaderModule mod = compile_material(
+		"return s.textures.base_color_map.Sample(s.uv).rgb;", {}, mem, theirs[..])!!;
+	defer mod.free();
+	test::@check(mod.ok, "'base_color_map' is a field like any other: %s", mod.diagnostic);
 
 	three::MaterialTexture[2] twice = { { "noise_map" }, { "noise_map" } };
 	fault again = @catch(check_material(PLAN_EXAMPLE, {}, mem, twice[..]));
-	test::@check(again == three::MATERIAL_NAME_INVALID, "and a duplicate is refused, got %s", again);
+	test::@check(again == three::MATERIAL_NAME_INVALID, "a duplicate is refused, got %s", again);
 	test::@check(
 		three::material_diagnostic().contains("twice"),
 		"as a duplicate: %s",
@@ -1113,6 +1104,10 @@ fn void a_texture_name_the_template_already_uses_is_refused() @test
 	three::MaterialTexture[1] punctuated = { { "noise-map" } };
 	fault third = @catch(check_material(PLAN_EXAMPLE, {}, mem, punctuated[..]));
 	test::@check(third == three::MATERIAL_NAME_INVALID, "and so is a name that is not an identifier, got %s", third);
+
+	three::MaterialTexture[1] keyword = { { "default" } };
+	fault fourth = @catch(check_material(PLAN_EXAMPLE, {}, mem, keyword[..]));
+	test::@check(fourth == three::MATERIAL_NAME_INVALID, "and a keyword, got %s", fourth);
 }
 
 <*
@@ -1266,43 +1261,26 @@ fn void a_bad_vertex_body_reports_the_vertex_file() @test
 }
 
 <*
- A uniform whose name is a field of `Surface` or `Vertex` is refused, by name.
+ A uniform may be named after a field of `Surface` or `Vertex`.
 
- **This was broken before the vertex stage and had no test.** A uniform is a
- `#define` live across the agent's own lines, so `uniforms: { normal: 1 }` rewrote
- the `s.normal` in the very body that declared it into `s.(push.normal)` — a
- syntax error inside generated code, reported against a line of preamble, about a
- member access the agent wrote correctly. The vertex stage made it easier to reach
- rather than newly possible: `Vertex` has seven fields and a body touches most of
- them.
-
- `position` is the one asserted because it is a field of both structs and a
- perfectly reasonable thing to want to call a uniform.
+ **This used to be refused, and before that it was broken.** A uniform was a
+ `#define` live across the agent's own lines, so `uniforms: { normal: 1 }`
+ rewrote the `s.normal` in the very body that declared it. As a field of
+ `s.uniforms` it touches nothing: `v.position` and `v.uniforms.position` are two
+ different values in the same line.
 *>
-fn void a_uniform_named_after_a_contract_field_is_refused() @test
+fn void a_uniform_may_be_named_after_a_contract_field() @test
 {
-	three::MaterialUniform[1] clashing = { { "position", 3, 1 } };
-	fault refused = @catch(check_material(
-		`fn float3 shade(Surface s) { return s.albedo; }`, clashing[..], mem, {},
-		`fn void displace(inout Vertex v) { v.position += position; }`
-	));
-
-	test::@check(refused == three::MATERIAL_NAME_INVALID, "'position' is refused, got %s", refused);
-	test::@check(
-		three::material_diagnostic().contains("position")
-			&& three::material_diagnostic().contains("v.position"),
-		"saying it would rewrite the body's own member access: %s",
-		three::material_diagnostic()
-	);
-
-	// `albedo` is a `Surface` field and reaches the same refusal through a
-	// material with no vertex body at all — which is the half that says this was
-	// always a bug rather than one the vertex stage introduced.
-	three::MaterialUniform[1] fragment_side = { { "albedo", 1, 1 } };
-	fault also = @catch(check_material(
-		`fn float3 shade(Surface s) { return s.albedo * albedo; }`, fragment_side[..]
-	));
-	test::@check(also == three::MATERIAL_NAME_INVALID, "and so is 'albedo', got %s", also);
+	three::MaterialUniform[2] named = { { "position", 3, 1 }, { "albedo", 1, 1 } };
+	three::ShaderModule mod = compile_material(
+		"return s.albedo * s.uniforms.albedo;", named[..], mem, {},
+		"v.position += v.uniforms.position;"
+	)!!;
+	defer mod.free();
+	test::@check(mod.ok, "'position' and 'albedo' compile as uniforms: %s", mod.diagnostic);
+	three::ShaderField* field = mod.layout.uniform_of("position");
+	test::@check(field != null && field.offset == three::MATERIAL_PUSH_START && field.size == 12,
+		"and `position` is the uniform at the start of the set");
 }
 
 <*

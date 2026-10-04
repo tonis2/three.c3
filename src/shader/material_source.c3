@@ -15,6 +15,8 @@
 *>
 module three;
 
+import shady;
+
 
 faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY, MATERIAL_TOO_MANY_TEXTURES;
 
@@ -89,7 +91,8 @@ const uint MATERIAL_UNIFORM_BUDGET = 104;
  A name rather than a binding index, because it is a *field of the push block*
  and reflection resolves it there — `shader/reflect.c3` follows exactly this one
  pointer and nothing else, which keeps `FrameBlock`, `Instance` and `Draw` out of
- the field list. In `MATERIAL_RESERVED` for the usual reason.
+ the field list. Tagged apart from the uniforms, so a script may still call one
+ `material_table`.
 *>
 const String MATERIAL_TABLE_FIELD = "material_table";
 const String MATERIAL_TABLE_TYPE  = "MaterialTable";
@@ -217,246 +220,6 @@ const String MATERIAL_VERTEX_NAME = "vertex";
 *>
 const String MATERIAL_PREAMBLE_NAME = "three.material";
 
-<*
- Names a material uniform may not take.
-
- Two groups, refused for different reasons. The first is everything the generated
- module declares or names around the body - a uniform called `shade` or `push`
- would collide with a declaration the agent cannot see, and the diagnostic that
- follows would point there. The second is the language's own vocabulary, where a
- uniform named `float` or `return` turns the rest of the module into something no
- error message will explain.
-
- The list is not complete and cannot be: the language's vocabulary is long, and
- reserving all of it would refuse `time` and `tint` along the way. It covers what
- the generated module touches and the keywords worth a sentence; anything past it
- fails as an ordinary compiler diagnostic at `material:<line>`, which is where
- the agent can act on it.
-*>
-const String[*] MATERIAL_RESERVED @local = { // What the generated module declares.
-	"push",
-	"s",
-	"shade",
-	"Surface",
-	"VertexOutput",
-	"PushData",
-	"FrameBlock",
-	"Instance",
-	"vertexMain",
-	"fragmentMain",
-	"base_color_map",
-	"lambert",
-	"srgb_to_linear", // The lighting the template hands a body: the struct in the frame block, the
-	// two intrinsics beside `lambert`, and the function all three of them share.
-	"Light",
-	"specular",
-	"standard",
-	"specular_light", // The spilled uniform table's pointer and its struct, generated only for a
-	// material whose uniforms do not fit the push block — but reserved for every
-	// material, because whether a name collides must not depend on how many other
-	// uniforms happened to be declared beside it.
-	"material_table",
-	"MaterialTable", // What the generator declares around a material's uniforms - `Uniforms`, the
-	// struct a body reads them through. `material_unused` is the padding field
-	// that lets a material with no uniforms keep the same `Surface`,
-	// `material_table` is the pointer a spilled set hangs off, and
-	// `material_uniforms` is the function that fills `Surface.uniforms` from
-	// whichever storage the set got.
-	"Uniforms",
-	"material_unused",
-	"material_uniforms",
-	// The shadow lookup: the reserved comparison samplers in the frame's set,
-	// the functions that read them, and the value `standard` folds into the
-	// direct light. `g_shadow` is the one worth naming out loud - a uniform of
-	// that name would shadow the value `lambert` folds in, and the body would
-	// compile and come out lit. `shadow_atlas` is the unfiltered map the
-	// `shadowMap` debug view draws, and `debug_view` is the view itself.
-	"shadow_map",
-	"shadow_factor",
-	"g_shadow",
-	"point_shadow_map",
-	"point_shadow_factor",
-	"shadow_compare",
-	"shadow_atlas",
-	"shadow_debug_depth",
-	"debug_view",
-	"shadow_atlas_compare",
-	"shadow_atlas_static_compare",
-	"shadow_view_factor_filtered",
-	"shadow_view_factor_filtered_from", // The crevice term: the frame depth at binding 4, the function that reads
-	// it, and the field it lands on.
-	"ambient_occlusion_depth",
-	"crevice_occlusion", // The baked light: the atlas at binding 20, the bit that says a light is in
-	// it, and the delta a moving caster took away from the bake.
-	"lightmap_atlas",
-	"light_is_baked",
-	"baked_dynamic_delta", // The area-light fit: the sampler at binding 19, read only when the frame
-	// says the table is on the device.
-	"ltc_lut", // The sky the same way: the reserved sampler at binding 2, the term that
-	// reads it and the mapping that term projects a direction through. A body
-	// naming any of the three would compile against its own and the reflection
-	// would resolve the binding to a texture the pass never wrote.
-	"environment_map",
-	"environment_light",
-	"environment_uv", // The vertex half of the same contract. `v` and `displace` are the body's own
-	// parameter and function, exactly as `s` and `shade` are the fragment body's;
-	// `Vertex` is the struct both of them name.
-	"v",
-	"displace",
-	"Vertex",
-	"FLAG_HAS_NORMALS",
-	"FLAG_HAS_UVS",
-	"FLAG_HAS_COLORS",
-	// The built-in path's fold of glTF's COLOR_0 and the generated constant
-	// that says whether this module is that path. A scripted module reads the
-	// same attribute through `Surface.vertex_color` and `Surface.vertex_mask`
-	// and decides for itself, which is why the fold is not always on.
-	"FLAG_COLORS_ARE_MASK",
-	"MATERIAL_BUILT_IN",
-	"MATERIAL_BAKE",
-	"MATERIAL_ROWS", // The device-wide texture array and what a declared texture is: the array,
-	// the type each name is given, the accessor the template's own maps go
-	// through, and the row `material.map` sits at.
-	"three_textures",
-	"Map",
-	"map_at",
-	"SLOT_BASE_COLOR", // The map a material wears through `surface.shady`: the three-tap sampler
-	// and the two pure helpers under it, and the bit that selects it. Also the
-	// row a base colour map sits at, above.
-	"stochastic_sample",
-	"hash_cell",
-	"triangle_cell",
-	"FLAG_STOCHASTIC",
-	// The built-in look's other four maps: the rows they sit at, the bits that
-	// say a material named one, and the frame the normal is rebuilt in.
-	"SLOT_NORMAL",
-	"SLOT_METALNESS_ROUGHNESS",
-	"SLOT_OCCLUSION",
-	"SLOT_EMISSIVE",
-	"FLAG_HAS_NORMAL_MAP",
-	"FLAG_HAS_METALNESS_ROUGHNESS_MAP",
-	"FLAG_HAS_OCCLUSION_MAP",
-	"FLAG_HAS_EMISSIVE_MAP",
-	"FLAG_HAS_HEIGHT_MAP",
-	"SLOT_HEIGHT",
-	"mapped_normal_frame", // The relief helpers a layered body calls, and the `Surface` spelling of
-	// the base colour and the mapped normal beside them.
-	"base_albedo",
-	"mapped_normal",
-	"parallax_shift",
-	"parallax_mesh_shift",
-	"parallax_step",
-	"parallax_uv",
-	"parallax_basis",
-	"parallax_tangent",
-	"parallax_occlusion_uv",
-	"parallax_self_shadow",
-	"map_texel",
-	// The three push fields the mesh contract pins, and the record the third of
-	// them points at. `frame`, `instances` and `draw` would be a second field of
-	// the same name in `PushData`; the six after them are `Draw`'s members, which
-	// no longer share a scope with a uniform — they stay refused because the
-	// template still declares them.
-	"frame",
-	"instances",
-	"draw",
-	"Draw",
-	"positions",
-	"normals",
-	"uvs",
-	"colors",
-	"base_color",
-	"flags",
-	"uv_transform", // Types.
-	"float",
-	"float2",
-	"float3",
-	"float4",
-	"float2x2",
-	"float3x3",
-	"float4x4",
-	"int",
-	"int2",
-	"int3",
-	"int4",
-	"uint",
-	"uint2",
-	"uint3",
-	"uint4",
-	"bool",
-	"bool2",
-	"bool3",
-	"bool4",
-	"half",
-	"double",
-	"void",
-	"Sampler2D",
-	"Texture2D",
-	"SamplerState", // Keywords.
-	"return",
-	"if",
-	"else",
-	"for",
-	"while",
-	"do",
-	"switch",
-	"case",
-	"default",
-	"break",
-	"continue",
-	"struct",
-	"const",
-	"static",
-	"in",
-	"out",
-	"inout",
-	"discard",
-	"true",
-	"false",
-	"typedef",
-	"namespace",
-	"uniform",
-	"cbuffer",
-	"groupshared",
-};
-
-// Long enough for any message below with the offending name spelled in full and
-// short enough to be a global. A name longer than this is refused before it can
-// be quoted anyway.
-<*
- The field names of `Surface` and `Vertex`, which a uniform may not take either.
-
- A different refusal from `MATERIAL_RESERVED`, because it is a different mistake
- and it breaks where the reserved list's message would not explain. A uniform is
- a `#define` live across the agent's own lines, so a uniform called `normal`
- rewrites the `s.normal` *in the body that declared it* into `s.(push.normal)` —
- a syntax error inside generated code, reported at a line in the preamble, about
- a member access the agent wrote correctly.
-
- It is worth its own sentence for the same reason: "the shader already uses it"
- is true and useless here, because the thing using it is the struct the agent is
- reading five characters away. `uniforms: { time: 1 }` on a post pass, the single
- most likely uniform anybody writes, failed with `three.post:134` under a caret
- pointing at a `#define`.
-*>
-const String[*] MATERIAL_CONTRACT_FIELDS @local = { // Surface. `shadow` is here rather than in `MATERIAL_RESERVED` because it
-// fails the way this list's header describes: a uniform of that name rewrites
-// the `s.shadow` in the body that declared it into `s.(push.shadow)`.
-	"albedo",
-	"normal",
-	"receiver_normal",
-	"uv",
-	"position",
-	"color",
-	"vertex_color",
-	"vertex_mask",
-	"variant",
-	"shadow",
-	"height", // Vertex adds these two; the rest it shares with Surface.
-	"local",
-	"index",
-};
-
 const usz MATERIAL_DIAGNOSTIC_MAX @local = 512;
 
 // The message the last refusal carried. See `material_diagnostic`.
@@ -531,13 +294,17 @@ fn uint material_rows(MaterialUniform[] uniforms)
  @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
  @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
 *>
-fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures)
+fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures, String vertex = "")
 {
 	@pool()
 	{
-		if (fragment.trim().len == 0)
+		// Either body is enough: both are `@fallback` holes in `material.shady`, so
+		// a material that wrote only a vertex body keeps the default shading. One
+		// that wrote neither is the built-in material, and asking for a script to
+		// get it is a mistake worth a sentence.
+		if (fragment.trim().len == 0 && vertex.trim().len == 0)
 		{
-			material_note("material: the fragment body is empty; it must define `fn float3 shade(Surface s)`");
+			material_note("material: the fragment and vertex bodies are both empty; write `return ...;` for `fn float3 shade(Surface s)`, or a vertex body");
 			return MATERIAL_BODY_EMPTY~;
 		}
 
@@ -554,29 +321,11 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 				return MATERIAL_NAME_INVALID~;
 			}
 
-			foreach (reserved : MATERIAL_RESERVED)
+			// A uniform is a field of `Uniforms`, read as `s.uniforms.name`, so the
+			// only names it cannot take are the language's own words.
+			if (shady::is_keyword(uniform.name))
 			{
-				if (uniform.name != reserved) continue;
-				material_note(
-					string::tformat(
-						"material: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
-						uniform.name
-					)
-				);
-				return MATERIAL_NAME_INVALID~;
-			}
-
-			foreach (field : MATERIAL_CONTRACT_FIELDS)
-			{
-				if (uniform.name != field) continue;
-				material_note(
-					string::tformat(
-						"material: uniform name '%s' is a field of Surface and Vertex, so it would rewrite s.%s and v.%s in your own body — rename the uniform",
-						uniform.name,
-						uniform.name,
-						uniform.name
-					)
-				);
+				material_note(string::tformat("material: uniform name '%s' is a shady keyword", uniform.name));
 				return MATERIAL_NAME_INVALID~;
 			}
 
@@ -621,17 +370,10 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			}
 		}
 
-		// After the uniforms, because a texture name is checked *against* them:
-		// the collision that matters most is a sampler sharing a uniform's name,
-		// and `texture_problem` can only report it once both lists are known to be
-		// individually sound.
-		String texture_note = texture_problem(
-			MATERIAL_BODY_NAME,
-			textures,
-			uniforms,
-			MATERIAL_RESERVED[..],
-			MATERIAL_TEXTURE_LIMIT
-		);
+		// A texture is a field of `Textures`, read as `s.textures.name`: like a
+		// uniform it shares no namespace with the template, so nothing the
+		// template declares is taken.
+		String texture_note = texture_problem(MATERIAL_BODY_NAME, textures, {}, MATERIAL_TEXTURE_LIMIT);
 		if (texture_note.len > 0)
 		{
 			material_note(texture_note);

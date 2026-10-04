@@ -806,7 +806,7 @@ fn MeshPipeline*? MeshPass.lightmap_pipeline_for(&self, Gpu* gpu, uint material_
 	{
 		// A material that reaches here was accepted by `create_material`; a
 		// refusal leaves the entry unready rather than compiling around it.
-		if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures)))
+		if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures, material.vertex)))
 		{
 			ShaderModule mod = compile_shader(
 				ShaderPass.LIGHTMAP_MATERIAL,

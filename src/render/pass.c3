@@ -3143,7 +3143,7 @@ fn uint? MeshPass.create_material(
 	BlendMode blend = blend_for(blending);
 	@pool()
 	{
-		validate_material(fragment, uniforms, textures)!;
+		validate_material(fragment, uniforms, textures, vertex)!;
 		MeshPipeline* pipeline = self.pipelines.acquire(
 			gpu,
 			target,
@@ -3163,7 +3163,10 @@ fn uint? MeshPass.create_material(
 				.pipeline = pipeline,
 				.cull = cull_for_side(side),
 				.blend = blend,
-				.fragment = fragment.copy(mem),
+				// Copied only when there is one, for `vertex`'s reason below: a
+				// vertex-only material has none, and `Material.free` frees only a
+				// fragment it can see.
+				.fragment = fragment.len > 0 ? fragment.copy(mem) : (String) { },
 				// Nothing here can know what shape a body cuts, so a body that cuts one
 				// is left out of the depth prepass — see `MeshPass.prepassed`.
 				.fragment_discards = fragment.contains("discard"),

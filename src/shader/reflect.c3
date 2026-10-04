@@ -48,6 +48,11 @@ struct ShaderField
 	// pointer these hang off, and `scene/material.c3` has why a table spills
 	// there at all.
 	bool indirect;
+	// A uniform the script declared, as opposed to a field the walk laid out
+	// from the pass's C3 push struct or the table pointer. The two are separate
+	// namespaces: a script may call a uniform `frame` or `info`, and a lookup by
+	// that name has to say which of the two it means.
+	bool uniform;
 }
 
 <*
@@ -137,6 +142,30 @@ fn ShaderBinding* ShaderLayout.binding_of(&self, String name)
 fn ShaderField* ShaderLayout.field_of(&self, String name)
 {
 	foreach (i, &field : self.push_fields) if (field.name == name) return field;
+	return null;
+}
+
+<*
+ A uniform the script declared, by its name - never a field of the pass's own
+ contract, whatever the two are called.
+
+ @return `A pointer into the list, or null. Invalid after the layout is freed.`
+*>
+fn ShaderField* ShaderLayout.uniform_of(&self, String name)
+{
+	foreach (&field : self.push_fields) if (field.uniform && field.name == name) return field;
+	return null;
+}
+
+<*
+ A field the pass itself lays out - the walked C3 push struct or the table
+ pointer - by its name, never a uniform that shares it.
+
+ @return `A pointer into the list, or null. Invalid after the layout is freed.`
+*>
+fn ShaderField* ShaderLayout.walked_of(&self, String name)
+{
+	foreach (&field : self.push_fields) if (!field.uniform && field.name == name) return field;
 	return null;
 }
 

@@ -91,7 +91,7 @@
  blob        name
  4        offset
  4        size
- 4        indirect (0 or 1 — a field of the table buffer)
+ 4        flags: 1 indirect (a field of the table buffer), 2 uniform (a script's)
 
  Trailing bytes past the last field are ignored rather than refused. A torn write
  is short, not long, and everything the module is made of has been read and
@@ -122,9 +122,12 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
  spilled table's uniforms then have no names at all. 4 added the compiler
  prefix, the name and the spec values, so a module the other compiler or another
  spec set built is a different entry and not a candidate at all. 5 dropped the
- shady revision from the compiler string, replaced by the rule above.
+ shady revision from the compiler string, replaced by the rule above. 6 made the
+ indirect word a set of flags and added `uniform`, which tells a script's uniform
+ from a contract field of the same name; a stored module without it would have
+ no uniforms at all.
 *>
-const uint SHADER_CACHE_FORMAT_VERSION = 5;
+const uint SHADER_CACHE_FORMAT_VERSION = 6;
 
 <*
  What kind of value a spec constant holds.
@@ -456,7 +459,7 @@ fn void cache_store(String path, ShaderCacheKey key, ShaderModule* mod) @local
 			cache_put_blob(&out, field.name);
 			cache_put_u32(&out, field.offset);
 			cache_put_u32(&out, field.size);
-			cache_put_u32(&out, field.indirect ? 1 : 0);
+			cache_put_u32(&out, (field.indirect ? 1 : 0) | (field.uniform ? 2 : 0));
 		}
 
 		// Lazily, on the first store: a process that only ever reads never creates
@@ -657,7 +660,9 @@ fn bool cache_load(String path, ShaderCacheKey key, ShaderModule* out, bool coun
 			field.name = reader.blob();
 			field.offset = reader.u32();
 			field.size = reader.u32();
-			field.indirect = reader.u32() != 0;
+			uint flags = reader.u32();
+			field.indirect = (flags & 1) != 0;
+			field.uniform = (flags & 2) != 0;
 			if (reader.bad) return cache_reject();
 			fields.push(field);
 		}

@@ -58,15 +58,11 @@ import std::io::file;
 
 const String FIXTURE_PATH = "test/fixtures/shader_abi.txt";
 
-// The built-in material's body, as `mesh.c3` holds it. A copy rather than a
-// reference because the original is private to the def that returns it.
-const String DEFAULT_SHADE = "fn float3 shade(Surface s) { return standard(s); }";
-
 // The scripted rows' fixed bodies, one per fixture section. Every name a body
 // reads is declared beside it below.
 const String MATERIAL_PLAIN_BODY = "fn float3 shade(Surface s) { return s.albedo; }";
 const String MATERIAL_DECLARED_BODY =
-	"fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint * s.uniforms.swatches[s.variant].rgb * noise_map().Sample(s.uv).rgb; }";
+	"fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint * s.uniforms.swatches[s.variant].rgb * s.textures.noise_map.Sample(s.uv).rgb; }";
 const String MATERIAL_VERTEX_BODY = "fn float3 shade(Surface s) { return s.albedo * s.uniforms.tint; }";
 const String MATERIAL_VERTEX_DISPLACE = "fn void displace(inout Vertex v) { v.position.y += 0.01; }";
 const String MATERIAL_SPILLED_BODY =
@@ -146,14 +142,9 @@ fn void append_module(DString* out, String variant, three::ShaderModule* mod)
 *>
 fn void append_built_in(DString* out, String variant, bool lightmap = false, bool reference = false)
 {
-	DString emitted;
-	emitted.tinit(64);
-	three::append_shady_uniforms(&emitted, {});
-	defer emitted.free();
-
+	// No body: the built-in look is `material.shady`'s own `@fallback`, as the
+	// switch compiles it.
 	three::ShaderDef def = three::mesh_def(
-		DEFAULT_SHADE,
-		emitted.str_view(),
 		built_in: true,
 		lightmap: lightmap,
 		reference: reference
@@ -178,28 +169,15 @@ fn void append_material(
 	bool lightmap = false
 )
 {
-	bool spilled = three::material_spills(uniforms);
-
-	DString emitted;
-	emitted.tinit(512);
-	three::append_shady_uniforms(&emitted, uniforms, spilled);
-	defer emitted.free();
-
-	DString declared;
-	declared.tinit(256);
-	three::append_shady_textures(&declared, textures, three::MATERIAL_BINDING_FIRST, true);
-	defer declared.free();
-
 	three::ShaderDef def = three::mesh_def(
 		body,
-		emitted.str_view(),
+		uniforms,
 		vertex,
 		built_in: false,
-		textures: declared.str_view(),
+		textures: textures,
 		bake: bake,
 		lightmap: lightmap
 	);
-	def.uniforms_spilled = spilled;
 	three::ShaderModule mod = three::compile_shady(def, three::MeshPush);
 	defer mod.free();
 	append_module(out, variant, &mod);
@@ -217,18 +195,9 @@ fn void append_post(
 	three::MaterialTexture[] textures = {}
 )
 {
-	DString emitted;
-	emitted.tinit(256);
-	three::append_shady_uniforms(&emitted, uniforms);
-	defer emitted.free();
-
-	DString declared;
-	declared.tinit(256);
-	three::append_shady_textures(&declared, textures, three::POST_BINDING_FIRST, false);
-	defer declared.free();
 
 	three::ShaderModule mod = three::compile_shady(
-		three::post_def(body, emitted.str_view(), declared.str_view()),
+		three::post_def(body, uniforms, textures),
 		three::PostPush
 	);
 	defer mod.free();
@@ -823,12 +792,7 @@ fn void the_fixture_is_what_the_shady_path_reports() @test
 *>
 fn void the_reference_module_is_the_one_without_a_slang_counterpart() @test
 {
-	DString emitted;
-	emitted.tinit(64);
-	three::append_shady_uniforms(&emitted, {});
-	defer emitted.free();
-
-	three::ShaderDef def = three::mesh_def(DEFAULT_SHADE, emitted.str_view(), built_in: true, reference: true);
+	three::ShaderDef def = three::mesh_def(built_in: true, reference: true);
 	three::ShaderModule mod = three::compile_shady(def, three::MeshPush);
 	defer mod.free();
 

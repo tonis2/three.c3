@@ -9,6 +9,8 @@
 *>
 module three;
 
+import shady;
+
 <*
  The binding index the first agent-declared sampler gets, per kind of shader.
 
@@ -37,7 +39,7 @@ const uint POST_BINDING_FIRST = 4;
 // The third source, and a number rather than a name for `SHADOW_BINDING`'s
 // reason: only the chain knows which image this is, and resolving it by name
 // would let a body claim it by declaring a texture called `tap_image`.
-// `POST_RESERVED` is what stops that.
+// `post_template_names` is what stops that: the template declares it.
 const uint POST_TAP_BINDING = 3;
 
 <*
@@ -157,23 +159,15 @@ fn bool is_identifier(String name)
  104-byte budget, the other neither) while these rules are the same rules with
  a different word in front of them.
 
- The name must not collide with a *uniform* either, which is the one check that
- could not be inferred from either list alone: a texture the module declares
- under a uniform's name is a duplicate identifier in the generated module, and
- the diagnostic would name a line of generated code the agent never wrote.
+ A texture and a uniform may share a name: one is a field of `Textures` or a
+ sampler, the other a field of `Uniforms`, and the two never meet.
 
  @param prefix : `"material" or "post" — what the sentence calls the thing being built.`
- @param reserved : `The generated module's own vocabulary, which a sampler may not take either.`
+ @param taken : `Names the template already declares in the namespace the samplers land in; empty when they land in a struct of their own.`
  @param limit : `How many samplers this kind of shader may declare.`
  @return `The empty string when the names are usable, or the sentence to refuse them with. Allocated from tmem.`
 *>
-fn String texture_problem(
-	String prefix,
-	MaterialTexture[] textures,
-	MaterialUniform[] uniforms,
-	String[] reserved,
-	uint limit
-)
+fn String texture_problem(String prefix, MaterialTexture[] textures, String[] taken, uint limit)
 {
 	// Counted first, so a script that passed eight names is told the number rather
 	// than being told about the first one that also happened to be misspelled.
@@ -199,13 +193,19 @@ fn String texture_problem(
 			);
 		}
 
-		foreach (word : reserved)
+		if (shady::is_keyword(texture.name))
+		{
+			return string::tformat("%s: texture name '%s' is a shady keyword", prefix, texture.name);
+		}
+
+		foreach (word : taken)
 		{
 			if (texture.name != word) continue;
 			return string::tformat(
-				"%s: texture name '%s' is reserved; the shader three.c3 generates around your body already uses it",
+				"%s: texture name '%s' is reserved; the %s template already declares it",
 				prefix,
-				texture.name
+				texture.name,
+				prefix
 			);
 		}
 
@@ -214,16 +214,6 @@ fn String texture_problem(
 			if (j >= i) break;
 			if (earlier.name != texture.name) continue;
 			return string::tformat("%s: texture '%s' is declared twice", prefix, texture.name);
-		}
-
-		foreach (uniform : uniforms)
-		{
-			if (uniform.name != texture.name) continue;
-			return string::tformat(
-				"%s: '%s' is both a uniform and a texture; both names reach the generated module, so one would shadow the other",
-				prefix,
-				texture.name
-			);
 		}
 	}
 

@@ -1110,7 +1110,7 @@ fn void? check_push_block(ShaderLayout* layout, PushFieldLayout[] fields)
 
 	foreach (expected : fields)
 	{
-		ShaderField* found = layout.field_of(expected.name);
+		ShaderField* found = layout.walked_of(expected.name);
 		if (found == null)
 		{
 			@advise("shader: the push block has no field '%s'", expected.name);

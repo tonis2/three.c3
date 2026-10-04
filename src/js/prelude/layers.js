@@ -518,8 +518,7 @@ function emit(base, layers) {
 	const stats = { layers: layers.length, samplers: 0, parallaxSolves: 0, taps: 0, sampleGradTaps: 0 };
 
 	// **Every texture read this body makes is written here and nowhere else.**
-	// What a sampler is spelled like — `name().Sample(uv)` today, an index into
-	// one device-wide array tomorrow — is one decision, and a generated body that
+	// What a sampler is spelled like — `s.textures.name.Sample(uv)` — is one decision, and a generated body that
 	// named samplers in eleven places would be eleven edits to move. It is also
 	// where the tap count comes from, which is the number that describes what a
 	// stack costs a pixel.
@@ -528,9 +527,9 @@ function emit(base, layers) {
 	// for itself — a `frac` seam, or a uv only part of the quad computed.
 	function read(name, at, grads) {
 		stats.taps++;
-		if (grads === undefined) return `${name}().Sample(${at})`;
+		if (grads === undefined) return `s.textures.${name}.Sample(${at})`;
 		stats.sampleGradTaps++;
-		return `${name}().SampleGrad(${at}, ${grads[0]}, ${grads[1]})`;
+		return `s.textures.${name}.SampleGrad(${at}, ${grads[0]}, ${grads[1]})`;
 	}
 
 	// Cleared rather than added to, because `emit` runs more than once on the same
@@ -626,7 +625,7 @@ function emit(base, layers) {
 		stats.sampleGradTaps += base.bump.steps;
 		body.push(
 			`    float bh;`,
-			`    float2 puv = parallax_occlusion_uv(s, base_height_map(), s.uv, ddx(s.uv), ddy(s.uv), `
+			`    float2 puv = parallax_occlusion_uv(s, s.textures.base_height_map, s.uv, ddx(s.uv), ddy(s.uv), `
 			+ `${num(base.depth, 'LayeredMaterial: bump')}, ${base.bump.steps}u, bh);`
 		);
 		if (anyMask) {

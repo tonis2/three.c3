@@ -38,8 +38,6 @@ import std::collections::list;
 import vk;
 import shady;
 
-faultdef SHADY_UNIFORMS_UNREADABLE;
-
 <*
  The kind of one SPIR-V type, as far as descriptor reflection needs to tell
  them apart. Zero is `NONE`, so a zeroed id table says "not a type".
@@ -790,40 +788,23 @@ fn ShaderModule compile_shady_source(
 	uint align = walked_align;
 	uint push_size = align_up(walked_end, align);
 
-	// What the generator appended above the walk. A spilled set is a pointer to
-	// the table buffer; a set that fits is the struct itself, and its fields
-	// land at the block offsets the host writes them through, by name.
-	if (def.uniforms.len > 0)
+	// What the generator appended above the walk, laid out from the list it was
+	// emitted from. A spilled set is a pointer to the table buffer; a set that
+	// fits is the struct itself, and its fields land at the block offsets the
+	// host writes them through, by name.
+	if (def.uniform_form == UniformForm.SPILLED)
 	{
-		if (def.uniforms_spilled)
-		{
-			uint at = align_up(walked_end, 8);
-			if (align < 8) align = 8;
-			fields.push({ .name = MATERIAL_TABLE_FIELD.copy(mem), .offset = at, .size = ulong::size });
-
-			uint? table = shady_uniform_fields(&fields, def.uniforms, 0, true);
-			if (catch table)
-			{
-				free_shader_fields(&fields);
-				mod.ok = false;
-				mod.diagnostic = "three: the emitted Uniforms region is not the shape append_shady_uniforms writes".copy(mem);
-				return mod;
-			}
-			push_size = align_up(at + ulong::size, align);
-		}
-		else
-		{
-			uint at = align_up(walked_end, 4);
-			uint? table = shady_uniform_fields(&fields, def.uniforms, at, false);
-			if (catch table)
-			{
-				free_shader_fields(&fields);
-				mod.ok = false;
-				mod.diagnostic = "three: the emitted Uniforms region is not the shape append_shady_uniforms writes".copy(mem);
-				return mod;
-			}
-			push_size = align_up(at + table, align);
-		}
+		uint at = align_up(walked_end, 8);
+		if (align < 8) align = 8;
+		fields.push({ .name = MATERIAL_TABLE_FIELD.copy(mem), .offset = at, .size = ulong::size });
+		append_uniform_fields(&fields, def.uniforms, 0, true);
+		push_size = align_up(at + ulong::size, align);
+	}
+	else if (def.uniform_form == UniformForm.PUSHED)
+	{
+		uint at = align_up(walked_end, 4);
+		uint table = append_uniform_fields(&fields, def.uniforms, at, false);
+		push_size = align_up(at + table, align);
 	}
 
 	shady::Diagnostic diagnostic;
@@ -887,104 +868,6 @@ fn void free_shader_fields(List{ShaderField}* fields) @local
 
 fn uint align_up(uint value, uint alignment) @local => (value + alignment - 1) / alignment * alignment;
 
-<*
- The fields of the emitted `Uniforms` struct, at their offsets.
-
- The region is `append_shady_uniforms`' own output, so the grammar is the one
- that emitter writes and nothing else: a struct header, one `float`/`float2`/
- `float3`/`float4` member per uniform - `[rows]` when it is a column of the
- material table - then the closing brace and the fill.
-
- `base` is where the struct starts: the end of the walked block for a set that
- fits the push block, zero for one that spilled, whose fields live in the table
- buffer. `material_unused` is the reserved padding that keeps a material with no
- uniforms the same shape; it is not a name anything may resolve, so it takes
- space and produces no field.
-*>
-fn uint? shady_uniform_fields(
-	List{ShaderField}* out,
-	String region,
-	uint base,
-	bool spilled) @local
-{
-	usz at = 0;
-	sz? found = region.index_of("struct Uniforms");
-	if (catch found) return SHADY_UNIFORMS_UNREADABLE~;
-	at = (usz)found;
-	if (region.contains("struct Uniforms @address") != spilled) return SHADY_UNIFORMS_UNREADABLE~;
-
-	usz brace = at;
-	while (brace < region.len && region[brace] != '{') brace++;
-	if (brace >= region.len) return SHADY_UNIFORMS_UNREADABLE~;
-
-	uint offset = 0;
-	usz line = brace + 1;
-	while (line < region.len)
-	{
-		usz end = line;
-		while (end < region.len && region[end] != '\n') end++;
-		String row = region[line:end - line].trim();
-		line = end + 1;
-
-		if (row.len == 0) continue;
-		if (row[0] == '}') break;
-		if (!row.ends_with(";")) return SHADY_UNIFORMS_UNREADABLE~;
-		row = row[:row.len - 1].trim();
-
-		usz space = 0;
-		sz? sep = row.index_of_char(' ');
-		if (catch sep) return SHADY_UNIFORMS_UNREADABLE~;
-		space = (usz)sep;
-		String type_name = row[:space];
-		String declaration = row[space + 1:row.len - space - 1].trim();
-
-		if (!type_name.starts_with("float")) return SHADY_UNIFORMS_UNREADABLE~;
-		uint components = type_name.len == 5 ? 1 : parse_decimal(type_name[5:type_name.len - 5]);
-		if (components < 1 || components > 4) return SHADY_UNIFORMS_UNREADABLE~;
-
-		uint rows = 1;
-		usz bracket = 0;
-		String name;
-		sz? open = declaration.index_of_char('[');
-		if (try open)
-		{
-			bracket = (usz)open;
-			if (!declaration.ends_with("]")) return SHADY_UNIFORMS_UNREADABLE~;
-			rows = parse_decimal(declaration[bracket + 1:declaration.len - bracket - 2]);
-			name = declaration[:bracket].trim();
-		}
-		else
-		{
-			name = declaration;
-		}
-		if (name.len == 0 || rows == 0) return SHADY_UNIFORMS_UNREADABLE~;
-
-		uint size = components * 4 * rows;
-		if (name != "material_unused")
-		{
-			out.push({
-				.name = name.copy(mem),
-				.offset = base + offset,
-				.size = size,
-				.indirect = spilled,
-			});
-		}
-		offset = align_up(offset + size, 4);
-	}
-
-	return offset;
-}
-
-fn uint parse_decimal(String digits) @local
-{
-	uint value = 0;
-	foreach (c : digits)
-	{
-		if (c < '0' || c > '9') return 0;
-		value = value * 10 + (uint)(c - '0');
-	}
-	return value;
-}
 
 <*
  What the module says about itself: its entry points and its descriptors.

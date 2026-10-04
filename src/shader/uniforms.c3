@@ -23,6 +23,8 @@
 *>
 module three;
 
+import std::collections::list;
+
 fn void append_shady_uniforms(DString* out, MaterialUniform[] uniforms, bool spilled = false)
 {
 	out.append_string("struct Uniforms");
@@ -97,26 +99,78 @@ fn String shady_float_type(uint components) @private
 
  Two shapes, because the two kinds of shader store an image differently. A
  material's images are rows of the device-wide table - one `uint` index each,
- carried in `DrawRecord.texture_index` - so a name is a function returning the
- `Map` the body samples, built with the same `map_at` the engine's own maps use:
- there is no second descriptor scheme and no new binding. A post pass's images
- are descriptors of its own set, so a name is the sampler itself and the body
- reads it by that name.
+ carried in `DrawRecord.texture_index` - so they are a `Textures` struct of
+ `Map`s, built with the same `map_at` the engine's own maps use, which
+ `Surface.textures` and `Vertex.textures` carry: a body samples
+ `s.textures.noise`, and no name it declared is a global that could collide with
+ one of the template's. A material with none still has the type, as `Uniforms`
+ does, because `Surface` is the engine's contract rather than a script's.
+
+ A post pass's images are descriptors of its own set, so a name is the sampler
+ itself and the body reads it by that name.
 
  `first` is the row or binding the first declared texture gets; declaration order
  is the numbering, so nothing outside the list remembers a number.
 *>
 fn void append_shady_textures(DString* out, MaterialTexture[] textures, uint first, bool material)
 {
-	foreach (i, texture : textures)
+	if (!material)
 	{
-		if (material)
-		{
-			out.appendf("fn Map %s()\n{\n\treturn map_at(%du);\n}\n", texture.name, first + (uint)i)!!;
-		}
-		else
+		foreach (i, texture : textures)
 		{
 			out.appendf("Sampler2D %s @set(0) @binding(%d);\n", texture.name, first + (uint)i)!!;
 		}
+		return;
 	}
+
+	out.append_string("struct Textures\n{\n");
+	if (textures.len == 0) out.append_string("\tuint textures_unused;\n");
+	foreach (texture : textures) out.appendf("\tMap %s;\n", texture.name)!!;
+	out.append_string("}\n\nfn Textures material_textures()\n{\n\tTextures t;\n");
+	if (textures.len == 0) out.append_string("\tt.textures_unused = 0u;\n");
+	foreach (i, texture : textures)
+	{
+		out.appendf("\tt.%s = map_at(%du);\n", texture.name, first + (uint)i)!!;
+	}
+	out.append_string("\treturn t;\n}\n");
+}
+
+<*
+ How many bytes one uniform takes in the `Uniforms` struct: its floats, times
+ its rows. Every width is a multiple of four under scalar layout, so a field
+ starts where the one before it ended.
+*>
+fn uint uniform_size(MaterialUniform uniform) => uniform.components * 4 * uniform_rows_of(uniform);
+
+<*
+ The fields of the `Uniforms` struct `append_shady_uniforms` emits, at their
+ offsets, computed from the same list rather than read back off the text.
+
+ `base` is where the struct starts: the end of the walked block for a set that
+ fits the push block, zero for one that spilled, whose fields are in the table
+ buffer and marked `indirect`. Every field is tagged `uniform`, so a lookup by a
+ script's name cannot land on a contract field that happens to share it.
+
+ An empty set is the reserved `material_unused` float, which takes its four
+ bytes and produces no field.
+
+ @return `The struct's size in bytes.`
+*>
+fn uint append_uniform_fields(List{ShaderField}* out, MaterialUniform[] uniforms, uint base, bool spilled)
+{
+	if (uniforms.len == 0) return 4;
+	uint offset = 0;
+	foreach (uniform : uniforms)
+	{
+		uint size = uniform_size(uniform);
+		out.push({
+			.name = uniform.name.copy(mem),
+			.offset = base + offset,
+			.size = size,
+			.indirect = spilled,
+			.uniform = true,
+		});
+		offset += size;
+	}
+	return offset;
 }

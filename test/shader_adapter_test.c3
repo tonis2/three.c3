@@ -82,11 +82,8 @@ fn void the_mesh_def_arrives_with_the_engines_abi() @test
 	// The material half declares `Surface.uniforms`, so a material def always
 	// carries the emitted struct - an empty list emits the reserved padding
 	// field that keeps the type the same for every material.
-	DString uniforms;
-	uniforms.tinit(64);
-	three::append_shady_uniforms(&uniforms, {});
 
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view());
+	three::ShaderDef def = three::mesh_def(default_shade(), {});
 	three::ShaderModule mod = three::compile_shady(def, three::MeshPush);
 	defer mod.free();
 
@@ -185,11 +182,8 @@ fn void a_post_def_reflects_its_bindings_and_uniforms() @test
 		{ "gain", 1, 1 }, // one float, 4 bytes
 		{ "tint", 4, 1 }, // one float4, 16 bytes
 	};
-	DString uniforms;
-	uniforms.tinit(256);
-	three::append_shady_uniforms(&uniforms, declared);
 
-	three::ShaderDef def = three::post_def(identity_post(), uniforms.str_view());
+	three::ShaderDef def = three::post_def(identity_post(), declared);
 	three::ShaderModule mod = three::compile_shady(def, three::PostPush);
 	defer mod.free();
 
@@ -247,12 +241,7 @@ fn void a_spilled_material_carries_the_table_pointer() @test
 	};
 	test::@check(three::material_spills(declared), "this set outgrows the push block");
 
-	DString uniforms;
-	uniforms.tinit(1024);
-	three::append_shady_uniforms(&uniforms, declared, true);
-
-	three::ShaderDef def = three::mesh_def(default_shade(), uniforms.str_view());
-	def.uniforms_spilled = true;
+	three::ShaderDef def = three::mesh_def(default_shade(), declared);
 
 	three::ShaderModule mod = three::compile_shady(def, three::MeshPush);
 	defer mod.free();
@@ -321,11 +310,7 @@ fn void a_cutout_shadow_def_reports_its_own_entries_and_sets() @test
 *>
 fn void a_broken_def_comes_back_as_a_diagnostic() @test
 {
-	DString uniforms;
-	uniforms.tinit(64);
-	three::append_shady_uniforms(&uniforms, {});
-
-	three::ShaderDef def = three::post_def(broken_post(), uniforms.str_view());
+	three::ShaderDef def = three::post_def(broken_post(), {});
 	three::ShaderModule mod = three::compile_shady(def, three::PostPush);
 	defer mod.free();
 

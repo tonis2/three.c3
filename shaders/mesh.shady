@@ -146,6 +146,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	// The same seam `mesh_fragment` fills `Surface.uniforms` through, so a
 	// vertex body and a fragment body read one storage with one spelling.
 	v.uniforms = material_uniforms();
+	v.textures = material_textures();
 
 	// **The mesh's own TEXCOORD_0, kept before `displace` can rewrite it.** The
 	// uv the body samples with is whatever it ends up as - a vertex body

@@ -770,8 +770,8 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 fn void PostPass.apply_exposure(&self)
 {
 	if (self.tonemap.pipeline.handle == null) return;
-	ShaderField* field = self.tonemap.pipeline.shader.field_of(TONEMAP_EXPOSURE);
-	if (field == null || field.offset < POST_PUSH_START || field.size != float::size) return;
+	ShaderField* field = self.tonemap.pipeline.shader.uniform_of(TONEMAP_EXPOSURE);
+	if (field == null || field.size != float::size) return;
 	float value = self.tonemap_exposure;
 	mem::copy(&self.tonemap.block[field.offset], &value, float::size);
 }

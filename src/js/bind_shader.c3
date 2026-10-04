@@ -234,17 +234,7 @@ fn void js_create_material(
 
 		if (catch err = made)
 		{
-			// Only built on the failure path, and only to be quoted back — see
-			// `material_failure`'s note on the one diagnostic that is not enough on
-			// its own.
-			DString declared;
-			declared.tinit();
-			foreach (uniform : uniforms)
-			{
-				if (declared.len() > 0) declared.append_string(", ");
-				declared.append_string(uniform.name);
-			}
-			*out = js.raise(material_failure(err, diagnostic, declared.str_view()));
+			*out = js.raise(material_failure(err, diagnostic, textures.array_view()));
 			return;
 		}
 
@@ -356,37 +346,32 @@ fn void js_set_material_texture(
 
  ## The one case where verbatim is not enough
 
- A diagnostic that still points at `three.material` is pointing at a line the
- agent did not write, and there is exactly one ordinary way to make that happen:
- every uniform is spliced in as `#define <name> (push.<name>)`, live across the
- whole module, so a helper's parameter or a local named after one of the
- material's own uniforms is rewritten and the error lands on the `#define`.
-
- The measured instance: a helper written `float3 ripple(float2 q, float t)` in a
- material with a `t` uniform, reported as `error[E20001]: unexpected token -->
- three.material:512:16 | #define t (push.t)` — a line the author never typed and
- a construct they never wrote. The refusals in `material_source.c3` cannot catch
- it: they check the *uniform's* name against the shader's own vocabulary, and
- this is the agent's own vocabulary colliding with the uniform, which needs the
- body parsed to see.
-
- So the diagnostic is kept whole and a sentence is added after it, naming the
- uniforms this material actually declares. It costs nothing on every other
- failure, because those have already been mapped onto the agent's own lines.
+ A body written before textures moved into `s.textures` calls one as a
+ function - `noise_map().Sample(uv)` - and the compiler, rightly, answers
+ "unknown function `noise_map`", or something stranger when the name is also an
+ engine helper's. That is true and does not say what to write instead, so when
+ the line quoted calls one of this material's own textures the sentence that
+ does is added after the diagnostic.
 *>
-fn String material_failure(fault err, String diagnostic, String uniforms = "") @local
+fn String material_failure(fault err, String diagnostic, MaterialTexture[] textures = {}) @local
 {
 	if (diagnostic.len > 0)
 	{
-		if (uniforms.len > 0 && diagnostic.contains(MATERIAL_PREAMBLE_NAME))
+		foreach (texture : textures)
 		{
+			// The rendered diagnostic quotes the offending line, so the old call
+			// spelling is visible in it whatever the compiler made of the name -
+			// "unknown function", or an overload of an engine helper that happens
+			// to share it (`noise`).
+			if (!diagnostic.contains(string::tformat("%s()", texture.name))) continue;
 			return string::tformat(
-				"%s\n\nthat line is generated, not yours. Each uniform is spliced in as "
-					"`#define <name> (push.<name>)` across the whole module, so a parameter, a local "
-					"or a helper named after one of this material's uniforms (%s) is rewritten and "
-					"breaks the line it was spliced into. Rename it.",
+				"%s\n\n`%s` is one of this material's textures, and a texture is a field rather than a "
+					"function: read it as `s.textures.%s.Sample(uv)` in the fragment body, or "
+					"`v.textures.%s.SampleLevel(uv, 0.0)` in the vertex body.",
 				diagnostic,
-				uniforms
+				texture.name,
+				texture.name,
+				texture.name
 			);
 		}
 		return diagnostic;
@@ -403,7 +388,7 @@ fn String material_failure(fault err, String diagnostic, String uniforms = "") @
 		case MATERIAL_BODY_EMPTY:
 			return "a ShaderMaterial needs a fragment body — `fragment` was empty";
 		case MATERIAL_NAME_INVALID:
-			return "a uniform name must be a plain identifier and must not shadow the shader's own";
+			return "a uniform or texture name must be a plain identifier and not a shady keyword";
 		case MATERIAL_TOO_MANY_UNIFORMS:
 			// Spelled from the constant rather than written out: this said "68
 			// bytes, 17 floats" for as long as the budget had been 52, because a

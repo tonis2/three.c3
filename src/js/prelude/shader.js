@@ -210,18 +210,19 @@ export class ShaderMaterial extends Material {
 		}
 		const { uniforms = {}, textures = {}, vertex = '', bounds = 0, side = FrontSide } = options;
 		if (vertex !== '' && typeof vertex !== 'string') {
-			throw new TypeError('`vertex` wants a shady body — fn void displace(inout Vertex v) { ... }');
+			throw new TypeError('`vertex` wants a shady body — `v.position += ...;`, or fn void displace(inout Vertex v) { ... }');
 		}
-		// **The fragment body is optional once there is a vertex one**, and
-		// defaults to the shading the built-in shader does. A material that
-		// only wants to move geometry should not have to retype the default
-		// look to say so — and the default is written here, once, rather than
-		// left to whoever is generating the script to remember.
-		const fragment = (typeof options.fragment === 'string' && options.fragment.trim().length > 0)
-			? options.fragment
-			: (vertex ? 'fn float3 shade(Surface s) { return standard(s); }' : options.fragment);
-		if (typeof fragment !== 'string' || fragment.trim().length === 0) {
-			throw new TypeError('a ShaderMaterial needs a `fragment` body — see three.getApiDocs()');
+		// **Either body is enough.** Both are holes of the template with a
+		// default in it, so a material that only moves geometry keeps the
+		// built-in shading without retyping it. Each may be the statements of
+		// the one function — `return s.albedo * 2.0;` — or whole functions
+		// with helpers beside them; the host tells the two apart.
+		const fragment = options.fragment === undefined ? '' : options.fragment;
+		if (typeof fragment !== 'string') {
+			throw new TypeError('`fragment` wants a shady body — `return s.albedo;`, or fn float3 shade(Surface s) { ... }');
+		}
+		if (fragment.trim().length === 0 && vertex.trim().length === 0) {
+			throw new TypeError('a ShaderMaterial needs a `fragment` or a `vertex` body — see three.getApiDocs()');
 		}
 		// A displacement the frustum does not know about is geometry that
 		// vanishes at the edge of the screen and comes back when the camera
@@ -235,11 +236,10 @@ export class ShaderMaterial extends Material {
 		if (uniforms === null || typeof uniforms !== 'object') {
 			throw new TypeError('`uniforms` wants an object like { tint: [1, 0.5, 0.2], time: 0 }');
 		}
-		// Every sampler the body wants, checked here so that a mistyped value
-		// is refused before a shader is compiled for it. The names become
-		// `[vk::binding(1, 0)] Sampler2D <name>;` lines in the generated
-		// module, in this order — and nothing on this side ever says which
-		// number: the host resolves them back by name through reflection.
+		// Every image the body wants, checked here so that a mistyped value is
+		// refused before a shader is compiled for it. Each name becomes a field
+		// of `s.textures` (and `v.textures`), in this order — and nothing on
+		// this side ever says which slot: the host numbers them.
 		const declared = textureLists(textures, 'this material\'s');
 		Material._checkSide(side);
 		// After the fragment and the uniforms, so that a material with a

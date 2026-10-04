@@ -831,10 +831,10 @@ fn void TextureSlots.set(&self, uint binding, int texture)
 
  **Asked of the declaration list rather than of the reflected layout**, which is
  where this moved when a material's images stopped being descriptor bindings.
- `assemble.c3` writes one `#define <name> map_at(K)` per declared texture, in
- declaration order from `MATERIAL_BINDING_FIRST` — and a macro leaves nothing in
- the module for reflection to find, so the list the assembler was handed is the
- only record of what K was. It is the same list, kept for the bake, and the same
+ `append_shady_textures` fills one `Textures` field per declared texture with
+ `map_at(K)`, in declaration order from `MATERIAL_BINDING_FIRST` — and a table
+ row leaves nothing in the module for reflection to find, so the list the def was
+ handed is the only record of what K was. It is the same list, kept for the bake, and the same
  order the assembler read it in, so the two cannot disagree.
 
  One consequence worth stating: a texture a body declared and never sampled now
@@ -889,12 +889,11 @@ fn uint Material.binding_of_texture(&self, String name)
 *>
 fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, uint rows = 1)
 {
-	ShaderField* field = self.pipeline.shader.field_of(name);
-	// The `MATERIAL_PUSH_START` cut only applies to the block. A table field's
-	// offset is inside the table buffer, where zero is a real offset and the mesh
-	// contract does not exist.
+	// A script's uniforms only, by tag rather than by offset: a uniform may share a
+	// name with the mesh contract's own fields, and a table field's offset is
+	// inside the table buffer, where zero is a real offset.
+	ShaderField* field = self.pipeline.shader.uniform_of(name);
 	if (field == null) return MATERIAL_UNIFORM_UNKNOWN~;
-	if (!field.indirect && field.offset < MATERIAL_PUSH_START) return MATERIAL_UNIFORM_UNKNOWN~;
 
 	uint width = (uint)(values.len * float::size);
 	if (width == 0 || rows == 0 || row >= rows) return MATERIAL_UNIFORM_WIDTH~;
@@ -922,18 +921,11 @@ fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, 
 *>
 fn void Material.uniform_fields(&self, List{ShaderField}* out)
 {
+	// Pushed and spilled alike: a table field is a uniform a script sets by name
+	// exactly as a pushed one is. The pointer it hangs off is not a uniform.
 	foreach (field : self.pipeline.shader.push_fields)
 	{
-		// A table field is a uniform a script sets by name exactly as a pushed one
-		// is; the pointer it hangs off is not, and is the one generated name that
-		// has to be kept out of `material.uniforms`.
-		if (field.indirect)
-		{
-			out.push(field);
-			continue;
-		}
-		if (field.name == MATERIAL_TABLE_FIELD) continue;
-		if (field.offset >= MATERIAL_PUSH_START) out.push(field);
+		if (field.uniform) out.push(field);
 	}
 }
 
@@ -960,7 +952,7 @@ fn void Material.bind_table(&self)
 			if (end > size) size = end;
 			continue;
 		}
-		if (field.name == MATERIAL_TABLE_FIELD) self.table_pointer = field.offset;
+		if (!field.uniform && field.name == MATERIAL_TABLE_FIELD) self.table_pointer = field.offset;
 	}
 
 	if (self.table.len > 0) mem::free(self.table);
@@ -1049,8 +1041,8 @@ fn float[4] Material.layer_params(&self, ScriptLayer* layer)
 *>
 fn int Material.uniform_offset(&self, String name)
 {
-	ShaderField* field = self.pipeline.shader.field_of(name);
-	if (field == null || field.offset < MATERIAL_PUSH_START) return -1;
+	ShaderField* field = self.pipeline.shader.uniform_of(name);
+	if (field == null || field.indirect) return -1;
 	if (field.size != LAYER_PARAMS_BYTES) return -1;
 	return (int)field.offset;
 }
@@ -1090,6 +1082,13 @@ fn void Material.free_declarations(&self)
 	self.declared_uniforms = { };
 	self.declared_textures = { };
 }
+
+<*
+ Whether a script wrote this material's shader: a fragment body, a vertex body,
+ or both. Either one makes it a `ShaderMaterial`, since each fills a hole of the
+ template and a body left empty keeps the template's own answer.
+*>
+fn bool Material.scripted(&self) => self.fragment.len > 0 || self.vertex.len > 0;
 
 fn void Material.free(&self)
 {

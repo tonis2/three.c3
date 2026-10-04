@@ -15,18 +15,24 @@
 // base one. The relief helpers and the `standard` overloads a layered body
 // calls are here too; the lightmap variant is a separate module.
 
-// **The material's own functions, and the only things this file needs from
-// outside.** Everything below is the built-in look; a material replaces exactly
-// these two, and its text is spliced in ahead of this file, so the bodies are
-// defined before the stages that call them.
+// **The material's own functions: the template's two holes.** Everything else
+// here is the built-in look; a material replaces exactly these two, and its text
+// is spliced in after this file and `mesh.shady`, so whatever it defines is the
+// second definition of its name and a clash is reported on the author's line.
 //
-// `@required` is what says so in the language rather than in a comment: a module
-// that got no body is refused at this line, whether or not anything managed to
-// call it. A plain declaration would only be wrong where it was called, which is
-// not the same claim. `displace` is the one a material may skip - the generator
-// emits the empty function when it does, so the call is never conditional.
-fn float3 shade(Surface s) @required;
-fn void displace(inout Vertex v) @required;
+// Both are `@fallback`s: a definition with the same signature replaces each one
+// wherever it comes, and a material that wrote none of either keeps the answer
+// here - the built-in look, and a vertex stage that moves nothing, which every
+// compiler folds away. A body written with the wrong signature is refused at the
+// author's line rather than becoming an overload this file never calls.
+fn float3 shade(Surface s) @fallback
+{
+	return standard(s);
+}
+
+fn void displace(inout Vertex v) @fallback
+{
+}
 
 // The frame's own screen-space depth, at the binding the pass already writes.
 // It carries the 1x1 white when the occlusion pass did not run, and
@@ -291,6 +297,12 @@ struct Surface
 	// either storage to this field.
 	Uniforms uniforms;
 
+	// The images the script declared, by the names it gave them: `s.textures.noise`
+	// is a `Map` to sample like any other. A struct of table rows rather than a
+	// global per name, so a texture can be called anything without colliding with
+	// a function in this file.
+	Textures textures;
+
 	// How much of the sun reaches this point: 1 in the open, 0 under something,
 	// and the values between are the taps disagreeing at the edge of a shadow.
 	// Folded into the direct light already, so a body does not have to read it
@@ -361,6 +373,7 @@ struct Vertex
 	uint variant;    // already clamped to the rows the material declared
 	uint index;      // `SV_VertexID`, the per-vertex seed a scatter keys on
 	Uniforms uniforms; // what the script declared, as `Surface.uniforms` reads it
+	Textures textures; // and its images, as `Surface.textures` reads them
 
 	// ---- inputs, not read back ----
 
@@ -1013,6 +1026,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		: float4(0.0, 0.0, 0.0, 0.0);
 	s.variant = min(input.variant, draw.material_rows - 1u);
 	s.uniforms = material_uniforms();
+	s.textures = material_textures();
 
 	// Read once and left in two places: on the surface for a body that wants
 	// it, and in the direct light `standard` sums. The receiver normal beside it

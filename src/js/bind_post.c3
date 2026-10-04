@@ -362,7 +362,7 @@ fn String post_failure(fault err, String diagnostic) @local
 		case POST_BODY_EMPTY:
 			return "a post pass needs a fragment body — `fragment` was empty";
 		case POST_NAME_INVALID:
-			return "a post uniform name must be a plain identifier and must not shadow the shader's own";
+			return "a post uniform name must be a plain identifier and not a shady keyword, and a post texture must not take a name the post template declares";
 		case POST_TOO_MANY_UNIFORMS:
 			return string::tformat(
 				"those uniforms do not fit the push block — a post pass has %d bytes, %d floats",

@@ -2592,7 +2592,7 @@ of the image built ahead of time, which is a build step rather than a sampler.
 A tangent-space normal map applied to a surface that carries no tangents. In a fragment body:
 
 ```slang
-float3 n = mapped_normal(s, bumps.Sample(s.uv).rgb);
+float3 n = mapped_normal(s, s.textures.bumps.Sample(s.uv).rgb);
 return standard(s, s.albedo, n);
 ```
 
@@ -2817,8 +2817,9 @@ texture throws.
 
 ## three.setPost({ fragment, uniforms, textures })
 
-Run one shader over the whole finished frame. `fragment` is a Slang function `float3 post(Post p)` returning
-linear rgb.
+Run one shader over the whole finished frame. `fragment` is the body of `float3 post(Post p)`, returning
+linear rgb: only its statements — `fragment: 'return p.color * 1.2;'` — or the whole function with any helpers
+beside it.
 
 `Post` carries:
 
@@ -2840,12 +2841,14 @@ There are no normals and no motion vectors.
 and `scene`, so a body that needs the neighbours reads `prev.Sample(p.uv + off)` — which is what the texel step
 is for, and the whole of how a blur is written.
 
-Each uniform is readable in the body by its own name. They are at most 104 bytes in total (26 floats), each a
+Each uniform is a field of `p.uniforms` — `p.uniforms.gain` — so `time` or `color` is a fine name and does not
+touch `p.time` or `p.color`; only a shady keyword is refused. They are at most 104 bytes in total (26 floats), each a
 number or an array of up to four numbers, and not a table — a post pass draws one triangle over the whole frame,
 so there are no instances for a row to belong to.
 
-`textures` is a ShaderMaterial's: `{ grade_lut: tex }` declares a Sampler2D the body reads by that name, up to
-four, with no binding number written anywhere. They are what a frame cannot supply about itself — a ramp to grade
+`textures` is a ShaderMaterial's, spelled differently: `{ grade_lut: tex }` declares a Sampler2D the body reads
+by that bare name, up to four, and a name the post template already declares — `scene`, `prev`, a helper — is
+refused, with no binding number written anywhere. They are what a frame cannot supply about itself — a ramp to grade
 through with `grade_lut.Sample(float2(p.color.r, 0.5))`, a noise field to distort or dither by, a mask that says
 where the effect applies. Tile one by the frame rather than by uv, `p.uv * p.resolution / 256`, or it stretches
 with the window. A sampler you leave null reads white.

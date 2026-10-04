@@ -261,15 +261,15 @@ const blastMat = new three.ShaderMaterial({
 
 	    // Two noise taps at different rates, multiplied — the cheapest thing
 	    // that reads as burning rather than as a moving picture of fire.
-	    float a = noise_map().Sample(s.uv * 2.0 + float2(s.uniforms.t * 0.09, -s.uniforms.t * 0.31)).r;
-	    float b = noise_map().Sample(s.uv * 5.0 - float2(s.uniforms.t * 0.24, s.uniforms.t * 0.57)).r;
+	    float a = s.textures.noise_map.Sample(s.uv * 2.0 + float2(s.uniforms.t * 0.09, -s.uniforms.t * 0.31)).r;
+	    float b = s.textures.noise_map.Sample(s.uv * 5.0 - float2(s.uniforms.t * 0.24, s.uniforms.t * 0.57)).r;
 	    float heat = saturate(a * b * 3.6) * (1.0 - age);
 
 	    // The shell burns away from the outside in. shade() returns rgb and
 	    // never alpha, on purpose — a body that MEANS to make geometry vanish
 	    // discards, which is what breaks the ball into tongues as it dies.
 	    if (heat < 0.09) discard;
-	    return ramp_map().Sample(lut(heat)).rgb * s.color.rgb * heat * 2.8;
+	    return s.textures.ramp_map.Sample(lut(heat)).rgb * s.color.rgb * heat * 2.8;
 	}`,
 });
 

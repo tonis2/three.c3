@@ -176,8 +176,8 @@ const shieldMat = new three.ShaderMaterial({
 
 	    // The lattice, drifting, broken up by the coarse field so it reads as
 	    // energy rather than as a decal.
-	    float drift = noise_map().Sample(s.uv * 2.0 + float2(s.uniforms.t * 0.03, s.uniforms.t * 0.02)).r;
-	    float cells = hex_map().Sample(s.uv * 3.0 + float2(s.uniforms.t * 0.02, 0.0) + drift * 0.05).r;
+	    float drift = s.textures.noise_map.Sample(s.uv * 2.0 + float2(s.uniforms.t * 0.03, s.uniforms.t * 0.02)).r;
+	    float cells = s.textures.hex_map.Sample(s.uv * 3.0 + float2(s.uniforms.t * 0.02, 0.0) + drift * 0.05).r;
 
 	    // The impact ring: a band travelling down from the top of the dome,
 	    // expanding as it goes. hit is 1 at the moment of impact and decays.
@@ -185,7 +185,7 @@ const shieldMat = new three.ShaderMaterial({
 	    float ring = saturate(band) * s.uniforms.hit;
 
 	    float energy = saturate(rim * 0.9 + cells * (0.12 + rim * 0.5) + ring * 1.6);
-	    float3 colour = ramp_map().Sample(lut(energy)).rgb;
+	    float3 colour = s.textures.ramp_map.Sample(lut(energy)).rgb;
 
 	    // Channel view, for the 1 key: 1 rim, 2 lattice, 3 ring, 0 the lot.
 	    if (s.uniforms.channel > 0.5 && s.uniforms.channel < 1.5) return float3(rim);
@@ -248,18 +248,18 @@ const coreMat = new three.ShaderMaterial({
 
 	fn float3 shade(Surface s)
 	{
-	    float2 warp = warp_map().Sample(s.uv * 1.5 - float2(0.0, s.uniforms.t * 0.10)).rg - 0.5;
+	    float2 warp = s.textures.warp_map.Sample(s.uv * 1.5 - float2(0.0, s.uniforms.t * 0.10)).rg - 0.5;
 	    float2 uv = s.uv + warp * 0.22;
 
-	    float a = noise_map().Sample(uv * 2.0 - float2(0.0, s.uniforms.t * 0.35)).r;
-	    float b = noise_map().Sample(uv * 4.0 + float2(s.uniforms.t * 0.11, -s.uniforms.t * 0.6)).r;
+	    float a = s.textures.noise_map.Sample(uv * 2.0 - float2(0.0, s.uniforms.t * 0.35)).r;
+	    float b = s.textures.noise_map.Sample(uv * 4.0 + float2(s.uniforms.t * 0.11, -s.uniforms.t * 0.6)).r;
 
 	    // Hotter towards the middle of the sphere's parameterisation, so the
 	    // shape reads as a core with a corona rather than as a noisy ball.
 	    float falloff = 1.0 - abs(s.uv.y - 0.5) * 1.7;
 	    float heat = saturate(a * b * 3.2 * saturate(falloff)) * s.uniforms.gain;
 
-	    return ramp_map().Sample(lut(heat)).rgb * heat * 2.2;
+	    return s.textures.ramp_map.Sample(lut(heat)).rgb * heat * 2.2;
 	}`,
 	// The core boils. Two noise taps at different speeds along the normal, which
 	// is what makes a sphere read as a mass of burning gas rather than as a
@@ -271,8 +271,8 @@ const coreMat = new three.ShaderMaterial({
 	vertex: `
 	fn void displace(inout Vertex v)
 	{
-	    float a = warp_map().SampleLevel(v.uv * 2.0 + float2(0.0, v.uniforms.t * 0.20), 0).r;
-	    float b = noise_map().SampleLevel(v.uv * 3.0 - float2(v.uniforms.t * 0.15, 0.0), 0).r;
+	    float a = v.textures.warp_map.SampleLevel(v.uv * 2.0 + float2(0.0, v.uniforms.t * 0.20), 0).r;
+	    float b = v.textures.noise_map.SampleLevel(v.uv * 3.0 - float2(v.uniforms.t * 0.15, 0.0), 0).r;
 	    v.position += normalize(v.normal) * ((a + b - 1.0) * 0.42 * v.uniforms.gain);
 	}`,
 	bounds: 0.6,
@@ -324,14 +324,14 @@ const dissolveMat = new three.ShaderMaterial({
 
 	fn float3 shade(Surface s)
 	{
-	    float n = noise_map().Sample(s.uv * 1.1).r;
+	    float n = s.textures.noise_map.Sample(s.uv * 1.1).r;
 
 	    // Everything the front has already passed is gone. Not faded — gone:
 	    // there is no alpha to fade, and a discard leaves the depth buffer
 	    // correct for whatever is behind it.
 	    if (n < s.uniforms.edge) discard;
 
-	    float3 plate = plate_map().Sample(s.uv).rgb * lambert(s, s.normal);
+	    float3 plate = s.textures.plate_map.Sample(s.uv).rgb * lambert(s, s.normal);
 
 	    // The band just ahead of the front, read through the burn ramp so the
 	    // edge glows white-hot and cools off over about a tenth of the range.
@@ -340,7 +340,7 @@ const dissolveMat = new three.ShaderMaterial({
 	    // still cover every pixel whose noise is under about a tenth, which is a
 	    // crate speckled with embers before anything has been asked to dissolve.
 	    float heat = s.uniforms.edge < 0.002 ? 0.0 : saturate(1.0 - (n - s.uniforms.edge) * 9.0);
-	    float3 burn = ramp_map().Sample(lut(1.0 - heat)).rgb;
+	    float3 burn = s.textures.ramp_map.Sample(lut(1.0 - heat)).rgb;
 
 	    return lerp(plate, burn * 2.4, heat * heat);
 	}`,
@@ -420,7 +420,7 @@ const bannerMat = new three.ShaderMaterial({
 	}
 	fn float3 shade(Surface s)
 	{
-	    float3 cloth = ramp_map().Sample(lut(1.0 - s.uv.y * 0.8)).rgb;
+	    float3 cloth = s.textures.ramp_map.Sample(lut(1.0 - s.uv.y * 0.8)).rgb;
 	    return cloth * s.color.rgb * (0.35 + 0.65 * lambert(s, s.normal));
 	}`,
 	uniforms: { t: 0 },

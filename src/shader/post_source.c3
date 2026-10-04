@@ -19,6 +19,9 @@
 *>
 module three;
 
+import shady;
+import std::collections::list;
+
 
 faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
 faultdef POST_TAP_UNKNOWN;
@@ -68,121 +71,6 @@ const String POST_BODY_NAME = "post";
 // whatever the body did.
 const String POST_PREAMBLE_NAME = "three.post";
 
-<*
- Names a post uniform may not take.
-
- The same two groups as `MATERIAL_RESERVED`: a short list of collisions turned
- into a good message, with the long tail left to fail as an ordinary compiler
- diagnostic at `post:<line>`, where the agent can act on it.
-
- The first group is what the generated module declares. Three break in ways the
- message would not otherwise explain:
-
- - `info` is a *field* of the same struct the uniforms are appended to, so a
- second one is a duplicate member rather than a substitution problem.
- - `post` and `p` are the body's own function and parameter. A `#define p
- (push.p)` is live across exactly the lines the agent wrote, so it rewrites the
- signature they are declared in.
- - `prev` and `scene` are the two reserved samplers. A body has both as
- same-pixel samples already (`p.color`, `p.scene`) and reaches the globals only
- to sample a *different* pixel — a blur, a bloom combine — so a uniform by
- either name would make the template's own declaration unparseable.
-*>
-const String[*] POST_RESERVED @local = { // What the template declares.
-	"push",
-	"PushData",
-	"info",
-	"planes",
-	"prev",
-	"scene",
-	"depth_buffer",
-	"tap_image",
-	"Post",
-	"p",
-	"VertexOutput",
-	"vertexMain",
-	"fragmentMain",
-	"post",
-	"output",
-	"vid",
-	"d",
-	"near",
-	"far",
-	"span", // What the generators declare around the agent's uniforms: the struct a body
-	// reads them through, the padding field a pass with no uniforms still gets,
-	// and the function the material half fills them with. Reserved before the
-	// switchover rather than at it, for `MATERIAL_RESERVED`'s reason: a name is
-	// reservable exactly once.
-	"Uniforms",
-	"material_unused",
-	"material_uniforms", // Types.
-	"float",
-	"float2",
-	"float3",
-	"float4",
-	"float2x2",
-	"float3x3",
-	"float4x4",
-	"int",
-	"int2",
-	"int3",
-	"int4",
-	"uint",
-	"uint2",
-	"uint3",
-	"uint4",
-	"bool",
-	"bool2",
-	"bool3",
-	"bool4",
-	"half",
-	"double",
-	"void",
-	"Sampler2D",
-	"Texture2D",
-	"SamplerState", // Keywords.
-	"return",
-	"if",
-	"else",
-	"for",
-	"while",
-	"do",
-	"switch",
-	"case",
-	"default",
-	"break",
-	"continue",
-	"struct",
-	"const",
-	"static",
-	"in",
-	"out",
-	"inout",
-	"discard",
-	"true",
-	"false",
-	"typedef",
-	"namespace",
-	"uniform",
-	"cbuffer",
-	"groupshared",
-};
-
-<*
- The field names of `Post`, which a uniform may not take either.
-
- `MATERIAL_CONTRACT_FIELDS`'s argument, and this is the list it was found on: a
- post pass's most natural uniform name is `time`, `Post` has a field called
- `time`, and `#define time (push.time)` turns the `p.time` in the agent's own
- body into `p.(push.time)` — a syntax error at a line of generated preamble,
- about a member access that was written correctly.
-
- `time` is worth refusing loudly rather than quietly renaming, because the
- uniform is usually redundant: `p.time` already carries seconds since the shader
- was set.
-*>
-const String[*] POST_CONTRACT_FIELDS @local = { "color", "scene", "uv", "resolution", "time", "depth", "tap", "uniforms" };
-
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
 char[POST_DIAGNOSTIC_MAX] post_message @local;
@@ -213,6 +101,26 @@ fn uint post_uniform_bytes(MaterialUniform[] uniforms)
 	uint total = 0;
 	foreach (uniform : uniforms) total += uniform.components * 4;
 	return total;
+}
+
+<*
+ Every name the post template declares at the top level, plus the two the def
+ generates beside it, read off the shipped (or on-disk) file. Allocated from
+ tmem; empty if the template does not parse, which the compile then reports.
+*>
+fn String[] post_template_names() @local
+{
+	String? text = load_source(ShaderFile.POST_SHADY, tmem);
+	if (catch text) return {};
+	String[]? names = shady::top_level_names(text, tmem);
+	if (catch names) return {};
+	List{String} all;
+	all.tinit(names.len + 3);
+	foreach (name : names) all.push(name);
+	all.push("Uniforms");
+	all.push("material_uniforms");
+	all.push("material_unused");
+	return all.array_view();
 }
 
 <*
@@ -250,29 +158,12 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 				return POST_NAME_INVALID~;
 			}
 
-			foreach (reserved : POST_RESERVED)
+			// A uniform is a field of `Uniforms`, read as `p.uniforms.name`, so
+			// `time`, `info` and `color` are all free; only the language's own
+			// words are not.
+			if (shady::is_keyword(uniform.name))
 			{
-				if (uniform.name != reserved) continue;
-				post_note(
-					string::tformat(
-						"post: uniform name '%s' is reserved; the shader three.c3 generates around your body already uses it",
-						uniform.name
-					)
-				);
-				return POST_NAME_INVALID~;
-			}
-
-			foreach (field : POST_CONTRACT_FIELDS)
-			{
-				if (uniform.name != field) continue;
-				post_note(
-					string::tformat(
-						"post: uniform name '%s' is a field of Post, so it would rewrite p.%s in your own body — rename the uniform%s",
-						uniform.name,
-						uniform.name,
-						uniform.name == "time" ? " (and p.time is already the clock)" : ""
-					)
-				);
+				post_note(string::tformat("post: uniform name '%s' is a shady keyword", uniform.name));
 				return POST_NAME_INVALID~;
 			}
 
@@ -316,16 +207,11 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 			}
 		}
 
-		// `validate_material`'s placement and reason: a sampler is checked
-		// against the uniforms as well as against the template's own names, so
-		// both lists have to be individually sound first.
-		String texture_note = texture_problem(
-			POST_BODY_NAME,
-			textures,
-			uniforms,
-			POST_RESERVED[..],
-			POST_TEXTURE_LIMIT
-		);
+		// A post pass's samplers are module-level resources, so unlike a uniform
+		// they share the template's namespace: a sampler may not take a name the
+		// template already declares - `scene`, `prev`, `tap_image`, a helper.
+		// Read off the template itself, so the list cannot fall behind it.
+		String texture_note = texture_problem(POST_BODY_NAME, textures, post_template_names(), POST_TEXTURE_LIMIT);
 		if (texture_note.len > 0)
 		{
 			post_note(texture_note);

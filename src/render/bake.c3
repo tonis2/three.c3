@@ -241,7 +241,7 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 
 	MeshPipeline* built = null;
 	Material* material  = self.pass.material(index);
-	if (material != null && material.fragment.len > 0)
+	if (material != null && material.scripted())
 	{
 		@pool()
 		{
@@ -250,7 +250,7 @@ fn MeshPipeline* MaterialBaker.pipeline_for(&self, uint index)
 			// bake's interface. A body already accepted by `create_material`
 			// passes validation; a refusal leaves the bake unbuilt rather than
 			// compiling around it.
-			if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures)))
+			if (@ok(validate_material(material.fragment, material.declared_uniforms, material.declared_textures, material.vertex)))
 			{
 				MeshPipeline*? made = self.pass.pipelines.acquire(
 					self.gpu,

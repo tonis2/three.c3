@@ -1117,7 +1117,7 @@ fn void a_material_gives_back_the_textures_its_samplers_held() @test
 				&renderer.target,
 				`fn float3 shade(Surface s)
 				{
-				    return noise_map().Sample(s.uv).rgb * ramp_map().Sample(s.uv).rgb;
+				    return s.textures.noise_map.Sample(s.uv).rgb * s.textures.ramp_map.Sample(s.uv).rgb;
 				}`,
 				{},
 				three::SIDE_FRONT,

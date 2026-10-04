@@ -1623,7 +1623,7 @@ fn void a_normal_map_tilts_the_lighting_and_a_flat_one_does_not() @test
 			globalThis.bumped = new three.ShaderMaterial({
 				textures: { surface_normal: flat },
 				fragment: 'fn float3 shade(Surface s) {'
-					+ '  float3 n = mapped_normal(s, surface_normal().Sample(s.uv).rgb);'
+					+ '  float3 n = mapped_normal(s, s.textures.surface_normal.Sample(s.uv).rgb);'
 					+ '  return float3(1.0, 1.0, 1.0) * lambert(s, n);'
 					+ '}',
 			});
