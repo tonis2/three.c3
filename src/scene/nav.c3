@@ -569,8 +569,15 @@ fn void NavMesh.measure_components(&self)
 <*
  The distance to the nearest goal, for every walkable cell.
 
- A chamfer transform with forward and backward sweeps, filtered through the
- profile's step and corner rules. Fast for a broad navigation sheet.
+ Dijkstra over the profile's step and corner rules: every cell is settled once,
+ in order of distance, so the cost is the size of the reachable set whatever its
+ shape.
+
+ Not the scan-order sweeps `solve_field` uses. A sweep pair carries a distance
+ along one scan direction, so a route that doubles back needs another pair per
+ reversal, and a trail winding through a level is mostly reversals — measured on
+ `examples/wumpa_run.js`, 5.6k cells took 54 ms swept against well under one
+ settled. The answer is the same shortest path over the same links either way.
 
  This is the expensive call, and there is one of it per goal set rather than per
  agent. See the file header.
@@ -588,42 +595,93 @@ fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
 	foreach (goal : goals) seeded += self.grid.seed_segment(field, goal, goal);
 	if (seeded == 0) return false;
 
+	int plane  = self.grid.nx * self.grid.ny;
 	int max_dy = self.max_vertical_steps();
-	bool changed = true;
-	while (changed)
+
+	NavHeap open;
+	open.items.init(mem, 256);
+	defer open.items.free();
+	foreach (entry, distance : field)
 	{
-		changed = false;
-		foreach (entry, voxel : self.grid.cells)
+		if (distance < collision::VOXEL_UNREACHED) open.push({ distance, (int)entry });
+	}
+
+	while (open.items.len() > 0)
+	{
+		NavHeapItem item = open.pop();
+		// A stale entry: the cell was settled nearer since this was pushed.
+		if (item.distance > field[(sz)item.entry]) continue;
+		int voxel = self.grid.cells[(sz)item.entry];
+
+		for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
 		{
-			float best = field[entry];
-			for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
+			if (dx == 0 && dz == 0) continue;
+			int there = voxel + dz * plane + dy * self.grid.nx + dx;
+			if (there < 0 || (sz)there >= self.grid.index.len) continue;
+			int neighbour = self.grid.index[there];
+			if (neighbour < 0) continue;
+			// The link the neighbour would walk *towards* this cell, which is
+			// the direction a cost travels: it is how far the neighbour is from
+			// the goal, through here.
+			if (!self.linked(there, -dx, -dy, -dz)) continue;
+			float distance = item.distance + self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
+			if (distance < field[(sz)neighbour])
 			{
-				if (dx == 0 && dy == 0 && dz == 0 || !self.linked(voxel, dx, dy, dz)) continue;
-				int neighbour = self.grid.index[voxel + dz * self.grid.nx * self.grid.ny + dy * self.grid.nx + dx];
-				float distance = field[neighbour];
-				if (distance >= collision::VOXEL_UNREACHED) continue;
-				distance += self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
-				if (distance < best) best = distance;
+				field[(sz)neighbour] = distance;
+				open.push({ distance, neighbour });
 			}
-			if (best < field[entry]) { field[entry] = best; changed = true; }
-		}
-		for (sz entry = self.grid.cells.len - 1; entry >= 0; entry--)
-		{
-			int voxel = self.grid.cells[entry];
-			float best = field[entry];
-			for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
-			{
-				if (dx == 0 && dy == 0 && dz == 0 || !self.linked(voxel, dx, dy, dz)) continue;
-				int neighbour = self.grid.index[voxel + dz * self.grid.nx * self.grid.ny + dy * self.grid.nx + dx];
-				float distance = field[neighbour];
-				if (distance >= collision::VOXEL_UNREACHED) continue;
-				distance += self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
-				if (distance < best) best = distance;
-			}
-			if (best < field[entry]) { field[entry] = best; changed = true; }
 		}
 	}
 	return true;
+}
+
+struct NavHeapItem @local
+{
+	float distance;
+	int entry;
+}
+
+<*
+ A binary min-heap on distance, with stale entries left in rather than
+ decreased — `solve` skips one whose distance is no longer the cell's.
+*>
+struct NavHeap @local
+{
+	List{NavHeapItem} items;
+}
+
+fn void NavHeap.push(&self, NavHeapItem item)
+{
+	self.items.push(item);
+	sz at = self.items.len() - 1;
+	while (at > 0)
+	{
+		sz parent = (at - 1) / 2;
+		if (self.items[parent].distance <= self.items[at].distance) break;
+		self.items.swap(parent, at);
+		at = parent;
+	}
+}
+
+fn NavHeapItem NavHeap.pop(&self)
+{
+	NavHeapItem top = self.items[0];
+	NavHeapItem last = self.items.pop()!!;
+	sz count = self.items.len();
+	if (count == 0) return top;
+	self.items[0] = last;
+	sz at = 0;
+	while (true)
+	{
+		sz left = at * 2 + 1;
+		if (left >= count) break;
+		sz smallest = left;
+		if (left + 1 < count && self.items[left + 1].distance < self.items[left].distance) smallest = left + 1;
+		if (self.items[at].distance <= self.items[smallest].distance) break;
+		self.items.swap(at, smallest);
+		at = smallest;
+	}
+	return top;
 }
 
 fn sz NavMesh.field_size(&self) => self.usable() ? self.grid.cells.len : 0;

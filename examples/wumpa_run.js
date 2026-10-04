@@ -663,6 +663,7 @@ class Player extends three.Entity {
 
 		// Where he is, and where the camera is looking from.
 		this.x = at.x; this.y = groundY(at.x, at.z) + 0.05; this.z = at.z;
+		this.px = this.x; this.py = this.y; this.pz = this.z;
 		this.vy = 0; this.grounded = false;
 		this.yaw = (at.yaw * 180) / Math.PI + 180; this.pitch = 20; this.dist = 12;
 		this.heading = at.yaw; this.moving = false; this.walkT = 0; this.spinAngle = 0;
@@ -688,6 +689,9 @@ class Player extends three.Entity {
 	// fence, no ground snap, no per-boulder circle test, because the wall, the
 	// floor and the boulder are all triangles it sweeps against.
 	step(dt) {
+		// Where the last step left him, for `pose` to blend from.
+		this.px = this.x; this.py = this.y; this.pz = this.z;
+
 		// --- run, in the camera's frame ---
 		const move = three.camera.planarMove(axis(KEYS.forward, KEYS.back), axis(KEYS.right, KEYS.left));
 		this.moving = move.length() > 0;
@@ -830,8 +834,16 @@ class Player extends three.Entity {
 	// including the ordinary property writes here. A column of one would be a
 	// crossing saved that was never spent. The capsule is not written here any
 	// more: `Player.follow` carries it.
+	//
+	// **Drawn between the last two steps, not at the latest one.** He moves at
+	// the fixed rate and the screen does not: at 120 Hz a frame gets one step,
+	// then none, then one, and drawing the raw position stutters by exactly that.
+	// `fixedAlpha` is how far the clock is into the next step, so the blend is
+	// one step behind and always smooth — and the camera, attached to this
+	// object, is smooth with it.
 	pose(dt) {
-		this.object.position.set(this.x, this.y, this.z);
+		const a = three.clock.fixedAlpha;
+		this.object.position.set(lerp(this.px, this.x, a), lerp(this.py, this.y, a), lerp(this.pz, this.z, a));
 		this.object.rotation.y = this.heading;
 		this.spinner.rotation.y = this.spinAngle;
 		if (this.moving && this.grounded) this.walkT += dt * 13;
@@ -911,6 +923,8 @@ class Critter extends three.Entity {
 	static collides = false;
 	static columns = {
 		position: 3,   // the capsule CENTRE, moved in place
+		prev: 3,       // where the last fixed step left it
+		shown: 3,      // between the two, where it is drawn
 		foot: 3,       // where the nav field is sampled
 		velocity: 3,   // what three.steer wants them to do
 		motion: 3,     // what this step actually asks for
@@ -925,6 +939,7 @@ class Critter extends three.Entity {
 		this.position[0] = at.x;
 		this.position[1] = groundY(at.x, at.z) + CRITTER_H / 2;
 		this.position[2] = at.z;
+		this.prev.set(this.position);
 
 		this.heading = at.yaw;
 		this.walk = hash2(i, 9, 5) * 6;    // the leg-swing phase
@@ -1109,6 +1124,8 @@ Critter.step('steer', () => {
 // motion and has its position overwritten by `arc` below, so its sweep is
 // wasted — cheaper than branching the one call that makes this fast.
 Critter.step('walk', (dt) => {
+	// The first of the systems that move the pack, so this is where a step starts.
+	Critter.column('prev').set(Critter.column('position'));
 	for (const c of Critter) {
 		if (c.launched) {
 			c.motion[0] = 0; c.motion[1] = 0; c.motion[2] = 0;
@@ -1195,8 +1212,14 @@ Critter.on('near', Player, (c, p) => {
 // carries the capsule-centre-to-feet offset — those are never the same point —
 // and `heading` here is an ordinary field, which pose reads just as happily as
 // a column.
+//
+// Posed from `shown`, the blend between the last two steps, for the reason
+// `Player.pose` gives.
 Critter.frame('draw', () => {
-	Critter.pose('position', { lift: -CRITTER_H / 2, heading: 'heading' });
+	const a = three.clock.fixedAlpha;
+	const prev = Critter.column('prev'), pos = Critter.column('position'), shown = Critter.column('shown');
+	for (let i = 0; i < shown.length; i++) shown[i] = prev[i] + (pos[i] - prev[i]) * a;
+	Critter.pose('shown', { lift: -CRITTER_H / 2, heading: 'heading' });
 	const t = Critter.transform;
 	let slot = 0;
 	for (const c of Critter) {
