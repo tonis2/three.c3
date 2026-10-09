@@ -2798,6 +2798,10 @@ fn void ui_fire(cui::Element* elem, UiEvent event) @local
  - `hovered` for a press, which is dispatched before the capture is recorded.
  - `focused` for a key, which is the only thing a text field ever answers to.
 
+ A text field asks `focused` first. Typing is a key, and the pointer resting on
+ some other field while it happens is the ordinary case: asked in the order a
+ button wants, every keystroke would land in whichever field the mouse was over.
+
  The kind is what disambiguates a nesting — a button inside a tree row finds the
  button, because the walk stops at the first ancestor of the kind that asked.
 *>
@@ -2806,7 +2810,8 @@ fn void ui_signal(cui::Ui* ui, UiNodeKind kind, UiEvent event) @local
 	UiLayer* layer = ui.inherit(UiLayer) ?? null;
 	if (layer == null || layer.listener == null) return;
 
-	int at = layer.locate(ui.captured, kind);
+	int at = kind == UiNodeKind.TEXTFIELD ? layer.locate(ui.focused, kind) : -1;
+	if (at < 0) at = layer.locate(ui.captured, kind);
 	if (at < 0) at = layer.locate(ui.hovered, kind);
 	if (at < 0) at = layer.locate(ui.focused, kind);
 	if (at < 0) return;

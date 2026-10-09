@@ -973,6 +973,46 @@ fn void a_focused_field_takes_the_keyboard() @test
 	};
 }
 
+<*
+ What is typed belongs to the focused field, wherever the pointer has wandered.
+
+ The pointer resting on another field is the ordinary case — a person clicks a
+ box, moves the mouse out of the way and types — and the hovered field is the
+ wrong answer there: every keystroke would be the other field's edit.
+*>
+fn void typing_reaches_the_focused_field_and_not_the_hovered_one() @test
+{
+	@with_renderer(; three::Renderer* renderer)
+	{
+		Heard heard;
+
+		renderer.ui.begin_tree(&renderer.gpu, &renderer.target)!!;
+		uint row = renderer.ui.push_node({ .kind = three::UiNodeKind.ROW, .gap = 10.0 }, -1)!!;
+		uint first = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.TEXTFIELD, .key = "first", .size = { 80, 0 }, .on_change = true },
+			(int)row
+		)!!;
+		uint second = renderer.ui.push_node(
+			{ .kind = three::UiNodeKind.TEXTFIELD, .key = "second", .size = { 80, 0 }, .on_change = true },
+			(int)row
+		)!!;
+		renderer.ui.commit_tree();
+		renderer.ui.on_event(&listen, &heard);
+		frame(renderer);
+
+		point(renderer, 40, 10, true);
+		point(renderer, 40, 10, false);
+		// Over the second field, which starts at 90 across, nothing pressed.
+		point(renderer, 120, 10, false);
+		renderer.ui.feed({ .inside = true, .x = 120, .y = 10 }, {}, "a", 16.0);
+
+		test::@check(heard.calls == 1, "one keystroke fired %d times", heard.calls);
+		test::@check(heard.node == first, "the keystroke went to node %d rather than the focused %d", heard.node, first);
+		test::@check(heard.said() == "a", "the field reported \"%s\"", heard.said());
+		test::@check(first != second, "the two fields were the same node");
+	};
+}
+
 // ============================================================================
 // The drawing ops
 // ============================================================================
