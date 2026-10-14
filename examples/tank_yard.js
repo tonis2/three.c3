@@ -12,6 +12,10 @@
 // -----------------------
 // This is meant to be read start to finish by somebody who has not written a
 // `three` script before.
+//
+// The ground keeps a record of the fight. Tanks leave tread marks and every
+// explosion leaves a scorch mark. Compute kernels write them into the image
+// the ground material reads its layers from. See "The ground remembers".
 
 // ---------------------------------------------------------------------------
 // The level, as a picture
@@ -149,6 +153,9 @@ const grassTex = paint(64, (u, v) => {
 // The splat mask: ONE image over the whole 30x30 yard, three weights in three
 // channels. Nothing here repeats — that is what makes it a description of this
 // particular ground rather than a pattern.
+//
+// This is the yard as it is when a round STARTS. The material never reads it:
+// it reads `groundMask` below, a copy the fight writes into.
 const splatTex = paint(128, (u, v) => {
 	const gravel = three.clamp01((three.fbm2(u * 3, v * 3, { octaves: 4, seed: 3, period: 3 }) - 0.42) * 3.4);
 	const grass = three.clamp01((three.fbm2(u * 4 + 9, v * 4 + 5, { octaves: 3, seed: 9, period: 4 }) - 0.60) * 4.2);
@@ -157,6 +164,223 @@ const splatTex = paint(128, (u, v) => {
 	const scorch = three.clamp01((1 - d) * 1.3) * three.fbm2(u * 5, v * 5, { octaves: 2, seed: 17, period: 5 });
 	return [gravel * 255, grass * 255, scorch * 255];
 }, TABLE);
+
+// ---------------------------------------------------------------------------
+// The ground remembers
+//
+// The mask the ground material reads is not a picture made once. It is a
+// `three.compute.image`, and two kernels write into it while the game runs:
+//
+//   - `sweep` copies `splatTex` into it at the start of each round, leaving
+//     alpha at zero.
+//   - `mark` puts a whole frame's marks into it in ONE dispatch. A moving
+//     tank's two tracks go into ALPHA, which the ground draws as ruts, and
+//     flatten the grass under them. A shell hit or a wreck burns into BLUE,
+//     the scorch layer that was already there, and takes the grass with it.
+//
+// The image is 1024 texels across the 30-unit yard, about 34 to a unit, so a
+// track's cleats are there to see. That is 64 times the pixels of `splatTex`.
+// Rather than paint that many in JavaScript, the sweep filters the small image
+// up on the GPU.
+// ---------------------------------------------------------------------------
+
+const GROUND = 1024;
+const YARD = CELL * MAP.length;
+
+const groundMask = three.compute.image({ width: GROUND, height: GROUND, format: 'rgba8' });
+
+// The same mapping the kernels use (`world_of` below), run the other way for
+// the script: which texel is under (x, z). Row 0 is the near edge, +Z,
+// because the plane's uv puts v = 0 there.
+const texelOf = (x, z) => [(x / YARD + 0.5) * GROUND, (0.5 - z / YARD) * GROUND];
+
+const sweep = three.compute.kernel(`
+image2d<rgba8> ground;
+Sampler2D pristine;
+
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+
+// Each thread fills a 4x4 block of texels, so the whole image is 65,536
+// threads rather than one per texel.
+fn void main(ComputeIn at) @compute @threads(8, 8, 1)
+{
+	int2 corner = int2(at.id.xy) * 4;
+	for (int y = 0; y < 4; y++)
+	{
+		for (int x = 0; x < 4; x++)
+		{
+			int2 px = corner + int2(x, y);
+			float2 uv = (float2(px) + float2(0.5, 0.5)) / ${GROUND}.0;
+			ground[px] = float4(pristine.sample_lod(uv, 0.0).rgb, 0.0);
+		}
+	}
+}`, { name: 'sweep' });
+
+// How many marks one dispatch carries. They travel in the push block rather
+// than in a buffer: writing a buffer is an upload the CPU waits for, and push
+// constants are recorded with the dispatch for nothing. A push block of 128
+// bytes is what every Vulkan device allows, and seven marks of 16 bytes plus
+// two words of bookkeeping fits in it. Four tanks and three explosions is a
+// busy frame, and a frame with more explosions than that leaves the rest for
+// the next one.
+const MARKS = 7;
+
+// How far a tank's tracks reach from its centre, in units: half the 1.6-long
+// footprint, and a little.
+const TREAD_REACH = 0.9;
+
+// How far a mark reaches in texels, the way the kernel's `reach_of` works it
+// out: a scorch its radius, a tank `TREAD_REACH`, and one texel of margin.
+const reachOf = (units) => Math.ceil(units * GROUND / YARD) + 1;
+
+const mark = three.compute.kernel(`
+image2d<rgba8> ground;
+
+// A mark is four numbers. A tank's tracks are (x, z, heading x, heading z).
+// A scorch is (x, z, radius, seed), and its bit in \`scorched\` says which kind
+// a mark is.
+struct Push @pushconstant
+{
+	float4 marks[${MARKS}];
+	uint count;
+	uint scorched;
+}
+Push push;
+
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+
+// Where on the yard a texel is, in world units, and the texel under a point:
+// the same mapping both ways.
+fn float2 world_of(int2 px)
+{
+	float2 uv = (float2(px) + float2(0.5, 0.5)) / ${GROUND}.0;
+	return float2(uv.x - 0.5, 0.5 - uv.y) * ${YARD.toFixed(1)};
+}
+
+fn int2 texel_of(float2 w)
+{
+	return int2(int(floor((w.x / ${YARD.toFixed(1)} + 0.5) * ${GROUND}.0)),
+		int(floor((0.5 - w.y / ${YARD.toFixed(1)}) * ${GROUND}.0)));
+}
+
+fn bool is_scorch(uint i)
+{
+	return ((push.scorched >> i) & 1u) != 0u;
+}
+
+// How many texels mark i reaches from its centre, in each direction.
+fn int reach_of(uint i)
+{
+	float units = is_scorch(i) ? push.marks[i].z : ${TREAD_REACH};
+	return int(ceil(units * ${(GROUND / YARD).toFixed(6)})) + 1;
+}
+
+// Whether a texel is inside mark i's square.
+fn bool covers(uint i, int2 px)
+{
+	int2 d = px - texel_of(push.marks[i].xy);
+	int r = reach_of(i);
+	return d.x >= -r && d.x <= r && d.y >= -r && d.y <= r;
+}
+
+// The dispatch is one slice per mark: \`id.z\` is the mark, and \`id.xy\` walks
+// the square of texels around it. A slice is as wide as the widest mark this
+// frame, so a thread past its own mark's square returns at once.
+fn void main(ComputeIn at) @compute @threads(8, 8, 1)
+{
+	uint own = at.id.z;
+	int r = reach_of(own);
+	int2 offset = int2(at.id.xy) - int2(r, r);
+	if (offset.x > r || offset.y > r) return;
+	int2 px = texel_of(push.marks[own].xy) + offset;
+	if (px.x < 0 || px.y < 0 || px.x >= ${GROUND} || px.y >= ${GROUND}) return;
+
+	// Two marks close together have overlapping squares, and a texel in both
+	// is reached by a thread in each slice. It belongs to the first mark that
+	// covers it, and every other thread leaves it alone, so each texel is
+	// written by exactly one thread and nothing races.
+	for (uint j = 0u; j < own; j++)
+	{
+		if (covers(j, px)) return;
+	}
+
+	// The thread that owns the texel folds EVERY mark into it, not only its
+	// own: the later mark whose square also covers it is counting on that.
+	// Three numbers in, three out, and one read and one write of the image.
+	float2 w = world_of(px);
+	float grass = 1.0;
+	float burn = 0.0;
+	float rut = 0.0;
+	for (uint i = 0u; i < push.count; i++)
+	{
+		float4 m = push.marks[i];
+		float2 d = w - m.xy;
+		if (is_scorch(i))
+		{
+			float k = length(d) / m.z;
+			if (k >= 1.0) continue;
+			float a = atan2(d.y, d.x);
+
+			// A ragged edge and streaks thrown outwards. They come from a few
+			// sines of the angle, with the seed turning each one, so no two
+			// scars match.
+			float edge = 0.8 + 0.12 * sin(a * 5.0 + m.w) + 0.08 * sin(a * 13.0 + m.w * 2.7);
+			float streak = 0.7 + 0.3 * sin(a * 23.0 + m.w * 5.1);
+			float b = (1.0 - smoothstep(edge * 0.45, edge, k)) * lerp(1.0, streak, smoothstep(0.25, 0.8, k));
+
+			// Scorched, the grass gone, and the earth churned as treads churn it.
+			grass = min(grass, 1.0 - b);
+			burn = max(burn, b);
+			rut = max(rut, 0.6 * b);
+		}
+		else
+		{
+			float2 ahead = m.zw;
+			float along = abs(dot(d, ahead));
+			float across = abs(dot(d, float2(-ahead.y, ahead.x)));
+
+			// The tracks the tank is drawn with: 0.28 wide, 0.62 either side of
+			// the middle, 1.6 long.
+			float track = (1.0 - smoothstep(0.11, 0.15, abs(across - 0.62))) * (1.0 - smoothstep(0.72, 0.8, along));
+			if (track <= 0.0) continue;
+
+			// Cleats, four to a unit. They are laid out from the yard's origin,
+			// not from the tank, so every frame's mark puts them in the same
+			// place and a tank driving over its own tracks leaves one clean row
+			// instead of a smear.
+			float cleat = smoothstep(0.25, 0.55, abs(frac(dot(w, ahead) * 4.0) - 0.5) * 2.0);
+			grass = min(grass, 1.0 - 0.85 * track);
+			rut = max(rut, track * (0.5 + 0.5 * cleat));
+		}
+	}
+	if (burn <= 0.0 && rut <= 0.0) return;
+
+	// Max and min rather than adding, so marking the same spot again changes
+	// nothing. A tank is marked every frame it moves, and its 1.6-unit
+	// footprint covers each texel a dozen times as it drives over.
+	float4 g = ground[px];
+	ground[px] = float4(g.r, min(g.g, grass), max(g.b, burn), max(g.a, rut));
+}`, { name: 'mark' });
+
+// The push block, built in place every frame: `marks` as floats, then the
+// count and the scorch bits after it. Handed to the dispatch as raw bytes,
+// which it sends as they are.
+const markBytes = new ArrayBuffer(MARKS * 16 + 16);
+const markFloats = new Float32Array(markBytes);
+const markWords = new Uint32Array(markBytes);
+const markPush = new Uint8Array(markBytes);
+
+// Scars waiting for the next frame: one { x, z, size, seed } per explosion.
+// The 'ground' system marks as many as fit and leaves the rest here.
+const scars = [];
+
+// The seed is worked out from where the scar is, not drawn from `three.seed`'s
+// stream. Drawing from the stream would change every random number after it,
+// so the match would no longer play out the way it did before the ground
+// remembered anything.
+function scar(x, z, size) {
+	scars.push({ x, z, size, seed: Math.abs(x * 12.9898 + z * 78.233) % 6.2832 });
+}
 
 // The eagle's plate: a pale star on dark metal.
 const eagleTex = paint(64, (u, v, x, y) => {
@@ -183,12 +407,17 @@ const fireRamp = ramp(64, [
 
 // The yard. No base map at all — the mesh's own colour is the bare earth, and
 // every layer paints over it through its own channel of the one mask.
+//
+// The mask is the image the kernels write. A material does not care that a
+// compute image is not a picture loaded from disk. It samples one the same way.
 const groundMat = new three.LayeredMaterial({
-	mask: splatTex,
+	mask: groundMask,
 	layers: [
 		{ name: 'dirt', mask: 'r', map: dirtTex, uvScale: 14 },
 		{ name: 'grass', mask: 'g', map: grassTex, uvScale: 18 },
-		// No map and no uv of its own: a tint through a mask is a stain.
+		// No map and no uv of its own: a tint through a mask is a stain. The
+		// ruts are only there where the treads have written alpha.
+		{ name: 'ruts', mask: 'a', tint: [0.50, 0.44, 0.38], blend: 'multiply' },
 		{ name: 'scorch', mask: 'b', tint: [0.20, 0.17, 0.15], blend: 'multiply' },
 	],
 });
@@ -464,8 +693,9 @@ class Tank extends three.Entity {
 	}
 
 	die() {
-		Blast.spawn([this.object.position.x, 0.7, this.object.position.z], 2.2, 0.75,
-			this.foe ? [1.0, 0.72, 0.34] : [1.0, 0.45, 0.30]);
+		const p = this.object.position;
+		Blast.spawn([p.x, 0.7, p.z], 2.2, 0.75, this.foe ? [1.0, 0.72, 0.34] : [1.0, 0.45, 0.30]);
+		scar(p.x, p.z, 1.7);
 		this.remove();
 	}
 }
@@ -496,6 +726,7 @@ class Bullet extends three.Entity {
 		this.dead = true;
 		const p = this.object.position;
 		Blast.spawn([p.x, p.y, p.z], size, 0.35, [1.0, 0.78, 0.42]);
+		scar(p.x, p.z, size * 0.75);
 		this.remove();
 	}
 }
@@ -547,6 +778,7 @@ Bullet.on('touch', Eagle, (shot, eagle) => {
 	if (G.over) return;
 	G.over = three.clock.time;
 	Blast.spawn([eagle.object.position.x, 1.0, eagle.object.position.z], 3.4, 1.1, [1.0, 0.5, 0.25]);
+	scar(eagle.object.position.x, eagle.object.position.z, 2.6);
 });
 
 // Two shells meeting in the air take each other out, as they always have.
@@ -587,6 +819,11 @@ function newRound() {
 	Tank.clear();
 	Eagle.clear();
 	eagleMat.layers[0].opacity = 0;
+
+	// The yard is swept: the ground goes back to how `splatTex` paints it, and
+	// any scars from the last frame of the old round go with the old round.
+	scars.length = 0;
+	sweep.dispatch({ ground: groundMask, pristine: splatTex }, { threads: [GROUND / 4, GROUND / 4] });
 
 	MAP.forEach((line, row) => {
 		[...line].forEach((c, col) => {
@@ -707,6 +944,63 @@ three.systems.frame('fire', (dt) => {
 	}
 });
 
+// The ground. Every tank that moved or turned since it was last marked presses
+// its tracks into the mask, and every explosion since the last frame leaves a
+// scar. All of it goes in one dispatch, of one slice of threads per mark. A
+// tank's slice is 72x72, so four tanks and a shell hit is about 26,000
+// threads, and no frame goes past seven slices of that size.
+//
+// This runs once a frame, not once a step. A tank covers less than a fifth of
+// a unit in a frame, and the footprint it marks is 1.6 long, so the tracks
+// still come out unbroken.
+//
+// A dispatch only records work. `submitAsync` sends it and does not wait. The
+// frame drawn next is queued behind it, so that frame already sees the new
+// marks, and the CPU never stops for the GPU.
+three.systems.frame('ground', () => {
+	let count = 0, scorched = 0, widest = 0;
+	const add = (x, z, a, b, reach) => {
+		markFloats.set([x, z, a, b], count * 4);
+		widest = Math.max(widest, reachOf(reach));
+		count++;
+	};
+
+	// A scar wider than a tank's tracks gets a frame to itself. Every slice is
+	// as wide as the widest mark, so a wreck sharing a frame with four tanks
+	// would make all five slices its size. The tanks skip that one frame, and
+	// their next mark still overlaps their last.
+	const small = (scar) => reachOf(scar.size) <= reachOf(TREAD_REACH);
+	if (scars.length > 0 && !small(scars[0])) {
+		const s = scars.shift();
+		scorched = 1;
+		add(s.x, s.z, s.size, s.seed, s.size);
+	} else {
+		for (const t of Tank) {
+			if (count === MARKS) break;
+			const p = t.object.position;
+			const last = t.printed;
+			if (last && last[0] === p.x && last[1] === p.z && last[2] === t.dir) continue;
+			t.printed = [p.x, p.z, t.dir];
+			add(p.x, p.z, DIRS[t.dir][0], DIRS[t.dir][1], TREAD_REACH);
+		}
+		while (count < MARKS && scars.length > 0 && small(scars[0])) {
+			const s = scars.shift();
+			scorched |= 1 << count;
+			add(s.x, s.z, s.size, s.seed, s.size);
+		}
+	}
+
+	if (count > 0) {
+		markWords[MARKS * 4] = count;
+		markWords[MARKS * 4 + 1] = scorched;
+		// One slice per mark, each as wide as the widest mark's square: 2r + 1
+		// texels, plus one in case the kernel's float rounding makes r one bigger.
+		const groups = Math.ceil((2 * widest + 2) / 8);
+		mark.dispatch({ ground: groundMask }, { workgroups: [groups, groups, count], push: markPush });
+	}
+	three.compute.submitAsync();
+});
+
 // The round. The eagle's ruin layer is the one `animated: true` layer in the
 // file, so this is a uniform write per frame rather than a new pipeline.
 three.systems.step('round', (dt) => {
@@ -785,5 +1079,6 @@ three.debug.write({
 	map: `${MAP[0].length}x${MAP.length} cells of ${CELL}`,
 	steel: Steel.count, brick: Brick.count, tanks: Tank.count,
 	materials: 'ground, brick x3 and eagle are LayeredMaterial; the fire is a ShaderMaterial',
+	ground: `${groundMask} written by the sweep and mark kernels, one mark dispatch a frame`,
 	stats: three.stats(),
 });
