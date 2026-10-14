@@ -7,28 +7,24 @@ A Three.js-shaped scene API over direct Vulkan.
 - [functions](functions.md) — Everything on `three` itself, keyed by its whole call.
 - [stats](stats.md) — What each number from `scene.stats()` counts.
 - [intersection](intersection.md) — The record a raycast or a pick answers with.
-- keys — The names `three.input` and `three.onKey` match against. This list is read out of the engine's own key table, so it is the list that actually matches.
+- keys — The names `three.input` and `three.onKey` match against. `three.input.keys()` lists them, read out of the engine's own key table, so it is the list that actually matches.
 - [example](examples.md#example) — A complete scene, with the draw-call count it ends on.
 - [exampleFromFile](examples.md#example-from-a-file) — The same, from a glTF file.
 
 ## How these files are used
 
-This folder is the one source of the API documentation. The [website](../site/) reads it directly.
-The engine cannot — it embeds JavaScript, not Markdown — so `tools/docs.mjs` compiles the folder into
-`src/js/prelude/docs.data.js`, and that is what `three.getApiDocs()`, `three.searchDocs()` and the
-`get_api_docs` MCP tool answer out of.
+This folder is the one source of the API documentation, and it is read as it is — nothing compiles
+it into the engine.
 
-That compiled module is **committed**, and no build step rewrites it. Edit the Markdown, run the
-compiler, commit both:
+- **Agents** read it over the MCP: `run_script`'s description names this folder's path on the
+  machine the server runs on, and an agent opens and greps the files with its own tools.
+- **A release** ships it beside the binary as `docs/`, which is the folder the server finds there.
+- **The website**, which lives in its own repository, compiles it into the API reference. Its
+  compiler is strict: a file it cannot read the way this page describes stops the site's build with
+  the file and the line, so keep to the layout below.
 
-```sh
-node tools/docs.mjs           # rewrite docs.data.js if anything changed
-node tools/docs.mjs --check   # what CI runs: fails if the committed module is stale
-node tools/docs.mjs --print   # the compiled object, as JSON
-```
-
-The compiler is strict. A file it cannot read the way this page describes stops the build with the
-file and the line, because an entry that quietly compiled to nothing would be worse.
+`test/docs_test.c3` checks the folder against the API: every export and every public member of an
+exported class needs its own entry here.
 
 ## The layout
 
@@ -75,9 +71,8 @@ Every drawable node whose bounding box reaches within radius of a point. ...
 The same, for a Box3, a { min, max } or a flat [minX, minY, minZ, maxX, maxY, maxZ].
 ```
 
-The heading is the entry's key, exactly as written — it is what
-`{ section: "functions.three.query.box(box, into)" }` asks for and what the website links to, so
-renaming one moves it. Entries come out in the order they are written.
+The heading is the entry's key, exactly as written — it is what an agent greps for and what the
+website links to, so renaming one moves it. Entries come out in the order they are written.
 
 Short entries can be a list instead, one per item, which is how `stats.md` is written:
 

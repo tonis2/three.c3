@@ -2,8 +2,7 @@
 
 A single binary that renders a scene described in JavaScript. The API is
 Three.js-shaped, but it is not Three.js — `SKILL.md` beside this file is the
-guide, and the reference is `docs/` here on disk or `three.getApiDocs()` from
-inside a run; they are the same text.
+guide, and the reference is `docs/` here on disk.
 
 ## Run it
 
@@ -54,9 +53,9 @@ a source checkout; from this folder it is `./three`.
 
 ## The reference
 
-`docs/` is the whole scripting API as Markdown, and it is the same text the
-engine answers `three.getApiDocs()` out of — the compiled copy inside the
-binary is generated from these files:
+`docs/` is the whole scripting API as Markdown, and the only copy of it: the
+binary carries none, and `--mcp` names this folder in `run_script`'s
+description so an attached agent reads it here:
 
     docs/differences.md   where this is not Three.js — read this one first
     docs/classes.md       the constructors, their properties and their methods
@@ -66,8 +65,8 @@ binary is generated from these files:
     docs/examples.md      a complete scene, with the draw calls it ends on
 
 `docs/README.md` indexes them. On disk they are greppable before a run starts,
-which is why they travel with the binary: an agent writing its first script
-against this bundle can read the API without one.
+so an agent writing its first script against this bundle can read the API
+without one.
 
 ## What is in here
 

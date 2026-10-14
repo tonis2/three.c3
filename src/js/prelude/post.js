@@ -117,7 +117,7 @@ export function postSpec(spec, wanted) {
 	const body = kind === 'compute' ? compute : fragment;
 	if (typeof body !== 'string' || body.trim().length === 0) {
 		throw new TypeError(
-			'a post pass needs a `fragment` body, or a `compute` entry point — see three.getApiDocs()'
+			'a post pass needs a `fragment` body, or a `compute` entry point — see three.setPost and three.addPass in docs/functions.md'
 		);
 	}
 	if (uniforms === null || typeof uniforms !== 'object') {

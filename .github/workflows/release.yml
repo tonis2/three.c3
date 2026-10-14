@@ -236,17 +236,16 @@ jobs:
           cp examples/*.js "$out/examples/"
           echo "examples: $count scripts"
 
-          # The API reference ships as well — the same Markdown the website is
-          # built from and the same text `three.getApiDocs()` answers out of,
-          # ~250 KB across seven files. The engine's copy is compiled into the
-          # binary by tools/docs.mjs and is reachable only from inside a run,
-          # so an agent handed this folder has nothing to read BEFORE it writes
-          # its first script; on disk it has the whole reference, and grep.
+          # The API reference ships as well: the Markdown in docs/, which is the
+          # only copy of it there is. The binary carries no docs of its own; its
+          # MCP server finds this folder beside the executable and names it in
+          # `run_script`'s description, so this is what an agent reads before
+          # it writes its first script.
           #
           # Guarded rather than `|| true` for the reason the examples are:
-          # README.md in this bundle points a reader at these files by name, so
-          # an empty docs/ would zip, upload and publish looking exactly like a
-          # full one.
+          # README.md in this bundle and the MCP point at these files by name,
+          # so an empty docs/ would zip, upload and publish looking exactly like
+          # a full one.
           doc_count=$({ ls docs/*.md 2>/dev/null || true; } | wc -l | tr -d ' ')
           [ "$doc_count" -gt 0 ] || {
             echo "::error::docs/ holds no .md files. README.md in this bundle"

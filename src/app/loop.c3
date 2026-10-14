@@ -524,7 +524,8 @@ fn void? live(
 	if (serving)
 	{
 		io::printfn("mcp: http://127.0.0.1:%d/mcp", port);
-		io::printn("     run_script, screenshot, get_api_docs");
+		io::printn("     run_script, screenshot");
+		io::printfn("     docs: %s", docs_location());
 	}
 	// Named as a game only when there is an entry module to boot; otherwise the
 	// directory is the root a `--script` loads out of, and naming a `main.js` that

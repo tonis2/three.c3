@@ -27,8 +27,8 @@
 
  The open brace carries no newline, so a stack trace's line numbers are the
  script's own. The cost is that a bare trailing expression is *not* the result —
- `return` it. That is stated in `getApiDocs()`, the one place this shape is
- visible from outside.
+ `return` it. `run_script`'s input schema says so (`src/mcp/server.c3`), the one
+ place this shape is visible from outside.
 
  `JS_EVAL_FLAG_ASYNC` would do this natively; quickjs.c3l's shim does not expose
  the flag, and reaching it would mean changing that submodule.
@@ -120,12 +120,9 @@ const uint JS_MAX_JOBS = 100_000;
  runtime, which for the files that *define* the API is worth more than editing
  them without a rebuild.
 
- `docs.data.js` is the one compiled from something else — `docs/`, by
- `tools/docs.mjs`. No build step regenerates it, deliberately: it is
- committed, and `node tools/docs.mjs --check` fails if it is not what the
- folder compiles to. That keeps it in the first category rather than the
- second — a file in the tree, as stale as anything else that is committed
- wrong, and never something a build quietly rewrote underneath you.
+ The API's docs are not among them. They are the Markdown in `docs/`, read
+ where it lies: the MCP server names the folder in `run_script`'s description,
+ and a release ships it beside the binary.
 *>
 const char[*] PRELUDE          = $embed("prelude/prelude.js");
 const char[*] PRELUDE_MATH     = $embed("prelude/math.js");
@@ -152,8 +149,6 @@ const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
 const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
 const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
-const char[*] PRELUDE_DOCS     = $embed("prelude/docs.js");
-const char[*] PRELUDE_DOCS_DATA = $embed("prelude/docs.data.js");
 
 <*
  The prelude's modules, by their `three:` specifiers.
@@ -167,7 +162,7 @@ const char[*] PRELUDE_DOCS_DATA = $embed("prelude/docs.data.js");
 *>
 fn qjs::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[26] parts;
+	static qjs::EmbeddedModule[24] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -193,8 +188,6 @@ fn qjs::EmbeddedModule[] prelude_parts()
 		{ "three:ui.js", (char[])PRELUDE_UI[..] },
 		{ "three:widget.js", (char[])PRELUDE_WIDGET[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
-		{ "three:docs.data.js", (char[])PRELUDE_DOCS_DATA[..] },
-		{ "three:docs.js", (char[])PRELUDE_DOCS[..] },
 	};
 	return parts[..];
 }

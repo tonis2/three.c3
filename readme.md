@@ -71,8 +71,9 @@ own `main.js`).
 ```
 
 `.mcp.json` in this repo already points there, so an agent session in a checkout picks it up.
-Three tools: `run_script` answers with everything the script logged, the scene's stats and a
-PNG of the frame; `screenshot` re-renders it; `get_api_docs` is the API, searchable.
+Two tools: `run_script` answers with everything the script logged, the scene's stats and a
+PNG of the frame, and `screenshot` re-renders it. The API is [`docs/`](docs/), and
+`run_script`'s description gives agents the path to it.
 
 ### Building
 
@@ -98,7 +99,5 @@ The API is written in [`docs/`](docs/) — start with
 
 Prebuilt binaries for macOS arm64, Linux x64 and Windows x64 are on the
 [releases page](https://github.com/tonis2/three.c3/releases).
-
-Website [here](tonis2.github.io/three.c3/)
 
 MIT licensed.

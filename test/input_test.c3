@@ -372,33 +372,6 @@ fn void asking_about_a_key_that_does_not_exist_throws() @test
 	};
 }
 
-<*
- The names an agent reads are the names the host searches.
-
- Two lists would drift the first time one gained a key, and the symptom would be
- a documented key that cannot be bound — which is worse than an undocumented one
- that can.
-*>
-fn void the_docs_list_the_whole_table() @test
-{
-	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
-	{
-		String count = @answer(run, "return three.getApiDocs().keys.length;");
-		defer count.free(mem);
-
-		DString expected;
-		expected.init(mem, 8);
-		defer expected.free();
-		expected.appendf("%d", three::KEY_NAMES.len)!!;
-
-		test::@check(
-			count == expected.str_view(),
-			"the docs list every row: %s of %s",
-			count, expected.str_view()
-		);
-	};
-}
-
 // ============================================================================
 // Handlers
 // ============================================================================
@@ -1337,23 +1310,6 @@ fn void an_async_click_handler_is_refused_at_registration() @test
 
 		test::@check(!result.ok, "an async click handler is refused where it was written");
 		test::@check(result.error.contains("synchronous"), "and says why: '%s'", result.error);
-	};
-}
-
-fn void the_docs_describe_the_click() @test
-{
-	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
-	{
-		String found = @answer(run, `
-			const d = three.getApiDocs({ all: true });
-			return [
-				'three.onClick(fn)' in d.functions,
-				'three.input.pointer' in d.functions,
-				Object.values(d.differences).some(s => s.includes('onClick')),
-			];
-		`);
-		defer found.free(mem);
-		test::@check(found == "[true,true,true]", "the click is documented where the rest is, got '%s'", found);
 	};
 }
 

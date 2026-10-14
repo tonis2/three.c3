@@ -11,7 +11,7 @@
  installs globals, modules see globals, and `import` is for the game's own code.
 
  The prelude is itself split into ES modules, and those live in the loader's
- embedded namespace — `three:math.js`, `three:docs.js` — answered from bytes
+ embedded namespace — `three:math.js`, `three:api.js` — answered from bytes
  embedded in the binary rather than from disk. Only a module already inside that
  space may import from it; a game writing `import 'three:math.js'` is refused
  like `../` past the root, because the prelude's internals are not API.

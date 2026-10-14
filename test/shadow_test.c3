@@ -700,7 +700,7 @@ fn char[] read_shadow_depth(three::Renderer* renderer)
  frame** that no material at all draws.
 
  **This is the check `g_shadow` exists to make passable.** `lambert(s.normal)` is
- how every material in this project, in `getApiDocs` and in `examples/` asks for
+ how every material in this project, in `docs/` and in `examples/` asks for
  the built-in light, so the shadow had to reach all of them — which is why it went
  inside `lambert` rather than into its signature. The failure that would otherwise
  be silent is a `ShaderMaterial` standing in its own light: the surface renders,
@@ -793,7 +793,7 @@ fn void a_shader_material_draws_the_same_shadowed_frame() @test
  the whole of the built-in shading until there was a highlight; now the built-in
  is a diffuse half the metalness takes away and a specular half it gives back, and
  `standard(s)` is the name for both of them together. If that name is not exactly
- what `material.shady` computes then the sentence in `getApiDocs` — "standard(s) IS
+ what `material.shady` computes then the sentence in `docs/` — "standard(s) IS
  the built-in shading, whole" — is a comment rather than a fact, and a material
  written to look like the default would be subtly not.
 

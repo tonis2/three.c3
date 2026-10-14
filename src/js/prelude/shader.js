@@ -222,7 +222,7 @@ export class ShaderMaterial extends Material {
 			throw new TypeError('`fragment` wants a shady body — `return s.albedo;`, or fn float3 shade(Surface s) { ... }');
 		}
 		if (fragment.trim().length === 0 && vertex.trim().length === 0) {
-			throw new TypeError('a ShaderMaterial needs a `fragment` or a `vertex` body — see three.getApiDocs()');
+			throw new TypeError('a ShaderMaterial needs a `fragment` or a `vertex` body — see ShaderMaterial in docs/classes.md');
 		}
 		// A displacement the frustum does not know about is geometry that
 		// vanishes at the edge of the screen and comes back when the camera

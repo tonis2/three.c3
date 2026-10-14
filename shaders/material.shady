@@ -556,7 +556,7 @@ fn float3 lambert(Surface s, float3 normal, float occlusion)
 }
 
 // The same light with nothing occluding it, which is every body ever written
-// here: `lambert(s, s.normal)` is the line in `getApiDocs` and in every material
+// here: `lambert(s, s.normal)` is the line in `docs/` and in every material
 // this project ships, once the surface it reads and the normal it takes are
 // spelled as arguments.
 fn float3 lambert(Surface s, float3 normal)

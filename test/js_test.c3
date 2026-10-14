@@ -263,20 +263,6 @@ fn void scripts_do_not_leak_declarations_into_each_other() @test
 // The scene, from JavaScript
 // ============================================================================
 
-fn void the_docs_describe_the_surface() @test
-{
-	@with_js(; three::JsRuntime* run)
-	{
-		three::RunResult result = run.run("return three.getApiDocs();");
-		defer result.free();
-
-		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value.contains("drawCalls"), "the stats block is described");
-		test::@check(result.value.contains("Exactly one scene is rendered at a time"),
-			"and so is every divergence from Three.js");
-	};
-}
-
 <*
  An object is not in the scene until it is added — Three.js's rule, and the one
  that stops an unadded mesh from quietly rendering.
@@ -2799,7 +2785,7 @@ fn void disposing_a_handle_does_not_disturb_a_material_using_it() @test
 <*
  A `ShaderMaterial` can wear a map too, and it arrives as `Surface.albedo`.
 
- Documented in `getApiDocs` and true for a reason that is easy to lose:
+ Documented in `docs/` and true for a reason that is easy to lose:
  `material.shady` samples the material's base map through `map_at` and folds the
  sample into `s.albedo` before the agent's body runs — so a body that never
  mentions a texture gets one anyway. Nothing else in
@@ -3231,73 +3217,6 @@ fn void a_plain_array_works_and_a_wrong_count_says_both_numbers() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == "[2,true,true,true,true,true]",
 			"an Array is widened, and each refusal says which one it is; got %s", result.value);
-	};
-}
-
-<*
- Every name the API exposes is documented where it belongs.
-
- `the_docs_describe_the_surface` checks that the dump contains two string
- literals, which asserts that docs exist rather than that they are true: adding
- `ShaderMaterial` and never mentioning it passed that test green. `plan.md` §4
- calls `getApiDocs()` the cheapest possible mitigation for the agent not having
- memorized this API, and a doc that has silently stopped covering the surface is
- worth less than none, because it is trusted.
-
- So this asks the surface itself — the module's exports, and every public member
- of every exported class walked off the prototype chain — and requires each to be
- documented *in its own entry*. A sweep of the whole dump was written first and
- was too weak to catch anything: renaming the `ShaderMaterial` entry to
- `_ShaderMaterialUndocumented` still contains the string `ShaderMaterial`, and
- prose in `differences` mentioning a class counted as documenting it.
-*>
-fn void the_docs_name_everything_the_api_exposes() @test
-{
-	@with_js(; three::JsRuntime* run)
-	{
-		three::RunResult result = run.run(`
-			// The whole object, not the index: this asks whether every name the
-			// API exposes has PROSE behind it, and the index answers with names.
-			const docs = three.getApiDocs({ all: true });
-			const elsewhere = JSON.stringify(docs.functions) + JSON.stringify(Object.keys(docs.classes));
-
-			const members = (ctor) => {
-				const out = new Set();
-				let p = ctor.prototype;
-				while (p && p !== Object.prototype) {
-					for (const n of Object.getOwnPropertyNames(p)) {
-						if (n !== 'constructor' && !n.startsWith('_')) out.add(n);
-					}
-					p = Object.getPrototypeOf(p);
-				}
-				return [...out];
-			};
-
-			const missing = [];
-			for (const name of Object.keys(three)) {
-				const exported = three[name];
-				const isClass = typeof exported === 'function' && /^[A-Z]/.test(name);
-				if (!isClass) {
-					if (!elsewhere.includes(name)) missing.push(name);
-					continue;
-				}
-				const entry = docs.classes[name];
-				if (!entry) { missing.push('classes.' + name); continue; }
-				const text = JSON.stringify(entry);
-				for (const m of members(exported)) {
-					if (!text.includes(m)) missing.push(name + '.' + m);
-				}
-			}
-			return missing;
-		`);
-		defer result.free();
-
-		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(
-			result.value == "[]",
-			"every exported name is documented in its own entry; these are not: %s",
-			result.value
-		);
 	};
 }
 

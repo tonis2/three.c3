@@ -15,7 +15,7 @@
  `c3w::EventKey` is an enum of X11 keycodes, which is the right identity for a
  host and the wrong one for a script. `KEY_NAMES` maps the strings an agent will
  actually type — the browser's `KeyboardEvent.key`, lowercased — onto it, and the
- same table is what `get_api_docs` lists.
+ same table is what `three.input.keys()` lists.
 
  An unknown name *throws* rather than reporting a key that is never down. A typo
  that silently never fires is the worst failure here: nothing is broken, nothing

@@ -672,7 +672,7 @@ fn void js_input_text(
  Every name, in table order, as an array of strings.
 
  Answered from the table rather than written out beside it, which is the whole
- reason it exists: `get_api_docs` calls this, so the list an agent reads and the
+ reason it exists: `three.input.keys()` calls this, so the list a script reads and the
  list `find_key` searches cannot drift.
 *>
 fn void js_key_names(

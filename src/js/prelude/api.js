@@ -41,7 +41,6 @@ import { cooldown, Cooldown } from './cooldown.js';
 import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { ui } from './ui.js';
 import { Widget, nodes as uiNodes, unmountAll as unmountAllWidgets } from './widget.js';
-import { docsQuery, docsSearch } from './docs.js';
 
 const H = globalThis.__three;
 
@@ -3070,17 +3069,6 @@ export const three = {
 	//   kernel.run({ a, out }, { threads: 1024, push: { scale: 2 } })
 	//   console.log(out.f32(0))
 	compute,
-
-	// The documentation, designed to be READ rather than dumped. With no
-	// argument this is the index — everything short in full, and the names of
-	// the classes and functions; `{ search }` is the grep over the whole
-	// surface, `{ section }` the drill-down, `{ all: true }` the old answer.
-	// The prose is Markdown under `docs/`, compiled into the data `docs.js`
-	// walks, and the MCP tool calls this rather than reimplementing it, so an
-	// agent asking over JSON-RPC and a script asking here read the same docs
-	// the same way.
-	getApiDocs(options) { return docsQuery(options); },
-	searchDocs(term) { return docsSearch(term); },
 };
 
 // Shared by both, including the async refusal: a key handler runs inside a

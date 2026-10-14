@@ -597,22 +597,6 @@ On Wayland the size never reads back — the surface answers "whatever the swapc
 drawable stays what the process booted at and the compositor scales it. X11, macOS and Windows track
 it. Under `--headless` sizes are zero, `fullscreen` is false and `resize` returns false.
 
-## three.getApiDocs(options)
-
-This documentation, four ways.
-
-- No argument — the index: the summary, every difference from Three.js, the stats block, the key
-  names, the examples, and the names of the classes and functions. About a quarter of the whole, and
-  the part read every time.
-- `{ search: "shadow" }` — the grep: every entry whose name or prose mentions a word, in full, keyed
-  by the path that asks for it again.
-- `{ section: "classes.ShaderMaterial" }` — one entry or one whole section. A bare `"ShaderMaterial"`
-  is found too.
-- `{ all: true }` — everything at once.
-
-Over MCP these are `get_api_docs`'s arguments, plus a `path` that writes the whole surface to a
-Markdown file — one heading per entry — which is how you grep it with your own tools.
-
 ## three.nextFrame()
 
 A promise that resolves after the next frame has been drawn.
@@ -632,17 +616,6 @@ The system clipboard, as text.
 - `three.clipboard.read()` answers with what it holds, and `''` when it holds no text.
 
 `read` asks whichever program owns the clipboard and waits for its answer. Where there is no system clipboard (headless, or a process with no window) both work on a clipboard kept inside the process, so a copy and paste inside one script still round-trips.
-
-## three.searchDocs(term)
-
-Where does the API mention X, over the whole documentation rather than only the differences.
-
-Answers `{ query, matches, entries }`, where `entries` maps a path like `classes.ConvexGeometry` or
-`functions.three.load(path)` to the text at it. One answer is capped, and anything that did not fit
-is named in `notShown` rather than dropped silently.
-
-`three.searchDocs("keyboard")` finds the headless-has-no-keyboard note without dumping the whole
-documentation object. Same thing as `three.getApiDocs({ search: term })`.
 
 ## three.budget
 

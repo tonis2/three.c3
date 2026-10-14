@@ -3,7 +3,7 @@
 
  three [options]
 
- --mcp [port]          serve run_script/screenshot/get_api_docs (default 8808)
+ --mcp [port]          serve run_script/screenshot (default 8808)
  --mcp-stdio [port]    relay stdin/stdout to a three that is already serving
  --screenshot <path>   render one frame, write a PNG, exit
  --width <n>           the window's size in points, or the render size headless

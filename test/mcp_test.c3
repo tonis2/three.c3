@@ -1,5 +1,5 @@
 <*
- The three tools, driven over the wire in-process.
+ The two tools, driven over the wire in-process.
 
 	`c3c test --trust=full --test-noleak --test-filter three_tests::mcp`
 
@@ -225,13 +225,14 @@ fn void the_server_introduces_itself() @test
 }
 
 <*
- Three tools, and the count is asserted rather than the names alone.
+ Two tools, and the count is asserted rather than the names alone.
 
- `plan.md` §5 is specific that there are three and no more: every scene verb is
- already a JavaScript call, so a fourth tool would be a second spelling of
- something `run_script` can do and one more thing to keep in step.
+ Every scene verb is already a JavaScript call, so a third tool would be a second
+ spelling of something `run_script` can do and one more thing to keep in step.
+ The docs are not a tool either: they are the Markdown in `docs/`, which
+ `run_script`'s description points at.
 *>
-fn void there_are_exactly_three_tools() @test
+fn void there_are_exactly_two_tools() @test
 {
 	@with_server(; mcp::Server* server)
 	{
@@ -240,8 +241,30 @@ fn void there_are_exactly_three_tools() @test
 
 		test::@check(response.contains(`"run_script"`), "run_script is listed");
 		test::@check(response.contains(`"screenshot"`), "screenshot is listed");
-		test::@check(response.contains(`"get_api_docs"`), "get_api_docs is listed");
-		test::@check(count_of(response, `"inputSchema"`) == 3, "and nothing else is: %s", response);
+		test::@check(count_of(response, `"inputSchema"`) == 2, "and nothing else is: %s", response);
+	};
+}
+
+<*
+ `run_script` names the folder the docs are in, and the folder is there.
+
+ The test binary is `build/testrun`, so it is the checkout's own `docs/` that is
+ found, one level above the executable — the same step `build/three` takes.
+*>
+fn void run_script_points_at_the_docs_folder() @test
+{
+	String docs = three::docs_location();
+	test::@check(!docs.starts_with("https://"), "a checkout finds its docs on disk, not online: %s", docs);
+	test::@check(file::is_file(string::tformat("%s/functions.md", docs)), "%s holds functions.md", docs);
+	test::@check(file::is_file(string::tformat("%s/README.md", docs)), "and README.md");
+
+	@with_server(; mcp::Server* server)
+	{
+		String response = ask(server, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`);
+		defer response.free(mem);
+
+		test::@check(response.contains(docs), "run_script's description names %s: %s", docs, response);
+		test::@check(response.contains("differences.md"), "and the file to read first");
 	};
 }
 
@@ -276,132 +299,6 @@ fn void an_unknown_method_is_refused() @test
 // ============================================================================
 // The tools
 // ============================================================================
-
-<*
- A bare ask is the index: everything short, and the names of everything long.
-
- The whole object is about 113 KB, which is thirty thousand tokens spent before
- a line is written, so the default answer carries the sections that are read
- every time — the differences, the stats block, the examples — and turns the 83
- KB of class and function prose into a list of names. `three.load(path)`'s note
- is the marker for that prose: it is in the dump and must not be in the index.
-*>
-fn void get_api_docs_answers_with_an_index() @test
-{
-	@with_server(; mcp::Server* server)
-	{
-		String response = call(server, "get_api_docs", "{}");
-		defer response.free(mem);
-
-		test::@check(response.contains("drawCalls"), "the stats block is in there");
-		test::@check(response.contains("three.Mesh"), "and the differences");
-		test::@check(response.contains("Exactly one scene is rendered at a time"),
-			"and the divergences: %s", response);
-		test::@check(response.contains("ShaderMaterial"), "the class NAMES are there");
-		test::@check(
-			!response.contains("Read a `.glb` or `.gltf`"),
-			"but not the prose behind them: %s",
-			response
-		);
-		test::@check(response.contains("This is the INDEX"), "and it says so, with how to ask again");
-	};
-}
-
-<*
- `all` is the old answer, whole, for a caller with the room for it.
-*>
-fn void get_api_docs_still_dumps_everything_when_asked() @test
-{
-	@with_server(; mcp::Server* server)
-	{
-		String response = call(server, "get_api_docs", `{"all":true}`);
-		defer response.free(mem);
-
-		test::@check(response.contains("Read a `.glb` or `.gltf`"), "the function prose is in there");
-		test::@check(response.contains("drawCalls"), "and the stats block: %s", response[:512]);
-	};
-}
-
-<*
- `search` is the grep the embedded docs otherwise cannot have.
-
- Hits are keyed by the path `section` takes, so an answer is both the fact and
- the way to ask for its neighbours. The check that matters is the negative one:
- a narrow search must not quietly become the dump again.
-*>
-fn void get_api_docs_searches_the_whole_surface() @test
-{
-	@with_server(; mcp::Server* server)
-	{
-		String response = call(server, "get_api_docs", `{"search":"convex hull"}`);
-		defer response.free(mem);
-
-		test::@check(response.contains("classes.ConvexGeometry"), "the class is a hit");
-		test::@check(response.contains("differences.convex-geometry"), "and so is the difference");
-		test::@check(response.contains("the bound of a scan"), "with the prose, not just the name");
-		test::@check(
-			!response.contains("Read a `.glb` or `.gltf`"),
-			"and nothing that does not match: %s",
-			response
-		);
-	};
-}
-
-<*
- `section` opens one name — by its path, or by the bare name read off the index.
-*>
-fn void get_api_docs_opens_one_section() @test
-{
-	@with_server(; mcp::Server* server)
-	{
-		String full = call(server, "get_api_docs", `{"section":"classes.ConvexGeometry"}`);
-		defer full.free(mem);
-		test::@check(full.contains("the bound of a scan"), "the entry came back: %s", full);
-		test::@check(!full.contains("drawCalls"), "and only that entry");
-
-		// The name as the index spells it, which is the name an agent has just
-		// read when it asks.
-		String bare = call(server, "get_api_docs", `{"section":"ConvexGeometry"}`);
-		defer bare.free(mem);
-		test::@check(bare.contains("classes.ConvexGeometry"), "a bare name resolves: %s", bare);
-
-		String missing = call(server, "get_api_docs", `{"section":"NoSuchThing"}`);
-		defer missing.free(mem);
-		test::@check(missing.contains("No entry by that name"), "and a miss says so: %s", missing);
-	};
-}
-
-<*
- `path` puts the docs on disk, which is the other half of being greppable.
-
- The answer is the path and the size rather than the docs: handing back 113 KB
- beside "it is in a file you can grep" would undo the reason for the file.
-*>
-fn void get_api_docs_writes_a_file_to_grep() @test
-{
-	String path = "build/api_docs.md";
-	defer (void)file::delete(path);
-
-	@with_server(; mcp::Server* server)
-	{
-		String response = call(server, "get_api_docs", `{"path":"build/api_docs.md"}`);
-		defer response.free(mem);
-
-		test::@check(response.contains(path), "the answer names the file: %s", response);
-		test::@check(!response.contains("Read a `.glb` or `.gltf`"), "and is not the docs themselves");
-
-		char[]? written = file::load(mem, path);
-		test::@check(@ok(written), "the file is there");
-		if (try bytes = written)
-		{
-			defer free(bytes);
-			String markdown = (String)bytes;
-			test::@check(markdown.contains("### classes.ConvexGeometry"), "one heading per entry");
-			test::@check(markdown.contains("the bound of a scan"), "with the prose under it");
-			test::@check(markdown.contains("Read a `.glb` or `.gltf`"), "and the whole surface in it");
-		}
-	};
-}
 
 <*
  M3's done condition (`plan.md` §5): the tier-1 example arrives over JSON-RPC as
