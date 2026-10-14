@@ -192,9 +192,9 @@ jobs:
           # No shaders/ and no launcher. src/shader/load.c3 carries the shader
           # sources in the binary and the compiler is linked in, so the only
           # file that has to travel BESIDE the executable is, on macOS, the
-          # driver. Everything else in the zip — SKILL.md, LICENSE,
-          # README.md, docs/ and examples/ — is documentation, not linkage, and
-          # its absence costs a reader rather than breaking a run.
+          # driver. Everything else in the zip — LICENSE, README.md, docs/ and
+          # examples/ — is documentation, not linkage, and its absence costs a
+          # reader rather than breaking a run.
 
           # macOS arm64 is the only platform that bundles a driver; setup.sh
           # skips the fetch everywhere else and Linux/Windows use the system's.
@@ -205,7 +205,7 @@ jobs:
             ./packaging/stage-libs.sh "lib/vulkan.c3l/${{ matrix.target }}" "$out"
           fi
 
-          cp SKILL.md LICENSE "$out/" 2>/dev/null || true
+          cp LICENSE "$out/"
           cp packaging/bundle-README.md "$out/README.md"
 
           # The examples ship too. They are five self-contained scripts, ~156 KB
@@ -215,9 +215,7 @@ jobs:
           # makes them cheap enough to bundle; an example that wanted a .glb
           # would not be.
           #
-          # Guarded rather than `|| true` like the line above it, and the
-          # difference is what the failure costs: a missing SKILL.md is a
-          # missing file, but an empty examples/ zips, uploads and publishes
+          # Guarded, because an empty examples/ zips, uploads and publishes
           # looking exactly like a full one, against a README that promises
           # five scenes by name.
           # `|| true` inside the substitution for the reason publish-static.sh

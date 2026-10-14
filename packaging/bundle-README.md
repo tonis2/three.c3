@@ -1,8 +1,8 @@
 # three
 
 A single binary that renders a scene described in JavaScript. The API is
-Three.js-shaped, but it is not Three.js — `SKILL.md` beside this file is the
-guide, and the reference is `docs/` here on disk.
+Three.js-shaped, but it is not Three.js — the reference is `docs/` here on
+disk. Start with `docs/README.md`, then `docs/differences.md`.
 
 ## Run it
 
@@ -72,7 +72,6 @@ without one.
 
     three            the engine, with the shader compiler linked in
     libvulkan_*      the GPU driver (macOS only — see below)
-    SKILL.md         the guide
     docs/            the API reference — see above
     examples/        five scenes to run — see below
     LICENSE
@@ -145,7 +144,8 @@ start drops from about 3.5 seconds to 1.6.
 `--mcp` works in every build, including this one. `three --mcp` serves the agent
 tools on 127.0.0.1:8808 and composes with everything else — `three --assets
 ./game --mcp` plays the game and answers tool calls against the same scene, in
-the same loop. `SKILL.md` beside this file is what to hand the agent.
+the same loop. There is nothing to hand the agent: `run_script`'s description
+names the `docs/` folder beside the binary, and the agent reads the API there.
 
 Nothing outside your machine can reach it: the port is bound on the loopback
 address only.
