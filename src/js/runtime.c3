@@ -673,6 +673,9 @@ fn void JsRuntime.close(&self)
 	// held by a *handle* rather than by a callback: the images this context's
 	// `Texture` objects own, which will never be disposed now that the context
 	// is going. See `release_script_textures`.
+	// After whatever the kernels still owe has run: a compute image is a texture,
+	// and a dispatch recorded and not yet submitted may name one this releases.
+	if (self.renderer != null) flush_compute(self);
 	self.release_script_textures();
 	// And the compute buffers and kernels, which are the same case again: a
 	// script's `three.compute` objects are handles, and a run that made them and

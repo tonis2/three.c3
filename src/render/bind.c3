@@ -92,13 +92,31 @@ struct SampledBindings
 *>
 fn void SampledBindings.add(&self, uint binding, vk::DescriptorImageInfo info)
 {
+	self.add_typed(binding, info, DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+}
+
+<*
+ Adds one storage image at one binding: no sampler, and `GENERAL`, the one
+ layout a shader may both read and write an image in.
+
+ Here rather than in a second struct because a compute post pass pushes both
+ kinds in one call - its samplers and its output are bindings of the same set -
+ and one array of writes is what `vkCmdPushDescriptorSetKHR` takes.
+*>
+fn void SampledBindings.add_storage(&self, uint binding, vk::ImageView view)
+{
+	self.add_typed(binding, { .imageView = view, .imageLayout = IMAGE_LAYOUT_GENERAL }, DESCRIPTOR_TYPE_STORAGE_IMAGE);
+}
+
+fn void SampledBindings.add_typed(&self, uint binding, vk::DescriptorImageInfo info, vk::DescriptorType type)
+{
 	if (self.count >= MAX_SAMPLED_BINDINGS) return;
 
 	self.infos[self.count] = info;
 	self.writes[self.count] = vk::writeDescriptorSet().setDstBinding(binding)
-		.setDescriptorType(
-			DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-		)/* A one-element slice of the struct's own array, so the pointer this *//* stores outlives the expression — see the struct's note. */
+		.setDescriptorType(type)
+		// A one-element slice of the struct's own array, so the pointer this
+		// stores outlives the expression — see the struct's note.
 		.setImageInfo(self.infos[self.count:1]);
 	self.count++;
 }
@@ -179,6 +197,11 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
 	if (found.set != 0) return 0;
 	if (found.binding < first) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
+	// A sampler, and nothing else that happens to sit above `first`: a compute
+	// post pass's `output` and its own images are bindings of the same set, and
+	// `post.textures.output = tex` must be refused rather than land a sampled
+	// texture in a storage-image slot.
+	if (found.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) return 0;
 	return found.binding;
 }
 
@@ -195,15 +218,19 @@ fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
  So the reserved bindings ask the same question the agent's own do
  (`sampler_binding_of`), by index instead of by name.
 
- @param binding : `An absolute binding index. 0 and 1 are the only callers today.`
+ @param binding : `An absolute binding index.`
+ @param type : `What kind of descriptor the binding must be. A storage image is asked for by the compute post pass's output and its own images.`
 *>
-fn bool pipeline_declares_binding(MeshPipeline* pipeline, uint binding)
+fn bool pipeline_declares_binding(
+	MeshPipeline* pipeline,
+	uint binding,
+	vk::DescriptorType type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 {
 	if (pipeline == null) return false;
 	foreach (declared : pipeline.shader.bindings)
 	{
 		if (declared.set != 0 || declared.binding != binding) continue;
-		return declared.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		return declared.type == type;
 	}
 	return false;
 }
@@ -219,5 +246,7 @@ fn void SampledBindings.push(&self, vk::CommandBuffer cmd, MeshPipeline* pipelin
 {
 	if (self.count == 0) return;
 
-	vk::cmdPushDescriptorSetKHR(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, self.count, &self.writes[0]);
+	// The pipeline's own bind point: a compute post pass pushes through the same
+	// struct, and a push against the wrong point is a set the dispatch never sees.
+	vk::cmdPushDescriptorSetKHR(cmd, pipeline.bind_point, pipeline.layout, 0, self.count, &self.writes[0]);
 }

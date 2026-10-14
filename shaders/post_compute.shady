@@ -1,0 +1,132 @@
+// The compute post pass: `post.shady`'s contract, dispatched rather than drawn.
+//
+// **No entry point here.** The script writes it - `fn void main(PostThread t)
+// @compute @threads(8, 8, 1)` - because the things a compute pass exists for are
+// the things only the entry point says: the workgroup's shape, its `shared`
+// memory, where it puts a `barrier()`. The engine reads the workgroup back out of
+// the module and dispatches enough of them to cover the frame.
+//
+// What the fragment template hands a body as `Post p`, this hands as functions
+// and resources a body calls by name:
+//
+//  - the four images the chain reserves, at the same bindings as `post.shady`:
+//    what the pass before wrote, the rendered scene, the depth buffer, and the
+//    pass named by `reads`. Read them by pixel with `color_at(px)` and its
+//    siblings, or filtered with `sample_prev(uv)` - never with `Sample`, whose
+//    level comes from screen-space derivatives a compute shader does not have.
+//  - `output`, the pass's destination, an `rgba16f` storage image the size of
+//    the frame. A body writes it at every pixel it covers - `output[px] = ...` -
+//    and a pass that never writes it is a *side pass*, which writes only its own
+//    images and leaves the frame as the pass before it left it.
+//  - `resolution()`, `time()`, `uniforms()`, and the depth in world units.
+//
+// `inside(px)` is the guard every body wants: a dispatch is whole workgroups, so
+// the last row and column of groups run past the edge of a frame whose size is
+// not a multiple of `@threads`. Return before a `barrier()` only if the whole
+// workgroup returns with you.
+
+import "noise.shady";
+
+// The same four as `post.shady`, at the same numbers: a chain mixes the two kinds
+// of pass, and the chain binds by number.
+Sampler2D prev @set(0) @binding(0);
+Sampler2D scene @set(0) @binding(1);
+Sampler2D depth_buffer @set(0) @binding(2);
+Sampler2D tap_image @set(0) @binding(3);
+
+// The destination. Binding 8 is `POST_OUTPUT_BINDING`: past the four reserved
+// samplers and the four the script may declare, so neither kind of pass has to
+// renumber anything for the other.
+image2d<rgba16f> output @set(0) @binding(8);
+
+// Where this invocation is. `id.xy` is the pixel for a pass dispatched over the
+// frame, which is every pass that names no `threads`.
+struct PostThread
+{
+	uint3 id @builtin(global_invocation_id);
+	uint3 local @builtin(local_invocation_id);
+	uint3 group @builtin(workgroup_id);
+}
+
+// The frame's extent in pixels.
+fn float2 resolution()
+{
+	return push.info.xy;
+}
+
+// Seconds since this pass was set, on the game clock.
+fn float time()
+{
+	return push.info.z;
+}
+
+// The script's uniforms, as the fragment template's `p.uniforms`.
+fn Uniforms uniforms()
+{
+	return push.uniforms;
+}
+
+// Whether a pixel is in the frame. The guard for the partial workgroups at the
+// right and bottom edges.
+fn bool inside(int2 px)
+{
+	return px.x >= 0 && px.y >= 0 && px.x < int(push.info.x) && px.y < int(push.info.y);
+}
+
+// The pixel's centre, 0..1 across the frame, (0, 0) at the top left: the `uv` a
+// fragment pass's `p.uv` would be at the same pixel.
+fn float2 uv_of(int2 px)
+{
+	return (float2(px) + float2(0.5, 0.5)) / push.info.xy;
+}
+
+// One pixel of each source, exactly - no filtering, no edge handling. A pixel off
+// the frame is undefined; clamp first if a kernel steps past the edge.
+fn float3 color_at(int2 px)
+{
+	return prev.load(px, 0).rgb;
+}
+
+fn float3 scene_at(int2 px)
+{
+	return scene.load(px, 0).rgb;
+}
+
+fn float3 tap_at(int2 px)
+{
+	return tap_image.load(px, 0).rgb;
+}
+
+// The same sources filtered at a uv: bilinear, clamped at the edge, which is
+// what a blur stepping between pixels or off the frame wants.
+fn float3 sample_prev(float2 uv)
+{
+	return prev.sample_lod(uv, 0.0).rgb;
+}
+
+fn float3 sample_scene(float2 uv)
+{
+	return scene.sample_lod(uv, 0.0).rgb;
+}
+
+fn float3 sample_tap(float2 uv)
+{
+	return tap_image.sample_lod(uv, 0.0).rgb;
+}
+
+// A device depth undone into world units: `post.shady`'s reconstruction, the
+// same guard against planes that are not set yet included.
+fn float linear_depth(float d)
+{
+	float near = push.planes.x;
+	float far = push.planes.y;
+	float span = far - d * (far - near);
+	return span > 1e-6 ? near * far / span : far;
+}
+
+// How far the surface at this pixel is from the camera, along the view, in world
+// units - `p.depth`.
+fn float depth_at(int2 px)
+{
+	return linear_depth(depth_buffer.load(px, 0).r);
+}

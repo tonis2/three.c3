@@ -88,6 +88,11 @@ fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
 	self.bind(host, "computeFill", &js_compute_fill, 5);
 	self.bind(host, "computeBarrier", &js_compute_barrier, 0);
 	self.bind(host, "computeLimits", &js_compute_limits, 0);
+	self.bind(host, "computeCreateImage", &js_compute_create_image, 4);
+	self.bind(host, "computeReadImage", &js_compute_read_image, 2);
+	self.bind(host, "computeWriteImage", &js_compute_write_image, 2);
+	self.bind(host, "computeFreeImage", &js_compute_free_image, 1);
+	self.bind(host, "computeKernelBindings", &js_compute_kernel_bindings, 1);
 }
 
 // --- Handles -----------------------------------------------------------------
@@ -196,7 +201,7 @@ fn StorageBuffer* JsRuntime.storage_buffer_of(&self, int encoded)
  recorded command names is freed. A failed submit is a lost device, and the
  free that follows is then the least of anybody's problems.
 *>
-fn void flush_compute(JsRuntime* self) @local
+fn void flush_compute(JsRuntime* self)
 {
 	if (self.renderer == null) return;
 	if (catch self.renderer.compute.submit()) { }
@@ -649,18 +654,43 @@ fn void install_kernel(
 	ComputeKernel* kernel = alloc::new(mem, ComputeKernel);
 	if (catch err = kernel.create(compute, shader, name, entry))
 	{
+		// Whatever `create` got as far as making - a name, a set layout - goes
+		// with it; every field is null until it is made.
+		kernel.free(self.renderer.gpu.handle);
 		alloc::free(mem, kernel);
 		self.kernel_slots[index].live = false;
 		GpuLimits* limits = &self.renderer.gpu.limits;
-		*out = err == COMPUTE_UNSUPPORTED_SUBGROUP_SIZE
-			? js.raise(string::tformat(
-				"%s is written for a subgroup of %d lanes, and this device %s", name, shader.subgroup_size,
-				limits.subgroup_size_control
-					? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
-					: "cannot be asked for a subgroup size"))
-			: js.raise(string::tformat(
-				"%s has no usable compute entry point `%s`, or binds something other than storage buffers",
-				name, entry));
+		switch (err)
+		{
+			case COMPUTE_UNSUPPORTED_SUBGROUP_SIZE:
+				*out = js.raise(string::tformat(
+					"%s is written for a subgroup of %d lanes, and this device %s", name, shader.subgroup_size,
+					limits.subgroup_size_control
+						? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
+						: "cannot be asked for a subgroup size"));
+			case COMPUTE_KERNEL_NO_ENTRY:
+				*out = js.raise(string::tformat("%s has no compute entry point `%s`", name, entry));
+			case COMPUTE_UNSUPPORTED_BINDING:
+				*out = js.raise(string::tformat(
+					"%s binds something a kernel cannot: storage buffers, storage images (image2d<...>) and "
+						"sampled textures (Sampler2D) are what a kernel takes, one per binding and all in set 0",
+					name));
+			case COMPUTE_IMAGE_FEATURE:
+				*out = js.raise(string::tformat(
+					"%s declares a storage image this device cannot have: an extended format needs "
+						"shaderStorageImageExtendedFormats, and an image2d<float4> whose format the host picks needs "
+						"shaderStorageImage%sWithoutFormat - name the format, e.g. image2d<rgba16f>",
+					name, limits.storage_image_read_without_format ? "Write" : "Read"));
+			case COMPUTE_TOO_MANY_IMAGES:
+				*out = js.raise(string::tformat(
+					"%s declares more storage images than the %d this device binds per kernel",
+					name, limits.max_per_stage_storage_images));
+			case COMPUTE_NOT_READY:
+				*out = js.raise(string::tformat(
+					"%s declares more than %d bindings - split it", name, COMPUTE_MAX_BINDINGS));
+			default:
+				*out = js.raise(string::tformat("%s could not be built: %s", name, err));
+		}
 		return;
 	}
 
@@ -748,11 +778,11 @@ fn void js_compute_dispatch(
 	int given = (int)js.length(list);
 	if (given < 0) given = 0;
 
-	BufferView[COMPUTE_MAX_BINDINGS] views;
+	ComputeBinding[COMPUTE_MAX_BINDINGS] views;
 	if ((uint)given != kernel.binding_count)
 	{
 		*out = js.raise(string::tformat(
-			"this kernel binds %d buffers and %d were given - they go in the shader's own order",
+			"this kernel binds %d buffers and images and %d were given - they go in the shader's own order",
 			(int)kernel.binding_count, given));
 		return;
 	}
@@ -762,6 +792,32 @@ fn void js_compute_dispatch(
 	{
 		qjs::Value element = js.index(list, (uint)i);
 		defer js.release(element);
+
+		// An image binding is a texture index - the prelude checked it is an
+		// image rather than a buffer, and this checks it is still there and is
+		// the image the shader declared.
+		ComputeBindingInfo* info = &kernel.info[i];
+		if (info.is_image())
+		{
+			int index = (int)js.number(element);
+			if (self.pass == null || !self.pass.assets.texture_alive(index))
+			{
+				*out = js.raise(string::tformat(
+					"binding %d (%s) is an image that has been disposed", i, kernel.binding_names[i]));
+				return;
+			}
+			Texture* image = self.pass.assets.texture_at(index);
+			String wrong = storage_image_mismatch(&self.renderer.gpu, info, image);
+			if (wrong.len > 0)
+			{
+				*out = js.raise(string::tformat("binding %d (%s) cannot take this image: %s",
+					i, kernel.binding_names[i], wrong));
+				return;
+			}
+			views[i] = { .image = image };
+			continue;
+		}
+
 		long handle = 0;
 		long offset = 0;
 		long size   = 0;
@@ -798,7 +854,7 @@ fn void js_compute_dispatch(
 				i, kernel.binding_names[i], offset, (long)alignment));
 			return;
 		}
-		views[i] = buffer.view((usz)offset, (usz)size);
+		views[i] = { .buffer = buffer.view((usz)offset, (usz)size) };
 	}
 
 	char[] push = argc >= 3 ? js.bytes(args[2]) : (char[]){ };
@@ -837,7 +893,7 @@ fn void js_compute_dispatch(
 	// dispatch, for a caller that knows the next command does not read it.
 	bool barrier = !(argc >= 7 && js.truth(args[6]));
 
-	if (catch compute.dispatch_views(kernel, views[:kernel.binding_count],
+	if (catch compute.dispatch_bindings(kernel, views[:kernel.binding_count],
 		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z, barrier))
 	{
 		*out = js.raise("the dispatch could not be recorded");
@@ -983,6 +1039,22 @@ fn void js_compute_limits(
 	js.set_property(object, "bindingAlignment", qjs::number_value((double)limits.min_storage_buffer_offset_alignment));
 	js.set_property(object, "maxPushConstants", qjs::number_value((double)limits.max_push_constants_size));
 	js.set_property(object, "maxBindings", qjs::number_value((double)COMPUTE_MAX_BINDINGS));
+
+	// Storage images. The format list is the one question a script cannot answer
+	// from the spec: the core thirteen are everywhere, and which of the rest a
+	// device stores is a per-format answer the device alone has.
+	qjs::Value formats = js.array();
+	uint stored = 0;
+	foreach (format : STORAGE_IMAGE_FORMATS)
+	{
+		if (!self.renderer.gpu.can_have_storage(format)) continue;
+		js.set_index(formats, stored++, js.string(format.name));
+	}
+	js.set_property(object, "storageImageFormats", formats);
+	js.set_property(object, "storageImageReadWithoutFormat", qjs::bool_value(limits.storage_image_read_without_format));
+	js.set_property(object, "storageImageWriteWithoutFormat", qjs::bool_value(limits.storage_image_write_without_format));
+	js.set_property(object, "maxStorageImages", qjs::number_value((double)limits.max_per_stage_storage_images));
+	js.set_property(object, "maxImageSize", qjs::number_value((double)limits.max_image_dimension_2d));
 	*out = object;
 }
 
@@ -1089,4 +1161,263 @@ fn void JsRuntime.release_compute(&self)
 	}
 	self.storage_slots.free();
 	self.kernel_slots.free();
+}
+
+
+// --- Images ------------------------------------------------------------------
+
+<*
+ `computeCreateImage(width, height, format, nearest)` - an image a kernel
+ writes, zeroed, answering a texture as `texture_value` builds one plus how it
+ reads back: `[index, width, height, levels, components, store]`, where
+ `store` names the typed array a readback fills (`'f32'`, `'u8'`, ...).
+
+ A texture because it is one: a slot in `Assets.textures`, an index a material
+ can be handed, a reference the context's handle holds and gives back on
+ close - see `Gpu.create_storage_texture` for the one way it differs.
+*>
+fn void js_compute_create_image(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (runtime_compute(self, &js, out) == null) return;
+	if (self.pass == null)
+	{
+		*out = js.raise("three.compute.image needs a scene's asset table and this context has none");
+		return;
+	}
+
+	Gpu* gpu = &self.renderer.gpu;
+	long width = (long)arg_number(&js, argc, args, 0);
+	long height = (long)arg_number(&js, argc, args, 1);
+	uint largest = gpu.limits.max_image_dimension_2d;
+	if (width < 1 || height < 1 || width > largest || height > largest)
+	{
+		*out = js.raise(string::tformat(
+			"three.compute.image wants a width and a height from 1 to %d, and was given %dx%d",
+			largest, width, height));
+		return;
+	}
+
+	@pool()
+	{
+		String name = arg_text(&js, argc, args, 2, tmem);
+		StorageImageFormat? format = storage_format_named(name);
+		if (catch format)
+		{
+			String hint = storage_format_hint(name);
+			*out = js.raise(hint.len > 0
+				? string::tformat("'%s' is not a storage image format - did you mean %s?", name, hint)
+				: string::tformat("'%s' is not a storage image format - rgba16f, rgba8, r32f and r32ui are the "
+					"common ones, and three.compute.limits.storageImageFormats lists this device's", name));
+			return;
+		}
+		bool nearest = arg_truth_or(&js, argc, args, 3, false);
+
+		Texture? made = gpu.create_storage_texture((uint)width, (uint)height, format, nearest);
+		if (catch err = made)
+		{
+			*out = js.raise(err == STORAGE_FORMAT_UNSUPPORTED
+				? string::tformat("this device cannot store to %s images%s", format.name,
+					format.extended ? " - it is an extended format, and the device does not have them" : "")
+				: string::tformat("could not create the %dx%d %s image: %s", width, height, format.name, err));
+			return;
+		}
+
+		// Into the table only where a material could sample it: a float format
+		// the device can sample. An r32ui image is still a texture - a kernel and a
+		// readback reach it by index - and its row stays white.
+		bool sampled = format.is_float() && gpu.can_sample(format.vk);
+		int index = self.pass.assets.install_texture(gpu, made, write_table: sampled);
+
+		qjs::Value fields = texture_value(self, &js, index, self.pass.assets.texture_at(index));
+		js.set_index(fields, 4, qjs::int_value((int)format.read_components()));
+		js.set_index(fields, 5, js.string(texel_store_name(format.store)));
+		js.set_index(fields, 6, qjs::bool_value(sampled));
+		*out = fields;
+	};
+}
+
+<*
+ The name of the typed array a readback of this store fills.
+*>
+fn String texel_store_name(TexelStore store) @local
+{
+	switch (store)
+	{
+		case F32:
+		case F16: return "f32";
+		case U8: return "u8";
+		case S8: return "i8";
+		case U16: return "u16";
+		case S16: return "i16";
+		case U32:
+		case PACKED32: return "u32";
+		case S32: return "i32";
+	}
+}
+
+<*
+ The storage image behind a texture index, or a raised error naming why not.
+*>
+fn Texture* compute_image(JsRuntime* self, qjs::Context* js, int index, String verb, qjs::Value* out) @local
+{
+	if (self.pass == null || !self.pass.assets.texture_alive(index))
+	{
+		*out = js.raise(string::tformat("%s: this image has been disposed", verb));
+		return null;
+	}
+	Texture* image = self.pass.assets.texture_at(index);
+	if (image.storage == FORMAT_UNDEFINED)
+	{
+		*out = js.raise(string::tformat("%s: this is an uploaded texture, not a three.compute.image", verb));
+		return null;
+	}
+	return image;
+}
+
+<*
+ `computeReadImage(index, into)` - the whole image, as numbers: `into` is the
+ bytes of the typed array the prelude made for it, sized by the components and
+ the store `computeCreateImage` answered with.
+*>
+fn void js_compute_read_image(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.read()", out);
+	if (image == null) return;
+
+	char[] into = argc > 1 ? js.bytes(args[1]) : (char[]) { };
+	sz need = image.storage_read_size();
+	if (into.len < need)
+	{
+		*out = js.raise(string::tformat("image.read() needs %d bytes for this image and was given %d", need, into.len));
+		return;
+	}
+	if (catch err = image.read_storage(compute, into))
+	{
+		*out = js.raise(string::tformat("image.read() could not copy the image back: %s", err));
+	}
+}
+
+<*
+ `computeWriteImage(index, bytes)` - the whole image, replaced: the same layout
+ `computeReadImage` fills, so a readback written back is the image it was.
+*>
+fn void js_compute_write_image(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Compute* compute = runtime_compute(self, &js, out);
+	if (compute == null) return;
+	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.write()", out);
+	if (image == null) return;
+
+	char[] values = argc > 1 ? js.bytes(args[1]) : (char[]) { };
+	sz need = image.storage_read_size();
+	if (values.len < need)
+	{
+		*out = js.raise(string::tformat("image.write() needs %d bytes for this image and was given %d", need, values.len));
+		return;
+	}
+	if (catch err = image.write_storage(compute, values))
+	{
+		*out = js.raise(string::tformat("image.write() could not upload the image: %s", err));
+	}
+}
+
+<*
+ `computeFreeImage(index)` - `textureDispose` for an image a kernel may still be
+ writing: whatever the kernels owe runs first, so a recorded dispatch never
+ names an image that is gone.
+*>
+fn void js_compute_free_image(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	int index = arg_int(&js, argc, args, 0);
+	if (self.pass == null || !self.pass.assets.texture_alive(index)) return;
+	flush_compute(self);
+	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
+	self.pass.assets.release_texture(gpu, index);
+	self.drop_texture(index);
+}
+
+<*
+ `computeKernelBindings(kernel)` - `[[name, kind, format], ...]` in binding
+ order, `kind` one of `'buffer'`, `'image'` and `'texture'` and `format` the
+ declared storage format's name or `''`.
+
+ What lets the prelude bind `run({ field, histogram })` by the shader's own names
+ and tell a script which binding wanted an image before the host has to.
+*>
+fn void js_compute_kernel_bindings(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
+	if (slot == null) return;
+	ComputeKernel* kernel = slot.kernel;
+
+	qjs::Value list = js.array();
+	for (uint i = 0; i < kernel.binding_count; i++)
+	{
+		ComputeBindingInfo info = kernel.info[i];
+		String kind = info.type == DESCRIPTOR_TYPE_STORAGE_IMAGE ? "image"
+			: info.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ? "texture" : "buffer";
+		String format = "";
+		if (info.type == DESCRIPTOR_TYPE_STORAGE_IMAGE && info.storage_format != 0)
+		{
+			if (try declared = storage_format_of(info.storage_format)) format = declared.name;
+		}
+		qjs::Value row = js.array();
+		js.set_index(row, 0, js.string(kernel.binding_names[i]));
+		js.set_index(row, 1, js.string(kind));
+		js.set_index(row, 2, js.string(format));
+		js.set_index(list, i, row);
+	}
+	*out = list;
 }

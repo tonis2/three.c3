@@ -52,6 +52,8 @@ enum ShadyType : char
 	RUNTIME_ARRAY_TYPE,
 	STRUCT_TYPE,
 	POINTER_TYPE,      // `op_a` is the storage class, `op_b` the pointee
+	INT_TYPE,          // `op_b` is the signedness
+	FLOAT_TYPE,
 }
 
 struct ShadyVariable
@@ -718,7 +720,14 @@ fn ShaderModule compile_shady_cached_source(
 		};
 
 		ShaderModule loaded;
-		if (shader_cache_try_load(key, &loaded)) return loaded;
+		if (shader_cache_try_load(key, &loaded))
+		{
+			// Not in the file, and read back out of the module the way
+			// `compile_compute_shader_cached` reads it - see `compile_shady_source`.
+			loaded.local_size = reflect_local_size(loaded.spirv);
+			loaded.subgroup_size = reflect_subgroup_size(loaded.spirv);
+			return loaded;
+		}
 
 		ShaderModule mod = compile_shady_source(source, def, walked, walked_align);
 		if (compiled != null) *compiled = true;
@@ -856,6 +865,11 @@ fn ShaderModule compile_shady_source(
 	mod.layout.stages = stage_union(mod.entries.array_view());
 	mod.layout.push_size = push_size;
 	mod.layout.push_fields = fields; // moved: the module owns the fields from here
+	// A def can be a compute module too - a compute post pass is one - and the
+	// dispatch is sized by what the body's `@threads` said. Zero on a module with
+	// no compute entry, which is every graphics def.
+	mod.local_size = reflect_local_size(mod.spirv);
+	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
 	mod.ok = true;
 	return mod;
 }
@@ -903,6 +917,11 @@ fn void reflect_shady_module(
 	bool[]       has_binding     = alloc::new_array(mem, bool, bound);
 	uint[]       binding_numbers = alloc::new_array(mem, uint, bound);
 	uint[]       constants       = alloc::new_array(mem, uint, bound);
+	// A storage image's declared format, by image type id, and the two access
+	// decorations by variable id. See `ShaderBinding.storage_format`.
+	uint[]       formats         = alloc::new_array(mem, uint, bound);
+	bool[]       non_readable    = alloc::new_array(mem, bool, bound);
+	bool[]       non_writable    = alloc::new_array(mem, bool, bound);
 
 	defer
 	{
@@ -917,6 +936,9 @@ fn void reflect_shady_module(
 		alloc::free(mem, has_binding);
 		alloc::free(mem, binding_numbers);
 		alloc::free(mem, constants);
+		alloc::free(mem, formats);
+		alloc::free(mem, non_readable);
+		alloc::free(mem, non_writable);
 	};
 
 	List{ShadyVariable} variables;
@@ -959,6 +981,10 @@ fn void reflect_shady_module(
 							if (length < 4) break;
 							binding_numbers[id] = words[i + 3];
 							has_binding[id] = true;
+						case shady::Decoration.NON_READABLE:
+							non_readable[id] = true;
+						case shady::Decoration.NON_WRITABLE:
+							non_writable[id] = true;
 						default:
 					}
 				}
@@ -969,9 +995,19 @@ fn void reflect_shady_module(
 					if (id < bound)
 					{
 						kinds[id] = ShadyType.IMAGE_TYPE;
+						op_a[id] = words[i + 2]; // the sampled type: float, int or uint
 						op_b[id] = words[i + 7]; // the `sampled` operand
+						if (length >= 9) formats[id] = words[i + 8];
 					}
 				}
+			case shady::Opcode.TYPE_INT:
+				if (length >= 4 && words[i + 1] < bound)
+				{
+					kinds[words[i + 1]] = ShadyType.INT_TYPE;
+					op_b[words[i + 1]] = words[i + 3];
+				}
+			case shady::Opcode.TYPE_FLOAT:
+				if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.FLOAT_TYPE;
 			case shady::Opcode.TYPE_SAMPLED_IMAGE:
 				if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.SAMPLED_IMAGE_TYPE;
 			case shady::Opcode.TYPE_SAMPLER:
@@ -1068,14 +1104,31 @@ fn void reflect_shady_module(
 			default:
 		}
 
-		bindings.push({
+		ShaderBinding found = {
 			.name = (named[variable.id] ? names[variable.id] : "").copy(mem),
 			.set = has_set[variable.id] ? sets[variable.id] : 0,
 			.binding = has_binding[variable.id] ? binding_numbers[variable.id] : 0,
 			.count = array_count,
 			.type = type,
 			.stages = stages,
-		});
+		};
+		if (type == DESCRIPTOR_TYPE_STORAGE_IMAGE)
+		{
+			found.storage_format = formats[pointee];
+			found.reads = !non_readable[variable.id];
+			found.writes = !non_writable[variable.id];
+			uint texel = op_a[pointee];
+			if (texel < bound)
+			{
+				switch (kinds[texel])
+				{
+					case ShadyType.FLOAT_TYPE: found.texel = TexelClass.FLOAT;
+					case ShadyType.INT_TYPE: found.texel = op_b[texel] != 0 ? TexelClass.SINT : TexelClass.UINT;
+					default:
+				}
+			}
+		}
+		bindings.push(found);
 		uint set = has_set[variable.id] ? sets[variable.id] : 0;
 		if (set + 1 > highest) highest = set + 1;
 	}

@@ -7286,3 +7286,120 @@ fn void an_unloaded_asset_rejects_what_was_queued() @test
 			"the await failed with a sentence naming the cause: %s", result.value);
 	};
 }
+
+// ============================================================================
+// Compute post passes, from a script
+// ============================================================================
+
+<*
+ `three.addPass({ compute })` from a script: a compute pass swaps red and blue,
+ its handle says what it is, and its uniforms are live like a fragment pass's.
+
+ The swap is what the frame says ran; the uniform is a multiplier set to zero
+ afterwards, so the second frame being black is the uniform reaching the push
+ block of a compute pipeline rather than only of a graphics one.
+*>
+fn void a_script_adds_a_compute_pass() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+		int red = encode_srgb(primitive_linear(0));
+
+		three::RunResult posted = run.run(`
+			globalThis.swap = three.addPass({
+				compute: "fn void main(PostThread t) @compute @threads(8, 8, 1) { int2 px = int2(t.id.xy); "
+					+ "if (!inside(px)) return; output[px] = float4(color_at(px).bgr * uniforms().gain, 1.0); }",
+				uniforms: { gain: 1 },
+			});
+			three.render(globalThis.scene, three.camera);
+			return [typeof swap.compute, swap.fragment === undefined, swap.index].join(',');
+		`);
+		defer posted.free();
+		test::@check(posted.ok, "the compute pass compiled: %s", posted.error);
+		test::@check(posted.value == "\"string,true,0\"", "the handle carries the compute body: %s", posted.value);
+
+		image::Image swapped = run.renderer.capture()!!;
+		defer swapped.free();
+		test::@check(count_near(&swapped, 0, 0, red) > 500, "the compute pass swapped the wall to blue: %d blue, %d red",
+			count_near(&swapped, 0, 0, red), count_near(&swapped, red, 0, 0));
+
+		three::RunResult dark = run.run(`swap.uniforms.gain = 0; three.render(globalThis.scene, three.camera);`);
+		defer dark.free();
+		test::@check(dark.ok, "the uniform was set: %s", dark.error);
+		image::Image black = run.renderer.capture()!!;
+		defer black.free();
+		test::@check(count_near(&black, 0, 0, 0, 8) > 10000, "a zero gain is a black frame: %d black pixels",
+			count_near(&black, 0, 0, 0, 8));
+
+		three::RunResult cleared = run.run(`three.setPost(null);`);
+		defer cleared.free();
+	};
+}
+
+<*
+ A post spec is a fragment pass or a compute pass, and the mistakes between the
+ two are refused at the line with the reason: both bodies, a grid on a fragment
+ pass, and a compute body that is not an entry point.
+*>
+fn void a_post_spec_with_fragment_and_compute_is_refused() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult both = run.run(`three.addPass({ fragment: "fn float3 post(Post p) { return p.color; }", compute: "x" });`);
+		defer both.free();
+		test::@check(!both.ok && both.error.contains("not both"), "both bodies are refused: %s", both.error);
+
+		three::RunResult grid = run.run(`three.addPass({ fragment: "fn float3 post(Post p) { return p.color; }", threads: [4, 4] });`);
+		defer grid.free();
+		test::@check(!grid.ok && grid.error.contains("fragment pass"), "a grid on a fragment pass is refused: %s", grid.error);
+
+		three::RunResult bare = run.run(`three.addPass({ compute: "output[int2(0, 0)] = float4(1.0);" });`);
+		defer bare.free();
+		test::@check(!bare.ok && bare.error.contains("@compute @threads"),
+			"a compute body that is not an entry point is refused with the signature: %s", bare.error);
+
+		three::RunResult image = run.run(`three.addPass({ compute: "fn void main(PostThread t) @compute @threads(8, 8, 1) { }", images: { h: 'rgb8' } });`);
+		defer image.free();
+		test::@check(!image.ok && image.error.contains("rgba8"), "an image in a format with no storage form: %s", image.error);
+	};
+}
+
+<*
+ A post pass samples an image a kernel wrote: the two halves of storage images
+ meeting - `three.compute.image` written outside the frame, read inside it by a
+ fragment pass's own texture.
+*>
+fn void a_post_pass_samples_a_compute_image() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = red_wall_scene(run);
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		three::RunResult posted = run.run(`
+			const tint = three.compute.image({ width: 4, height: 4, format: 'rgba8' });
+			three.compute.kernel("image2d<rgba8> tint; struct ComputeIn { uint3 id @builtin(global_invocation_id); } "
+				+ "fn void main(ComputeIn at) @compute @threads(4, 4, 1) { tint[int2(at.id.xy)] = float4(0.0, 1.0, 0.0, 1.0); }",
+				{ name: 'tint' }).run({ tint }, { workgroups: [1, 1] });
+			three.setPost({
+				fragment: "fn float3 post(Post p) { return tint_map.sample_lod(p.uv, 0.0).rgb; }",
+				textures: { tint_map: tint },
+			});
+			three.render(globalThis.scene, three.camera);
+		`);
+		defer posted.free();
+		test::@check(posted.ok, "the pass bound the image: %s", posted.error);
+
+		image::Image shot = run.renderer.capture()!!;
+		defer shot.free();
+		test::@check(count_near(&shot, 0, 255, 0, 8) > 10000, "the frame is the kernel's green: %d pixels",
+			count_near(&shot, 0, 255, 0, 8));
+
+		three::RunResult cleared = run.run(`three.setPost(null);`);
+		defer cleared.free();
+	};
+}

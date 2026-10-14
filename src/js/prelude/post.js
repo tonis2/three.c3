@@ -37,9 +37,12 @@ let postEpoch = 0;
 // replacing the chain bumps the epoch through a verb rather than an assignment.
 export function bumpPostEpoch() { postEpoch++; }
 
-function postHandle(fragment, names, declared = { names: [], values: {} }, index = 0) {
+function postHandle(fragment, names, declared = { names: [], values: {} }, index = 0, kind = 'fragment', images = []) {
 	const epoch = postEpoch;
-	const handle = { fragment, index };
+	// The body under the key it was given as: `fragment` for a fragment pass,
+	// `compute` for a compute one, so a handle reads back as the spec it came from.
+	const handle = kind === 'compute' ? { compute: fragment, index } : { fragment, index };
+	if (images.length > 0) handle.images = images;
 	// Off the enumeration, so that returning the handle from a script
 	// stringifies as the two things it is — the body and the uniforms — and
 	// not as the bookkeeping behind them.
@@ -96,9 +99,26 @@ export function postSpec(spec, wanted) {
 	if (spec === null || spec === undefined || typeof spec !== 'object') {
 		throw new TypeError(wanted);
 	}
-	const { fragment, uniforms = {}, textures = {}, reads } = spec;
-	if (typeof fragment !== 'string' || fragment.trim().length === 0) {
-		throw new TypeError('a post pass needs a `fragment` body — see three.getApiDocs()');
+	const { fragment, compute, uniforms = {}, textures = {}, reads, images = {}, threads } = spec;
+	for (const key of Object.keys(spec)) {
+		if (!['fragment', 'compute', 'uniforms', 'textures', 'reads', 'images', 'threads'].includes(key)) {
+			throw new TypeError(
+				`a post pass has no option called '${key}' — it takes fragment or compute, uniforms, textures, `
+				+ 'reads, images and threads'
+			);
+		}
+	}
+	if (fragment !== undefined && compute !== undefined) {
+		throw new TypeError(
+			'a post pass is a `fragment` body or a `compute` entry point, not both — they are two kinds of pass'
+		);
+	}
+	const kind = compute !== undefined ? 'compute' : 'fragment';
+	const body = kind === 'compute' ? compute : fragment;
+	if (typeof body !== 'string' || body.trim().length === 0) {
+		throw new TypeError(
+			'a post pass needs a `fragment` body, or a `compute` entry point — see three.getApiDocs()'
+		);
 	}
 	if (uniforms === null || typeof uniforms !== 'object') {
 		throw new TypeError('`uniforms` wants an object like { gain: 1, tint: [1, 0.5, 0.2] }');
@@ -110,21 +130,93 @@ export function postSpec(spec, wanted) {
 	// keys, so the names cross as a joined string. See js/bind_post.c3.
 	const names = Object.keys(uniforms);
 	const shapes = names.map(n => uniformShape(n, uniforms[n], false));
+	const grid = threadsGrid(threads, kind);
+	const declaredImages = imageList(images);
 
 	return {
-		fragment,
+		fragment: body,
+		kind,
 		names,
 		uniforms,
 		declared,
+		images: declaredImages.map(i => i.name),
 		args: [
-			fragment,
+			body,
 			names.join(','),
 			shapes.map(s => s[0]).join(','),
 			declared.names.join(','),
 			declared.ids.join(','),
 			readsIndex(reads),
+			kind === 'compute' ? 1 : 0,
+			grid[0],
+			grid[1],
+			declaredImages.map(i => i.name).join(','),
+			declaredImages.map(i => i.format).join(','),
+			declaredImages.map(i => i.size[0]).join(','),
+			declaredImages.map(i => i.size[1]).join(','),
+			declaredImages.map(i => (i.clear === 'frame' ? 1 : 0)).join(','),
 		],
 	};
+}
+
+// `threads` as `[x, y]`, or `[0, 0]` for the frame's own extent — which is what
+// every pass that writes the frame wants. A grid is a compute pass's: a fragment
+// pass draws one triangle over the frame and has nothing to size.
+function threadsGrid(threads, kind) {
+	if (threads === undefined || threads === null) return [0, 0];
+	if (kind !== 'compute') {
+		throw new TypeError('`threads` sizes a compute pass\'s dispatch, and this is a fragment pass');
+	}
+	const grid = typeof threads === 'number' ? [threads, 1] : threads;
+	if (!Array.isArray(grid) || grid.length < 1 || grid.length > 2
+		|| !grid.every(n => Number.isInteger(n) && n > 0)) {
+		throw new TypeError(
+			'`threads` wants a pixel grid like [256, 1], or nothing for the whole frame — got '
+			+ JSON.stringify(threads)
+		);
+	}
+	return [grid[0], grid.length > 1 ? grid[1] : 1];
+}
+
+// `images` as a list of `{ name, format, size, clear }`.
+//
+// Each is a format name — `{ history: 'rgba16f' }`, the size of the frame — or
+// an object for anything else:
+//
+//     images: { hist: { format: 'r32ui', size: [256, 1], clear: 'frame' } }
+//
+// `clear: 'frame'` zeroes the image at the start of every frame, for an
+// accumulator that is about one frame; the default, 'never', keeps what the
+// last frame left, which is what a history wants. The format and the size are
+// checked against what a storage image can be on the host, which has the table.
+function imageList(images) {
+	if (images === null || typeof images !== 'object' || Array.isArray(images)) {
+		throw new TypeError("`images` wants an object like { history: 'rgba16f' }");
+	}
+	return Object.keys(images).map((name) => {
+		const value = images[name];
+		const spec = typeof value === 'string' ? { format: value } : value;
+		if (spec === null || typeof spec !== 'object') {
+			throw new TypeError(`image '${name}' wants a format like 'rgba16f', or { format, size, clear }`);
+		}
+		for (const key of Object.keys(spec)) {
+			if (!['format', 'size', 'clear'].includes(key)) {
+				throw new TypeError(`image '${name}' has no option called '${key}' — it takes format, size and clear`);
+			}
+		}
+		const { format, size, clear = 'never' } = spec;
+		if (typeof format !== 'string' || format.length === 0) {
+			throw new TypeError(`image '${name}' wants a format like 'rgba16f' or 'r32ui'`);
+		}
+		if (size !== undefined && (!Array.isArray(size) || size.length !== 2
+			|| !size.every(n => Number.isInteger(n) && n > 0))) {
+			throw new TypeError(`image '${name}' wants a size like [256, 1], or none for the frame's own`);
+		}
+		if (clear !== 'never' && clear !== 'frame') {
+			throw new TypeError(`image '${name}': clear is 'never' (keep it between frames) or 'frame'`);
+		}
+		return { name, format, size: size || [0, 0], clear };
+	});
 }
 
 // `reads` as an index, or -1 for a pass that names none.
@@ -157,7 +249,7 @@ function readsIndex(reads) {
 // into another's layout. So the values the spec gave are written afterwards,
 // exactly as a ShaderMaterial writes its own.
 export function postFinish(parsed, index) {
-	const handle = postHandle(parsed.fragment, parsed.names, parsed.declared, index);
+	const handle = postHandle(parsed.fragment, parsed.names, parsed.declared, index, parsed.kind, parsed.images);
 	for (const name of parsed.names) handle._set(name, parsed.uniforms[name]);
 	return handle;
 }

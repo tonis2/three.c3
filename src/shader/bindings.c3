@@ -43,6 +43,29 @@ const uint POST_BINDING_FIRST = 4;
 const uint POST_TAP_BINDING = 3;
 
 <*
+ Where a compute post pass's destination is bound: the `output` storage image.
+
+ Past the four samplers the chain reserves and the four a script may declare, so
+ a compute pass and a fragment pass number everything below it the same way.
+ `shaders/post_compute.shady` writes the number down too, and
+ `the_post_compute_def_declares_output_at_its_binding` holds the two together.
+*>
+const uint POST_OUTPUT_BINDING = POST_BINDINGS_END;
+
+<*
+ Where a post pass's own storage images start, and how many it may declare.
+
+ Four because four is what Vulkan promises per stage, and a compute pass's
+ `output` spends one of them - so a portable pass that writes the frame has three
+ to spend, and the device's own count is checked when the pipeline is built.
+*>
+const uint POST_IMAGE_FIRST = POST_OUTPUT_BINDING + 1;
+const uint POST_IMAGE_LIMIT = 4;
+
+$assert POST_IMAGE_FIRST + POST_IMAGE_LIMIT <= MAX_SAMPLED_BINDINGS
+	: "a post pass's images are pushed through SampledBindings, which is MAX_SAMPLED_BINDINGS wide";
+
+<*
  Where the shadow map is bound, in every shader that shades a surface.
 
  A number rather than a name, unlike everything a material declares, and for the

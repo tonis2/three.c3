@@ -4663,6 +4663,9 @@ fn int? Assets.claim_texture(
 	foreach (i, &existing : self.textures)
 	{
 		if (!existing.alive) continue;
+		// A computed image is never the same texture as an uploaded one, whatever
+		// its fields happen to say: a kernel can rewrite it at any time.
+		if (existing.texture.storage != FORMAT_UNDEFINED) continue;
 		if (existing.texture.hash == hash && existing.texture.width == decoded.width
 			&& existing.texture.height == decoded.height
 			&& existing.texture.format.equals(layout)
@@ -4686,7 +4689,7 @@ fn int? Assets.claim_texture(
  claim paths, because where a texture lands has nothing to do with how it was
  encoded.
 *>
-fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded)
+fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded, bool write_table = true)
 {
 	self.revision++;
 	uint index;
@@ -4703,7 +4706,23 @@ fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded)
 
 	// The slot the table already gave it is the bindless index too, so there is no
 	// second free list and no second lifetime to keep in step.
-	if (gpu != null) gpu.texture_table.write(gpu, index, uploaded.descriptor());
+	//
+	// Not for an image no sampler may read - a compute image in an integer format,
+	// or one the device cannot sample - whose view has no `SAMPLED` usage and is
+	// not a legal descriptor in the table at all. Its row keeps the white
+	// `release` put back, and nothing can index it: the script's handle refuses
+	// to be a material's map.
+	if (gpu != null)
+	{
+		if (write_table)
+		{
+			gpu.texture_table.write(gpu, index, uploaded.descriptor());
+		}
+		else
+		{
+			gpu.texture_table.reserve(gpu, index);
+		}
+	}
 	return (int)index;
 }
 
@@ -4729,6 +4748,7 @@ fn int? Assets.claim_texture_levels(&self, Gpu* gpu, BlockImage blocks, bool nea
 	foreach (i, &existing : self.textures)
 	{
 		if (!existing.alive) continue;
+		if (existing.texture.storage != FORMAT_UNDEFINED) continue;
 		if (existing.texture.hash == hash && existing.texture.width == blocks.width
 			&& existing.texture.height == blocks.height
 			&& existing.texture.format.equals(blocks.format)
@@ -5024,7 +5044,8 @@ fn vk::DescriptorImageInfo Texture.descriptor(&self)
 	return {
 		.sampler = self.sampler,
 		.imageView = self.view,
-		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		// `GENERAL` for an image a compute kernel writes - see `resting_layout`.
+		.imageLayout = self.resting_layout(),
 	};
 }
 

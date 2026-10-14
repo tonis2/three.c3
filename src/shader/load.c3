@@ -63,6 +63,7 @@ const char[*] EMBED_CLUSTER_SHADY         = $embed("../../shaders/cluster.shady"
 const char[*] EMBED_SHADOW_SHADY          = $embed("../../shaders/shadow.shady");
 const char[*] EMBED_SHADOW_CUTOUT_SHADY   = $embed("../../shaders/shadow_cutout.shady");
 const char[*] EMBED_POST_SHADY            = $embed("../../shaders/post.shady");
+const char[*] EMBED_POST_COMPUTE_SHADY    = $embed("../../shaders/post_compute.shady");
 const char[*] EMBED_LIGHTING_SHADY        = $embed("../../shaders/lighting.shady");
 const char[*] EMBED_LIGHTING_LTC_SHADY    = $embed("../../shaders/lighting_ltc.shady");
 const char[*] EMBED_LIGHTING_REFERENCE_SHADY = $embed("../../shaders/lighting_reference.shady");
@@ -95,6 +96,7 @@ enum ShaderFile : int (String name, String text)
 	SHADOW_SHADY         { "shadow.shady", EMBED_SHADOW_SHADY },
 	SHADOW_CUTOUT_SHADY  { "shadow_cutout.shady", EMBED_SHADOW_CUTOUT_SHADY },
 	POST_SHADY           { "post.shady", EMBED_POST_SHADY },
+	POST_COMPUTE_SHADY   { "post_compute.shady", EMBED_POST_COMPUTE_SHADY },
 	LIGHTING_SHADY       { "lighting.shady", EMBED_LIGHTING_SHADY },
 	LIGHTING_LTC_SHADY   { "lighting_ltc.shady", EMBED_LIGHTING_LTC_SHADY },
 	LIGHTING_REFERENCE_SHADY { "lighting_reference.shady", EMBED_LIGHTING_REFERENCE_SHADY },

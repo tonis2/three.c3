@@ -62,7 +62,9 @@ faultdef
 	PUSH_BLOCK_MISMATCH,
 	SHADER_BINDING_UNSUPPORTED,
 	SHADER_TOO_MANY_SETS,
-	SHADER_MISSING_ENTRY_POINT;
+	SHADER_MISSING_ENTRY_POINT,
+	SHADER_WORKGROUP_TOO_LARGE,
+	SHADER_SUBGROUP_SIZE_UNSUPPORTED;
 
 const uint FLAG_HAS_NORMALS = 1;
 const uint FLAG_HAS_UVS     = 2;
@@ -1075,6 +1077,13 @@ struct MeshPipeline
 	// can put back what the pipeline would otherwise have baked in. Left zeroed by
 	// the constructors that declare no dynamic depth.
 	PipelineState state;
+	// Where it binds. Zero is GRAPHICS, which is every constructor but
+	// `init_post_compute` - so a pipeline nobody told otherwise is the kind it
+	// always was, and `SampledBindings.push` pushes against the right point.
+	vk::PipelineBindPoint bind_point;
+	// The workgroup a compute pipeline was built over, out of the module's
+	// `@threads`; what its dispatch divides the grid by. Zero on graphics.
+	uint[3] local_size;
 }
 
 <*
@@ -1182,7 +1191,8 @@ fn void? MeshPipeline.build_layouts(
 	Gpu* gpu,
 	ShaderModule* mod,
 	PushFieldLayout[] fields,
-	ShaderEntry[] entries = MESH_ENTRIES[..]
+	ShaderEntry[] entries = MESH_ENTRIES[..],
+	bool texture_table = true
 )
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
@@ -1201,6 +1211,13 @@ fn void? MeshPipeline.build_layouts(
 	if (mod.layout.set_count > TEXTURE_TABLE_SET + 1)
 	{
 		@advise("shader: %d descriptor sets declared and this pass has two", mod.layout.set_count);
+		return SHADER_TOO_MANY_SETS~;
+	}
+	// A layout without the table has set 0 alone, so a module reaching for set 1
+	// would read a set this pipeline cannot have bound.
+	if (!texture_table && mod.layout.set_count > 1)
+	{
+		@advise("shader: %d descriptor sets declared and this pass has one", mod.layout.set_count);
 		return SHADER_TOO_MANY_SETS~;
 	}
 
@@ -1264,7 +1281,7 @@ fn void? MeshPipeline.build_layouts(
 	// shader that starts reading it needs no new pipeline plumbing. Nothing
 	// declares it yet, and a set no shader statically uses need not even be bound.
 	vk::DescriptorSetLayout[2] sets = { self.descriptor_layout, gpu.texture_table.layout };
-	uint set_count = gpu.texture_table.ready ? 2 : 1;
+	uint set_count = texture_table && gpu.texture_table.ready ? 2 : 1;
 
 	self.layout = vk::pipelineLayoutCreateInfo().setSetLayouts(sets[:set_count])
 		.setPushConstantRanges({ push_range })
@@ -1593,6 +1610,94 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 			.color_blend = &color_blend,
 		}
 	);
+}
+
+<*
+ Builds a compute post pass's pipeline: `init_post`'s contract, dispatched
+ rather than drawn.
+
+ The same object as the graphics constructors produce - a `MeshPipeline`, with
+ a push-descriptor set 0 checked against `POST_PUSH_FIELDS` - so a compute stage
+ and a fragment stage go through the same binding helpers, the same uniform
+ writes and the same `Gpu.retire_pipeline`. What differs is that there is no
+ attachment, no raster state and no vertex stage, and that `bind_point` says
+ COMPUTE, which is what `SampledBindings.push` and the stage's own bind read.
+
+ ## No texture table
+
+ The layout is set 0 alone. Everything a compute post pass samples - the chain's
+ images, the script's own textures - is pushed by name into set 0, the way a
+ fragment post pass's own textures are, and the table's layout was created for
+ the vertex and fragment stages: binding it to a compute pipeline would be a set
+ whose stages exclude the one stage that runs.
+
+ ## One entry, and its name
+
+ The script writes the entry point, so its name is the script's: whichever one
+ compute entry the module has. Two would be two pipelines, and a module with a
+ vertex or fragment entry beside it is not a compute pass.
+
+ @param mod : `A module from compile_shader(ShaderPass.POST_COMPUTE). Its layout is copied, not moved.`
+ @return ? SHADER_MISSING_ENTRY_POINT : `The module has no compute entry point, or more than one entry point of any kind.`
+ @return ? SHADER_WORKGROUP_TOO_LARGE : `The @threads the body declared exceed what this device runs in one workgroup.`
+ @return ? SHADER_SUBGROUP_SIZE_UNSUPPORTED : `The body asked for a @subgroup_size this device cannot promise.`
+*>
+fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* mod,
+	PushFieldLayout[] contract = POST_PUSH_FIELDS[..])
+{
+	if (mod.entries.len() != 1 || mod.entries[0].stage != STAGE_COMPUTE)
+	{
+		@advise("shader: a compute pass has one compute entry point and this module has %d entries", mod.entries.len());
+		return SHADER_MISSING_ENTRY_POINT~;
+	}
+	ShaderEntry entry = mod.entries[0];
+
+	GpuLimits* limits = &gpu.limits;
+	uint[3] size = mod.local_size;
+	ulong invocations = (ulong)size[0] * size[1] * size[2];
+	if (invocations == 0 || invocations > limits.max_compute_workgroup_invocations
+		|| size[0] > limits.max_compute_workgroup_size[0]
+		|| size[1] > limits.max_compute_workgroup_size[1]
+		|| size[2] > limits.max_compute_workgroup_size[2])
+	{
+		return SHADER_WORKGROUP_TOO_LARGE~;
+	}
+	uint lanes = mod.subgroup_size;
+	if (lanes != 0 && (!limits.subgroup_size_control || lanes < limits.min_subgroup_size || lanes > limits.max_subgroup_size))
+	{
+		return SHADER_SUBGROUP_SIZE_UNSUPPORTED~;
+	}
+
+	self.build_layouts(gpu, mod, contract, { entry }, texture_table: false)!;
+
+	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
+	defer module_handle.free(gpu.handle);
+
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
+		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+		.requiredSubgroupSize = lanes,
+	};
+	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
+		.setStage(vk::pipelineShaderStageCreateInfo()
+			.setNext(lanes != 0 ? (void*)&required_lanes : null)
+			.setStage(SHADER_STAGE_COMPUTE_BIT)
+			.setMod(module_handle)
+			.setName((ZString)entry.name.zstr_tcopy()))
+		.setLayout(self.layout);
+
+	if (catch err = vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &self.handle))
+	{
+		// Built above and not yet anyone's: a failed pipeline must not strand them.
+		self.layout.free(gpu.handle);
+		self.descriptor_layout.free(gpu.handle);
+		*self = { };
+		return err~;
+	}
+
+	self.shader = mod.layout.copy();
+	self.bind_point = PIPELINE_BIND_POINT_COMPUTE;
+	self.local_size = size;
+	return *self;
 }
 
 <*

@@ -34,6 +34,8 @@
 // `read()` takes the result. Everything else is the buffer and kernel objects
 // themselves.
 
+import { Texture, LinearSRGBColorSpace, NearestFilter, LinearFilter } from './texture.js';
+
 const H = globalThis.__three;
 
 // How a buffer's element type is spelled to the host: a code, its byte width,
@@ -314,6 +316,18 @@ export class ComputeKernel {
 		this.source = source;
 		this.threads = threads;
 		this.disposed = false;
+		// What each binding is, in binding order — `[name, kind, format]`, the
+		// kind one of 'buffer', 'image' and 'texture'. Asked once: it is the
+		// module's, and a kernel's module never changes.
+		this._bindings = H.computeKernelBindings(handle);
+	}
+
+	// The bindings as the shader declares them: `[{ name, kind, format }]` in
+	// binding order. `kind` is 'buffer', 'image' (a storage image the kernel
+	// loads and stores) or 'texture' (a Sampler2D it samples); `format` is a
+	// storage image's declared format, or '' when the host picks it.
+	get bindings() {
+		return this._bindings.map(([name, kind, format]) => ({ name, kind, format }));
 	}
 
 	// Record a dispatch and wait for it.
@@ -360,8 +374,37 @@ export class ComputeKernel {
 
 		// `independent: true` leaves out the barrier after this dispatch: the
 		// caller is saying the next command does not read what this one wrote.
-		H.computeDispatch(this._handle, list.map((b) => b._binding), push, x, y, z, options.independent === true);
+		H.computeDispatch(
+			this._handle, list.map((b, i) => this._bind(b, i)), push, x, y, z, options.independent === true
+		);
 		return this;
+	}
+
+	// What crosses for binding `i`: a buffer's handle or range, or an image's
+	// texture index. Checked against what the shader declared there, so an image
+	// handed to a buffer is refused naming both rather than reaching the host as
+	// a number that happens to be a valid handle of the other kind.
+	_bind(value, i) {
+		const declared = this._bindings[i];
+		const [name, kind] = declared || [`#${i}`, 'buffer'];
+		const isImage = value instanceof Texture;
+		if (kind === 'buffer') {
+			if (isImage || !value || value._binding === undefined) {
+				throw new TypeError(
+					`three.compute: binding '${name}' is a buffer and was given ${describe(value)}`
+				);
+			}
+			return value._binding;
+		}
+		if (!isImage) {
+			throw new TypeError(
+				`three.compute: binding '${name}' is ${kind === 'image' ? 'a storage image' : 'a texture the kernel samples'}`
+				+ ` and was given ${describe(value)} — pass a three.compute.image()`
+				+ (kind === 'texture' ? ' or a texture' : '')
+			);
+		}
+		if (!value.alive) throw new TypeError(`three.compute: binding '${name}' was given a disposed image`);
+		return value._t;
 	}
 
 	// The buffers as the shader declares them, in binding order.
@@ -371,13 +414,20 @@ export class ComputeKernel {
 	// in. A name the shader does not have is refused here rather than becoming
 	// a dispatch against the wrong buffer.
 	_byName(named, declared) {
-		const fields = declared || Object.keys(named);
+		// By the shader's own names when every key is one of them, which is what
+		// lets `run({ out, field })` be written in any order. A key the shader
+		// does not have keeps the order the keys were written in — what this did
+		// before it knew the names, and what a module with no names needs.
+		const names = this._bindings.map(([name]) => name);
+		const keys = Object.keys(named);
+		const byShader = !declared && names.length === keys.length && names.every((n) => n !== '' && n in named);
+		const fields = declared || (byShader ? names : keys);
 		const out = [];
 		for (const name of fields) {
 			const buffer = named[name];
-			if (!buffer || buffer._binding === undefined) {
+			if (!buffer || (buffer._binding === undefined && !(buffer instanceof Texture))) {
 				throw new TypeError(
-					`three.compute: run() was given no buffer for '${name}' — name the shader's own bindings`
+					`three.compute: run() was given nothing to bind as '${name}' — name the shader's own bindings`
 				);
 			}
 			out.push(buffer);
@@ -394,6 +444,121 @@ export class ComputeKernel {
 
 	_assertLive() {
 		if (this.disposed) throw new TypeError('three.compute: this kernel has been disposed');
+	}
+}
+
+// What a script handed over, for a message: a buffer, an image, or what it was.
+function describe(value) {
+	if (value instanceof ComputeImage) return `a ${value.format} image`;
+	if (value instanceof Texture) return 'a texture';
+	if (value instanceof ComputeBuffer || value instanceof ComputeView) return 'a buffer';
+	return value === null || value === undefined ? 'nothing' : typeof value;
+}
+
+// The typed array a readback of each store fills, keyed by the name the host
+// answers with. Half floats arrive as f32: there is no half in JavaScript.
+const STORES = {
+	f32: Float32Array,
+	u8: Uint8Array,
+	i8: Int8Array,
+	u16: Uint16Array,
+	i16: Int16Array,
+	u32: Uint32Array,
+	i32: Int32Array,
+};
+
+// An image a kernel writes: a `Texture` made by `three.compute.image()`.
+//
+// It is a texture in every sense a script uses one — a material's `map`, a
+// post pass's `textures`, a kernel's `Sampler2D` — and one more: a kernel can
+// store into it, as an `image2d<format>` binding. `read()` and `write()` move
+// its texels as numbers rather than as RGBA bytes, in the typed array its
+// format reads as: a Float32Array for rgba16f, r32f and the other float
+// formats, a Uint32Array for r32ui.
+//
+//   const field = three.compute.image({ width: 256, height: 256, format: 'r32f' });
+//   kernel.run({ field }, { threads: [256, 256] });
+//   const values = field.read();          // Float32Array of 65536
+export class ComputeImage extends Texture {
+	constructor(fields, format) {
+		super(fields, null, LinearSRGBColorSpace);
+		this.format = format;
+		this._components = fields[4];
+		this._store = STORES[fields[5]];
+		this._sampled = fields[6];
+	}
+
+	// How many numbers one texel reads back as.
+	get components() { return this._components; }
+
+	// The texels, as numbers: width * height * components of them, row by row
+	// from the top. `into` is optional, and is the array to fill — this copies
+	// the image off the device and waits, so a caller doing it every frame
+	// should hand the same one back.
+	read(into) {
+		if (this._t < 0) throw new TypeError('three.compute: read() of a disposed image');
+		const count = this._width * this._height * this._components;
+		const out = into === undefined ? new this._store(count) : into;
+		if (!(out instanceof this._store) || out.length < count) {
+			throw new TypeError(
+				`three.compute: a ${this.format} image reads into a ${this._store.name} of ${count}, `
+				+ `and was given ${out && out.constructor ? out.constructor.name : typeof out}`
+				+ (out && out.length !== undefined ? ` of ${out.length}` : '')
+			);
+		}
+		H.computeReadImage(this._t, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
+		return out;
+	}
+
+	// Replace every texel: the same layout `read()` gives, so a readback written
+	// back is the image it came from. A plain array of numbers is accepted and
+	// converted.
+	write(data) {
+		if (this._t < 0) throw new TypeError('three.compute: write() of a disposed image');
+		const count = this._width * this._height * this._components;
+		const values = data instanceof this._store ? data
+			: Array.isArray(data) || ArrayBuffer.isView(data) ? this._store.from(data)
+			: null;
+		if (values === null || values.length < count) {
+			throw new TypeError(
+				`three.compute: a ${this._width}x${this._height} ${this.format} image is written from `
+				+ `${count} numbers, and was given ${values === null ? typeof data : values.length}`
+			);
+		}
+		H.computeWriteImage(this._t, new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
+		return this;
+	}
+
+	// Gives the image back. Like a texture's, a material still drawing with it
+	// keeps it; unlike one, whatever the kernels have recorded runs first.
+	dispose() {
+		if (this._t < 0) return;
+		H.computeFreeImage(this._t);
+		this._t = -1;
+	}
+
+	// A material's map, or a post pass's texture. An integer image is neither:
+	// a sampler would read its integers as floats.
+	_index() {
+		if (this._t >= 0 && !this._sampled) {
+			throw new TypeError(
+				`this ${this.format} image holds ${this.format.endsWith('ui') ? 'unsigned integers'
+					: this.format.endsWith('i') ? 'integers' : 'texels this device cannot sample'} `
+				+ 'and cannot be a texture — read it in a kernel as an image2d, or read() it back'
+			);
+		}
+		return super._index();
+	}
+
+	save(path) {
+		if (this.format !== 'rgba8') {
+			throw new TypeError(`three.compute: save() writes rgba8 images, and this one is ${this.format} — read() it instead`);
+		}
+		return super.save(path);
+	}
+
+	toString() {
+		return `ComputeImage(${this.format} ${this._width}x${this._height})`;
 	}
 }
 
@@ -554,8 +719,46 @@ export const compute = {
 	// The barrier a run of `independent` commands left out.
 	barrier() { H.computeBarrier(); },
 
+	// An image a kernel writes and anything else may read: a material's map, a
+	// post pass's texture, another kernel's input.
+	//
+	//   const img = three.compute.image({ width: 512, height: 512, format: 'rgba16f' });
+	//
+	// `format` is a storage format as the shader spells it — 'rgba16f' (the
+	// default), 'rgba8', 'r32f', 'r32ui', and the rest
+	// `three.compute.limits.storageImageFormats` lists. `filter` is how a
+	// material samples it, three.LinearFilter or three.NearestFilter. `data`
+	// fills it, in `read()`'s layout; without it the image starts at zero.
+	image(options = {}) {
+		if (options === null || typeof options !== 'object') {
+			throw new TypeError('three.compute.image({ width, height, format }) wants an options object');
+		}
+		for (const key of Object.keys(options)) {
+			if (!['width', 'height', 'format', 'filter', 'data'].includes(key)) {
+				throw new TypeError(
+					`three.compute.image has no option called '${key}' — it takes width, height, format, filter and data`
+				);
+			}
+		}
+		const { width, height, format = 'rgba16f', filter = LinearFilter, data } = options;
+		if (!Number.isInteger(width) || !Number.isInteger(height)) {
+			throw new TypeError('three.compute.image({ width, height }) wants whole-number dimensions');
+		}
+		if (typeof format !== 'string') {
+			throw new TypeError(`three.compute.image: format wants a name like 'rgba16f', not ${typeof format}`);
+		}
+		if (filter !== LinearFilter && filter !== NearestFilter) {
+			throw new TypeError('three.compute.image: filter is three.LinearFilter or three.NearestFilter');
+		}
+		const image = new ComputeImage(H.computeCreateImage(width, height, format, filter === NearestFilter), format);
+		if (data !== undefined && data !== null) image.write(data);
+		return image;
+	},
+
 	// What this device lets a kernel do: `{ device, cooperativeMatrix,
 	// subgroupSize, maxSharedMemory, maxWorkgroupInvocations, maxBindingRange,
-	// maxAllocation, bindingAlignment, maxPushConstants, maxBindings }`.
+	// maxAllocation, bindingAlignment, maxPushConstants, maxBindings,
+	// storageImageFormats, storageImageReadWithoutFormat,
+	// storageImageWriteWithoutFormat, maxStorageImages, maxImageSize }`.
 	get limits() { return H.computeLimits(); },
 };

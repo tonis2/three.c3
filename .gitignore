@@ -26,6 +26,8 @@ node_modules
 *.la
 *.lo
 
+tools/
+
 # Shared objects (inc. Windows DLLs)
 *.dll
 *.so

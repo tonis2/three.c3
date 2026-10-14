@@ -99,14 +99,25 @@ struct ChainImage
 }
 
 <*
+ What a chain image is created for by default: a fragment pass writes it as an
+ attachment and the next pass samples it.
+*>
+const vk::ImageUsageFlags CHAIN_IMAGE_USAGE = IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT;
+
+<*
  Creates the image, its memory and its view.
 
  `COLOR_ATTACHMENT` because a pass writes it and `SAMPLED` because the next one
- reads it, and nothing else: none of these is ever blitted or copied out.
+ reads it, and nothing else: none of these is ever blitted or copied out. A
+ chain with a compute pass in it adds `STORAGE`, because that pass writes its
+ destination as a storage image - and only then, since a usage bit an image
+ never needs can cost it its colour compression on some hardware. A pass's own
+ images are storage and nothing else.
 
  @require self.image == null : `already created; free it first`
 *>
-fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent)
+fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent,
+	vk::ImageUsageFlags usage = CHAIN_IMAGE_USAGE)
 {
 	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format)
 		.setExtent({ .width = extent.width, .height = extent.height, .depth = 1 })
@@ -114,7 +125,7 @@ fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent
 		.setArrayLayers(1)
 		.setSamples(SAMPLE_COUNT_1_BIT)
 		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
+		.setUsage(usage)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(gpu.handle)!;
 	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
@@ -174,6 +185,8 @@ struct PassIo
 {
 	vk::ImageView prev;
 	vk::ImageView scene;
+	// Null for a side pass: a compute pass that writes only its own images, and
+	// whose successor reads what this one read.
 	vk::Image dst;
 	vk::ImageView dst_view;
 	vk::Extent2D extent;
@@ -214,9 +227,15 @@ struct PassIo
  The protocol, which the interface cannot express and every implementer must
  honour: on entry `prev` and `scene` are in `SHADER_READ_ONLY_OPTIMAL` and `dst`
  is in whatever the last frame left — open it with `color_attachment_barrier`,
- which discards from `UNDEFINED`. On exit `dst` is in `COLOR_ATTACHMENT_OPTIMAL`
- with rendering ended. `target.depth` is not yours and neither is `target.color`,
- unless you are the tonemap.
+ which discards from `UNDEFINED`, or `storage_open_barrier` to write it from a
+ compute shader. On exit `dst` is in `COLOR_ATTACHMENT_OPTIMAL` with rendering
+ ended, or in `GENERAL` for a pass that wrote it as a storage image — and then
+ the pass implements `close_barrier`, because closing `dst` for the next reader
+ is the chain's and the chain has to be told which layout it is closing from.
+ `target.depth` is not yours and neither is `target.color`, unless you are the
+ tonemap.
+
+ `dst` is null for a side pass, which writes no frame at all.
 
  The layout half of that is at least checked: a missing barrier is only visible
  to validation as a layout mismatch, which is why the layouts here are specific
@@ -258,6 +277,13 @@ interface FullscreenPass
 
 	// Give back device objects. Optional for the pass that holds none.
 	fn void free(Gpu* gpu) @optional;
+
+	<*
+	 The barrier that hands `dst` to the next reader, for a pass that leaves it
+	 somewhere other than `COLOR_ATTACHMENT_OPTIMAL`. Optional: the chain closes
+	 an attachment with `shader_read_barrier` when this is absent.
+	*>
+	fn vk::ImageMemoryBarrier2 close_barrier(vk::Image dst) @optional;
 }
 
 // ============================================================================
@@ -311,10 +337,43 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	// the tonemap alone — `three.toneMapping` with no `setPost` — reads A and
 	// allocates neither, which is what keeps a tone curve one image rather than
 	// two.
-	if (stages >= 1 && !self.pong[0].exists()) self.pong[0].init(gpu, POST_CHAIN_FORMAT, self.extent)!;
-	if (stages >= 2 && !self.pong[1].exists()) self.pong[1].init(gpu, POST_CHAIN_FORMAT, self.extent)!;
+	vk::ImageUsageFlags usage = self.pong_usage();
+	if (stages >= 1 && !self.pong[0].exists()) self.pong[0].init(gpu, POST_CHAIN_FORMAT, self.extent, usage)!;
+	if (stages >= 2 && !self.pong[1].exists()) self.pong[1].init(gpu, POST_CHAIN_FORMAT, self.extent, usage)!;
 
+	self.ensure_post_images(gpu)!;
 	self.ensure_sampler(gpu)!;
+}
+
+<*
+ What a pass's destination is created with: an attachment, and a storage image
+ too once the chain has had a compute pass. Image A is never a destination, so it
+ never needs it.
+*>
+fn vk::ImageUsageFlags PostPass.pong_usage(&self)
+{
+	return self.storage ? CHAIN_IMAGE_USAGE | IMAGE_USAGE_STORAGE_BIT : CHAIN_IMAGE_USAGE;
+}
+
+<*
+ Makes every pass destination a storage image, before the first compute pass is
+ built.
+
+ By recreating them: a usage bit is fixed when an image is made. The images go
+ through the deletion queue like any other, so frames in flight keep theirs, and
+ the next frame opens the new ones from `UNDEFINED` as it does every frame. Once
+ and for good - a chain that had a compute pass once is likely to again, and the
+ flag going back would be a second recreation for nothing.
+*>
+fn void? PostPass.ensure_storage(&self, Gpu* gpu)
+{
+	if (self.storage) return;
+	self.storage = true;
+	self.pong[0].free(gpu);
+	self.pong[1].free(gpu);
+	foreach (stage : self.stages) if (stage.keep.exists()) stage.keep.free(gpu);
+	if (self.extent.width == 0) return;
+	self.ensure_keeps(gpu)!;
 }
 
 <*
@@ -367,6 +426,216 @@ fn void PostPass.destroy_images(&self, Gpu* gpu)
 	self.pong[0].free(gpu);
 	self.pong[1].free(gpu);
 	self.extent = { };
+}
+
+// ============================================================================
+// A pass's own images
+// ============================================================================
+
+<*
+ A storage image post passes declared for themselves: a history a temporal
+ effect reads back next frame, a histogram one pass builds and the next reduces.
+
+ **The chain's, not a pass's.** Two passes that declare the same name, format and
+ size bind the same image - that is how one pass hands another something that is
+ not a frame - and the image lives as long as any pass declares it. `users` is
+ that count. `PostPass.set` reuses an image whose declaration it repeats exactly,
+ so live-editing a temporal effect's body keeps its history rather than starting
+ it over.
+
+ Starts at zero (`fresh`), and is zeroed again whenever it is remade - a resize,
+ for one the size of the frame. `per_frame` zeroes it at the start of every
+ frame too, for an accumulator that is about one frame.
+
+ Always in `GENERAL`: every reader and writer is a shader, and a layout change
+ per pass would be a barrier per pass for nothing.
+*>
+struct PostImage
+{
+	String name;
+	StorageImageFormat format;
+	// As declared. Zero is the frame's own size, which `extent` then follows.
+	uint width;
+	uint height;
+	bool per_frame;
+	ChainImage image;
+	vk::Extent2D extent;
+	bool fresh;
+	uint users;
+}
+
+fn bool PostImage.matches(&self, PostImageDecl decl)
+{
+	return self.name == decl.name && self.format.name == decl.format
+		&& self.width == decl.width && self.height == decl.height && self.per_frame == decl.per_frame;
+}
+
+<*
+ The image a declaration names: one the chain already has under that name, or a
+ new one.
+
+ An existing image under the name with a different format, size or clear is a
+ conflict for `add` - two passes cannot mean two images by one name - and is
+ passed over for `set`, which is about to drop the passes that declared it. The
+ new image then lives beside it until they go.
+
+ @param replacing : `True from set: the chain's current passes are about to be dropped.`
+ @return ? POST_IMAGE_CONFLICT : `An existing image of that name was declared differently. diagnostic says how.`
+ @return ? STORAGE_FORMAT_UNSUPPORTED : `This device cannot store to the format.`
+*>
+fn PostImage*? PostPass.claim_image(&self, Gpu* gpu, PostImageDecl decl, bool replacing, String* diagnostic)
+{
+	PostImage* conflict = null;
+	foreach (image : self.images)
+	{
+		if (image.name != decl.name) continue;
+		if (image.matches(decl))
+		{
+			image.users++;
+			return image;
+		}
+		conflict = image;
+	}
+	if (conflict != null && !replacing)
+	{
+		if (diagnostic != null)
+		{
+			*diagnostic = string::format(mem,
+				"post: image '%s' is already in the chain as %s %s, and this pass declares it %s %s - "
+					"one name is one image",
+				decl.name, conflict.format.name, image_size_words(conflict.width, conflict.height),
+				decl.format, image_size_words(decl.width, decl.height));
+		}
+		return POST_IMAGE_CONFLICT~;
+	}
+
+	StorageImageFormat format = storage_format_named(decl.format)!;
+	if (!gpu.can_have_storage(format))
+	{
+		if (diagnostic != null)
+		{
+			*diagnostic = string::format(mem, "post: image '%s' is %s, which this device cannot store to", decl.name,
+				decl.format);
+		}
+		return STORAGE_FORMAT_UNSUPPORTED~;
+	}
+
+	PostImage* made = mem::new(PostImage);
+	*made = {
+		.name = decl.name.copy(mem),
+		.format = format,
+		.width = decl.width,
+		.height = decl.height,
+		.per_frame = decl.per_frame,
+		.users = 1,
+	};
+	if (catch err = made.ensure(gpu, self.extent))
+	{
+		made.name.free(mem);
+		mem::free(made);
+		return err~;
+	}
+	self.images.push(made);
+	return made;
+}
+
+fn String image_size_words(uint width, uint height)
+{
+	return width == 0 ? "the size of the frame" : string::tformat("%dx%d", width, height);
+}
+
+<*
+ One user fewer, and the image gone with the last.
+*>
+fn void PostPass.release_image(&self, Gpu* gpu, PostImage* image)
+{
+	if (image.users > 1)
+	{
+		image.users--;
+		return;
+	}
+	foreach (i, held : self.images)
+	{
+		if (held != image) continue;
+		self.images.remove_at(i);
+		break;
+	}
+	image.image.free(gpu);
+	image.name.free(mem);
+	mem::free(image);
+}
+
+<*
+ Makes the image exist at the size it should be: its own, or the frame's.
+ Remade at a new size is remade empty, and marked to be zeroed before its first
+ use.
+*>
+fn void? PostImage.ensure(&self, Gpu* gpu, vk::Extent2D frame)
+{
+	vk::Extent2D wanted = self.width == 0 ? frame : { .width = self.width, .height = self.height };
+	if (wanted.width == 0 || wanted.height == 0) return;
+	if (self.image.exists() && self.extent.width == wanted.width && self.extent.height == wanted.height) return;
+	self.image.free(gpu);
+	self.image.init(gpu, self.format.vk, wanted, IMAGE_USAGE_STORAGE_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
+	self.extent = wanted;
+	self.fresh = true;
+}
+
+fn void? PostPass.ensure_post_images(&self, Gpu* gpu)
+{
+	foreach (image : self.images) image.ensure(gpu, self.extent)!;
+}
+
+<*
+ Zeroes every image that needs it before the frame's first pass: a new one, a
+ remade one, and every `per_frame` one.
+
+ A clear is a transfer write, so each is fenced on both sides: after every shader
+ that touched the image last frame, and before every one that touches it this
+ frame.
+*>
+fn void PostPass.open_images(&self, vk::CommandBuffer cmd)
+{
+	foreach (image : self.images)
+	{
+		if (!image.image.exists() || (!image.fresh && !image.per_frame)) continue;
+		vk::ImageMemoryBarrier2 before = {
+			...IMAGE_BARRIER,
+			.image = image.image.image,
+			.srcStageMask = image.fresh ? PIPELINE_STAGE_2_NONE : CHAIN_READERS,
+			.srcAccessMask = image.fresh ? (vk::AccessFlags2)0 : ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			.dstStageMask = PIPELINE_STAGE_2_CLEAR_BIT,
+			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+			.oldLayout = image.fresh ? IMAGE_LAYOUT_UNDEFINED : IMAGE_LAYOUT_GENERAL,
+			.newLayout = IMAGE_LAYOUT_GENERAL,
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ before }));
+		vk::ClearColorValue zero = { .uint32 = { 0, 0, 0, 0 } };
+		vk::cmdClearColorImage(cmd, image.image.image, IMAGE_LAYOUT_GENERAL, &zero, 1, &COLOR_LEVEL);
+		vk::ImageMemoryBarrier2 after = {
+			...IMAGE_BARRIER,
+			.image = image.image.image,
+			.srcStageMask = PIPELINE_STAGE_2_CLEAR_BIT,
+			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+			.dstStageMask = CHAIN_READERS,
+			.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT | ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			.oldLayout = IMAGE_LAYOUT_GENERAL,
+			.newLayout = IMAGE_LAYOUT_GENERAL,
+		};
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ after }));
+		image.fresh = false;
+	}
+}
+
+fn void PostPass.free_post_images(&self, Gpu* gpu)
+{
+	foreach (image : self.images)
+	{
+		image.image.free(gpu);
+		image.name.free(mem);
+		mem::free(image);
+	}
+	self.images.clear();
 }
 
 // ============================================================================
@@ -877,19 +1146,25 @@ fn void? PostPass.record_chain(
 			));
 	}
 
+	// Before any pass reads them: a new image, a remade one and a per-frame one
+	// start the frame at zero.
+	self.open_images(cmd);
+
 	foreach (i, boxed : self.stages)
 	{
 		// `output_of` rather than `pong[i & 1]`, in all three places a destination
 		// or a source is named: a stage something taps writes into an image of its
 		// own, and the whole difference between the two kinds lives in that one
-		// function.
-		ChainImage* dst    = self.output_of(i);
+		// function. A side pass has no destination at all.
+		PostStage* stage   = self.stages[i];
+		ChainImage* dst    = stage.writes_output ? self.output_of(i) : null;
 		// The first pass's `prev` is A, which makes a chain of one identical to the
 		// single pass this replaced: both bindings point at the same image, so
 		// `p.color == p.scene` and a shader written before the chain existed reads
-		// exactly what it always read.
-		vk::ImageView prev = i == 0 ? self.scene.view : self.output_of(i - 1).view;
-		int tapped         = self.stages[i].tap;
+		// exactly what it always read. `source_of` steps over side passes, which
+		// leave the frame as they found it.
+		vk::ImageView prev = self.source_of(i).view;
+		int tapped         = stage.tap;
 		vk::ImageView tap  = tapped >= 0 ? self.output_of((sz)tapped).view : self.scene.view;
 
 		// Taken fresh from the boxed stage rather than cached — see
@@ -900,8 +1175,8 @@ fn void? PostPass.record_chain(
 			{
 				.prev = prev,
 				.scene = self.scene.view,
-				.dst = dst.image,
-				.dst_view = dst.view,
+				.dst = dst == null ? (vk::Image)null : dst.image,
+				.dst_view = dst == null ? (vk::ImageView)null : dst.view,
 				.extent = self.extent,
 				.sampler = self.sampler,
 				.depth = target.depth_view,
@@ -914,7 +1189,17 @@ fn void? PostPass.record_chain(
 			}
 		)!;
 
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(dst.image) }));
+		if (dst != null)
+		{
+			vk::ImageMemoryBarrier2 close = &pass.close_barrier ? pass.close_barrier(dst.image) : shader_read_barrier(dst.image);
+			vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ close }));
+		}
+		// What this pass stored into its own images, before the next pass - or the
+		// next frame - reads or rewrites them.
+		if (stage.image_count > 0)
+		{
+			vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setMemoryBarriers({ storage_memory_barrier() }));
+		}
 	}
 
 	// The one pass that writes `target.color`, and the one pipeline in the chain
@@ -923,7 +1208,7 @@ fn void? PostPass.record_chain(
 	// A that reads its own predecessor, and A again with no predecessor to read:
 	// a tonemap-only chain is the first pass of a chain, and its `prev` is what
 	// every first pass's is.
-	vk::ImageView last = count == 0 ? self.scene.view : self.output_of(count - 1).view;
+	vk::ImageView last = self.source_of(count).view;
 	tone.record(
 		cmd,
 		{

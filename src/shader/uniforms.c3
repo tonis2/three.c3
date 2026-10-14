@@ -136,6 +136,19 @@ fn void append_shady_textures(DString* out, MaterialTexture[] textures, uint fir
 }
 
 <*
+ A post pass's own storage images, one module-level declaration each, numbered
+ from `first` in the order the script listed them. The format is spelled as the
+ script wrote it, which `validate_post` has already checked is one shady knows.
+*>
+fn void append_shady_images(DString* out, ShaderImage[] images, uint first)
+{
+	foreach (i, image : images)
+	{
+		out.appendf("image2d<%s> %s @set(0) @binding(%d);\n", image.format, image.name, first + (uint)i)!!;
+	}
+}
+
+<*
  How many bytes one uniform takes in the `Uniforms` struct: its floats, times
  its rows. Every width is a multiple of four under scalar layout, so a field
  starts where the one before it ended.

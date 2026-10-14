@@ -2902,6 +2902,97 @@ keep their index and their shader — which is what lets a script animate every 
 `addPass` calls you want is the same effect said in a way that cannot leave a handle pointing at somebody else's
 shader.
 
+## three.addPass({ compute, uniforms, textures, reads, images, threads })
+
+A post pass that is a compute shader rather than a function per pixel — the same chain, the same `reads`, the
+same live `uniforms` and `textures`, and `three.setPost({ compute })` works the same way. Reach for one when
+an effect is not a function of one pixel: a blur that shares the texels it loads across a workgroup instead
+of sampling each one nine times, a scatter that writes somewhere other than where it reads, a reduction over
+the whole frame.
+
+```js
+three.addPass({
+	compute: `
+shared float3 row[66];
+
+fn void main(PostThread t) @compute @threads(64, 1, 1)
+{
+	int2 px = int2(t.id.xy);
+	int last = int(resolution().x) - 1;
+	row[t.local.x + 1u] = color_at(int2(min(px.x, last), px.y));
+	if (t.local.x == 0u) row[0] = color_at(int2(max(px.x - 1, 0), px.y));
+	if (t.local.x == 63u) row[65] = color_at(int2(min(px.x + 1, last), px.y));
+	barrier();
+	if (!inside(px)) return;
+	uint i = t.local.x + 1u;
+	output[px] = float4((row[i - 1u] + row[i] + row[i + 1u]) / 3.0, 1.0);
+}`,
+});
+```
+
+The body is the whole entry point, `fn void main(PostThread t) @compute @threads(x, y, 1)`, with any helpers
+and `shared` arrays beside it. The engine reads the workgroup back out of it and dispatches enough to cover
+the frame. `t.id.xy` is the pixel, `t.local` is the thread within its group and `t.group` is the group.
+
+What a fragment body gets as `Post p`, a compute body calls by name:
+
+- `output` — the pass's destination, an `rgba16f` image the size of the frame. Write every pixel:
+  `output[px] = float4(c, 1.0)`.
+- `color_at(px)`, `scene_at(px)`, `tap_at(px)` — one pixel of what the pass before wrote, of the rendered
+  scene, and of the pass named by `reads`, exactly. `sample_prev(uv)`, `sample_scene(uv)` and `sample_tap(uv)`
+  are the same images filtered at a uv, clamped at the edge. `prev`, `scene` and `tap_image` are the samplers
+  themselves.
+- `depth_at(px)` — `p.depth`: how far the surface at that pixel is from the camera, in world units.
+- `resolution()`, `time()`, `uv_of(px)` — the frame's size in pixels, seconds since the pass was set, and the
+  pixel's centre as a 0..1 uv.
+- `uniforms()` — the pass's uniforms, `uniforms().gain`.
+- `inside(px)` — whether a pixel is in the frame.
+
+Three rules a fragment body never meets:
+
+- **No `Sample`.** It takes its level from screen-space derivatives, which a compute shader does not have;
+  read with `color_at`, `sample_prev` or `.sample_lod(uv, 0.0)` instead.
+- **Guard the edge.** A dispatch is whole workgroups, so the last row and column of groups run past a frame
+  whose size is not a multiple of `@threads`. `if (!inside(px)) return;` — after any `barrier()`, because a
+  barrier the whole workgroup does not reach is undefined.
+- **Write `output`, or it is a side pass.** A compute pass that never stores to `output` writes only its own
+  `images` and leaves the frame as it found it: the pass after it reads what it read. A side pass cannot be
+  named by `reads`, and one that writes nothing at all is refused.
+
+`threads: [x, y]` dispatches over that many threads instead of the frame — a reduction over a 256-bucket
+histogram is `threads: [256, 1]`. A pass that writes `output` over a smaller grid leaves the rest of the frame
+undefined, so leave it out on those.
+
+## pass images
+
+`images` gives a post pass storage images of its own, which keep what they hold from one frame to the next — a
+history a temporal effect reads back, a histogram one pass builds for the next to read. Each is a format, or
+`{ format, size, clear }`:
+
+```js
+const histogram = { format: 'r32ui', size: [64, 1], clear: 'frame' };
+three.addPass({ compute: countLuminance, images: { histogram } });   // a side pass: writes only the histogram
+three.addPass({ compute: applyExposure, images: { histogram } });
+```
+
+- `format` — a storage format as the shader spells it: `'rgba16f'`, `'rgba8'`, `'r32f'`, `'r32ui'`, and the rest
+  `three.compute.limits.storageImageFormats` lists.
+- `size` — `[width, height]`, or left out for the frame's own size, which follows the frame when it resizes.
+- `clear` — `'never'`, the default, keeps the image between frames; `'frame'` zeroes it at the start of every
+  frame, for an accumulator that is about one frame.
+
+The body reads and writes it by name as an `image2d<format>`: `history[px]`, `history[px] = v`,
+`InterlockedAdd(histogram[int2(bucket, 0)], 1u)` on an `r32ui` one. Every image starts at zero.
+
+**One name is one image.** Passes that declare the same name, format and size share it — that is how one hands
+another something that is not a frame — and a pass that declares it differently is refused naming both. The
+image lives as long as some pass declares it. `three.setPost` with the same declaration keeps it, so editing a
+temporal effect's body live does not throw its history away.
+
+A pass may declare four; a compute pass writing the frame has spent one of the device's guaranteed four on
+`output`, so three is the portable count. A fragment pass may declare images too, and store to them where the
+device lets a fragment shader store at all.
+
 ## three.toneMapping
 
 The curve the finished frame ends on: `'none'`, `'agx'` or `'agx-blender'`. Anything else throws.
@@ -3536,6 +3627,13 @@ kernel.run({ a, result }, { threads: n });     // named
 kernel.run([a, result], { threads: n });       // positional
 ```
 
+Named bindings are matched to the shader's own names whatever order the keys are written in. An
+object whose keys are not all the shader's names binds in key order instead, which is what a module
+with no names needs. A binding is a buffer, a `three.compute.image()`, or — for a `Sampler2D` the
+kernel samples — any texture; handing one kind where the shader declares another is refused naming
+the binding. `kernel.bindings` lists them as `[{ name, kind, format }]`, `kind` being `'buffer'`,
+`'image'` or `'texture'`.
+
 The options:
 
 - `threads` — a work-item count, split by the entry point's own `@threads`. `threads: n`.
@@ -3561,19 +3659,74 @@ three.compute.copy(saved, latent);        // back before the unconditional one
 three.compute.zero(accumulator);
 ```
 
+### three.compute.image({ width, height, format, filter, data })
+
+An image a kernel writes and anything else may read: a material's `map`, a post pass's `textures`,
+another kernel's input. It is a texture — it goes wherever a texture goes — that a kernel can also
+store into, declared in the shader as `image2d<format>`.
+
+```js
+const paint = three.compute.image({ width: 256, height: 256, format: 'rgba8' });
+const fill = three.compute.kernel(`
+image2d<rgba8> target;
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+fn void main(ComputeIn at) @compute @threads(8, 8, 1)
+{
+    int2 px = int2(at.id.xy);
+    if (px.x >= target.size().x || px.y >= target.size().y) return;
+    target[px] = float4(float(px.x) / 256.0, float(px.y) / 256.0, 0.5, 1.0);
+}`, { name: 'fill' });
+fill.run({ target: paint }, { threads: [256, 256] });
+
+scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), new three.MeshLambertMaterial({ map: paint })));
+```
+
+- `format` — a storage format as the shader spells it: `'rgba16f'` (the default), `'rgba8'`,
+  `'rgba32f'`, `'r32f'`, `'r32ui'`, `'r32i'`, and the extended ones `three.compute.limits.storageImageFormats`
+  lists for this device (`'rg16f'`, `'r11f_g11f_b10f'`, `'r8'`, ...). There is no `rgb8` and no sRGB
+  storage format: write `rgba8` and encode in the shader if you need to.
+- `filter` — how a material samples it, `three.LinearFilter` or `three.NearestFilter`. A format the
+  device cannot filter is nearest whatever this says.
+- `data` — first contents, in `read()`'s layout. Without it the image starts at zero, which is what
+  an accumulator or a histogram wants.
+
+The image's texels are linear values — no sRGB decode on the way into a material. A kernel's write
+reaches the next frame without anything else changing: the frame knows a kernel touched an image
+and redraws.
+
+An integer image (`r32ui`, `r32i`, ...) is a kernel's and a readback's only: as a material's `map`
+it is refused, because a sampler would read its integers as floats. `r32ui` is the one format
+`InterlockedAdd(img[px], 1u)` works on.
+
+### image.read(into?), image.write(data), image.dispose()
+
+`read()` copies the texels back as numbers, `width * height * components` of them row by row from
+the top, in the typed array the format reads as: a `Float32Array` for every float format (`rgba16f`
+included — halves arrive as floats), a `Uint8Array` for `rgba8`, a `Uint32Array` for `r32ui`. `into`
+is the array to fill, for a caller doing it repeatedly. `write(data)` replaces every texel from the
+same layout, so a readback written back is the image it came from.
+
+`dispose()` gives the image back once whatever the kernels have recorded has run. A material still
+drawing with it keeps it.
+
 ### three.compute.limits
 
 What this device lets a kernel do: `{ device, cooperativeMatrix, subgroupSize, maxSharedMemory,
 maxWorkgroupInvocations, maxBindingRange, maxAllocation, bindingAlignment, maxPushConstants,
-maxBindings }`. It is for choosing between kernel variants, such as a cooperative-matrix matmul or a
-tiled one.
+maxBindings, storageImageFormats, storageImageReadWithoutFormat, storageImageWriteWithoutFormat,
+maxStorageImages, maxImageSize }`. It is for choosing between kernel variants, such as a
+cooperative-matrix matmul or a tiled one. `storageImageFormats` is every format this device can
+make a `three.compute.image` in; `maxStorageImages` is how many one kernel may declare (four is all
+the spec promises); the two `WithoutFormat` flags say whether an `image2d<float4>` — whose format the
+host picks — can be read and written.
 
 Kernels compiled from source are cached on disk in the shader cache, keyed by name and source, so a
 warm start reads them rather than compiling them again.
 
 ### What is not here
 
-No textures, no indirect dispatch, no atomics beyond what the shader language already has, and no
-frame integration: a `submit` is a device round trip the script asks for, not something the loop
-does. The boundary is also the safety valve — a command buffer that runs past the driver's watchdog
+No indirect dispatch, no mip levels or image arrays, no atomics beyond what the shader language
+already has, and no frame integration: a `submit` is a device round trip the script asks for, not
+something the loop does. A post pass that wants a compute shader inside the frame is
+`three.addPass({ compute })` instead. The boundary is also the safety valve — a command buffer that runs past the driver's watchdog
 timeout is a lost device, and only the caller knows where the work can be cut.

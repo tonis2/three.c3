@@ -72,6 +72,9 @@ enum ShaderPass : char
 	TONEMAP,
 	LIGHTMAP,
 	LIGHTMAP_MATERIAL,
+	// A script's compute post pass: `post_compute.shady` with the script's
+	// entry point after it. Last before COUNT so no earlier number moves.
+	POST_COMPUTE,
 	COUNT,
 }
 
@@ -89,7 +92,8 @@ faultdef SHADY_PASS_UNWIRED;
  the pipelines over this module are specialized with; they are part of the disk
  cache key, so two value sets never share an entry. When `compiled` is given it
  answers whether the compiler actually ran, which is what `PipelineCache`
- counts.
+ counts. `images` are a post pass's own storage images, emitted as
+ `image2d<format>` declarations beside its samplers - see `ShaderDef.images`.
 *>
 fn ShaderModule? compile_shader(
 	ShaderPass pass,
@@ -100,7 +104,8 @@ fn ShaderModule? compile_shader(
 	MaterialTexture[] textures = { },
 	String vertex = "",
 	bool bake = false,
-	ShaderSpec[] specs = { })
+	ShaderSpec[] specs = { },
+	ShaderImage[] images = { })
 {
 	// One case per pass: the def, and the push block it walks.
 	switch (pass)
@@ -173,7 +178,12 @@ fn ShaderModule? compile_shader(
 			// fixed half declares. `body_shady` is the spelling to splice
 			// when the two languages disagree about a body.
 			String spliced = body_shady.len > 0 ? body_shady : body;
-			return compile_shady_cached(post_def(spliced, uniforms, textures), PostPush, compiled, specs);
+			return compile_shady_cached(post_def(spliced, uniforms, textures, images), PostPush, compiled, specs);
+		case ShaderPass.POST_COMPUTE:
+			// The same push block and the same uniforms and samplers, and a body
+			// that is the whole entry point rather than a function the template
+			// calls - see `post_compute_def`.
+			return compile_shady_cached(post_compute_def(body, uniforms, textures, images), PostPush, compiled, specs);
 		default:
 			@advise("three: no module is wired for pass %d", (int)pass);
 			return SHADY_PASS_UNWIRED~;

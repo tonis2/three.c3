@@ -243,6 +243,18 @@ fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
 }
 
 <*
+ The stages that read the post chain's images: a fragment pass's sampler and a
+ compute pass's, either of which may be the next pass in the chain.
+
+ Both on every barrier that hands an image to the chain - not the one stage the
+ next pass happens to be - because which kind of pass comes next is a fact about
+ the chain the barrier's caller does not have, and naming a stage nothing runs
+ costs nothing. The cached-scene reopen below waits on the same pair for the
+ same reason: last frame's readers of image A were either.
+*>
+const vk::PipelineStageFlags2 CHAIN_READERS = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+<*
  The other way a finished colour attachment can be consumed: read by a later pass
  in the same command buffer instead of copied out of.
 
@@ -258,10 +270,74 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstStageMask = CHAIN_READERS,
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+}
+
+<*
+ Opens an image a compute pass is about to write every texel of.
+
+ `color_attachment_barrier`'s compute counterpart: from `UNDEFINED`, because the
+ dispatch covers the image and nothing in it is worth keeping, into `GENERAL`,
+ the one layout a storage image may be written in. An execution dependency on
+ everything before it and no source access, for the same write-after-read reason
+ - last frame sampled it, this frame overwrites it.
+*>
+fn vk::ImageMemoryBarrier2 storage_open_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.srcAccessMask = (vk::AccessFlags2)0,
+		.dstStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_GENERAL,
+	};
+}
+
+<*
+ Closes an image a compute pass wrote, for the next pass to sample.
+
+ `shader_read_barrier` from the other side: the writer was a compute shader's
+ storage store rather than colour output, and the image leaves `GENERAL` for the
+ same `SHADER_READ_ONLY_OPTIMAL` every chain image is read in - so the pass after
+ a compute pass cannot tell what kind of pass made its input.
+*>
+fn vk::ImageMemoryBarrier2 storage_close_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.dstStageMask = CHAIN_READERS,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_GENERAL,
+		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+}
+
+<*
+ Orders one pass's storage-image writes before the next pass's reads and writes
+ of the same images, which stay in `GENERAL` throughout: a memory barrier, since
+ there is no layout to change and naming each image would add nothing.
+
+ What makes a histogram one pass builds visible to the pass that reduces it, and
+ what keeps a history image a pass rewrites from being read half-written.
+*>
+fn vk::MemoryBarrier2 storage_memory_barrier()
+{
+	return {
+		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
+		.srcStageMask = CHAIN_READERS,
+		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.dstStageMask = CHAIN_READERS,
+		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT | ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 	};
 }
 
@@ -287,7 +363,7 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstStageMask = CHAIN_READERS,
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
@@ -429,7 +505,7 @@ fn void Target.begin_cached_render_to(
 	vk::ImageMemoryBarrier2 color = {
 		...IMAGE_BARRIER,
 		.image = image,
-		.srcStageMask = sampled ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.srcStageMask = sampled ? CHAIN_READERS : PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT : ACCESS_2_TRANSFER_READ_BIT,
 		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_READ_BIT | ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -439,7 +515,7 @@ fn void Target.begin_cached_render_to(
 	vk::ImageMemoryBarrier2 depth = {
 		...IMAGE_BARRIER,
 		.image = self.depth,
-		.srcStageMask = sampled && !keep_depth ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+		.srcStageMask = sampled && !keep_depth ? CHAIN_READERS
 			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = sampled && !keep_depth ? ACCESS_2_SHADER_SAMPLED_READ_BIT
 			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -481,7 +557,7 @@ fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty
 	vk::ImageMemoryBarrier2 depth = {
 		...IMAGE_BARRIER,
 		.image = self.depth,
-		.srcStageMask = sampled ? PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+		.srcStageMask = sampled ? CHAIN_READERS
 			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT
 			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,

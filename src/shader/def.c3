@@ -54,6 +54,17 @@ enum TextureForm : char
 }
 
 <*
+ A storage image a script declared on a post pass, as the module spells it:
+ `image2d<format> name`. The chain owns the image itself - see `PostImage` in
+ `render/chain.c3` - and this is only the declaration.
+*>
+struct ShaderImage
+{
+	String name;
+	String format;
+}
+
+<*
  Text that fills one of a template's holes - a `@required` or `@fallback`
  function the template's own code calls.
 
@@ -97,6 +108,11 @@ struct ShaderDef
 	TextureForm texture_form;
 	MaterialTexture[] textures;
 	uint texture_first; // the table row or binding the first texture gets
+
+	// A post pass's own storage images, each a binding of the pass's own set
+	// from `image_first` on. Empty for every other def.
+	ShaderImage[] images;
+	uint image_first;
 
 	// The module's text, in the order it is written out. A pass whose source is
 	// more than one file lists them here - a shared piece first, then the file
@@ -192,6 +208,14 @@ macro void append_shader_def(DString* out, ShaderDef def, $Type)
 		{
 			append_shader_source(out, { .name = maps ? "material_textures" : "post_textures", .source = region.str_view() }, restore);
 		}
+	}
+
+	if (def.images.len > 0)
+	{
+		DString region;
+		region.tinit(128);
+		append_shady_images(&region, def.images, def.image_first);
+		append_shader_source(out, { .name = "post_images", .source = region.str_view() }, restore);
 	}
 
 	foreach (source : def.sources)

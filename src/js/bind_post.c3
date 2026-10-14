@@ -47,8 +47,8 @@ import qjs;
 *>
 fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
 {
-	self.bind(host, "setPost", &js_set_post, 6);
-	self.bind(host, "addPass", &js_add_pass, 6);
+	self.bind(host, "setPost", &js_set_post, 14);
+	self.bind(host, "addPass", &js_add_pass, 14);
 	self.bind(host, "clearPost", &js_clear_post, 0);
 	self.bind(host, "setPostUniform", &js_set_post_uniform, 7);
 	self.bind(host, "setPostTexture", &js_set_post_texture, 3);
@@ -181,6 +181,51 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 		textures.tinit(4);
 		foreach (name : texture_name_list) textures.push({ .name = name });
 
+		// Which kind of pass, and for a compute pass the grid it is dispatched
+		// over - zero for the frame's own extent.
+		PostKind kind = argc > 6 && arg_int(&js, argc, args, 6) == 1 ? PostKind.COMPUTE : PostKind.FRAGMENT;
+		uint[2] threads = {
+			argc > 7 ? whole(arg_int(&js, argc, args, 7)) : 0,
+			argc > 8 ? whole(arg_int(&js, argc, args, 8)) : 0,
+		};
+
+		// The pass's own images, as five more joined lists in step: names,
+		// formats, widths and heights (zero for the frame's), and whether each is
+		// cleared every frame. `postSpec` has already refused a malformed entry.
+		List{String} image_names;
+		List{String} image_formats;
+		List{String} image_widths;
+		List{String} image_heights;
+		List{String} image_clears;
+		image_names.tinit(4);
+		image_formats.tinit(4);
+		image_widths.tinit(4);
+		image_heights.tinit(4);
+		image_clears.tinit(4);
+		split_commas(argc > 9 ? arg_text(&js, argc, args, 9, tmem) : "", &image_names);
+		split_commas(argc > 10 ? arg_text(&js, argc, args, 10, tmem) : "", &image_formats);
+		split_commas(argc > 11 ? arg_text(&js, argc, args, 11, tmem) : "", &image_widths);
+		split_commas(argc > 12 ? arg_text(&js, argc, args, 12, tmem) : "", &image_heights);
+		split_commas(argc > 13 ? arg_text(&js, argc, args, 13, tmem) : "", &image_clears);
+		if (image_formats.len() != image_names.len() || image_widths.len() != image_names.len()
+			|| image_heights.len() != image_names.len() || image_clears.len() != image_names.len())
+		{
+			*out = js.raise("every post image needs a format and a size — one arrived without them");
+			return;
+		}
+		List{PostImageDecl} images;
+		images.tinit(4);
+		foreach (i, name : image_names)
+		{
+			images.push({
+				.name = name,
+				.format = image_formats[i],
+				.width = whole(image_widths[i].to_int() ?? 0),
+				.height = whole(image_heights[i].to_int() ?? 0),
+				.per_frame = image_clears[i] == "1",
+			});
+		}
+
 		// Collected whether the compile failed or only warned, exactly as
 		// `js_create_material` collects it: the warning path logs and the failure
 		// path throws, and an agent who never sees a warning writes the same mistake
@@ -200,7 +245,10 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 				uniforms.array_view(),
 				textures.array_view(),
 				tap,
-				diagnostic: &diagnostic
+				diagnostic: &diagnostic,
+				kind: kind,
+				images: images.array_view(),
+				threads: threads
 			);
 			err = @catch(added);
 			if (!err) stage = added!!;
@@ -218,7 +266,10 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 						// the mesh pass and the chain belongs to the renderer, so this is
 						// the layer that has both.
 					&self.pass.assets,
-					diagnostic: &diagnostic
+					diagnostic: &diagnostic,
+					kind: kind,
+					images: images.array_view(),
+					threads: threads
 				)
 			);
 		}
@@ -260,6 +311,9 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 		*out = qjs::int_value((int)stage);
 	};
 }
+
+// A count from a script, where a negative one means none.
+fn uint whole(int value) @local => value < 0 ? 0 : (uint)value;
 
 <*
  Turns a post sampler fault into a sentence an agent can act on.
@@ -371,6 +425,19 @@ fn String post_failure(fault err, String diagnostic) @local
 			);
 		case POST_TOO_MANY_TEXTURES:
 			return string::tformat("a post pass may declare %d textures of its own", POST_TEXTURE_LIMIT);
+		case POST_COMPUTE_BODY:
+			return "a compute pass is whole functions with a `@compute @threads(x, y, 1)` entry point among them";
+		case POST_PASS_WRITES_NOTHING:
+			return "this compute pass writes nothing — store to `output[px]`, or to an image the pass declares";
+		case POST_TAP_SIDE_PASS:
+			return "`reads` names a side pass, which writes no frame to read";
+		case POST_TOO_MANY_IMAGES:
+			return string::tformat("a post pass may declare %d images of its own", POST_IMAGE_LIMIT);
+		case POST_IMAGE_INVALID:
+		case POST_IMAGE_CONFLICT:
+			return "a post image is declared wrongly, or differently from a pass already in the chain";
+		case STORAGE_FORMAT_UNSUPPORTED:
+			return "a post image asks for a format this device cannot store to";
 		case SHADER_COMPILE_FAILED:
 			return "the post shader failed to compile and no diagnostic came back";
 		default:

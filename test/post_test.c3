@@ -34,6 +34,7 @@ import image;
 import std::core::test;
 import std::math;
 import std::collections::list;
+import shady;
 
 // A global rather than a function returning a slice literal: a slice literal is
 // backed by the stack frame that made it, and c3c says so.
@@ -1921,5 +1922,543 @@ fn void the_background_goes_through_the_tonemap() @test
 			"and AgX moves it — got %d,%d,%d",
 			(int)toned[0], (int)toned[1], (int)toned[2]
 		);
+	};
+}
+
+// ============================================================================
+// Compute passes
+//
+// The same chain, with a pass that is a compute shader the script wrote whole:
+// its own workgroup, its own `shared` memory, writing `output` as a storage
+// image. What is different from a fragment pass is all in how the destination
+// is opened and closed, which is why the engine half of this runs under the
+// validation layer too.
+// ============================================================================
+
+// The smallest compute pass that writes the frame: every pixel, unchanged.
+const String COMPUTE_IDENTITY = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	output[px] = float4(color_at(px), 1.0);
+}`;
+
+<*
+ A compute body compiles against its template: one compute entry, the workgroup
+ it declared, and `output` at `POST_OUTPUT_BINDING` - written, `rgba16f`, a
+ storage image - with the four reserved samplers where a fragment pass has them.
+*>
+fn void the_post_compute_def_declares_output_at_its_binding() @test
+{
+	three::validate_post(COMPUTE_IDENTITY, {}, {}, three::PostKind.COMPUTE)!!;
+	three::ShaderModule mod = three::compile_shader(three::ShaderPass.POST_COMPUTE, body: COMPUTE_IDENTITY)!!;
+	defer mod.free();
+	test::@check(mod.ok, "the identity compute pass compiles: %s", mod.diagnostic);
+	test::@check(mod.entries.len() == 1 && mod.entries[0].stage == three::STAGE_COMPUTE,
+		"one compute entry point: %d entries", mod.entries.len());
+	test::@check(mod.local_size[0] == 8 && mod.local_size[1] == 8 && mod.local_size[2] == 1,
+		"its workgroup is the @threads it declared");
+
+	three::ShaderBinding* output = mod.layout.binding_of("output");
+	test::@check(output != null, "output is reflected");
+	test::@check(output.binding == three::POST_OUTPUT_BINDING, "at binding %d, got %d",
+		three::POST_OUTPUT_BINDING, output.binding);
+	test::@check(output.type == DESCRIPTOR_TYPE_STORAGE_IMAGE && output.writes && !output.reads,
+		"as a storage image that is written and not read");
+	test::@check(output.storage_format == (uint)shady::ImageFormat.RGBA16F, "in rgba16f, the chain's format");
+
+	three::ShaderBinding* previous = mod.layout.binding_of("prev");
+	test::@check(previous != null && previous.binding == 0 && previous.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		"and prev is the combined sampler at 0 that a fragment pass has");
+	test::@check(mod.layout.walked_of("info") != null && mod.layout.walked_of("planes") != null,
+		"with the post push block in front");
+}
+
+<*
+ A compute body is whole functions with an entry point among them. The fragment
+ pass's shorthand - only the statements - has no signature to be wrapped in here,
+ since the workgroup the signature carries is the author's, so it is refused with
+ the signature it needs rather than compiled into a module with no entry.
+*>
+fn void a_compute_body_that_is_not_an_entry_point_is_refused() @test
+{
+	test::@check(@catch(three::validate_post("output[int2(0, 0)] = float4(1.0);", {}, {}, three::PostKind.COMPUTE))
+		== three::POST_COMPUTE_BODY, "bare statements are refused");
+	test::@check(three::post_diagnostic().contains("@compute @threads"),
+		"naming the signature: %s", three::post_diagnostic());
+
+	test::@check(@catch(three::validate_post("fn float3 helper(float3 c) { return c; }", {}, {}, three::PostKind.COMPUTE))
+		== three::POST_COMPUTE_BODY, "whole functions with no entry among them are refused");
+}
+
+<*
+ An image declaration is checked like a uniform's: its name, which the template
+ and the textures share, and its format, which is refused with the one the
+ script probably meant.
+*>
+fn void a_post_image_with_an_unknown_format_is_refused_by_name() @test
+{
+	three::PostImageDecl[1] wrong = { { .name = "history", .format = "rgb8" } };
+	test::@check(@catch(three::validate_post(COMPUTE_IDENTITY, {}, {}, three::PostKind.COMPUTE, wrong[..]))
+		== three::POST_IMAGE_INVALID, "rgb8 is not a storage format");
+	test::@check(three::post_diagnostic().contains("history") && three::post_diagnostic().contains("rgba8"),
+		"and the sentence names the image and the format it meant: %s", three::post_diagnostic());
+
+	three::PostImageDecl[1] taken = { { .name = "output", .format = "rgba16f" } };
+	test::@check(@catch(three::validate_post(COMPUTE_IDENTITY, {}, {}, three::PostKind.COMPUTE, taken[..]))
+		== three::POST_IMAGE_INVALID, "output is the template's");
+
+	three::PostImageDecl[1] half = { { .name = "hist", .format = "r32ui", .width = 256 } };
+	test::@check(@catch(three::validate_post(COMPUTE_IDENTITY, {}, {}, three::PostKind.COMPUTE, half[..]))
+		== three::POST_IMAGE_INVALID, "a size with one side is refused");
+}
+
+<*
+ A compute pass that copies the frame leaves it where it was, to a level.
+
+ `an_identity_post_pass_leaves_the_frame_where_it_was` for the other kind of
+ pass, on the same asymmetric frame: a destination opened wrong, a pixel
+ addressed from the bottom, or an output written in the wrong format would each
+ move the frame, and a flip would move it by a hundred levels.
+*>
+fn void an_identity_compute_pass_leaves_the_frame_where_it_was() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target, COMPUTE_IDENTITY, {}, kind: three::PostKind.COMPUTE)!!;
+		image::Image posted = renderer.capture()!!;
+		defer posted.free();
+
+		int delta = worst_channel_delta(&plain, &posted);
+		test::@check(delta <= 1, "the identity compute pass changed the frame by %d levels", delta);
+	};
+}
+
+<*
+ A compute pass that stores to nothing is refused rather than run: it would
+ change nothing, and the likeliest reason is a body that forgot `output`.
+*>
+fn void a_compute_pass_that_never_writes_output_is_refused() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		String diagnostic;
+		fault err = @catch(renderer.post.set(&renderer.gpu, &renderer.target, `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	float3 c = color_at(int2(t.id.xy));
+}`, {}, diagnostic: &diagnostic, kind: three::PostKind.COMPUTE));
+		defer if (diagnostic.ptr != null) diagnostic.free(mem);
+		test::@check(err == three::POST_PASS_WRITES_NOTHING, "a pass that writes nothing is refused: %s", err);
+		test::@check(diagnostic.contains("output"), "naming output: %s", diagnostic);
+	};
+}
+
+// Swaps red and blue: a fragment pass whose effect says which pass ran.
+const String SWAP = `fn float3 post(Post p) { return p.color.bgr; }`;
+
+// Copies the tapped pass's output: a compute pass that reads `reads`.
+const String COMPUTE_COPY_TAP = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	output[px] = float4(tap_at(px), 1.0);
+}`;
+
+<*
+ Compute and fragment passes mix in one chain and read each other, through
+ `prev` and through `reads`, in both directions.
+
+ A swap, a compute copy of the swap read through `reads`, and a fragment swap of
+ that copy read through `reads` again: the frame comes back to where it started,
+ to a level, only if every edge carried the right image. A compute destination
+ handed on in the wrong layout, a tapped compute output overwritten, or a kept
+ image made without storage usage once the chain gained a compute pass each
+ leave the frame swapped or black.
+*>
+fn void compute_and_fragment_passes_mix_and_read_each_other() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target, SWAP, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, COMPUTE_COPY_TAP, {}, tap: 0,
+			kind: three::PostKind.COMPUTE)!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, `fn float3 post(Post p) { return p.tap.bgr; }`, {},
+			tap: 1)!!;
+
+		image::Image chained = renderer.capture()!!;
+		defer chained.free();
+		int delta = worst_channel_delta(&plain, &chained);
+		test::@check(delta <= 1, "swap, copy, swap back changed the frame by %d levels", delta);
+	};
+}
+
+// A three-tap horizontal box blur, as a fragment pass: each tap is a texel
+// centre, so the linear sampler returns the texels themselves.
+const String FRAGMENT_BLUR = `
+fn float3 post(Post p)
+{
+	float2 step = float2(1.0 / p.resolution.x, 0.0);
+	return (prev.sample_lod(p.uv - step, 0.0).rgb + p.color + prev.sample_lod(p.uv + step, 0.0).rgb) / 3.0;
+}`;
+
+// The same blur through workgroup memory: each thread loads one texel, the edge
+// threads one more, and every thread averages three after the barrier. Every
+// thread reaches the barrier - the bounds check is after it.
+const String COMPUTE_BLUR = `
+shared float3 tile[66];
+
+fn void main(PostThread t) @compute @threads(64, 1, 1)
+{
+	int2 px = int2(t.id.xy);
+	int last = int(resolution().x) - 1;
+	tile[t.local.x + 1u] = color_at(int2(min(px.x, last), px.y));
+	if (t.local.x == 0u) tile[0] = color_at(int2(max(px.x - 1, 0), px.y));
+	if (t.local.x == 63u) tile[65] = color_at(int2(min(px.x + 1, last), px.y));
+	barrier();
+	if (!inside(px)) return;
+	uint i = t.local.x + 1u;
+	output[px] = float4((tile[i - 1u] + tile[i] + tile[i + 1u]) / 3.0, 1.0);
+}`;
+
+<*
+ A compute pass's workgroup shares memory: a blur that reads its neighbours out
+ of `shared` agrees with the same blur sampled by a fragment pass, to a level.
+
+ The frame is 96 wide against a 64-wide workgroup, so the second group is part
+ empty and its edge texels come from the clamped loads - a barrier reached by
+ only some of the group, or a tile read before it was written, lands a wrong
+ value at the seam between the two groups.
+*>
+fn void a_compute_pass_shares_memory_across_its_workgroup() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+
+		renderer.post.set(&renderer.gpu, &renderer.target, FRAGMENT_BLUR, {})!!;
+		image::Image sampled = renderer.capture()!!;
+		defer sampled.free();
+
+		renderer.post.set(&renderer.gpu, &renderer.target, COMPUTE_BLUR, {}, kind: three::PostKind.COMPUTE)!!;
+		image::Image shared = renderer.capture()!!;
+		defer shared.free();
+
+		int delta = worst_channel_delta(&sampled, &shared);
+		test::@check(delta <= 1, "the shared-memory blur and the sampled one differ by %d levels", delta);
+	};
+}
+
+<*
+ A chain with compute passes in it is silent under the validation layer: set,
+ add, a side pass with an image, clear, and the three frame paths.
+
+ What the layer sees and a picture does not: a compute destination opened from
+ the wrong layout, a storage image bound in one layout and left in another, a
+ push against a set layout the pipeline does not have, a depth buffer sampled by
+ a compute shader without being handed to it.
+*>
+fn void a_compute_chain_is_silent_under_validation() @test
+{
+	@with_validating_pass(; three::Renderer* renderer)
+	{
+		if (!renderer.gpu.validation) return;
+
+		asymmetric_scene(renderer);
+		image::Image warmup = renderer.capture()!!;
+		warmup.free();
+
+		renderer.gpu.begin_capture();
+
+		renderer.post.set(&renderer.gpu, &renderer.target, COMPUTE_IDENTITY, {}, kind: three::PostKind.COMPUTE)!!;
+		image::Image one = renderer.capture()!!;
+		one.free();
+
+		renderer.post.add(&renderer.gpu, &renderer.target, SWAP, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	output[px] = float4(color_at(px) * 0.5 + float3(depth_at(px) * 0.0), 1.0);
+}`, {}, kind: three::PostKind.COMPUTE)!!;
+		three::PostImageDecl[1] counted = { { .name = "hist", .format = "r32ui", .width = 16, .height = 1, .per_frame = true } };
+		renderer.post.add(&renderer.gpu, &renderer.target, HISTOGRAM_SIDE, {}, kind: three::PostKind.COMPUTE,
+			images: counted[..])!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, COMPUTE_COPY_TAP, {}, tap: 1,
+			kind: three::PostKind.COMPUTE)!!;
+		image::Image two = renderer.capture()!!;
+		two.free();
+		image::Image three_ = renderer.capture()!!;
+		three_.free();
+		renderer.render_offscreen()!!;
+
+		renderer.post.clear(&renderer.gpu);
+		image::Image bare = renderer.capture()!!;
+		bare.free();
+
+		String errors = renderer.gpu.sink.errors.str_view();
+		String warnings = renderer.gpu.sink.warnings.str_view();
+		renderer.gpu.end_capture();
+
+		test::@check(errors.len == 0, "a compute chain produced validation errors: %s", errors);
+		test::@check(warnings.len == 0, "and warnings: %s", warnings);
+	};
+}
+
+// ============================================================================
+// A pass's own images
+// ============================================================================
+
+// Counts every pixel into one of sixteen buckets by its red channel: a side pass,
+// writing only its image.
+const String HISTOGRAM_SIDE = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	uint bucket = uint(clamp(color_at(px).r, 0.0, 1.0) * 15.0);
+	InterlockedAdd(hist[int2(int(bucket), 0)], 1u);
+}`;
+
+// Writes the share of the frame the histogram counted, over two: 0.5 when every
+// pixel was counted exactly once this frame.
+const String HISTOGRAM_SHOW = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	uint total = 0u;
+	for (int i = 0; i < 16; i++) total += hist[int2(i, 0)];
+	float share = float(total) / (resolution().x * resolution().y);
+	output[px] = float4(float3(share * 0.5), 1.0);
+}`;
+
+<*
+ One pass builds a histogram and the next reads it, through an image both
+ declare - and a `clear: 'frame'` image starts every frame at zero.
+
+ The second pass writes half the share of the frame the histogram counted, so
+ grey 0.5 is every pixel counted once. A histogram the second pass read before
+ the first had finished, or one bound to a different image, reads short; one the
+ frame did not clear reads every pixel twice on the second frame, which is white.
+*>
+fn void a_histogram_built_by_one_pass_is_read_by_the_next() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+		three::PostImageDecl[1] hist = { { .name = "hist", .format = "r32ui", .width = 16, .height = 1, .per_frame = true } };
+		renderer.post.set(&renderer.gpu, &renderer.target, HISTOGRAM_SIDE, {}, kind: three::PostKind.COMPUTE,
+			images: hist[..])!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, HISTOGRAM_SHOW, {}, kind: three::PostKind.COMPUTE,
+			images: hist[..])!!;
+		test::@check(renderer.post.images.len() == 1, "two declarations, one image: %d", renderer.post.images.len());
+
+		int grey = (int)math::round((double)three::linear_to_srgb(0.5) * 255.0);
+		for (int frame = 0; frame < 2; frame++)
+		{
+			image::Image shot = renderer.capture()!!;
+			defer shot.free();
+			char[3] middle = middle_pixel(&shot);
+			test::@check(math::abs((int)middle[0] - grey) <= 1 && math::abs((int)middle[2] - grey) <= 1,
+				"frame %d counted every pixel once: %d against %d", frame, middle[0], grey);
+		}
+	};
+}
+
+// Adds an eighth to one texel, once per frame: a side pass over one thread.
+const String ACCUMULATE = `
+fn void main(PostThread t) @compute @threads(1, 1, 1)
+{
+	acc[int2(0, 0)] = acc[int2(0, 0)] + 0.125;
+}`;
+
+// Shows that texel over the whole frame.
+const String SHOW_ACC = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	output[px] = float4(float3(acc[int2(0, 0)]), 1.0);
+}`;
+
+fn void set_accumulator(three::Renderer* renderer, String side = ACCUMULATE)
+{
+	three::PostImageDecl[1] acc = { { .name = "acc", .format = "r32f", .width = 1, .height = 1 } };
+	uint[2] one = { 1, 1 };
+	renderer.post.set(&renderer.gpu, &renderer.target, side, {}, kind: three::PostKind.COMPUTE,
+		images: acc[..], threads: one)!!;
+	renderer.post.add(&renderer.gpu, &renderer.target, SHOW_ACC, {}, kind: three::PostKind.COMPUTE, images: acc[..])!!;
+}
+
+fn int accumulated(three::Renderer* renderer)
+{
+	image::Image shot = renderer.capture()!!;
+	defer shot.free();
+	return (int)middle_pixel(&shot)[1];
+}
+
+fn int encoded(float linear) => (int)math::round((double)three::linear_to_srgb(linear) * 255.0);
+
+<*
+ An image a pass declares keeps what it held between frames - and `set` with the
+ same declaration keeps it too, which is what lets a temporal effect's body be
+ edited live without its history starting over.
+
+ The accumulator starts at zero and gains an eighth a frame, so frame N shows
+ N/8. A `set` that repeated the declaration exactly carries on from where the
+ last chain left it; one that declared it differently would start again.
+*>
+fn void a_persistent_image_accumulates_across_frames() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+		set_accumulator(renderer);
+		test::@check(math::abs(accumulated(renderer) - encoded(0.125)) <= 1, "the first frame is an eighth");
+		test::@check(math::abs(accumulated(renderer) - encoded(0.25)) <= 1, "the second is a quarter");
+
+		// The same declaration and a new body: the image is the one already there.
+		set_accumulator(renderer, `
+fn void main(PostThread t) @compute @threads(1, 1, 1)
+{
+	acc[int2(0, 0)] += 0.125;
+}`);
+		test::@check(renderer.post.images.len() == 1, "the old chain's image went with it: %d", renderer.post.images.len());
+		int carried = accumulated(renderer);
+		test::@check(math::abs(carried - encoded(0.375)) <= 1, "a live edit kept the history: %d against %d",
+			carried, encoded(0.375));
+
+		renderer.post.clear(&renderer.gpu);
+		test::@check(renderer.post.images.len() == 0, "and clearing the chain gives it back");
+	};
+}
+
+<*
+ An image the size of the frame follows the frame, and starts again at zero when
+ it does: the old contents are at the old size and mean nothing at the new one.
+*>
+fn void a_frame_sized_image_follows_a_resize_and_starts_at_zero() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+		three::PostImageDecl[1] acc = { { .name = "acc", .format = "r32f" } };
+		String per_pixel = `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	float v = acc[px] + 0.125;
+	acc[px] = v;
+	output[px] = float4(float3(v), 1.0);
+}`;
+		renderer.post.set(&renderer.gpu, &renderer.target, per_pixel, {}, kind: three::PostKind.COMPUTE, images: acc[..])!!;
+		accumulated(renderer);
+		test::@check(math::abs(accumulated(renderer) - encoded(0.25)) <= 1, "two frames accumulate");
+
+		renderer.resize_target(W + 16, H + 8)!!;
+		renderer.post.ensure_images(&renderer.gpu, &renderer.target, renderer.post.stages.len())!!;
+		test::@check(renderer.post.images[0].extent.width == W + 16, "the image is the new frame's width: %d",
+			renderer.post.images[0].extent.width);
+		test::@check(math::abs(accumulated(renderer) - encoded(0.125)) <= 1, "and starts again at zero");
+	};
+}
+
+<*
+ One name is one image: a second pass that declares it with another format is
+ refused, naming both, and the chain that was running is left alone.
+*>
+fn void a_second_declaration_with_another_format_is_refused() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		set_accumulator(renderer);
+		three::PostImageDecl[1] other = { { .name = "acc", .format = "rgba16f", .width = 1, .height = 1 } };
+		String diagnostic;
+		fault err = @catch(renderer.post.add(&renderer.gpu, &renderer.target, SHOW_ACC, {}, diagnostic: &diagnostic,
+			kind: three::PostKind.COMPUTE, images: other[..]));
+		defer if (diagnostic.ptr != null) diagnostic.free(mem);
+		test::@check(err == three::POST_IMAGE_CONFLICT, "the conflict is refused: %s", err);
+		test::@check(diagnostic.contains("r32f") && diagnostic.contains("rgba16f"), "naming both: %s", diagnostic);
+		test::@check(renderer.post.stages.len() == 2 && renderer.post.images.len() == 1,
+			"and the chain is as it was: %d passes, %d images", renderer.post.stages.len(), renderer.post.images.len());
+	};
+}
+
+<*
+ A side pass leaves the frame as it found it - the pass after it reads what it
+ read - and naming it in `reads` is refused, since it has no output to read.
+*>
+fn void a_side_pass_leaves_the_frame_and_cannot_be_tapped() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		asymmetric_scene(renderer);
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		three::PostImageDecl[1] hist = { { .name = "hist", .format = "r32ui", .width = 16, .height = 1, .per_frame = true } };
+		renderer.post.set(&renderer.gpu, &renderer.target, SWAP, {})!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, HISTOGRAM_SIDE, {}, kind: three::PostKind.COMPUTE,
+			images: hist[..])!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, SWAP, {})!!;
+		image::Image back = renderer.capture()!!;
+		defer back.free();
+		int delta = worst_channel_delta(&plain, &back);
+		test::@check(delta <= 1, "swap, side pass, swap is the frame again: %d levels", delta);
+
+		String diagnostic;
+		fault err = @catch(renderer.post.add(&renderer.gpu, &renderer.target, COMPUTE_COPY_TAP, {}, tap: 1,
+			diagnostic: &diagnostic, kind: three::PostKind.COMPUTE));
+		defer if (diagnostic.ptr != null) diagnostic.free(mem);
+		test::@check(err == three::POST_TAP_SIDE_PASS, "reading a side pass is refused: %s", err);
+	};
+}
+
+<*
+ A fragment pass can store to an image too, where the device allows a fragment
+ shader to store at all: it copies its input into one, and a compute pass shows
+ that image - the frame comes back unchanged only if every pixel landed.
+*>
+fn void a_fragment_pass_can_keep_an_image_too() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		if (!renderer.gpu.limits.fragment_stores_and_atomics) return;
+		asymmetric_scene(renderer);
+		image::Image plain = renderer.capture()!!;
+		defer plain.free();
+
+		three::PostImageDecl[1] copy = { { .name = "kept", .format = "rgba16f" } };
+		renderer.post.set(&renderer.gpu, &renderer.target, `
+fn float3 post(Post p)
+{
+	kept[int2(p.uv * p.resolution)] = float4(p.color, 1.0);
+	return float3(0.0);
+}`, {}, images: copy[..])!!;
+		renderer.post.add(&renderer.gpu, &renderer.target, `
+fn void main(PostThread t) @compute @threads(8, 8, 1)
+{
+	int2 px = int2(t.id.xy);
+	if (!inside(px)) return;
+	output[px] = kept[px];
+}`, {}, kind: three::PostKind.COMPUTE, images: copy[..])!!;
+		image::Image shown = renderer.capture()!!;
+		defer shown.free();
+		int delta = worst_channel_delta(&plain, &shown);
+		test::@check(delta <= 1, "the image a fragment pass stored is the frame: %d levels", delta);
 	};
 }

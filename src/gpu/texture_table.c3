@@ -219,6 +219,18 @@ fn void TextureTable.write(&self, Gpu* gpu, uint index, vk::DescriptorImageInfo 
 }
 
 <*
+ Counts a slot as used without pointing it at its image: for an image no sampler
+ may read, whose view is not a legal descriptor here. The slot reads white, and
+ `release` is then the same call as for any other slot.
+*>
+fn void TextureTable.reserve(&self, Gpu* gpu, uint index)
+{
+	if (!self.ready || index >= self.usable()) return;
+	if (self.has_fallback) self.write_slot(gpu, index, self.fallback);
+	self.used++;
+}
+
+<*
  Points one slot back at the white fallback.
 
  The whole reason a released index is survivable: `Assets.release_texture`

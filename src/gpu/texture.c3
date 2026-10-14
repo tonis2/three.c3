@@ -234,6 +234,27 @@ struct Texture
 	// other one's filtering.
 	bool nearest;
 	ulong hash;
+	// A storage image's format, or `FORMAT_UNDEFINED` for every texture that was
+	// uploaded rather than computed. Set only by `Gpu.create_storage_texture`
+	// (`gpu/storage_image.c3`): an image a compute kernel writes and a material
+	// samples, which lives in `GENERAL` - see `resting_layout` - and whose
+	// `format` above is meaningless because its texels are not RGBA8 or blocks.
+	vk::Format storage;
+}
+
+<*
+ The layout this image is in whenever nothing is using it, and the one every
+ descriptor over it names.
+
+ `SHADER_READ_ONLY_OPTIMAL` for an uploaded texture. `GENERAL` for a storage
+ image, because a kernel writes it and a material samples it with nothing
+ between the two that could transition it - the kernel's submission and the
+ frame's are different command buffers, and `GENERAL` is the one layout both
+ uses are legal in.
+*>
+fn vk::ImageLayout Texture.resting_layout(&self)
+{
+	return self.storage != FORMAT_UNDEFINED ? IMAGE_LAYOUT_GENERAL : IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 <*
@@ -276,7 +297,7 @@ fn uint level_extent(uint size, uint level) => (size >> level) > 0 ? (size >> le
 const uint MAX_UPLOAD_LEVELS = 32;
 
 faultdef TEXTURE_TOO_MANY_LEVELS, TEXTURE_LEVEL_WRONG_SIZE, TEXTURE_FORMAT_UNSUPPORTED,
-	TEXTURE_IS_COMPRESSED;
+	TEXTURE_IS_COMPRESSED, TEXTURE_IS_NOT_RGBA8;
 
 <*
  Whether this device can build a mip chain for this format by blitting.
@@ -855,10 +876,15 @@ fn Texture? Gpu.create_texture_levels(
 
  @param dst : `Filled with width*height*4 bytes. The caller owns it; nothing is retained.`
  @return ? TEXTURE_IS_COMPRESSED : `A block-compressed texture. Its bytes are blocks, not pixels.`
+ @return ? TEXTURE_IS_NOT_RGBA8 : `A storage image in a format other than rgba8. Its texels are not four bytes; ComputeImage.read() is the verb for those.`
  @require dst.len >= (sz)self.width * self.height * 4
 *>
 fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 {
+	// A computed image is pixels only when it is RGBA8. Any other storage format
+	// would copy fewer or more bytes than the contract says, which is
+	// `TEXTURE_IS_COMPRESSED`'s argument over again.
+	if (self.storage != FORMAT_UNDEFINED && self.storage != FORMAT_R8G8B8A8_UNORM) return TEXTURE_IS_NOT_RGBA8~;
 	// Refused rather than attempted, and named rather than approximated. The
 	// copy would succeed: `vkCmdCopyImageToBuffer` moves stored bytes, so a BC7
 	// image hands back a quarter as many of them as the contract promises and
@@ -883,7 +909,7 @@ fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 	{
 		vk::ImageMemoryBarrier2 to_src = vk::transferBarrier(
 			self.image,
-			IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			self.resting_layout(),
 			IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 		);
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_src }));
@@ -908,7 +934,7 @@ fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 		vk::ImageMemoryBarrier2 to_shader = vk::transferBarrier(
 			self.image,
 			IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+			self.resting_layout()
 		);
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
 	}!;

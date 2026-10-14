@@ -150,6 +150,22 @@ struct GpuLimits
 	uint min_subgroup_size;
 	uint max_subgroup_size;
 	ulong max_memory_allocation_size;
+	// What a storage image may be, for `gpu/storage_image.c3` and the compute
+	// post passes. Read off the same core features struct handed to
+	// `deviceCreateInfo` unchanged, so each is enabled exactly where it is
+	// reported. The formats outside shady's core thirteen (`rg16f`,
+	// `r11f_g11f_b10f`, ...) need the first; an `image2d<float4>`, whose format
+	// the host picks, needs the next two for whichever of reading and writing it
+	// does; a fragment shader that stores to one needs the fourth.
+	bool storage_image_extended_formats;
+	bool storage_image_read_without_format;
+	bool storage_image_write_without_format;
+	bool fragment_stores_and_atomics;
+	// Four is the spec's floor, and four is what a portable pass may count on -
+	// a post pass's output and its own images are all spent from this.
+	uint max_per_stage_storage_images;
+	uint[3] max_compute_workgroup_size;
+	uint max_image_dimension_2d;
 	char[256] device_name;
 }
 
@@ -706,6 +722,13 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.min_subgroup_size = v13_properties.minSubgroupSize,
 		.max_subgroup_size = v13_properties.maxSubgroupSize,
 		.max_memory_allocation_size = (ulong)v11_properties.maxMemoryAllocationSize,
+		.storage_image_extended_formats = features.features.shaderStorageImageExtendedFormats == vk::TRUE,
+		.storage_image_read_without_format = features.features.shaderStorageImageReadWithoutFormat == vk::TRUE,
+		.storage_image_write_without_format = features.features.shaderStorageImageWriteWithoutFormat == vk::TRUE,
+		.fragment_stores_and_atomics = features.features.fragmentStoresAndAtomics == vk::TRUE,
+		.max_per_stage_storage_images = properties.limits.maxPerStageDescriptorStorageImages,
+		.max_compute_workgroup_size = properties.limits.maxComputeWorkGroupSize,
+		.max_image_dimension_2d = properties.limits.maxImageDimension2D,
 		.device_name = properties.deviceName,
 	};
 

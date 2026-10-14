@@ -318,3 +318,97 @@ fn void a_broken_def_comes_back_as_a_diagnostic() @test
 	test::@check(mod.spirv.len == 0, "and produced no module");
 	test::@check(mod.diagnostic.contains("post_body:4"), "naming the body's own line: %s", mod.diagnostic);
 }
+
+// Three storage images, one of each access, and one whose format the host picks.
+const String STORAGE_IMAGE_KERNEL = `
+image2d<rgba16f> source;
+image2d<r32ui>   counts;
+image2d<float4>  scratch;
+
+struct ComputeIn
+{
+	uint3 id @builtin(global_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(8, 4, 1)
+{
+	int2 px = int2(at.id.xy);
+	float4 c = source[px];
+	InterlockedAdd(counts[int2(0, 0)], 1u);
+	scratch[px] = c;
+}
+`;
+
+<*
+ A storage image arrives with what it was declared as: its format, what its
+ texels read as, and whether the module reads it, writes it or both.
+
+ These are what a host checks a bound image against, so each is held apart:
+ `source` is only read, `scratch` only written, `counts` both - an atomic is a
+ read and a write - and `scratch`'s format is the host's to pick, which the
+ module says as `Unknown` and which still pins the texel to float.
+*>
+fn void a_storage_image_reflects_its_format_and_access() @test
+{
+	three::ShaderModule mod = three::compile_compute_shader("storage", STORAGE_IMAGE_KERNEL);
+	defer mod.free();
+	test::@check(mod.ok, "the kernel compiles: %s", mod.diagnostic);
+
+	three::ShaderBinding* source = mod.layout.binding_of("source");
+	three::ShaderBinding* counts = mod.layout.binding_of("counts");
+	three::ShaderBinding* scratch = mod.layout.binding_of("scratch");
+	test::@check(source != null && counts != null && scratch != null, "all three images are reflected");
+
+	test::@check(source.type == DESCRIPTOR_TYPE_STORAGE_IMAGE, "as storage images");
+	test::@check(source.storage_format == (uint)shady::ImageFormat.RGBA16F,
+		"source is rgba16f: %d", source.storage_format);
+	test::@check(source.texel == three::TexelClass.FLOAT, "of float texels");
+	test::@check(source.reads && !source.writes, "read and never written");
+
+	test::@check(counts.storage_format == (uint)shady::ImageFormat.R32UI,
+		"counts is r32ui: %d", counts.storage_format);
+	test::@check(counts.texel == three::TexelClass.UINT, "of uint texels");
+	test::@check(counts.reads && counts.writes, "and an atomic both reads and writes it");
+
+	test::@check(scratch.storage_format == (uint)shady::ImageFormat.UNKNOWN,
+		"scratch leaves its format to the host: %d", scratch.storage_format);
+	test::@check(scratch.texel == three::TexelClass.FLOAT, "which is still a float image");
+	test::@check(!scratch.reads && scratch.writes, "written and never read");
+
+	test::@check(mod.local_size[0] == 8 && mod.local_size[1] == 4 && mod.local_size[2] == 1,
+		"and the workgroup is the @threads it was given");
+}
+
+<*
+ The engine's storage-format table and shady's are the same table.
+
+ Two tables, because shady's is `@local` and says nothing about Vulkan - so this
+ is what keeps them one: every name the engine accepts is one shady accepts, for
+ the same `ImageFormat`, with a texel type of the class and width the engine
+ thinks it has, on the same side of the core/extended line. And the count, so a
+ format shady grows is a failure here rather than a name a script cannot use.
+*>
+fn void the_storage_format_table_agrees_with_shady() @test
+{
+	test::@check(three::STORAGE_IMAGE_FORMATS.len == 39, "all 39 of shady's formats: %d",
+		three::STORAGE_IMAGE_FORMATS.len);
+	foreach (format : three::STORAGE_IMAGE_FORMATS)
+	{
+		shady::StorageFormat theirs;
+		test::@check(shady::storage_format(format.name, &theirs), "shady knows '%s'", format.name);
+		test::@check((uint)theirs.format == format.shady, "'%s' is ImageFormat %d to both: shady says %d",
+			format.name, format.shady, (uint)theirs.format);
+		test::@check(theirs.extended == format.extended, "'%s' is extended to both", format.name);
+
+		String prefix = format.texel == three::TexelClass.FLOAT ? "float"
+			: format.texel == three::TexelClass.SINT ? "int" : "uint";
+		test::@check(theirs.texel.starts_with(prefix), "'%s' reads as %s, and shady says %s",
+			format.name, prefix, theirs.texel);
+		uint width = theirs.texel.len == prefix.len ? 1 : (uint)(theirs.texel[^1] - '0');
+		test::@check(width == format.channels, "'%s' has %d channels, and shady says %s",
+			format.name, format.channels, theirs.texel);
+
+		three::StorageImageFormat? back = three::storage_format_of(format.shady);
+		test::@check(@ok(back) && (back ?? format).name == format.name, "'%s' is found by its number", format.name);
+	}
+}

@@ -499,6 +499,9 @@ fn ulong Renderer.picture_key(&self)
 		key = @hash_value(key, stage.fragment.len);
 	}
 	if (self.post.stages.len() > 0) key = @hash_value(key, self.pass.clock.time);
+	// A kernel that rewrote an image a material or a post pass samples changed
+	// the picture without changing anything above.
+	key = @hash_value(key, self.compute.image_epoch);
 	return key;
 }
 
@@ -601,6 +604,9 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	cache_global = @hash_value(cache_global, self.target.color);
 	cache_global = @hash_value(cache_global, self.target.depth);
 	if (posted) cache_global = @hash_value(cache_global, self.post.scene.image);
+	// The whole cache, not a region of it: which meshes sample the image a kernel
+	// just rewrote is not something the scene's own dirty rectangles know.
+	cache_global = @hash_value(cache_global, self.compute.image_epoch);
 	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
 	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial
 		&& self.pass.prepared_views.len() == 0

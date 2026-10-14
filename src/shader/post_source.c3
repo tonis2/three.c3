@@ -25,6 +25,35 @@ import std::collections::list;
 
 faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
 faultdef POST_TAP_UNKNOWN;
+faultdef POST_COMPUTE_BODY, POST_IMAGE_INVALID, POST_TOO_MANY_IMAGES, POST_PASS_WRITES_NOTHING, POST_TAP_SIDE_PASS,
+	POST_IMAGE_CONFLICT;
+
+<*
+ Which kind of pass a body is: a function the fragment template calls once per
+ pixel, or a compute entry point the engine dispatches over the frame.
+*>
+enum PostKind : char
+{
+	FRAGMENT,
+	COMPUTE,
+}
+
+<*
+ One storage image a post pass declares for itself: the name the body uses, the
+ format it is declared as, and its size - zero for the frame's own, which is
+ what a history or a mask wants and what follows the frame when it resizes.
+
+ `per_frame` clears it to zero at the start of every frame, for an image that is
+ an accumulator *within* a frame - a histogram - rather than across frames.
+*>
+struct PostImageDecl
+{
+	String name;
+	String format;
+	uint width;
+	uint height;
+	bool per_frame;
+}
 
 <*
  How many samplers of its own a post pass may declare, on top of `prev` and
@@ -108,9 +137,9 @@ fn uint post_uniform_bytes(MaterialUniform[] uniforms)
  generates beside it, read off the shipped (or on-disk) file. Allocated from
  tmem; empty if the template does not parse, which the compile then reports.
 *>
-fn String[] post_template_names() @local
+fn String[] post_template_names(PostKind kind = PostKind.FRAGMENT) @local
 {
-	String? text = load_source(ShaderFile.POST_SHADY, tmem);
+	String? text = load_source(kind == PostKind.COMPUTE ? ShaderFile.POST_COMPUTE_SHADY : ShaderFile.POST_SHADY, tmem);
 	if (catch text) return {};
 	String[]? names = shady::top_level_names(text, tmem);
 	if (catch names) return {};
@@ -134,15 +163,38 @@ fn String[] post_template_names() @local
  @return ? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the generated module already uses, is a keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
  @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
  @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
+ @return ? POST_COMPUTE_BODY : `A compute body that is not whole functions with a @compute entry point among them.`
+ @return ? POST_IMAGE_INVALID : `An image whose name is not an identifier or is taken, whose format is not a storage format, or whose size is half given.`
+ @return ? POST_TOO_MANY_IMAGES : `More images than POST_IMAGE_LIMIT.`
 *>
-fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures)
+fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures,
+	PostKind kind = PostKind.FRAGMENT, PostImageDecl[] images = {})
 {
 	@pool()
 	{
 		if (fragment.trim().len == 0)
 		{
-			post_note("post: the fragment body is empty; it must define `float3 post(Post p)`");
+			post_note(kind == PostKind.COMPUTE
+				? "post: the compute body is empty; it must define `fn void main(PostThread t) @compute @threads(8, 8, 1)`"
+				: "post: the fragment body is empty; it must define `float3 post(Post p)`");
 			return POST_BODY_EMPTY~;
+		}
+
+		// A compute body is the entry point itself, so it cannot be the statements
+		// of one: there is no signature to wrap them in, because the workgroup the
+		// signature carries is the author's to choose.
+		if (kind == PostKind.COMPUTE)
+		{
+			// A body that does not parse is let through: the compile has the better
+			// message for it.
+			bool whole = shady::defines_functions(fragment) ?? true;
+			if (!whole || !fragment.contains("@compute"))
+			{
+				post_note("post: a compute pass is whole functions with one entry point among them, "
+					"`fn void main(PostThread t) @compute @threads(8, 8, 1) { ... }` - "
+					"`t.id.xy` is the pixel, and `output[px] = ...` writes it");
+				return POST_COMPUTE_BODY~;
+			}
 		}
 
 		foreach (i, uniform : uniforms)
@@ -211,11 +263,27 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 		// they share the template's namespace: a sampler may not take a name the
 		// template already declares - `scene`, `prev`, `tap_image`, a helper.
 		// Read off the template itself, so the list cannot fall behind it.
-		String texture_note = texture_problem(POST_BODY_NAME, textures, post_template_names(), POST_TEXTURE_LIMIT);
+		String[] template = post_template_names(kind);
+		String texture_note = texture_problem(POST_BODY_NAME, textures, template, POST_TEXTURE_LIMIT);
 		if (texture_note.len > 0)
 		{
 			post_note(texture_note);
 			return textures.len > POST_TEXTURE_LIMIT ? POST_TOO_MANY_TEXTURES~ : POST_NAME_INVALID~;
+		}
+
+		if (images.len > POST_IMAGE_LIMIT)
+		{
+			post_note(string::tformat("post: %d images declared, and a pass may declare %d", images.len, POST_IMAGE_LIMIT));
+			return POST_TOO_MANY_IMAGES~;
+		}
+		foreach (i, image : images)
+		{
+			String problem = post_image_problem(image, i, images, textures, template);
+			if (problem.len > 0)
+			{
+				post_note(problem);
+				return POST_IMAGE_INVALID~;
+			}
 		}
 
 		uint wanted = post_uniform_bytes(uniforms);
@@ -234,4 +302,48 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 
 		post_note("");
 	};
+}
+
+<*
+ What is wrong with one image declaration, as a sentence, or "".
+
+ An image is a module-level resource like a sampler, so it shares the
+ template's namespace and the textures': `output`, `prev` and a texture the same
+ pass declared are all taken.
+*>
+fn String post_image_problem(PostImageDecl image, sz index, PostImageDecl[] images, MaterialTexture[] textures,
+	String[] template) @local
+{
+	if (!is_identifier(image.name) || shady::is_keyword(image.name))
+	{
+		return string::tformat("post: image name '%s' is not an identifier this module can declare", image.name);
+	}
+	foreach (name : template)
+	{
+		if (name == image.name) return string::tformat("post: image name '%s' is one the post template already declares", image.name);
+	}
+	foreach (texture : textures)
+	{
+		if (texture.name == image.name) return string::tformat("post: '%s' is declared as both a texture and an image", image.name);
+	}
+	foreach (j, earlier : images)
+	{
+		if (j >= index) break;
+		if (earlier.name == image.name) return string::tformat("post: image '%s' is declared twice", image.name);
+	}
+	if (catch storage_format_named(image.format))
+	{
+		String hint = storage_format_hint(image.format);
+		return hint.len > 0
+			? string::tformat("post: image '%s' asks for '%s', which is not a storage format - did you mean %s?",
+				image.name, image.format, hint)
+			: string::tformat("post: image '%s' asks for '%s', which is not a storage format - rgba16f, rgba8, r32f "
+				"and r32ui are the common ones", image.name, image.format);
+	}
+	if ((image.width == 0) != (image.height == 0))
+	{
+		return string::tformat("post: image '%s' is %dx%d - give both sides, or neither for the frame's own size",
+			image.name, image.width, image.height);
+	}
+	return "";
 }

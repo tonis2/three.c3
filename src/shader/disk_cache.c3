@@ -86,6 +86,8 @@
  4        count
  4        type   (vk::DescriptorType)
  4        stages (vk::ShaderStageFlags)
+ 4        image  — a storage image's declared format, texel class and access,
+ packed: format | texel << 8 | reads << 16 | writes << 17
  4  push field count
  per field:
  blob        name
@@ -125,9 +127,11 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
  shady revision from the compiler string, replaced by the rule above. 6 made the
  indirect word a set of flags and added `uniform`, which tells a script's uniform
  from a contract field of the same name; a stored module without it would have
- no uniforms at all.
+ no uniforms at all. 7 added a storage image's declared format, texel class and
+access, which a host checks a bound image against — a stored module without
+them would accept any image in any format.
 *>
-const uint SHADER_CACHE_FORMAT_VERSION = 6;
+const uint SHADER_CACHE_FORMAT_VERSION = 7;
 
 <*
  What kind of value a spec constant holds.
@@ -451,6 +455,8 @@ fn void cache_store(String path, ShaderCacheKey key, ShaderModule* mod) @local
 			cache_put_u32(&out, binding.count);
 			cache_put_u32(&out, (uint)binding.type);
 			cache_put_u32(&out, (uint)binding.stages);
+			cache_put_u32(&out, (binding.storage_format & 0xff) | ((uint)binding.texel << 8)
+				| (binding.reads ? 1u << 16 : 0) | (binding.writes ? 1u << 17 : 0));
 		}
 
 		cache_put_u32(&out, (uint)mod.layout.push_fields.len());
@@ -632,8 +638,8 @@ fn bool cache_load(String path, ShaderCacheKey key, ShaderModule* out, bool coun
 		uint set_count = reader.u32();
 
 		uint binding_count = reader.u32();
-		// A blob plus five numbers: twenty-four bytes at the very least.
-		if (!reader.room_for(binding_count, 24)) return cache_reject();
+		// A blob plus six numbers: twenty-eight bytes at the very least.
+		if (!reader.room_for(binding_count, 28)) return cache_reject();
 		List{ShaderBinding} bindings;
 		bindings.tinit(binding_count > 0 ? binding_count : 1);
 		for (uint i = 0; i < binding_count; i++)
@@ -645,6 +651,15 @@ fn bool cache_load(String path, ShaderCacheKey key, ShaderModule* out, bool coun
 			binding.count = reader.u32();
 			binding.type = (vk::DescriptorType)reader.u32();
 			binding.stages = (vk::ShaderStageFlags)reader.u32();
+			uint image = reader.u32();
+			uint texel = (image >> 8) & 0xff;
+			// Checked before the cast: an enum built from a number past its last
+			// member is a fault, and a file is only bytes.
+			if (texel > (uint)TexelClass.UINT) return cache_reject();
+			binding.storage_format = image & 0xff;
+			binding.texel = (TexelClass)texel;
+			binding.reads = (image & (1u << 16)) != 0;
+			binding.writes = (image & (1u << 17)) != 0;
 			if (reader.bad) return cache_reject();
 			bindings.push(binding);
 		}

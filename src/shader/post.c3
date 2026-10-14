@@ -32,7 +32,8 @@ struct PostPush
 // here because the engine's own post path writes bytes rather than this struct.
 $assert @layout_matches(PostPush, POST_PUSH_FIELDS) : "PostPush no longer lays out the way POST_PUSH_FIELDS says";
 
-macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialTexture[] textures = {})
+macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialTexture[] textures = {},
+	ShaderImage[] images = {})
 {
 	ShaderSource[] sources = {
 		{ .name = "post", .file = ShaderFile.POST_SHADY },
@@ -54,6 +55,43 @@ macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialT
 		.texture_form = TextureForm.SAMPLERS,
 		.textures = textures,
 		.texture_first = POST_BINDING_FIRST,
+		.images = images,
+		.image_first = POST_IMAGE_FIRST,
+		.sources = sources,
+		.fills = fills,
+	};
+}
+
+<*
+ The compute post pass, as a `ShaderDef`.
+
+ `post_def`'s push block, uniforms and samplers over `shaders/post_compute.shady`,
+ which declares the four reserved samplers, the `output` image and the helpers -
+ and no entry point. The script's text is the entry point, so it is spliced
+ whole after the template rather than into a hole: an empty hole name is what
+ `append_hole_fill` takes as "these are whole functions, put them in as they
+ are", and `validate_post` has already refused a body that is not.
+*>
+macro ShaderDef post_compute_def(String body, MaterialUniform[] uniforms = {}, MaterialTexture[] textures = {},
+	ShaderImage[] images = {})
+{
+	ShaderSource[] sources = {
+		{ .name = "post_compute", .file = ShaderFile.POST_COMPUTE_SHADY },
+	};
+
+	HoleFill[] fills = {
+		{ .hole = "", .region = "post_body", .text = body },
+	};
+
+	return (ShaderDef) {
+		.name = "post_compute",
+		.uniform_form = UniformForm.PUSHED,
+		.uniforms = uniforms,
+		.texture_form = TextureForm.SAMPLERS,
+		.textures = textures,
+		.texture_first = POST_BINDING_FIRST,
+		.images = images,
+		.image_first = POST_IMAGE_FIRST,
 		.sources = sources,
 		.fills = fills,
 	};

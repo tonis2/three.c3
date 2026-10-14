@@ -15,6 +15,7 @@
 module three_tests::shader;
 
 import three;
+import shady;
 import three_tests::device;
 import vk;
 import std::core::test;
@@ -1806,4 +1807,61 @@ fn void a_disabled_cache_neither_reads_nor_writes() @test
 	test::@check(!file::is_dir(CACHE_DISABLED_DIR), "no directory was created");
 	test::@check(cached_modules(CACHE_DISABLED_DIR) == 0,
 		"and no module reached it: %d", (int)cached_modules(CACHE_DISABLED_DIR));
+}
+
+const String CACHE_IMAGE_DIR = "build/shader-cache-test/image";
+
+// A def that is a compute module with storage images: what a compute post pass
+// is, without the post pass.
+const String CACHE_IMAGE_SOURCE = `
+image2d<rgba16f> frame;
+image2d<r32ui>   histogram;
+
+struct ComputeIn
+{
+	uint3 id @builtin(global_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(16, 8, 1)
+{
+	float4 c = frame[int2(at.id.xy)];
+	InterlockedAdd(histogram[int2(int(c.r * 255.0), 0)], 1u);
+}
+`;
+
+<*
+ A module read back from disk is the module that was stored, the storage half of
+ its bindings included - and a def-built compute module knows its workgroup.
+
+ The format, the texel class and the access are what a host checks a bound
+ image against, so a loader that dropped them would accept any image in any
+ format on a warm start and refuse nothing on a cold one. The workgroup size is
+ not in the file at all: it is read back out of the module, on both paths.
+*>
+fn void a_cached_module_keeps_its_storage_images_and_workgroup() @test
+{
+	fresh_cache(CACHE_IMAGE_DIR);
+
+	bool ran;
+	three::ShaderModule first = compile_cached(CACHE_IMAGE_SOURCE, "image.shady", { }, &ran)!!;
+	defer first.free();
+	test::@check(first.ok && ran, "the first compile ran: %s", first.diagnostic);
+	test::@check(first.local_size[0] == 16 && first.local_size[1] == 8 && first.local_size[2] == 1,
+		"a def-built compute module knows its workgroup");
+
+	three::ShaderModule second = compile_cached(CACHE_IMAGE_SOURCE, "image.shady", { }, &ran)!!;
+	defer second.free();
+	test::@check(second.ok && !ran, "the second came off the disk");
+	test::@check(second.local_size[0] == 16 && second.local_size[1] == 8 && second.local_size[2] == 1,
+		"and still knows its workgroup");
+
+	three::ShaderBinding* frame = second.layout.binding_of("frame");
+	three::ShaderBinding* histogram = second.layout.binding_of("histogram");
+	test::@check(frame != null && histogram != null, "both images came back");
+	test::@check(frame.storage_format == (uint)shady::ImageFormat.RGBA16F, "frame is still rgba16f");
+	test::@check(frame.texel == three::TexelClass.FLOAT && frame.reads && !frame.writes,
+		"of floats, read and not written");
+	test::@check(histogram.storage_format == (uint)shady::ImageFormat.R32UI, "histogram is still r32ui");
+	test::@check(histogram.texel == three::TexelClass.UINT && histogram.reads && histogram.writes,
+		"of uints, read and written");
 }

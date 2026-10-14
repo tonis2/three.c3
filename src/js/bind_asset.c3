@@ -468,7 +468,7 @@ fn ColorSpace color_space_of(int code) @local
  handle reporting the request rather than the result would make `tex.levels` a
  restatement of the caller's own argument.
 *>
-fn qjs::Value texture_value(JsRuntime* self, qjs::Context* js, int index, Texture* uploaded) @local
+fn qjs::Value texture_value(JsRuntime* self, qjs::Context* js, int index, Texture* uploaded)
 {
 	// Counted here because this is the only door. Every one of the four verbs
 	// that hands a texture to a script takes a reference on the way through, and

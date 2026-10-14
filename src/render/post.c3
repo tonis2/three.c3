@@ -153,6 +153,25 @@ struct PostStage (FullscreenPass)
 	// images it always cost.
 	ChainImage keep;
 	bool kept;
+
+	// A fragment body or a compute entry point - which pipeline was built, and
+	// which half of `record` draws or dispatches it.
+	PostKind kind;
+	// Whether it writes the frame. Every fragment pass does; a compute pass does
+	// when its body stores to `output`, and one that does not is a *side pass*
+	// that writes only its own images - the next pass reads what this one read.
+	bool writes_output;
+	// Which ping-pong image a writing pass takes: its place among the passes that
+	// write, rather than among all of them, so a side pass between two writers
+	// does not land the second on the image the first wrote and it reads.
+	uint ordinal;
+	// The grid a compute pass is dispatched over, or zero for the frame's own
+	// extent - what every pass that writes the frame wants.
+	uint[2] threads;
+	// The chain's images this pass declared, in declaration order, which is also
+	// binding order from `POST_IMAGE_FIRST`. Counted references - see `PostImage`.
+	PostImage*[POST_IMAGE_LIMIT] images;
+	uint image_count;
 }
 
 <*
@@ -213,6 +232,14 @@ struct PostPass
 	// has to be stamped with the time it was set at, and `set` is reached between
 	// frames from a script rather than from the frame loop.
 	double now;
+
+	// Whether pass destinations are storage images too: true from the first
+	// compute pass on. See `ensure_storage`.
+	bool storage;
+
+	// The storage images passes declared for themselves, shared by name. Boxed,
+	// because a stage holds pointers to them and the list grows.
+	List{PostImage*} images;
 }
 
 <*
@@ -225,6 +252,7 @@ struct PostPass
 fn void PostPass.init(&self)
 {
 	self.stages.init(mem, 2);
+	self.images.init(mem, 2);
 	// Not the zero a fresh struct has: an exposure of 0 is a black frame, and
 	// every path that reaches a `PostPass` comes through here.
 	self.tonemap_exposure = 1.0;
@@ -252,6 +280,7 @@ fn usz PostPass.bytes(&self)
 {
 	usz total = (usz)(self.scene.memory.size + self.pong[0].memory.size + self.pong[1].memory.size);
 	foreach (stage : self.stages) total += (usz)stage.keep.memory.size;
+	foreach (image : self.images) total += (usz)image.image.memory.size;
 	return total;
 }
 
@@ -286,6 +315,9 @@ fn usz PostPass.bytes(&self)
  @param textures : `Samplers the body wants, in declaration order. Declared here and filled afterwards, one set_texture per name.`
  @param assets : `Where the textures the *previous* chain held go back to. Null skips that release, which is only safe on a chain that never had any.`
  @param [out] diagnostic : `The compiler's output verbatim, on failure and on warnings alike. Owned by the caller. Null keeps the old behaviour of printing to stderr.`
+ @param kind : `FRAGMENT for a post(Post p) body, COMPUTE for a body that is a @compute entry point writing output.`
+ @param images : `The pass's own storage images. A name the old chain declared identically keeps its image - see PostImage.`
+ @param threads : `A compute pass's dispatch grid in threads, or zeros for the frame's extent.`
  @return ? POST_BODY_EMPTY : `The body is empty. post_diagnostic() has the sentence, and it is copied into diagnostic too.`
  @return ? POST_NAME_INVALID : `A uniform name, width or row count is one this cannot generate. post_diagnostic() names it.`
  @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more than the 104 bytes info leaves.`
@@ -300,13 +332,19 @@ fn void? PostPass.set(
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures = { },
 	Assets* assets = null,
-	String* diagnostic = null
+	String* diagnostic = null,
+	PostKind kind = PostKind.FRAGMENT,
+	PostImageDecl[] images = { },
+	uint[2] threads = { 0, 0 }
 )
 {
 	// One, not `stages.len() + 1`: this call is about to be the whole chain, so
 	// the second ping-pong image is only allocated if a later `add` asks for it.
-	// `-1`: the first pass of a chain has nothing before it to tap.
-	PostStage* built = self.build_stage(gpu, target, 1, fragment, uniforms, textures, -1, diagnostic)!;
+	// `-1`: the first pass of a chain has nothing before it to tap. `replacing`:
+	// an image the old chain declared differently is about to go with it, so it
+	// is no conflict.
+	PostStage* built = self.build_stage(gpu, target, 1, fragment, uniforms, textures, -1, diagnostic,
+		kind, images, threads, replacing: true, ordinal: 0)!;
 
 	// Past every fault: from here the swap cannot fail half way.
 	self.drop_stages(gpu, assets);
@@ -350,9 +388,13 @@ fn void? PostPass.set(
  gives, and it matches the chain's existing rule for a source that is not
  distinct.
 
- @param tap : `Which earlier pass this one also reads, or -1 for none. Must be an index already in the chain.`
+ @param tap : `Which earlier pass this one also reads, or -1 for none. Must be an index already in the chain, and not a side pass.`
+ @param kind : `FRAGMENT or COMPUTE, as for set.`
+ @param images : `The pass's own storage images. One the chain already has under the same name must be declared the same way.`
+ @param threads : `A compute pass's dispatch grid in threads, or zeros for the frame's extent.`
  @return `Which position in the chain this pass took. Stable until the chain is set or cleared.`
  @return ? POST_TAP_UNKNOWN : `tap is not an index of a pass already in the chain. diagnostic has the sentence.`
+ @return ? POST_TAP_SIDE_PASS : `tap names a side pass, which has no output to read. diagnostic has the sentence.`
 *>
 fn uint? PostPass.add(
 	&self,
@@ -362,7 +404,10 @@ fn uint? PostPass.add(
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures = { },
 	int tap = -1,
-	String* diagnostic = null
+	String* diagnostic = null,
+	PostKind kind = PostKind.FRAGMENT,
+	PostImageDecl[] images = { },
+	uint[2] threads = { 0, 0 }
 )
 {
 	// Before the compile, unlike the `tap`-is-unread check below, because this one
@@ -381,16 +426,37 @@ fn uint? PostPass.add(
 		}
 		return POST_TAP_UNKNOWN~;
 	}
+	// A side pass has no output to keep, so there is nothing a later pass could
+	// read through it.
+	if (tap >= 0 && !self.stages[tap].writes_output)
+	{
+		if (diagnostic != null)
+		{
+			*diagnostic = string::format(mem,
+				"post: pass %d writes no frame - it is a side pass that writes only its own images - so there is "
+					"nothing to read from it; declare the same image instead",
+				tap);
+		}
+		return POST_TAP_SIDE_PASS~;
+	}
+
+	uint writers = 0;
+	foreach (stage : self.stages) if (stage.writes_output) writers++;
 
 	PostStage* built = self.build_stage(
 		gpu,
 		target,
-		self.stages.len() + 1,
+		(sz)writers + 1,
 		fragment,
 		uniforms,
 		textures,
 		tap,
-		diagnostic
+		diagnostic,
+		kind,
+		images,
+		threads,
+		replacing: false,
+		ordinal: writers
 	)!;
 
 	self.stages.push(built);
@@ -424,7 +490,23 @@ fn ChainImage* PostPass.output_of(&self, sz stage)
 {
 	PostStage* owner = self.stages[stage];
 	if (owner.kept && owner.keep.exists()) return &owner.keep;
-	return &self.pong[stage & 1];
+	return &self.pong[owner.ordinal & 1];
+}
+
+<*
+ What a stage reads as `prev`: the output of the last pass before it that wrote
+ the frame, or image A when none has. A side pass leaves the frame as it found
+ it, so it is stepped over - the pass after it reads what it read.
+
+ `count` for the tonemap, which reads what the whole chain left.
+*>
+fn ChainImage* PostPass.source_of(&self, sz stage)
+{
+	for (sz i = stage; i > 0; i--)
+	{
+		if (self.stages[i - 1].writes_output) return self.output_of(i - 1);
+	}
+	return &self.scene;
 }
 
 <*
@@ -439,7 +521,7 @@ fn void? PostPass.ensure_keeps(&self, Gpu* gpu)
 	foreach (stage : self.stages)
 	{
 		if (!stage.kept || stage.keep.exists()) continue;
-		stage.keep.init(gpu, POST_CHAIN_FORMAT, self.extent)!;
+		stage.keep.init(gpu, POST_CHAIN_FORMAT, self.extent, self.pong_usage())!;
 	}
 }
 
@@ -468,33 +550,69 @@ fn PostStage*? PostPass.build_stage(
 	MaterialUniform[] uniforms,
 	MaterialTexture[] textures,
 	int tap,
-	String* diagnostic
+	String* diagnostic,
+	PostKind kind = PostKind.FRAGMENT,
+	PostImageDecl[] images = { },
+	uint[2] threads = { 0, 0 },
+	bool replacing = false,
+	uint ordinal = 0
 )
 {
 	// The refusals before a module is generated: they carry a sentence rather than
 	// a fault, and the caller asked for the text. Copied out here rather than left
 	// to `post_diagnostic()`, which is a view into a fixed buffer the next call
 	// overwrites.
-	if (catch reason = validate_post(fragment, uniforms, textures))
+	if (catch reason = validate_post(fragment, uniforms, textures, kind, images))
 	{
 		if (diagnostic != null) *diagnostic = post_diagnostic().copy(mem);
 		return reason~;
 	}
 
+	// Before the compile, because it needs nothing from the module: two passes
+	// meaning two images by one name is refused whatever the body says.
+	if (!replacing)
+	{
+		foreach (image : images)
+		{
+			foreach (existing : self.images)
+			{
+				if (existing.name != image.name || existing.matches(image)) continue;
+				if (diagnostic != null)
+				{
+					*diagnostic = string::format(mem,
+						"post: image '%s' is already in the chain as %s %s, and this pass declares it %s %s - "
+							"one name is one image",
+						image.name, existing.format.name, image_size_words(existing.width, existing.height),
+						image.format, image_size_words(image.width, image.height));
+				}
+				return POST_IMAGE_CONFLICT~;
+			}
+		}
+	}
+
+	// Before the images: the first compute pass makes every destination a storage
+	// image, and `ensure_images` then creates them that way.
+	if (kind == PostKind.COMPUTE) self.ensure_storage(gpu)!;
 	self.ensure_images(gpu, target, stages)!;
 	self.ensure_tonemap(gpu, target)!;
 
 	MeshPipeline built;
+	bool writes_output = kind == PostKind.FRAGMENT;
+	bool writes_images = false;
 	@pool()
 	{
+		List{ShaderImage} declared;
+		declared.tinit(images.len + 1);
+		foreach (image : images) declared.push({ .name = image.name, .format = image.format });
+
 		// Through the disk cache, so the second run of a script that sets the same
 		// body pays no compile at all. The body and its declarations are the key,
 		// so live editing needs no invalidation path: a different body is a
 		// different key. The def splices the body and emits the two regions a
 		// script reads through.
 		ShaderModule mod = compile_shader(
-			ShaderPass.POST,
-			body: fragment, uniforms: uniforms, textures: textures)!;
+			kind == PostKind.COMPUTE ? ShaderPass.POST_COMPUTE : ShaderPass.POST,
+			body: fragment, uniforms: uniforms, textures: textures, images: declared.array_view())!;
 		defer mod.free();
 
 		// Handed over before the `ok` check: a successful compile can still warn,
@@ -509,10 +627,52 @@ fn PostStage*? PostPass.build_stage(
 		}
 		if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
 
-		// `POST_CHAIN_FORMAT`, never the target's. Every pass a script writes reads
-		// float and writes float; the tonemap is the only encoder. That is what
-		// keeps one pipeline shape for every body and reordering free.
-		built.init_post(gpu, &mod, POST_CHAIN_FORMAT)!;
+		// What the module stores to, read off its own access decorations: the
+		// frame, its own images, or nothing - and a pass that stores to nothing
+		// changes nothing, which is a mistake rather than a pass.
+		uint storage_images = 0;
+		foreach (binding : mod.layout.bindings)
+		{
+			if (binding.set != 0 || binding.type != DESCRIPTOR_TYPE_STORAGE_IMAGE) continue;
+			storage_images++;
+			if (!binding.writes) continue;
+			if (binding.binding == POST_OUTPUT_BINDING) writes_output = true;
+			if (binding.binding >= POST_IMAGE_FIRST) writes_images = true;
+		}
+		if (!writes_output && !writes_images)
+		{
+			post_refusal(diagnostic, "post: this compute pass writes nothing - store to `output[px]` to write the "
+				"frame, or to an image the pass declares to make it a side pass");
+			return POST_PASS_WRITES_NOTHING~;
+		}
+		if (storage_images > gpu.limits.max_per_stage_storage_images)
+		{
+			post_refusal(diagnostic, string::tformat("post: this pass binds %d storage images, and this device "
+				"binds %d per shader", storage_images, gpu.limits.max_per_stage_storage_images));
+			return POST_TOO_MANY_IMAGES~;
+		}
+		if (kind == PostKind.FRAGMENT && writes_images && !gpu.limits.fragment_stores_and_atomics)
+		{
+			post_refusal(diagnostic, "post: this fragment pass stores to an image, and this device cannot store "
+				"from a fragment shader (fragmentStoresAndAtomics) - make it a compute pass");
+			return POST_TOO_MANY_IMAGES~;
+		}
+
+		if (kind == PostKind.COMPUTE)
+		{
+			if (catch err = built.init_post_compute(gpu, &mod))
+			{
+				post_refusal(diagnostic, compute_pass_refusal(err, gpu, &mod));
+				return err~;
+			}
+		}
+		else
+		{
+			// `POST_CHAIN_FORMAT`, never the target's. Every pass a script writes
+			// reads float and writes float; the tonemap is the only encoder. That is
+			// what keeps one pipeline shape for every body and reordering free.
+			built.init_post(gpu, &mod, POST_CHAIN_FORMAT)!;
+		}
 	};
 
 	PostStage* stage = mem::new(PostStage);
@@ -520,7 +680,80 @@ fn PostStage*? PostPass.build_stage(
 	stage.fragment = fragment.copy(mem);
 	stage.set_at = self.now;
 	stage.tap = tap;
+	stage.kind = kind;
+	stage.writes_output = writes_output;
+	stage.ordinal = ordinal;
+	stage.threads = threads;
+
+	// Last, because it changes the chain's registry: everything that could refuse
+	// this pass has already had its say, and a claim that fails part-way gives back
+	// what it took.
+	foreach (i, image : images)
+	{
+		PostImage*? claimed = self.claim_image(gpu, image, replacing, diagnostic);
+		if (catch err = claimed)
+		{
+			stage.release_images(self, gpu);
+			gpu.retire_pipeline(stage.pipeline);
+			stage.fragment.free(mem);
+			mem::free(stage);
+			return err~;
+		}
+		stage.images[i] = claimed;
+		stage.image_count = (uint)i + 1;
+	}
 	return stage;
+}
+
+<*
+ A refusal's sentence, into the caller's diagnostic - replacing a compiler
+ warning that may already be there, which is the less useful of the two.
+*>
+fn void post_refusal(String* diagnostic, String sentence) @local
+{
+	if (diagnostic == null)
+	{
+		io::eprintn(sentence);
+		return;
+	}
+	if (diagnostic.ptr != null) diagnostic.free(mem);
+	*diagnostic = sentence.copy(mem);
+}
+
+<*
+ Why a compiled compute pass could not become a pipeline, in words.
+*>
+fn String compute_pass_refusal(fault err, Gpu* gpu, ShaderModule* mod) @local
+{
+	GpuLimits* limits = &gpu.limits;
+	switch (err)
+	{
+		case SHADER_MISSING_ENTRY_POINT:
+			return "post: a compute pass defines exactly one entry point, "
+				"`fn void main(PostThread t) @compute @threads(8, 8, 1)`";
+		case SHADER_WORKGROUP_TOO_LARGE:
+			return string::tformat("post: @threads(%d, %d, %d) is more than this device runs in one workgroup - "
+				"at most %d invocations, and %d x %d x %d on each axis",
+				mod.local_size[0], mod.local_size[1], mod.local_size[2], limits.max_compute_workgroup_invocations,
+				limits.max_compute_workgroup_size[0], limits.max_compute_workgroup_size[1],
+				limits.max_compute_workgroup_size[2]);
+		case SHADER_SUBGROUP_SIZE_UNSUPPORTED:
+			return string::tformat("post: @subgroup_size(%d) is not one this device can promise", mod.subgroup_size);
+		default:
+			// Pipeline creation itself, which on a working device is a workgroup's
+			// `shared` memory past what the device has.
+			return string::tformat("post: the compute pipeline could not be built (%s) - a `shared` array larger "
+				"than this device's %d bytes is the usual reason", err, limits.max_compute_shared_memory);
+	}
+}
+
+<*
+ Gives back the chain images a stage declared.
+*>
+fn void PostStage.release_images(&self, PostPass* chain, Gpu* gpu)
+{
+	for (uint i = 0; i < self.image_count; i++) chain.release_image(gpu, self.images[i]);
+	self.image_count = 0;
 }
 
 <*
@@ -553,6 +786,7 @@ fn void PostPass.drop_stages(&self, Gpu* gpu, Assets* assets)
 	foreach (stage : self.stages)
 	{
 		stage.release_textures(gpu, assets);
+		stage.release_images(self, gpu);
 		gpu.retire_pipeline(stage.pipeline);
 		// Retired too — `ChainImage.free` goes through the deletion queue, which
 		// makes replacing a chain mid-frame safe for its images as well as for its
@@ -762,8 +996,11 @@ fn void PostPass.free(&self, Gpu* gpu)
 		if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
 		if (self.depth_sampler != null) vk::destroySampler(gpu.handle, self.depth_sampler, null);
 		self.destroy_images(gpu);
+		// After the stages, whose pointers into this list are gone with them.
+		self.free_post_images(gpu);
 	}
 	self.stages.free();
+	self.images.free();
 	*self = { };
 }
 
@@ -803,6 +1040,8 @@ fn void PostStage.free(&self, Gpu* gpu) @dynamic
 *>
 fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 {
+	if (self.kind == PostKind.COMPUTE) return self.record_compute(cmd, io);
+
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color_attachment_barrier(io.dst) }));
 
 	// Colour only, and no depth attachment — `MeshPipeline.init_post` declares no
@@ -839,6 +1078,81 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// to a binding the layout does not declare is a validation error. Everything
 	// from `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
 	SampledBindings samplers;
+	self.add_chain_samplers(&samplers, io);
+	self.add_images(&samplers);
+	samplers.push(cmd, &self.pipeline);
+	self.push_info(cmd, io, width, height);
+
+	// Three vertices, one instance, no vertex buffer and no index buffer. The
+	// triangle is `SV_VertexID` arithmetic in `shaders/post.shady`.
+	vk::cmdDraw(cmd, 3, 1, 0, 0);
+
+	vk::cmdEndRendering(cmd);
+}
+
+<*
+ A compute pass: the same bindings and the same push block as a fragment pass,
+ plus `output`, dispatched over the frame rather than drawn.
+
+ The destination is opened from `UNDEFINED` into `GENERAL` - the body is held to
+ writing every pixel it covers, which is every pixel of the frame unless it
+ named a smaller grid - and left there, for `close_barrier` to hand to the next
+ reader. A side pass has no destination and opens nothing.
+
+ No texture table: a compute pipeline's layout is set 0 alone - see
+ `MeshPipeline.init_post_compute`.
+*>
+fn void? PostStage.record_compute(&self, vk::CommandBuffer cmd, PassIo io)
+{
+	if (io.dst != null)
+	{
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ storage_open_barrier(io.dst) }));
+	}
+
+	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_COMPUTE, self.pipeline.handle);
+
+	SampledBindings bindings;
+	self.add_chain_samplers(&bindings, io);
+	if (io.dst_view != null && pipeline_declares_binding(&self.pipeline, POST_OUTPUT_BINDING, DESCRIPTOR_TYPE_STORAGE_IMAGE))
+	{
+		bindings.add_storage(POST_OUTPUT_BINDING, io.dst_view);
+	}
+	self.add_images(&bindings);
+	bindings.push(cmd, &self.pipeline);
+
+	float width  = (float)io.extent.width;
+	float height = (float)io.extent.height;
+	self.push_info(cmd, io, width, height);
+
+	// Whole workgroups over the grid: the frame's extent, or what the pass named.
+	uint grid_x = self.threads[0] > 0 ? self.threads[0] : io.extent.width;
+	uint grid_y = self.threads[1] > 0 ? self.threads[1] : io.extent.height;
+	uint[3] local = self.pipeline.local_size;
+	vk::cmdDispatch(cmd, (grid_x + local[0] - 1) / local[0], (grid_y + local[1] - 1) / local[1], 1);
+}
+
+<*
+ Hands a compute pass's destination to the next reader: from `GENERAL`, where
+ the dispatch left it, to the `SHADER_READ_ONLY_OPTIMAL` every chain image is read
+ in. A fragment pass closes the attachment it rendered.
+*>
+fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst) @dynamic
+{
+	return self.kind == PostKind.COMPUTE ? storage_close_barrier(dst) : shader_read_barrier(dst);
+}
+
+<*
+ The four images the chain reserves, and the script's own samplers: what every
+ post pass binds the same way whatever kind it is.
+
+ Every write is checked against the reflected layout first, the reserved bindings
+ included. The compiler may drop a sampler nothing reads, and a body that never
+ touches `p.scene` gives it every reason to drop `scene`; a write to a binding the
+ layout does not declare is a validation error. Everything from
+ `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
+*>
+fn void PostStage.add_chain_samplers(&self, SampledBindings* samplers, PassIo io)
+{
 	if (pipeline_declares_binding(&self.pipeline, 0)) samplers.add(0, sampled_with(io.sampler, io.prev));
 	if (pipeline_declares_binding(&self.pipeline, 1)) samplers.add(1, sampled_with(io.sampler, io.scene));
 	// The depth buffer, in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than
@@ -864,15 +1178,36 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 		samplers.add(POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
 	}
 	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets, POST_BINDING_FIRST);
-	samplers.push(cmd, &self.pipeline);
+}
 
-	// `info` is rewritten here and nowhere else. The uniforms above it are
-	// whatever `set_uniform` last wrote, which is what makes them live between
-	// frames with no upload and no per-frame crossing.
-	// 
-	// Six floats: `info` and then `planes`, which is exactly `POST_PUSH_START`
-	// bytes and exactly what `POST_PUSH_FIELDS` pins. Written as one array because
-	// they are contiguous in the shader's block.
+<*
+ The chain images this pass declared, each a storage image in `GENERAL` at its
+ own binding. One the compiler dropped - declared and never used - is skipped,
+ as an unread sampler is.
+*>
+fn void PostStage.add_images(&self, SampledBindings* bindings)
+{
+	for (uint i = 0; i < self.image_count; i++)
+	{
+		uint binding = POST_IMAGE_FIRST + i;
+		if (!pipeline_declares_binding(&self.pipeline, binding, DESCRIPTOR_TYPE_STORAGE_IMAGE)) continue;
+		if (!self.images[i].image.exists()) continue;
+		bindings.add_storage(binding, self.images[i].image.view);
+	}
+}
+
+<*
+ The push block: `info` and `planes`, rewritten here and nowhere else, then the
+ uniforms above them as `set_uniform` last wrote them - which is what makes them
+ live between frames with no upload and no per-frame crossing.
+
+ Six floats, which is exactly `POST_PUSH_START` bytes and exactly what
+ `POST_PUSH_FIELDS` pins. Written as one array because they are contiguous in the
+ shader's block. The reflected size is pushed, not `PUSH_BUDGET`: pushing more
+ than the block the shader declared is a validation error.
+*>
+fn void PostStage.push_info(&self, vk::CommandBuffer cmd, PassIo io, float width, float height)
+{
 	float[6] info = {
 		width,
 		height,
@@ -883,16 +1218,8 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	};
 	mem::copy(&self.block[0], &info[0], (sz)POST_PUSH_START);
 
-	// The reflected size, not `PUSH_BUDGET`. Pushing more than the block the
-	// shader declared is a validation error.
 	uint push_size = self.pipeline.shader.push_size;
 	vk::cmdPushConstants(cmd, self.pipeline.layout, self.pipeline.shader.stages, 0, push_size, &self.block);
-
-	// Three vertices, one instance, no vertex buffer and no index buffer. The
-	// triangle is `SV_VertexID` arithmetic in `shaders/post.shady`.
-	vk::cmdDraw(cmd, 3, 1, 0, 0);
-
-	vk::cmdEndRendering(cmd);
 }
 
 // One of the chain's own images, as a descriptor. Always SHADER_READ_ONLY_OPTIMAL

@@ -33,6 +33,35 @@ struct ShaderBinding
 	uint count;
 	vk::DescriptorType type;
 	vk::ShaderStageFlags stages;
+
+	// The rest is a storage image's, and zero on every other kind of binding.
+	// They are what lets a host check the image it is about to bind against
+	// what the shader declared - a wrong format is not a validation error a
+	// driver must report, and the picture it gives is reinterpreted bits.
+	//
+	// The format as the module wrote it, a `shady::ImageFormat` - SPIR-V's own
+	// numbering. Zero is `Unknown`: `image2d<float4>`, whose format the host
+	// picks, and which only `texel` then constrains.
+	uint storage_format;
+	// What a texel reads as: float for a float or normalized format, the two
+	// integer classes otherwise. The one thing an `Unknown` format still pins.
+	TexelClass texel;
+	// Whether the module reads and writes the image at all. shady infers both
+	// from use and says so as `NonReadable` / `NonWritable`, so a pass whose body
+	// never stores to an image it declared is told apart from one that does.
+	bool reads;
+	bool writes;
+}
+
+<*
+ What a storage image's texels are, as the shader reads them.
+*>
+enum TexelClass : char
+{
+	NONE,
+	FLOAT,
+	SINT,
+	UINT,
 }
 
 <*
