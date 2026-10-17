@@ -330,6 +330,10 @@ struct JsRuntime
 	// decides how many of these a frame owes.
 	qjs::Value fixed_fn;
 	bool fixed_active;
+	// The late systems, the same way again: called once a frame after the follow
+	// camera has moved, for whatever has to agree with where the camera ended up.
+	qjs::Value late_fn;
+	bool late_active;
 	bool in_frame;
 	long frame_ticks;
 	DString frame_log;
@@ -618,6 +622,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	self.ui_handlers.init(mem, 0);
 	self.ui_pending = qjs::undefined_value();
 	self.frame_fn = qjs::undefined_value();
+	self.late_fn = qjs::undefined_value();
 	self.click_fn = qjs::undefined_value();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
@@ -652,6 +657,7 @@ fn void JsRuntime.close(&self)
 	// into an engine that would no longer be there to release it into.
 	self.clear_frame();
 	self.clear_fixed();
+	self.clear_late();
 	self.clear_key_handlers();
 	self.clear_click_handler();
 	self.clear_physics_handlers();

@@ -973,6 +973,11 @@ centres.
 This solves a whole field and throws it away — right for a wanderer replanning every few seconds, and
 the thing `three.nav.field` exists to replace for a crowd.
 
+**Set `blocks = false` on characters.** The sweep that pulls the route tight meets every mesh that blocks,
+including ones added after the bake — so a character standing on a route cuts it, and a character asking
+for a path from where it stands gets an empty one, because its first step starts inside itself.
+`blocks = false` leaves it clickable and raycastable and takes it out of every sweep.
+
 ## three.nav.field(goals)
 
 Solve towards one or more goals and keep the answer — the verb a crowd uses.
@@ -1174,7 +1179,7 @@ The same seed places the same points, which is what makes a screenshot comparabl
 
 # Systems, entities and loops
 
-## three.systems.step(name, fn, options) / frame / add / remove / enable / list / outline / report / clear / three.systemLoad(budgetMs)
+## three.systems.step(name, fn, options) / frame / late / add / remove / enable / list / outline / report / clear / three.systemLoad(budgetMs)
 
 The ordered system registry. `three.setFixedLoop` and `three.setAnimationLoop` each take one callback, so a
 game with five things to do a frame has one function with five things in it — and that is what this replaces.
@@ -1189,7 +1194,12 @@ The verb is the clock:
   when the step they integrate over does not.
 - `three.systems.frame(name, fn)` is once per drawn frame, handed what that frame was actually worth, and it
   is where the camera, the fades and the uniform writes go.
-- `add()` is the same thing with `{ phase }` left as an option, for when the phase is a variable.
+- `three.systems.late(name, fn)` is once per drawn frame too, after every frame system **and after the
+  camera `attach()` follows has moved** — for whatever has to agree with the camera this frame draws
+  with: an HP bar or a name placed over a character with `three.camera.project`. From a frame system
+  such a label trails a moving camera by one frame.
+- `add()` is the same thing with `{ phase }` left as an option (`'fixed'`, `'frame'` or `'late'`), for
+  when the phase is a variable.
 
 They run in the order you register them. For the one system in a file that has to break that, name the
 neighbour: `{ before: 'fire' }` or `{ after: 'Player.pose' }`, one name or a list, and a name registered
@@ -1198,8 +1208,10 @@ list — the engine's systems still bracket them, the rules drain ahead and the 
 loop is refused where it is made; a name that matches nothing is said once and otherwise ignored. There is
 also a numeric `{ order }`, which is what the engine's own systems use, but a game should not need it.
 
-`outline()` prints the tick — `step  spawn → player → foes` on one line and `frame autopilot → fire` on the
-next. Two lines because they are two lists: every step this frame owes runs before any frame system.
+`outline()` prints the tick — `step  spawn → player → foes` on one line, `frame autopilot → fire` on the
+next and `late  bars` after that. A line per list because they are separate lists: every step this frame
+owes runs before any frame system, and every late system runs after the camera follow that comes after
+them all.
 
 Adding a name that exists replaces it, so a re-run top level ends up with one copy of each system rather
 than two.
@@ -1820,6 +1832,27 @@ It is the same ray a pick casts rather than a second derivation from `position()
 `raycast` on it finds what `pick` finds at that pixel, at the same `distance`. The origin is therefore on the
 near plane and not at the eye: what sits in front of the near plane is invisible, and a ray taken from the
 picture does not hit it either.
+
+## three.camera.project(point)
+
+The pixel a world point is drawn at, as `[x, y, depth]` — or null when the point is behind the camera.
+`three.camera.ray(x, y)` backwards: a point anywhere on the ray through a pixel comes back as that pixel,
+so a name drawn at the answer sits where a click picks the thing it names.
+
+```js
+const at = three.camera.project([p.x, p.y + 2, p.z]);
+if (at) ops.push({ op: 'text', at: [at[0], at[1]], text: actor.name });
+```
+
+`x` and `y` are the rendered image's pixels from its top-left corner — what `three.input.pointer`
+answers in and what `three.ui.draw` places in at `three.ui.scale` 1. `depth` is world units in front of
+the eye along the view axis: what to sort labels by, or fade them with.
+
+It reads the camera as it stands when it is called. The follow `three.camera.attach` sets up runs after
+every frame system, so an overlay projected from a frame system trails a gliding camera by one frame —
+project from `three.systems.late` instead, which runs after the follow.
+
+Takes a Vector3, an `{x, y, z}` or an `[x, y, z]`. Needs a render target, as `ray` does.
 
 ## asset.instantiate(name, { camera: true })
 

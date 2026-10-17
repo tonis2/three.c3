@@ -849,6 +849,9 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
  *kept* waypoint fixes it, and there are a handful of those after shortening
  rather than one per cell.
 
+ Only what blocks counts as floor: a character standing on the waypoint is not
+ something to stand on.
+
  Falls back to the point it was given when nothing is under it, which happens at
  the lip of a ledge where the ray goes past the edge: half a cell of float is
  better than a waypoint dropped to the bottom of a pit.
@@ -856,7 +859,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
 {
 	collision::Ray down = { .origin = { point.x, point.y + cell, point.z }, .direction = { 0, -1, 0 } };
-	Hit hit             = self.raycast(assets, down);
+	Hit hit             = self.raycast(assets, down, true);
 	if (!hit.hit || hit.distance > cell * 3.0f) return point;
 	return hit.point;
 }

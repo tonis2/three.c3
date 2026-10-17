@@ -1293,7 +1293,8 @@ fn void Scene.gather_triangles(
 		if (!self.ignored(id, skip))
 		{
 			Node* node = self.node(id);
-			if (node != null)
+			// `Node.blocks`: a character is found by a pick and walked past by a sweep.
+			if (node != null && node.blocks)
 			{
 				GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 				if (mesh != null && mesh.bvh != null)

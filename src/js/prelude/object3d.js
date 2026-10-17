@@ -44,6 +44,7 @@ export class Object3D {
 		// accessor. Off by default; only the collision proxy an implicit shape
 		// gets from `instantiate({ physics: true })` sets it.
 		this._collisionOnly = false;
+		this._blocks = true;
 		// Something to do the moment this object is in a scene, or null — which
 		// is every object but the root of an `instantiate({ physics: true })`.
 		// A body hangs on a host node and there is no host node until an `add`.
@@ -153,6 +154,25 @@ export class Object3D {
 	set collides(v) {
 		this._collides = !!v;
 		if (this._i >= 0) H.setCollides(this._i, this._g, this._collides);
+	}
+
+	// **"Find me, but walk past me."** Off, the object is still raycast, picked
+	// and reported by `three.query.sphere`/`box`, but nothing sweeps against
+	// it: not `three.query.sweep`, not `moveAndSlide`, not `three.nav.bake`
+	// and not the sweep `three.nav.path` pulls its route tight with.
+	//
+	// It is what a character wants. Left on, a character is a wall across
+	// every route through where it stands, and its own path from where it
+	// stands comes back empty, because its first step starts inside itself.
+	// `collides = false` fixed that by taking it out of the picks too.
+	//
+	// NOT inherited, for `collides`' reason — set it on the meshes, which is
+	// what `traverse` is for. Free to toggle: unlike `collides`, nothing is
+	// rebuilt.
+	get blocks() { return this._blocks; }
+	set blocks(v) {
+		this._blocks = !!v;
+		if (this._i >= 0) H.setBlocks(this._i, this._g, this._blocks);
 	}
 
 	// **"This is a shape, not a picture."** On, the object is swept against,
@@ -319,6 +339,7 @@ export class Object3D {
 		if (!this._visible) H.setVisible(i, g, false);
 		if (!this._collides) H.setCollides(i, g, false);
 		if (this._collisionOnly) H.setCollisionOnly(i, g, true);
+		if (!this._blocks) H.setBlocks(i, g, false);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(i, g, material);
@@ -831,6 +852,7 @@ export class Object3D {
 			visible: this._visible,
 			collides: this._collides,
 			collisionOnly: this._collisionOnly,
+			blocks: this._blocks,
 			inScene: this._i >= 0,
 			children: this.children.length,
 		};

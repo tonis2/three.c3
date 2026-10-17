@@ -1076,6 +1076,28 @@ const camera = {
 		};
 	},
 
+	// The pixel a world point is drawn at, as `[x, y, depth]`, or null when
+	// it is behind the camera. `ray(x, y)` backwards: a point anywhere on the
+	// ray through a pixel comes back as that pixel, so a label drawn at the
+	// answer sits where a click picks the thing it names.
+	//
+	//     const at = three.camera.project([p.x, p.y + 2, p.z]);
+	//     if (at) ops.push({ op: 'text', at: [at[0], at[1]], text: name });
+	//
+	// `x` and `y` are the rendered image's pixels from its top-left corner —
+	// what `three.input.pointer` answers in and `three.ui.draw` places in at
+	// `three.ui.scale` 1. `depth` is world units in front of the eye along the
+	// view axis, which is what to sort labels by or fade them with.
+	//
+	// It reads the camera as it stands now. The follow `attach()` sets up runs
+	// last in the frame, so a `frame` system projecting from a camera that is
+	// still gliding is one frame behind it — `three.systems.late` is what
+	// runs after the follow.
+	project(point) {
+		const [x, y, z] = readVector(point, 'three.camera.project(point)');
+		return H.cameraProject(x, y, z);
+	},
+
 	// What the camera is following, or null. Also how a script finds out
 	// that what it was following has been destroyed: the host drops the
 	// attachment silently, because the alternative is throwing from inside a

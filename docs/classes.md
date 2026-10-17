@@ -45,6 +45,7 @@ topic. It is an Object3D, so moving it moves everything.
      scene that is not on screen could be lit through them. -->
 - `collides` — on the root, which draws nothing; set it on the meshes
 - `collisionOnly` — the same: a root draws nothing and is queried by nothing
+- `blocks` — the same: set it on the meshes
 
 ### Methods
 
@@ -130,6 +131,9 @@ material is one draw call.
 - `static` — this will not move again: drawn into the shadow map once and kept
 - `collides` — false takes it out of every spatial query — scenery, not a wall
 - `collisionOnly` — true puts it in every query and in no draw — a shape, not a picture
+- `blocks` — false keeps it in raycasts, picks and `query.sphere`/`box` and out of every sweep,
+  `moveAndSlide`, `nav.bake` and `nav.path` — a character, found by a click and walked past. Free to
+  toggle, and not inherited
 - `animations` — empty unless this came from `asset.instantiate()`
 - `morphs` — how many morph targets the geometry has, 0 for most
 - `weights` — per copy, free: how much of each morph target this one wears
@@ -1013,6 +1017,7 @@ clip outright is `play()` without a fade.
 - `static` — this will not move again — see the static-casters topic
 - `collides` — per node and not inherited; set it on the meshes, not on the Group
 - `collisionOnly` — the same: set it on the meshes, not on the Group
+- `blocks` — the same: set it on the meshes, not on the Group — `traverse` does
 - `animations` — clip names, from `asset.instantiate()`
 
 ### Methods
@@ -2318,6 +2323,7 @@ the times it is inside a wall.
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2374,6 +2380,7 @@ moving it.
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2424,6 +2431,7 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 
 ### Methods
 
@@ -2477,6 +2485,7 @@ live. Divisions are capped at 256.
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2536,6 +2545,7 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `animations` — always empty
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods

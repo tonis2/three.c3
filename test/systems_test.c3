@@ -546,3 +546,48 @@ fn void the_outline_keeps_the_two_phases_apart() @test
 			"the outline is the tick, phase by phase; got %s", value);
 	};
 }
+
+<*
+ A late system reads the camera the frame draws with.
+
+ **The regression this exists for is a health bar that trails its character.**
+ The follow `camera.attach` sets up runs after every frame system, because every
+ one of them can move what it follows — so a frame system that projects a label
+ over a character reads where the camera was before this frame's follow, and
+ while the camera moves the label lags it by one frame's travel.
+
+ The thing followed moves one unit a frame along x and the follow is rigid, so
+ the eye's x minus the thing's x is a constant to a late system and one unit
+ short of it to a frame system. The outline is the other half: the late line
+ comes after the frame line, because that is the order they run in.
+*>
+fn void a_late_system_reads_the_camera_the_frame_draws_with() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			const scene = new three.Scene();
+			const g = new three.Group();
+			scene.add(g);
+			three.camera.attach(g, { distance: 5 });
+			globalThis.seen = { frame: [], late: [] };
+			three.systems.frame('walk', () => {
+				g.position.x += 1;
+				seen.frame.push(three.camera.position().x - g.position.x);
+			});
+			three.systems.late('label', () => {
+				seen.late.push(three.camera.position().x - g.position.x);
+			});
+		`, 6, `
+			const f = seen.frame.slice(2), l = seen.late.slice(2);
+			const steady = l.every(v => Math.abs(v - l[0]) < 1e-4);
+			const behind = f.every((v, i) => Math.abs(l[i] - v - 1) < 1e-4);
+			const lines = three.systems.outline().split('\n');
+			return [seen.late.length, steady, behind, lines.length, lines[0].startsWith('frame'), lines[1].startsWith('late'),
+				three.systems.list().map(s => s.phase).join(',')]
+		`, "the late-phase script ran");
+
+		test::@check(value == "[6,true,true,2,true,true,\"frame,late\"]",
+			"late systems see the followed camera; got %s", value);
+	};
+}

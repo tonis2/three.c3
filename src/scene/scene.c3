@@ -1609,6 +1609,8 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// And the other way round: a recycled slot that stayed collision-only would
 	// be a mesh that never draws, which reads as a failed upload.
 	node.collision_only = false;
+	// A recycled slot that stayed non-blocking would be a wall walked through.
+	node.blocks = true;
 	node.dirty = true;
 	node.generation = generation;
 	node.alive = true;
@@ -1891,6 +1893,21 @@ fn void Scene.set_collides(&self, NodeId id, bool collides)
 	if (node == null || node.collides == collides) return;
 	node.collides = collides;
 	self.query.drop();
+}
+
+<*
+ Whether this node stands in a mover's way — gathered by sweeps, the nav bake
+ and nav path shortening.
+
+ `Node.blocks` has the argument. The index is untouched, unlike `set_collides`:
+ a non-blocking node is still raycast and picked, and the flag is read where
+ triangles are gathered, so toggling it costs nothing.
+*>
+fn void Scene.set_blocks(&self, NodeId id, bool blocks)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.blocks = blocks;
 }
 
 <*

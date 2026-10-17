@@ -109,6 +109,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setStatic", &js_set_static, 3);
 	self.bind(host, "setCollides", &js_set_collides, 3);
 	self.bind(host, "setCollisionOnly", &js_set_collision_only, 3);
+	self.bind(host, "setBlocks", &js_set_blocks, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
@@ -221,6 +222,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "cameraDetach", &js_camera_detach, 0);
 	self.bind(host, "cameraAttached", &js_camera_attached, 0);
 	self.bind(host, "cameraRay", &js_camera_ray, 2);
+	self.bind(host, "cameraProject", &js_camera_project, 3);
 	self.bind(host, "frameAll", &js_frame_all, 0);
 
 	self.js.set_property(global, "__three", host);
@@ -1450,6 +1452,29 @@ fn void js_set_collides(
 }
 
 <*
+ `setBlocks(index, generation, on)` — whether this node stands in a mover's way.
+
+ Returns nothing, like `setCollides`. `Node.blocks` has what it is for.
+*>
+fn void js_set_blocks(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	ref.scene.set_blocks(ref.id, arg_truth(&js, argc, args, 2));
+}
+
+<*
  `setCollisionOnly(index, generation, on)` — whether this node is swept against
  and never drawn.
 
@@ -1803,6 +1828,55 @@ fn void js_camera_ray(
 	js.set_index(six, 4, qjs::number_value(ray.direction.y));
 	js.set_index(six, 5, qjs::number_value(ray.direction.z));
 	*out = six;
+}
+
+<*
+ `cameraProject(x, y, z)` — the pixel a world point is drawn at, as
+ `[column, row, depth]`, or null for a point behind the eye.
+
+ `cameraRay` backwards, through the same `screen_point` arithmetic and the same
+ extent, so a point on the ray through a pixel comes back as that pixel. An
+ overlay that drew its labels from a second derivation — eye, forward, right
+ and field of view — would agree at the centre and drift at the edges, which is
+ a name drawn beside the character it names.
+*>
+fn void js_camera_project(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("a pixel for a point needs a render target and this context has none");
+		return;
+	}
+
+	Vec3 point = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	float[<3>] pixel;
+	if (!screen_point(
+		&self.pass.camera,
+		point,
+		self.renderer.target.extent.width,
+		self.renderer.target.extent.height,
+		&pixel,
+	))
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	qjs::Value three = js.array();
+	js.set_index(three, 0, qjs::number_value(pixel[0]));
+	js.set_index(three, 1, qjs::number_value(pixel[1]));
+	js.set_index(three, 2, qjs::number_value(pixel[2]));
+	*out = three;
 }
 
 <*

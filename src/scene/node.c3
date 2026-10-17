@@ -291,6 +291,25 @@ struct Node
 	*>
 	bool collision_only;
 
+	<*
+	 Whether this node stands in a mover's way.
+
+	 The half of `collides` a character needs turned off and its picking needs
+	 kept. Off, the node is still in the query index — a raycast, a pick and
+	 `query.sphere` still find it — but no sweep gathers its triangles: not a
+	 capsule sweep, not `moveAndSlide`, not the nav bake and not the sweep that
+	 pulls a nav path tight. Without it a character standing on a route was a
+	 wall across it, and a character asking for a path from where it stood
+	 blocked its own first step, so every path it asked for came back empty.
+
+	 Tested where triangles are gathered rather than filed out of the index,
+	 because the index is the thing a pick still needs. So unlike `collides`
+	 it costs no rebuild, and a script may toggle it as often as it likes.
+
+	 On by default. Not inherited, for `collides`' reason.
+	*>
+	bool blocks;
+
 	// Slot bookkeeping. `generation` is bumped when the slot is reused, which is
 	// what makes a stale NodeId detectable rather than silently valid.
 	uint generation;
