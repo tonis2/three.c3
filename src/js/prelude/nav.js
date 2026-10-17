@@ -5,9 +5,9 @@
 // `three.nav.path(from, to)` for one agent. `three.nav.field(goals)` for a
 // handle a crowd samples. §17 was explicit that an API offering only
 // `path()` guarantees somebody writes the second one badly, and the reason is a
-// cost rather than a taste: a path is a solve of the whole reachable set that
-// is thrown away after one answer, so a hundred agents heading for the same
-// door is a hundred solves for one field. `field()` is that solve, kept.
+// cost rather than a taste: a path is a search between two points thrown away
+// after one answer, so a hundred agents heading for the same door is a hundred
+// searches for what one field answers. `field()` is that solve, kept.
 //
 //     const door = three.nav.field([[10, 0, 4]]);      // once
 //     three.setAnimationLoop(() => {
@@ -255,9 +255,10 @@ export function makeSceneNav(scene) {
 
 	// One agent, one route, shortened against the geometry.
 	//
-	// **This solves a whole field and throws it away.** For a wanderer
-	// replanning every few seconds that is the right trade; for a crowd it is
-	// the thing `field()` exists to replace.
+	// An A* search aimed at the start, so it costs the cells between the two
+	// ends rather than the level: cheap enough to plan under the cursor every
+	// frame. For a crowd heading one way it is still the thing `field()`
+	// exists to replace.
 	//
 	// Answers with an array of Vector3 waypoints on the walking surface,
 	// starting at the point given, or an empty array when there is no route.

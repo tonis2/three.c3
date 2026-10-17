@@ -478,16 +478,12 @@ fn void js_nav_sample(
  `navPath(fromX, fromY, fromZ, toX, toY, toZ, buffer, byteOffset, floats)` — one
  agent, one route, shortened against the geometry.
 
- This solves a whole field and throws it away, which is the cost the two-verb
- split exists to make visible: a hundred agents heading for one door is a hundred
- solves for one answer, and `three.nav.field()` is that answer kept. A single
- wanderer replanning occasionally is what this is for.
-
- Dijkstra from the goal rather than A* from the start, for reuse:
- `collision::VoxelGrid.solve_field` is a written and tested chamfer transform
- with no priority queue in it, and it is fast for the one broad sheet a nav layer
- is. A* would be asymptotically better on a long route through a maze and would
- be a second pathfinder to keep correct.
+ A* from the goal towards the start, through the same solver `three.nav.field()`
+ uses: the search stops once the start is settled, so its cost is the cells
+ between the two ends rather than the whole bake — on a town-sized grid, a click
+ across a square was a 50 ms full solve and is now a fraction of a millisecond.
+ Searching from the goal is what lets `walk` descend the result from the start.
+ When there is no route the search still exhausts the goal's region.
 
  The Float32Array's capacity is in waypoints, three floats each. It answers with
  how many were written, including the start, and zero when there is no route.
@@ -527,7 +523,7 @@ fn void js_nav_path(
 	{
 		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!scene.nav.solve(&goals, field))
+		if (!scene.nav.solve(&goals, field, &from))
 		{
 			*out = qjs::int_value(0);
 			return;

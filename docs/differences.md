@@ -439,8 +439,9 @@ the first. `scene.nav.bake({ cell, radius, height, stepHeight, slope })` voxeliz
 is built. Neither happens on the first path query. `three.nav` is the rendered scene's navigation object.
 
 Then two verbs, and the split is the design: `three.nav.path(from, to)` is one agent's route, and
-`three.nav.field(goals)` is a solve kept that a whole crowd samples. A path solves the entire reachable set
-and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has
+`three.nav.field(goals)` is a solve kept that a whole crowd samples. A path is an A* search between its two
+ends, cheap for one agent, but a hundred agents heading for one door is a hundred searches for what one field
+answers. A field has
 `direction(point)`, `cost(point)` — Infinity for unreachable — and `dispose()`.
 
 Paths come back shortened against the actual geometry with a capsule sweep at the agent's own size, so they

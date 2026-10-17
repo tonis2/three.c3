@@ -2193,9 +2193,9 @@ export const three = {
 	// three.nav.path(from, to) is one agent's route, shortened against the
 	// geometry so it does not look like it is walking cell centres; and
 	// three.nav.field(goals) is the solve KEPT, which is what a crowd samples.
-	// The two verbs are two because a path is a whole solve thrown away after
-	// one answer, and offering only that guarantees somebody writes the second
-	// one badly.
+	// The two verbs are two because a path is a search thrown away after one
+	// answer, and offering only that guarantees somebody writes the second one
+	// badly.
 	//
 	// `nav` itself is the getter further down: a bake belongs to a scene, so
 	// three.nav is the rendered scene's and scene.nav is any scene's.

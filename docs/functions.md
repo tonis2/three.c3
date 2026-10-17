@@ -970,8 +970,10 @@ The straight lines between them have been checked with a capsule sweep at the ag
 corner it cannot physically round has not been cut and the path does not look like it is walking cell
 centres.
 
-This solves a whole field and throws it away — right for a wanderer replanning every few seconds, and
-the thing `three.nav.field` exists to replace for a crowd.
+The search is A* aimed at the start, so it costs the cells between the two ends rather than the whole
+bake: a route across a town square is well under a millisecond, cheap enough to plan every frame under
+the cursor. When there is no route it searches the goal's whole region before saying so. A crowd
+heading for one place still wants `three.nav.field`, which solves once for all of them.
 
 **Set `blocks = false` on characters.** The sweep that pulls the route tight meets every mesh that blocks,
 including ones added after the bake — so a character standing on a route cuts it, and a character asking

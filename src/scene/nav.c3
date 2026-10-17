@@ -20,9 +20,10 @@
  ## Two verbs
 
  `nav.path(from, to)` for one agent, `nav.field(goals)` for a handle a script
- samples per agent. A path is a solve of the whole reachable set thrown away
- after one answer, so a hundred agents heading for the same door is a hundred
- solves for one field. `field()` is that solve, kept.
+ samples per agent. A path is an A* search aimed at its start, which settles the
+ cells along the way rather than the level; a field is the whole reachable set,
+ kept, so a hundred agents heading for the same door is one solve rather than a
+ hundred searches.
 
  ## What a cell is, and what that costs a caller
 
@@ -582,10 +583,17 @@ fn void NavMesh.measure_components(&self)
  This is the expensive call, and there is one of it per goal set rather than per
  agent. See the file header.
 
+ With `toward`, it is A* instead: the search leans towards that point and stops
+ once its cell is settled, so a route across a square settles the cells between
+ its ends rather than the whole level. The field is then only true near the
+ route, and only `walk` from `toward` may read it: every reached cell still has a
+ neighbour nearer the goal, so the walk still ends there.
+
  @param field : `Scratch the caller owns, one float per walkable cell. NavMesh.field_size is how many.`
+ @param toward : `The one point the answer is for, or null for the whole field.`
  @return `False when no goal landed on a walkable cell, which leaves the field unusable rather than uniformly unreachable.`
 *>
-fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
+fn bool NavMesh.solve(&self, Vec3[] goals, float[] field, Vec3* toward = null)
 {
 	if (!self.usable() || field.len != self.grid.cells.len) return false;
 
@@ -598,19 +606,28 @@ fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
 	int plane  = self.grid.nx * self.grid.ny;
 	int max_dy = self.max_vertical_steps();
 
+	// Straight-line distance to `toward` never overestimates the walk there,
+	// and steps cost their straight length, so the estimate is consistent and
+	// a cell is still settled once, at its true distance.
+	int stop = toward ? self.grid.nearest_cell(*toward, NAV_PAD) : -1;
+	Vec3 target = stop >= 0 ? self.grid.entry_center(stop) : (Vec3){ 0, 0, 0 };
+
 	NavHeap open;
 	open.items.init(mem, 256);
 	defer open.items.free();
 	foreach (entry, distance : field)
 	{
-		if (distance < collision::VOXEL_UNREACHED) open.push({ distance, (int)entry });
+		if (distance >= collision::VOXEL_UNREACHED) continue;
+		float guess = stop >= 0 ? (self.grid.entry_center((int)entry) - target).length() : 0.0f;
+		open.push({ distance + guess, distance, (int)entry });
 	}
 
 	while (open.items.len() > 0)
 	{
 		NavHeapItem item = open.pop();
 		// A stale entry: the cell was settled nearer since this was pushed.
-		if (item.distance > field[(sz)item.entry]) continue;
+		if (item.reached > field[(sz)item.entry]) continue;
+		if (item.entry == stop) break;
 		int voxel = self.grid.cells[(sz)item.entry];
 
 		for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
@@ -624,11 +641,12 @@ fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
 			// the direction a cost travels: it is how far the neighbour is from
 			// the goal, through here.
 			if (!self.linked(there, -dx, -dy, -dz)) continue;
-			float distance = item.distance + self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
+			float distance = item.reached + self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
 			if (distance < field[(sz)neighbour])
 			{
 				field[(sz)neighbour] = distance;
-				open.push({ distance, neighbour });
+				float guess = stop >= 0 ? (self.grid.entry_center(neighbour) - target).length() : 0.0f;
+				open.push({ distance + guess, distance, neighbour });
 			}
 		}
 	}
@@ -637,13 +655,16 @@ fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
 
 struct NavHeapItem @local
 {
+	// The order key: `reached`, plus the A* estimate when there is one.
 	float distance;
+	// How far the goal is from this cell along the route that pushed it.
+	float reached;
 	int entry;
 }
 
 <*
  A binary min-heap on distance, with stale entries left in rather than
- decreased — `solve` skips one whose distance is no longer the cell's.
+ decreased — `solve` skips one whose `reached` is no longer the cell's.
 *>
 struct NavHeap @local
 {
@@ -873,10 +894,13 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
  through `scene/query.c3`, at the agent's own radius and height, so a corner the
  agent cannot physically round is not cut.
 
- Greedy and forward-only: from the current anchor, advance while the sweep is
- clear and stop at the first waypoint it is not. That is one sweep per waypoint
- rather than the quadratic all-pairs version, and on a path through a room it
- collapses a hundred cells to two.
+ Greedy and forward-only: from the current anchor, reach as far ahead as the
+ sweep is clear. The reach doubles while it is clear and is then bisected back
+ between the last clear waypoint and the first blocked one, so a long open route
+ costs a handful of sweeps per corner rather than one per cell — on a 60 m
+ route, 20 ms of sweeps became a fraction of one. Visibility along a route is not
+ monotonic, so the bisection may stop short of the farthest waypoint it could
+ have seen; it never keeps a segment that was not swept clear.
 
  @param path : `The raw walk, as NavMesh.walk wrote it. Foot points, not cell centres.`
  @param out : `Where the shortened path goes. May be the same slice the raw walk is in.`
@@ -905,19 +929,43 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 	uint anchor = 0;
 	while (anchor < count - 1 && written < out.len)
 	{
-		uint reach = anchor;
-		uint candidate = anchor + 1;
 		// Even consecutive cells are swept: an embedded graph is metadata, while
 		// the collision scene is the physical authority for the path returned now.
-		while (candidate < count)
+		uint reach   = anchor;
+		uint blocked = count;
+		uint step    = 1;
+		while (reach + step < count)
 		{
-			Vec3 a = path[anchor];
-			Vec3 b = path[candidate];
-			a.y += lift;
-			b.y += lift;
-			SweepHit hit = self.sweep_capsule(assets, a, b, radius, half, skin, skip);
-			if (hit.hit) break;
-			reach = candidate++;
+			if (!self.can_sweep(assets, path[anchor], path[reach + step], lift, radius, half, skin, skip))
+			{
+				blocked = reach + step;
+				break;
+			}
+			reach += step;
+			step *= 2;
+		}
+		if (blocked == count && reach < count - 1)
+		{
+			if (self.can_sweep(assets, path[anchor], path[count - 1], lift, radius, half, skin, skip))
+			{
+				reach = count - 1;
+			}
+			else
+			{
+				blocked = count - 1;
+			}
+		}
+		while (blocked - reach > 1)
+		{
+			uint middle = reach + (blocked - reach) / 2;
+			if (self.can_sweep(assets, path[anchor], path[middle], lift, radius, half, skin, skip))
+			{
+				reach = middle;
+			}
+			else
+			{
+				blocked = middle;
+			}
 		}
 		if (reach == anchor) return 0;
 		out[written++] = self.on_floor(assets, path[reach], nav.grid.cell);
@@ -925,4 +973,12 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 	}
 
 	return anchor == count - 1 ? written : 0;
+}
+
+// Whether an agent's capsule passes from one foot point to another untouched.
+fn bool Scene.can_sweep(&self, Assets* assets, Vec3 from, Vec3 to, float lift, float radius, float half, float skin, IgnoreSet skip) @local
+{
+	from.y += lift;
+	to.y += lift;
+	return !self.sweep_capsule(assets, from, to, radius, half, skin, skip).hit;
 }
