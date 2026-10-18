@@ -976,7 +976,7 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 }
 
 // Whether an agent's capsule passes from one foot point to another untouched.
-fn bool Scene.can_sweep(&self, Assets* assets, Vec3 from, Vec3 to, float lift, float radius, float half, float skin, IgnoreSet skip) @local
+fn bool Scene.can_sweep(&self, Assets* assets, Vec3 from, Vec3 to, float lift, float radius, float half, float skin, IgnoreSet skip)
 {
 	from.y += lift;
 	to.y += lift;
