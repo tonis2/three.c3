@@ -2198,8 +2198,10 @@ whose shadow was not resident bakes without one — raise `three.lights.shadow.m
 a scene with more baked lights than the four that hold shadows by default.
 
 Built-in materials run through `mesh.slang`'s UV-space bake variant. Supported layered materials
-instead compile a bake variant of their generated program, so their blended normal and parallax
-inputs take part. Arbitrary shader bodies and vertex displacement are refused as receivers rather
+instead compile a bake variant of their generated program, so their blended normal takes part.
+Their parallax does not: where a texture slides to depends on where it is seen from, and a tile
+is seen from everywhere, so the bake reads every layer at its own uv and moving the camera never
+makes a tile stale. Arbitrary shader bodies and vertex displacement are refused as receivers rather
 than cached with a different surface.
 
 Area lights are integrated numerically in the bake whatever the frame is using, so the cached
@@ -2221,9 +2223,9 @@ frames:
   the receiver *shadows*, and there is no cheap exact answer to what that is;
 - **a static caster with no tile of its own moving** — the same rule. A mesh whose uvs cannot
   carry a tile still casts into the bake;
-- **a cached receiver's layered material or camera changing** — its blended normal and parallax
-  sampling can change the direct diffuse even though the geometry did not. The tile is disabled
-  immediately and rebuilt for the new material state or view;
+- **a cached receiver's layered material changing** — its blended normal can change the direct
+  diffuse even though the geometry did not. The tile is disabled immediately and rebuilt for the
+  new material state;
 - **a static receiver's shadow material changing** — because alpha testing decides whether the
   surface casts a shadow. Plain albedo, roughness and metalness are not stored in a tile;
 - **a static receiver being added, removed, re-parented, hidden, or joining or leaving
@@ -2234,8 +2236,8 @@ stops being read at all until the next `three.lights.bake()`, which is what make
 `light.baked = false` restore the real-time picture byte for byte.
 
 **A dirty tile is not displayed while it waits.** Its receiver falls back to the complete
-real-time light loop, so a moved light, changed layered normal, or changed camera never presents
-stale cached diffuse. It returns to the atlas after its tile catches up.
+real-time light loop, so a moved light or a changed layered normal never presents stale cached
+diffuse. It returns to the atlas after its tile catches up.
 
 The bake reads the static shadow atlas. Dynamic casters remain live: inside a moving caster's
 current shadow-map footprint, affected receivers bypass their cached tile per fragment and use
@@ -2285,8 +2287,8 @@ A record names its receiver by **node name, mesh index and copy index** — the 
 nodes with the same name and mesh in scene order, so two hundred crates out of one file each
 find their own tile. Beside that it holds the tile's rectangle, its texel density, and a fold
 over the node's world matrix and material state. The header holds the atlas side, the format,
-the set of baked lights the atlas is a sum over, the camera signature needed by layered
-parallax, and a hash over the whole payload. Files from older versions are declined.
+the set of baked lights the atlas is a sum over, and a hash over the whole payload. Files from
+older versions are declined.
 
 ## three.lights.loadBake
 
@@ -2304,10 +2306,9 @@ load: true })` is that whole sentence.
 
 `dirty` is how many loaded tiles have a different receiver transform or material signature.
 Those keep their rectangles but use real-time lighting while they re-bake over the following
-frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. A saved
-bake also records its camera signature, because a layered material's parallax is the one part
-of a tile the view makes: loaded under a different camera, the layered tiles join `dirty` and
-the rest of the file loads as saved. The clean tiles are used as saved, texel for texel.
+frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. Where the
+camera is makes no difference: a file loads the same under any view. The clean tiles are used as
+saved, texel for texel.
 
 On the Evil Forest scene, with all ten local lights baked: **about 50 ms to load, against 1.9 s
 to bake**, from a 9.0 MB file, with the frame it produces identical to the baked one pixel for

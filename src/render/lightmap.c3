@@ -53,9 +53,11 @@
  `Scene.static_revision` — the same events the cached shadow map is invalidated
  by — and `JsRuntime.set_lighting` marks what a baked light's own change reaches.
  `MeshPass.resolve_lightmap` spreads a moved receiver's change to the receivers
- the baked lights could carry it to. Layered-material parameters and the camera
- invalidate their affected tiles as well, because their blended normal and
- parallax result can change the cached diffuse. `MeshPass.update_lightmap`
+ the baked lights could carry it to. Layered-material parameters invalidate their
+ affected tiles as well, because their blended normal can change the cached
+ diffuse. The camera does not: the bake reads a layer stack without its parallax
+ (`parallax_basis` in `material.shady`), so nothing in a tile depends on where it
+ is looked at from. `MeshPass.update_lightmap`
  re-bakes dirty tiles a few at a time under a millisecond budget; a dirty tile
  uses real-time lighting until it is current. Inside a moving caster's shadow
  footprint, the static-to-combined visibility change adjusts the cached diffuse.
@@ -64,7 +66,7 @@
 
  ## Persistence
 
- `MeshPass.save_lightmap` writes version 4 of the atlas and its tile table beside
+ `MeshPass.save_lightmap` writes version 7 of the atlas and its tile table beside
  the assets as `LIGHTMAP_MAGIC`: a header, one record per tile naming the
  receiver by node
  name, mesh index and copy index, and the tiles' texels packed one after another
@@ -197,7 +199,10 @@ fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
 	if (material.table.len > 0) signature = hash_bytes(signature, material.table.ptr, material.table.len);
 	// These inputs live beside the material's reflected block, but still alter the
 	// final normal and therefore the diffuse irradiance stored in the tile.
-	signature = hash_bytes(signature, &material.uv_transform, float[4]::size);
+	// As the bake reads it: an unset transform is the identity, and setting the
+	// identity by hand is not a change.
+	float[4] uv_transform = material.uv_transform_or_identity();
+	signature = hash_bytes(signature, &uv_transform, float[4]::size);
 	signature = hash_bytes(signature, &material.uv_variant_count, uint::size);
 	signature = hash_bytes(signature, &material.uv_variants, UvVariant[UV_VARIANTS]::size);
 	signature = hash_bytes(signature, &material.stochastic, bool::size);
@@ -376,7 +381,6 @@ struct Lightmap
 	// row. A bake reads the shadow atlas as the last frame left it.
 	uint settle;
 	uint stalled;
-	ulong camera_signature;
 	LightmapResult last;
 }
 
@@ -487,23 +491,6 @@ fn void MeshPass.update_lightmap(&self, Gpu* gpu)
 	Lightmap* map = &self.lightmap;
 	if (self.scene == null || !map.live || map.scene_id != self.scene.id) return;
 	if (self.baked_light_signature() != map.signature) return;
-	Vec3 eye = self.camera.eye();
-	Matrix4f camera_view_projection = self.camera.view_projection(self.aspect);
-	ulong camera_signature = hash_bytes(KEY_SEED, &eye, Vec3::size);
-	camera_signature = hash_bytes(camera_signature, &camera_view_projection, Matrix4f::size);
-	if (map.live && map.camera_signature != camera_signature)
-	{
-		foreach (tile : map.tiles)
-		{
-			Node* node = &self.scene.nodes[tile.node];
-			Material* material = self.material(node.material);
-			if (material == null || !material.script_layers.present) continue;
-			node.lightmap_dirty = true;
-			node.lightmap = { 0, 0, 0, 0 };
-		}
-		map.camera_signature = camera_signature;
-		self.scene.lightmap_changes++;
-	}
 	@pool()
 	{
 		// Re-read materials every frame so direct uniform writes are observed, but
@@ -1193,10 +1180,6 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	map.baked_lights.clear();
 	for (uint i = 0; i < self.lighting.count; i++) map.baked_lights.push(self.lighting.lights[i]);
 	map.seen = self.scene.lightmap_changes;
-	Vec3 baked_eye = self.camera.eye();
-	Matrix4f baked_view_projection = self.camera.view_projection(self.aspect);
-	map.camera_signature = hash_bytes(KEY_SEED, &baked_eye, Vec3::size);
-	map.camera_signature = hash_bytes(map.camera_signature, &baked_view_projection, Matrix4f::size);
 	self.scene.lightmap_live = true;
 
 	usz texels = 0;
@@ -1647,7 +1630,10 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 const String LIGHTMAP_DEFAULT_PATH = "bake.lightmap";
 
 const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
-const uint LIGHTMAP_FILE_VERSION = 6;
+// 7: no camera in the header, because a layered tile no longer depends on one —
+// and a 6 holds layered tiles baked through the parallax of the view it was
+// saved from, so it is declined rather than loaded as view-free.
+const uint LIGHTMAP_FILE_VERSION = 7;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1665,7 +1651,6 @@ struct LightmapHeader
 	// this scene's is a bake of a different lighting and is refused.
 	uint signature;
 	float density;
-	ulong camera_signature;
 	// FNV-1a over everything after this header — the records and the texels.
 	ulong hash;
 	ulong texel_bytes;
@@ -1886,7 +1871,6 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 		.tiles = (uint)tiles.len,
 		.signature = map.signature,
 		.density = map.density,
-		.camera_signature = map.camera_signature,
 		.hash = hash_bytes(KEY_SEED, &file[LightmapHeader::size], total - LightmapHeader::size),
 		.texel_bytes = texel_bytes,
 	};
@@ -1911,8 +1895,7 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 
  A receiver the file has at a different world matrix keeps its rectangle and joins
  the dirty list, so the load covers what has not moved and the budget covers what
- has. A file saved under another camera loads the same way, with its layered
- receivers on the dirty list: their parallax was the only thing that view made.
+ has.
 
  @return ? LIGHTMAP_NO_DEVICE : `No GPU to put the atlas on.`
  @return ? LIGHTMAP_NO_ATLAS : `No scene, or the atlas would not fit.`
@@ -1939,16 +1922,6 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	if (header.version != LIGHTMAP_FILE_VERSION) return LIGHTMAP_BAD_FILE~;
 	if (header.format != (uint)LIGHTMAP_FORMAT) return LIGHTMAP_BAD_FILE~;
 	if (header.tiles == 0 || header.side == 0) return LIGHTMAP_BAD_FILE~;
-	Vec3 load_eye = self.camera.eye();
-	Matrix4f load_view_projection = self.camera.view_projection(self.aspect);
-	ulong load_camera = hash_bytes(KEY_SEED, &load_eye, Vec3::size);
-	load_camera = hash_bytes(load_camera, &load_view_projection, Matrix4f::size);
-	// **A bake from another view is still a bake.** Only a layered material's
-	// tiles depend on the camera — their parallax — so those join the dirty list
-	// below and the rest of the level loads as it was saved. Refusing the file
-	// cost a whole re-bake whenever a game booted looking anywhere but where it
-	// was saved from, which a third-person start or a probe does every time.
-	bool other_view = header.camera_signature != load_camera;
 	usz records = (usz)header.tiles * LightmapFileTile::size;
 	usz total = LightmapHeader::size + records + (usz)header.texel_bytes;
 	if (file.len != total) return LIGHTMAP_BAD_FILE~;
@@ -1996,11 +1969,6 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 			};
 			moved[i] = saved[found].world != lightmap_world_hash(node.world)
 				|| saved[found].material_signature != tiles[i].material_signature;
-			if (other_view && !moved[i])
-			{
-				Material* material = self.material(node.material);
-				moved[i] = material != null && material.script_layers.present;
-			}
 			if (moved[i]) dirty++;
 		}
 
@@ -2046,9 +2014,6 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	if (map.baked_lights.allocator == null) map.baked_lights.init(mem, self.lighting.count);
 	map.baked_lights.clear();
 	for (uint i = 0; i < self.lighting.count; i++) map.baked_lights.push(self.lighting.lights[i]);
-	// The view the tiles are now true for: the saved one, except that a different
-	// one has already sent its layered tiles to the dirty list above.
-	map.camera_signature = load_camera;
 	map.dirty = dirty;
 	map.seen = self.scene.lightmap_changes;
 	map.settle = 1;
