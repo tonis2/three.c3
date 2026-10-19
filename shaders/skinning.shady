@@ -47,18 +47,17 @@ fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
 	uint4 joints = draw.joints[vid];
 	float4 weights = draw.weights[vid];
 
-	float4x4 pose = blend_joints(palette, base, joints, weights);
-	// Uniform across an instance, so this is a scalar branch.
-	//
-	// **The mix is of joint matrices and not of the transforms behind them.**
-	// Blending the transforms would need an inverse per joint per frame and would
-	// not be the same motion: two joints' contributions compose, they do not
-	// average, so a half-way between two poses is not the average of the two
-	// matrices - it is this, and this is what every engine does.
-	if (instance.blend <= 0.0) return pose;
-
-	float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
-	return pose + (from - pose) * instance.blend;
+	// One palette per vertex, whatever the character is doing. A blend of clips
+	// is composed on the CPU into the live palette (`AnimationPlayer.blend_layers`)
+	// rather than mixed here, where a mix of two joint matrices is not a rigid
+	// pose and a third clip would be a third fetch. What is left is the two baked
+	// frames either side of the clip's time — uniform across an instance, so a
+	// scalar branch.
+	if (instance.pose_t > 0.0)
+	{
+		return blend_frames(palette, base, instance.pose_next & POSE_MASK, instance.pose_t, joints, weights);
+	}
+	return blend_joints(palette, base, joints, weights);
 }
 
 // The base vertex, displaced by every morph target this bucket carries.

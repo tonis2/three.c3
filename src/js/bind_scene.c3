@@ -85,8 +85,10 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "unbindSocket", &js_unbind_socket, 2);
 	self.bind(host, "setMorphWeights", &js_set_morph_weights, 3);
 	self.bind(host, "meshMorphs", &js_mesh_morphs, 3);
-	self.bind(host, "playAnimation", &js_play_animation, 7);
+	self.bind(host, "playAnimation", &js_play_animation, 8);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
+	self.bind(host, "animationState", &js_animation_state, 2);
+	self.bind(host, "blendAnimation", &js_blend_animation, 16);
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "assetText", &js_asset_text, 1);
 	self.bind(host, "assetWriteText", &js_asset_write_text, 2);
@@ -1176,12 +1178,14 @@ fn void js_bind_animation(
 	// skeleton, and a skeleton that drives nothing would be the read-only version
 	// of the flag rather than the useful one. See `AnimationPlayer.live_skin`.
 	bool live_skin = argc > 5 ? arg_truth(&js, argc, args, 5) : false;
-	ref.scene.bind_player(asset, ref.id, sources.array_view(), nodes.array_view(), live_skin);
+	// Whether it took, so the prelude caches only a bind that happened — see
+	// `Object3D._bindAnimation`.
+	*out = qjs::bool_value(ref.scene.bind_player(asset, ref.id, sources.array_view(), nodes.array_view(), live_skin));
 }
 
 <*
- `playAnimation(index, generation, name, loop, speed, time, fade)` — start a clip
- on an instantiated subtree.
+ `playAnimation(index, generation, name, loop, speed, time, fade, sync)` — start a
+ clip on an instantiated subtree.
 
  Answers with a boolean rather than throwing on an unknown clip: `mesh.animations`
  is the list, so naming something that is not on it is a mistake a script can see
@@ -1216,7 +1220,10 @@ fn void js_play_animation(
 		// binding did for its whole life before the argument existed, which is why
 		// it is the default and not a sentinel.
 		float fade  = argc > 6 ? arg_float(&js, argc, args, 6) : 0;
-		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade));
+		// The phase offset `sync` asked for, already folded into [0, 1) by the
+		// prelude; negative is no sync.
+		float sync  = argc > 7 ? arg_float(&js, argc, args, 7) : -1;
+		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade, sync));
 	};
 }
 
@@ -1407,6 +1414,119 @@ fn void js_stop_animation(
 	if (ref.scene == null) return;
 
 	*out = qjs::bool_value(ref.scene.stop(ref.id));
+}
+
+<*
+ `blendAnimation(index, generation, fade, speed, name, weight, offset, ...)` —
+ hold several clips at once.
+
+ Up to four `(name, weight, offset)` triples after the two numbers, positional
+ rather than an array because the prelude has already validated and flattened
+ them and four is the most there can be. An offset below zero is a clip on its
+ own clock. See `Scene.blend`.
+*>
+fn void js_blend_animation(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	@pool()
+	{
+		float fade = arg_float(&js, argc, args, 2);
+		float speed = arg_float(&js, argc, args, 3);
+		String[ANIMATION_LAYERS] names;
+		float[ANIMATION_LAYERS] weights;
+		float[ANIMATION_LAYERS] offsets;
+		usz count = 0;
+		for (int at = 4; at + 2 < argc && count < ANIMATION_LAYERS; at += 3)
+		{
+			names[count] = arg_text(&js, argc, args, at, tmem);
+			weights[count] = arg_float(&js, argc, args, at + 1);
+			offsets[count] = arg_float(&js, argc, args, at + 2);
+			count++;
+		}
+		*out = qjs::bool_value(ref.scene.blend(ref.id, names[:count], weights[:count], fade, offsets[:count], speed));
+	};
+}
+
+<*
+ `animationState(index, generation)` — where the clip on a subtree is, or null
+ before anything has played.
+
+ A state machine needs the playhead to know where a one-shot is and when it has
+ run out; without it a script keeps a second clock that drifts from this one the
+ first time the game clock is scaled or capped. `time` is seconds into the clip
+ from its own start, the same measure `play`'s `time` takes, and `playing` is
+ false on a one-shot that has finished as well as after `stop()`.
+*>
+fn void js_animation_state(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::null_value();
+	if (ref.scene.assets == null) return;
+	AnimationPlayer* player = ref.scene.player(ref.id);
+	if (player == null || player.layer_count == 0) return;
+	Asset* loaded = ref.scene.assets.slot(player.asset);
+	if (loaded == null) return;
+
+	int top = player.dominant();
+	qjs::Value layers = js.array();
+	qjs::Value state = qjs::null_value();
+	uint written = 0;
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		if (layer.clip < 0 || layer.clip >= loaded.clips.len()) continue;
+		qjs::Value entry = layer_value(&js, layer, &loaded.clips[layer.clip]);
+		if ((int)i == top) state = layer_value(&js, layer, &loaded.clips[layer.clip]);
+		js.set_index(layers, written++, entry);
+	}
+	if (state.is_null())
+	{
+		js.release(layers);
+		return;
+	}
+	js.set_property(state, "layers", layers);
+	*out = state;
+}
+
+<*
+ One layer as a script reads it: `{ name, time, duration, speed, loop, playing,
+ weight }`, `time` measured from the clip's own start the way `play` takes it.
+*>
+fn qjs::Value layer_value(qjs::Context* js, AnimationLayer* layer, AnimationClip* clip) @local
+{
+	qjs::Value value = js.object();
+	js.set_property(value, "name", js.string(clip.name));
+	js.set_property(value, "time", qjs::number_value((double)layer.time - clip.start));
+	js.set_property(value, "duration", qjs::number_value(clip.duration));
+	js.set_property(value, "speed", qjs::number_value(layer.speed));
+	js.set_property(value, "loop", qjs::bool_value(layer.loop));
+	js.set_property(value, "playing", qjs::bool_value(layer.playing));
+	js.set_property(value, "weight", qjs::number_value(layer.weight));
+	return value;
 }
 
 fn void js_set_visible(

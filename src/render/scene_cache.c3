@@ -811,8 +811,8 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 		state = @hash_value(state, node.color);
 		state = @hash_value(state, node.variant);
 		state = @hash_value(state, node.pose);
-		state = @hash_value(state, node.pose_from);
-		state = @hash_value(state, node.blend);
+		state = @hash_value(state, node.pose_next);
+		state = @hash_value(state, node.pose_t);
 		state = @hash_value(state, node.morph);
 		state = @hash_value(state, node.lightmap);
 		state = @hash_value(state, cache.node_group_states[slot]);
@@ -833,6 +833,22 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 			static_receivers_state = @hash_value(static_receivers_state, identity);
 			static_receivers_state = @hash_value(static_receivers_state, projection_state);
 		}
+	}
+
+	// **A frame already redrawn whole has no shadow damage left to find.** The
+	// loop below projects every receiver's shadow box through every refreshed
+	// shadow view, which is the most expensive thing this function does — and a
+	// moved camera has already made `finish` answer with the whole target, so all
+	// it would produce is rectangles inside a rectangle that is everything. A
+	// third-person camera moves every frame, and with a skinned character walking
+	// through nine views this was forty milliseconds of an -O0 frame spent on
+	// nothing. The per-view reuse it would have refreshed is dropped instead, so
+	// the first still frame computes it from scratch rather than trusting a key
+	// taken under another camera.
+	if (cache.full)
+	{
+		foreach (&valid : cache.static_shadow_valid) *valid = false;
+		return cache.finish();
 	}
 
 	ShadowManager* manager = &self.shadow_manager;

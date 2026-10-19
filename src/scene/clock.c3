@@ -112,6 +112,19 @@ struct GameClock
 	// that moves a stopped clock.
 	double owed_ms;
 
+	<*
+	 What every frame after the first is worth in wall milliseconds, in place of
+	 the host's reading; zero measures.
+
+	 `play_frames` sets it to exactly a sixtieth. A counted clock of whole
+	 milliseconds cannot be: 16 ms frames are 62.5 Hz against a fixed loop and a
+	 solver that both step at 60, so one frame in twenty-five took no step and a
+	 probe that pressed a key for n frames moved n−1 steps' worth. The same double
+	 as `PHYSICS_STEP_MS` and `fixed_step_ms()` at 60 Hz, so the accumulators
+	 subtract it back to exactly zero and every frame is exactly one step.
+	*>
+	double frame_ms;
+
 	// The fixed step's accumulator, in game milliseconds, and its rate.
 	double fixed_ms;
 	double fixed_hz;
@@ -167,6 +180,7 @@ fn void GameClock.defaults(&self)
 fn double GameClock.advance_frame(&self, double wall_ms)
 {
 	double wall_dt = self.started ? wall_ms - self.last_wall_ms : 0;
+	if (self.started && self.frame_ms > 0) wall_dt = self.frame_ms;
 	self.last_wall_ms = wall_ms;
 	self.started = true;
 

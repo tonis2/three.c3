@@ -1911,7 +1911,8 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 
  A receiver the file has at a different world matrix keeps its rectangle and joins
  the dirty list, so the load covers what has not moved and the budget covers what
- has.
+ has. A file saved under another camera loads the same way, with its layered
+ receivers on the dirty list: their parallax was the only thing that view made.
 
  @return ? LIGHTMAP_NO_DEVICE : `No GPU to put the atlas on.`
  @return ? LIGHTMAP_NO_ATLAS : `No scene, or the atlas would not fit.`
@@ -1942,7 +1943,12 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	Matrix4f load_view_projection = self.camera.view_projection(self.aspect);
 	ulong load_camera = hash_bytes(KEY_SEED, &load_eye, Vec3::size);
 	load_camera = hash_bytes(load_camera, &load_view_projection, Matrix4f::size);
-	if (header.camera_signature != load_camera) return LIGHTMAP_STALE~;
+	// **A bake from another view is still a bake.** Only a layered material's
+	// tiles depend on the camera — their parallax — so those join the dirty list
+	// below and the rest of the level loads as it was saved. Refusing the file
+	// cost a whole re-bake whenever a game booted looking anywhere but where it
+	// was saved from, which a third-person start or a probe does every time.
+	bool other_view = header.camera_signature != load_camera;
 	usz records = (usz)header.tiles * LightmapFileTile::size;
 	usz total = LightmapHeader::size + records + (usz)header.texel_bytes;
 	if (file.len != total) return LIGHTMAP_BAD_FILE~;
@@ -1990,6 +1996,11 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 			};
 			moved[i] = saved[found].world != lightmap_world_hash(node.world)
 				|| saved[found].material_signature != tiles[i].material_signature;
+			if (other_view && !moved[i])
+			{
+				Material* material = self.material(node.material);
+				moved[i] = material != null && material.script_layers.present;
+			}
 			if (moved[i]) dirty++;
 		}
 
@@ -2035,7 +2046,9 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	if (map.baked_lights.allocator == null) map.baked_lights.init(mem, self.lighting.count);
 	map.baked_lights.clear();
 	for (uint i = 0; i < self.lighting.count; i++) map.baked_lights.push(self.lighting.lights[i]);
-	map.camera_signature = header.camera_signature;
+	// The view the tiles are now true for: the saved one, except that a different
+	// one has already sent its layered tiles to the dirty list above.
+	map.camera_signature = load_camera;
 	map.dirty = dirty;
 	map.seen = self.scene.lightmap_changes;
 	map.settle = 1;

@@ -1665,6 +1665,10 @@ const input = {
 	// `button` is 0 left, 1 right, 2 middle; anything else is refused by
 	// name. `scroll(dy, dx)` is in notches, positive away from the user.
 	movePointer(x, y) { H.inputMove(Number(x), Number(y)); },
+	// By a distance rather than to a place: what a mouse look is built from.
+	// It reaches `pointer.dx`/`dy` for one frame and leaves `x`/`y` alone, so
+	// a probe can turn a camera headless, where there is no lock to give.
+	movePointerBy(dx, dy) { H.inputNudge(Number(dx), dy === undefined ? 0 : Number(dy)); },
 	pressButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), true); },
 	releaseButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), false); },
 	scroll(dy, dx) { H.inputScroll(Number(dy), dx === undefined ? 0 : Number(dx)); },

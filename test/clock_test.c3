@@ -398,6 +398,32 @@ fn void the_step_count_does_not_depend_on_the_frame_rate() @test
 }
 
 <*
+ A counted frame is exactly one fixed step.
+
+ What `play_frames` sets: `GameClock.frame_ms` at a sixtieth, so whatever the
+ host's readings say, every frame after the first is worth one step of the fixed
+ loop. The readings here are the whole milliseconds the headless loop used to
+ count in — sixteen a frame, which is 62.5 Hz — and with them the loop took 576
+ steps in 600 frames: one frame in twenty-five took none, so a probe holding a key
+ for a number of frames walked a number of steps it could not predict.
+*>
+fn void a_counted_frame_is_exactly_one_fixed_step() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		@ok(run, "globalThis.steps = 0; three.setFixedLoop(() => { globalThis.steps++; });");
+		run.pass.clock.frame_ms = 1000.0 / 60.0;
+
+		for (int i = 0; i <= 600; i++) run.tick((double)i * 16.0);
+
+		String steps = @answer(run, "return globalThis.steps + ' ' + three.frame.droppedSteps + ' ' + three.clock.time.toFixed(9);");
+		defer steps.free(mem);
+		test::@check(steps == `"600 0 10.000000000"`,
+			"601 counted frames are 600 steps, none dropped, ten seconds; got '%s'", steps);
+	};
+}
+
+<*
  A rate a script chose is the rate it gets.
 
  The same ninety milliseconds that owed five steps at sixty hertz owes two at

@@ -58,14 +58,19 @@ fn void the_docs_describe_the_click() @test
  it green. A doc that has silently stopped covering the surface is worth less
  than none, because it is trusted.
 
- So this asks the surface itself — the module's exports, and every public member
- of every exported class walked off the prototype chain — and requires each to be
- documented *in its own entry*: a class under its own `## Name` in `classes.md`,
- each of its members inside that entry, and everything else in `functions.md`.
- A sweep of the whole folder would be too weak to catch anything: renaming the
- `ShaderMaterial` entry to `_ShaderMaterialUndocumented` still contains the
- string `ShaderMaterial`, and prose in `differences.md` mentioning a class would
- count as documenting it.
+ So this asks the surface itself — the module's exports, every public member of
+ every exported class walked off the prototype chain, and the members of
+ `three.input` — and requires each to be documented *in its own entry*: a class
+ under its own `## Name` in `classes.md`, each of its members as a listed member
+ of that entry, and everything else in `functions.md` under its own name.
+
+ Listed, not mentioned. A member counts when it is the leading identifier of one
+ of the entry's `- ` list items or a `#### name` heading, and an export when
+ `three.name` appears as a whole identifier — because a substring is a mention:
+ `animation` passed for every class whose `animations` was listed, and
+ `three.reset` passed because "does not reset it" is a sentence. A sweep of the
+ whole folder would be weaker still: renaming the `ShaderMaterial` entry to
+ `_ShaderMaterialUndocumented` still contains the string `ShaderMaterial`.
 *>
 fn void the_docs_name_everything_the_api_exposes() @test
 {
@@ -85,7 +90,36 @@ fn void the_docs_name_everything_the_api_exposes() @test
 			const newline = part.indexOf('\n');
 			entries[part.slice(0, newline).trim()] = part.slice(newline);
 		}
-		const elsewhere = functions + JSON.stringify(Object.keys(entries));
+
+		// What an entry documents, as names: the leading identifier of every
+		// "- 'name'" or "- 'sig(args)'" list item, in code quotes — a span may wrap, a list of
+		// several is split on its commas, and the arguments are dropped so
+		// "set(x,y,z)" does not document y and z — and every "#### name".
+		// Prose does not count: "animations" mentions "animation" and documents
+		// nothing about it.
+		const documented = (entry) => {
+			const names = new Set();
+			for (const m of entry.matchAll(/^\s*- \x60([^\x60]+)\x60/gm)) {
+				const code = m[1].replace(/\([^)]*\)/g, '').replace(/\{[^}]*\}/g, '');
+				for (const piece of code.split(',')) {
+					const id = piece.trim().match(/^[A-Za-z_$][\w$]*/);
+					if (id) names.add(id[0]);
+				}
+			}
+			for (const m of entry.matchAll(/^#### ([A-Za-z_$][\w$]*)\s*$/gm)) names.add(m[1]);
+			return names;
+		};
+
+		// A name in functions.md as a whole identifier after its namespace —
+		// "three.reset", not the word "reset" in a sentence — or after a slash in
+		// a heading that names it, "## three.input.pressed(key) / released(key)".
+		const escape = (text) => text.replace(/[.$]/g, '\\$&');
+		const named = (namespace, name) => {
+			const whole = new RegExp('(?<![\\w$])' + escape(namespace + '.' + name) + '(?![\\w$])');
+			if (whole.test(functions)) return true;
+			const heading = new RegExp('^## ' + escape(namespace) + '\\..*/ ' + escape(name) + '(?![\\w$])', 'm');
+			return heading.test(functions);
+		};
 
 		const members = (ctor) => {
 			const out = new Set();
@@ -104,14 +138,22 @@ fn void the_docs_name_everything_the_api_exposes() @test
 			const exported = three[name];
 			const isClass = typeof exported === 'function' && /^[A-Z]/.test(name);
 			if (!isClass) {
-				if (!elsewhere.includes(name)) missing.push(name);
+				if (!named('three', name) && !(name in entries)) missing.push(name);
 				continue;
 			}
 			const entry = entries[name];
 			if (entry === undefined) { missing.push('classes.' + name); continue; }
+			const listed = documented(entry);
 			for (const m of members(exported)) {
-				if (!entry.includes(m)) missing.push(name + '.' + m);
+				if (!listed.has(m)) missing.push(name + '.' + m);
 			}
+		}
+
+		// The input namespace is a surface of its own, and the half of it a test
+		// reaches for — pressing keys, moving the pointer — was the half nobody
+		// could find.
+		for (const name of Object.keys(Object.getOwnPropertyDescriptors(three.input))) {
+			if (!named('three.input', name)) missing.push('input.' + name);
 		}
 		return missing;
 	`);

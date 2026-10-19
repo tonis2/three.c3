@@ -1032,10 +1032,12 @@ fn void the_ported_skin_module_is_generated() @test
 	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
 	test::@check(source.contains("(pose * float4(normal, 0.0)).xyz"),
 		"the normal is the w = 0 multiply the original's 3x3 cast spelled out");
-	test::@check(source.contains("float4x4 mx = palette[base + joints.x];"),
+	test::@check(source.contains("float4x4 first = palette[base + joints.x];"),
 		"the palette pointer is indexed by joint");
-	test::@check(source.contains("weights.x * rx + weights.y * ry"),
+	test::@check(source.contains("real = real + weight * r;"),
 		"and a vector scales by a scalar on the left");
+	test::@check(source.contains("add_influence(palette[next + joints.w], then.w, pivot, real, dual);"),
+		"and an inout argument is a vector the callee adds into");
 
 	check_compiles(source, "the generated skin module");
 

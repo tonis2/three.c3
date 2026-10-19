@@ -912,9 +912,11 @@ fn void a_receiver_that_moved_since_the_save_is_the_only_dirty_tile() @test
 <*
  A generated layered material uses its own lightmap program, including its final
  mapped normal. Because parallax is viewed from the camera, moving that camera
- drops the tile to the real-time path and also makes a persisted bake incompatible.
+ drops the tile to the real-time path — and a persisted bake loaded under another
+ camera puts exactly those tiles on the dirty list rather than being refused
+ whole, which cost a full re-bake on every boot from another view.
 *>
-fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @test
+fn void a_layered_normal_cache_follows_the_camera_and_reloads_from_another_view() @test
 {
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
 	{
@@ -987,8 +989,8 @@ fn void a_layered_normal_cache_follows_the_camera_and_rejects_an_old_view() @tes
 			three::RunResult loaded = run.run(
 				`const b = three.lights.loadBake('layered.lightmap'); return b && [b.tiles, b.dirty].join(' ');`);
 			defer loaded.free();
-			test::@check(loaded.value == "null",
-				"the persisted view-dependent diffuse is rejected from another camera: %s", loaded.value);
+			test::@check(loaded.value == `"5 5"`,
+				"a bake saved under another camera loads with its five layered tiles dirty: %s", loaded.value);
 		};
 	};
 }

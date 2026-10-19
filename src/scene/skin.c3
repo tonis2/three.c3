@@ -23,9 +23,10 @@
 
  ## What it gives up
 
- Quantised time, no blending between clips, and no way to move a bone — all the
- same limitation from different sides: the pose is a table lookup, so nothing can
- influence it that was not sampled at bake time. `MeshPass` writes a *live*
+ Quantised time and no way to move a bone — the same limitation from two sides:
+ the pose is a table lookup, so nothing can influence it that was not sampled at
+ bake time. A crossfade is the exception that fits: two looked-up frames and a
+ weight, mixed in the shader (`key_pose`). `MeshPass` writes a *live*
  palette into the same shader contract for characters instantiated with a
  skeleton, and `Instance.pose`'s top bit says which of the two buffers a copy
  reads, so the two kinds of character still share a draw call and a script that
@@ -85,7 +86,7 @@ const float BAKE_FPS = 30.0;
 // One node's transform while a frame is being posed. The three channels are
 // carried separately rather than as a matrix, because a clip may drive one of
 // them and leave the other two at the file's own values.
-struct PosedNode @local
+struct PosedNode
 {
 	Vec3 position;
 	Quaternionf rotation;
@@ -229,6 +230,11 @@ fn uint plan_segments(Asset* asset) @local
 		foreach (c, &clip : asset.clips)
 		{
 			uint frames = frame_count_of(clip.duration);
+			// Spread so the last frame is the clip's end exactly. At a flat thirty a
+			// second a 1.05 s walk's last frame would be sampled past its end and
+			// clamped to its last key, and a pose interpolated toward it would stop
+			// short of the seam and jump on the wrap.
+			float fps = frames > 1 && clip.duration > 0 ? (float)(frames - 1) / clip.duration : BAKE_FPS;
 			asset.baked.push(
 				{
 					.skin = (uint)s,
@@ -236,7 +242,7 @@ fn uint plan_segments(Asset* asset) @local
 					.frame_offset = offset,
 					.frame_count = frames,
 					.joint_count = joint_count,
-					.fps = BAKE_FPS,
+					.fps = fps,
 				}
 			);
 			offset += frames * joint_count;
@@ -365,15 +371,40 @@ fn void pose_at(
 		}
 	}
 
-	foreach (i, &node : scratch)
+	asset.compose_posed(scratch, locals, world);
+}
+
+<*
+ Every node's world matrix in the asset's own space, from one transform per node.
+
+ The second half of `pose_at`, split out so a pose that did not come from one clip
+ — `AnimationPlayer.blend_layers`, mixing several — composes exactly as a baked
+ frame does: from the asset's roots, under an identity parent, so a joint matrix
+ comes out relative to the mesh node and the instance's own matrix goes on top in
+ the shader.
+*>
+fn void Asset.compose_posed(&self, PosedNode[] posed, Matrix4f[] locals, Matrix4f[] world)
+{
+	foreach (i, &node : posed)
 	{
+		if (i >= locals.len) break;
 		locals[i] = matrix::IDENTITY4{float}.translate(node.position).mul(node.rotation.to_matrix()).scale(node.scale);
 	}
 
-	foreach (root : asset.roots)
+	foreach (root : self.roots)
 	{
-		compose_from(asset, root, matrix::IDENTITY4{float}, locals, world);
+		compose_from(self, root, matrix::IDENTITY4{float}, locals, world);
 	}
+}
+
+<*
+ One skin's joint matrices out of a composed pose — `write_joints` for a caller
+ outside this file, which is the blend that poses a baked character on the CPU.
+*>
+fn void Asset.skin_joints(&self, uint skin, Matrix4f[] world, Matrix4f[] out)
+{
+	if (skin >= self.skins.len()) return;
+	write_joints(self, &self.skins[skin], world, out);
 }
 
 <*
@@ -560,8 +591,9 @@ fn Matrix4f Asset.bone_matrix(&self, uint skin, uint joint, uint offset)
 
  What is created is deliberately the *empty* skin: `joints` numbered 0..N-1 and
  the inverse binds identity. Both are honest here rather than a stand-in. The
- caller's palette is already `world * inverse_bind` — it is the whole point of a
- palette — so folding a second inverse bind through it would undo the pose, and
+ caller's palette is already the joint's mesh-space transform times its inverse
+ bind — it is the whole point of a palette — so folding a second inverse bind
+ through it would undo the pose, and
  the joint list only ever has to be as long as the palette, because nothing here
  maps these joints onto nodes. `Scene.set_palette` is what fills the matrices.
 
@@ -634,9 +666,10 @@ fn int? Assets.attach_skin(&self, Gpu* gpu, AssetId id, uint joints)
 
  The fourth pose path, beside the baked table, the bone-node palette and the
  compute skinner — and the one for a caller that owns its own skeleton. Nothing
- here samples a clip or reads a node: the matrices arrive whole, already
- `world * inverse_bind`, which is the same contract `write_live_poses` produces
- from bone nodes and the same one `shaders/skinning.shady` reads.
+ here samples a clip or reads a node: the matrices arrive whole, already the
+ joint's mesh-space transform times its inverse bind, which is the same contract
+ `write_live_poses` produces from bone nodes and the same one
+ `shaders/skinning.shady` reads.
 
  A side table rather than a field on `Node`, for `MorphWeights`' reason: almost
  no node has one, and a `List` per node would be a pointer, a length and a
@@ -684,7 +717,9 @@ fn LivePalette* Scene.live_palette(&self, NodeId id)
  	`scene.set_palette(model, palette);`
 
  One matrix per joint of the skin the node names, each taking a *rest-pose*
- vertex to where it belongs — `world * inverse_bind`, identity at rest. Handing
+ vertex to where it belongs in the mesh's own space — the joint's mesh-space
+ transform times its inverse bind, identity at rest; the node's world matrix goes
+ on top in the shader, as for every other mesh. Handing
  in bone-space transforms instead poses the mesh by its own bind pose twice and
  turns it inside out around the root, which is the one mistake worth naming here
  because it produces a picture rather than an error.
@@ -846,8 +881,8 @@ struct Socket
 	// scene. The three fields together are the whole of what the bone transform
 	// depends on, so comparing them is exact rather than a heuristic.
 	uint pose;
-	uint pose_from;
-	float blend;
+	uint pose_next;
+	float pose_t;
 	bool written;
 }
 
@@ -970,8 +1005,13 @@ fn void Scene.update_sockets(&self)
 			continue;
 		}
 
-		if (socket.written && socket.pose == character.pose && socket.pose_from == character.pose_from
-			&& socket.blend == character.blend)
+		// A character blending several clips is posed from a palette composed this
+		// frame rather than from a frame of the table, and nothing about `pose`
+		// says whether it moved — so it is read every time.
+		Matrix4f* composed = self.composed_joint(socket.character, socket.skin, socket.joint);
+
+		if (composed == null && socket.written && socket.pose == character.pose
+			&& socket.pose_next == character.pose_next && socket.pose_t == character.pose_t)
 		{
 			continue;
 		}
@@ -979,36 +1019,70 @@ fn void Scene.update_sockets(&self)
 		Asset* owner = self.assets.slot(character.asset);
 		if (owner == null) continue;
 
-		Matrix4f world = owner.bone_matrix(socket.skin, socket.joint, character.pose);
-		if (character.blend > 0)
+		Matrix4f world = composed != null
+			? composed.mul(owner.skins[socket.skin].bind[socket.joint])
+			: owner.bone_matrix(socket.skin, socket.joint, character.pose);
+		// Between two baked frames, as the shader draws it.
+		if (composed == null && character.pose_t > 0)
 		{
-			// The same mix the shader makes, and the same lie with it: what a
-			// socket has to be is where the crossfading hand *is*, not where either
-			// clip on its own would have put it.
-			Matrix4f from = owner.bone_matrix(socket.skin, socket.joint, character.pose_from);
-			world = mix_matrix(world, from, character.blend);
+			Matrix4f next = owner.bone_matrix(socket.skin, socket.joint, character.pose_next);
+			world = mix_rigid(world, next, character.pose_t);
 		}
 
 		decompose(world, &node.position, &node.rotation, &node.scale);
 		self.mark_moved(socket.node);
 
 		socket.pose = character.pose;
-		socket.pose_from = character.pose_from;
-		socket.blend = character.blend;
+		socket.pose_next = character.pose_next;
+		socket.pose_t = character.pose_t;
 		socket.written = true;
 	}
 }
 
 <*
- Two matrices mixed componentwise, `weight` of the second.
-
- The socket's half of `shaders/skinning.shady`'s crossfade, and wrong in exactly the
- way that one is wrong — deliberately, because a socket that took the honest path
- would drift away from the hand the shader drew.
+ Two bone transforms mixed as transforms — position and scale by a lerp, rotation
+ by a slerp — `weight` of the second. A socket's half of interpolating between two
+ baked frames.
 *>
-fn Matrix4f mix_matrix(Matrix4f to, Matrix4f from, float weight) @local
+fn Matrix4f mix_rigid(Matrix4f from, Matrix4f to, float weight) @local
 {
-	Matrix4f mixed;
-	for (usz i = 0; i < 16; i++) mixed.m[i] = to.m[i] + (from.m[i] - to.m[i]) * weight;
-	return mixed;
+	Vec3 from_position;
+	Quaternionf from_rotation;
+	Vec3 from_scale;
+	Vec3 to_position;
+	Quaternionf to_rotation;
+	Vec3 to_scale;
+	decompose(from, &from_position, &from_rotation, &from_scale);
+	decompose(to, &to_position, &to_rotation, &to_scale);
+	Vec3 position = from_position + (to_position - from_position) * weight;
+	Vec3 scale = from_scale + (to_scale - from_scale) * weight;
+	Quaternionf rotation = from_rotation.slerp(to_rotation, weight);
+	return matrix::IDENTITY4{float}.translate(position).mul(rotation.to_matrix()).scale(scale);
+}
+
+<*
+ One joint's matrix out of the palette a blending character was composed into
+ this frame, or null when the mesh is not on one — see `AnimationPlayer.composed`.
+*>
+fn Matrix4f* Scene.composed_joint(&self, NodeId mesh, uint skin, uint joint)
+{
+	foreach (&player : self.players)
+	{
+		if (!player.composed) continue;
+		Asset* owner = self.assets.slot(player.asset);
+		if (owner == null) continue;
+		sz at = 0;
+		foreach (&target : player.skinned)
+		{
+			if (target.skin >= owner.skins.len()) continue;
+			sz count = owner.skins[target.skin].joints.len();
+			if (target.node == mesh && target.skin == skin)
+			{
+				if (joint >= count || at + joint >= player.palette.len()) return null;
+				return &player.palette[at + joint];
+			}
+			at += count;
+		}
+	}
+	return null;
 }

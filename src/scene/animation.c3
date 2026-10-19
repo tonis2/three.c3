@@ -18,11 +18,14 @@
  play, is faster per frame and is what makes `CUBICSPLINE` implementable rather
  than approximated.
 
- There is a crossfade and there are no additive layers. The fade is two clips and
- one weight — `play(name, { fade })` and nothing else to hold — where Three.js's
- `AnimationMixer` is a graph of actions with their own weights, timescales and
- loop counts. Two clips is what a locomotion state machine actually asks for, and
- the third one is the point at which a mixer would have to be a mixer.
+ A player is a stack of up to four weighted clips (`AnimationLayer`), with no
+ additive layers and no action objects: `play(name, { fade })` raises one clip and
+ lowers the rest, `Scene.blend` holds several at the weights it is given, and the
+ weights belong to the character rather than to handles a script has to keep.
+ Three.js's `AnimationMixer` is a graph of actions with their own weights,
+ timescales and loop counts; what a locomotion state machine asks for is a walk
+ and a run held by speed, a jump crossfaded over them and an idle to come back to,
+ and four clips on one stack is that.
 *>
 module three;
 
@@ -301,6 +304,62 @@ struct SkinnedTarget
 
 
 <*
+ The most clips one character blends at once.
+
+ Four is a walk, a run, the jump a landing is still coming out of, and one to
+ spare for the idle a stop fades into — what a locomotion graph asks for at any
+ one moment. Fixed rather than a list because a player is per character, and a
+ hundred of them stay a hundred structs.
+*>
+const uint ANIMATION_LAYERS = 4;
+
+<*
+ One clip on a character's stack: its clock, and how much of the picture it is.
+
+ `weight` moves toward `target` at `rate` per second, which is the whole of a
+ fade — `play(name, { fade })` raises one layer and lowers the rest so they all
+ arrive together, and `Scene.blend` sets several targets at once. A layer whose
+ weight and target are both zero is gone at the end of the frame.
+*>
+struct AnimationLayer
+{
+	// Into the asset's clips.
+	int clip;
+	// In the clip's own units, which begin at `clip.start`.
+	float time;
+	float speed;
+	bool loop;
+	bool playing;
+	float weight;
+	float target;
+	// Weight per second toward `target`; zero or less arrives at once.
+	float rate;
+	// Cycles on from the player's shared `phase`, or negative for a layer on its
+	// own clock.
+	float offset;
+}
+
+<*
+ One node's share of every layer that drives it, summed before it is written.
+
+ A rotation is summed as a 4-vector, each sample turned into the same hemisphere
+ as the node's rest rotation first, and normalised once at the end — the
+ weighted mean of several rotations, which for two at equal weight is exactly the
+ slerp half-way.
+*>
+struct LayerSum
+{
+	Vec3 position;
+	float position_weight;
+	Quaternionf rotation;
+	float rotation_weight;
+	Vec3 scale;
+	float scale_weight;
+	bool touched;
+	bool morphed;
+}
+
+<*
  One instantiated subtree's animation state.
 
  Per instance, which is the point: two copies of the same character have one copy
@@ -334,37 +393,32 @@ struct AnimationPlayer
 	// drew and are shared by every copy in the scene.
 	List{SkinnedTarget} skinned;
 
-	// -1 when nothing is playing, which is the state a player spends most of its
-	// life in and is not the same as "no player".
-	int clip;
-	float time;
-	float speed;
-	bool loop;
-	bool playing;
+	<*
+	 The clips this character is blending, in the order they arrived, and how many.
+	 Empty is the state a player spends most of its life in, and is not the same as
+	 "no player".
+
+	 **Symmetric by construction.** Every node any layer drives starts each frame
+	 from the file's rest pose and takes Σ wᵢ·sampleᵢ over the layers that drive it,
+	 the rest of the weight staying rest — so a node only a leaving clip moved goes
+	 back where the file had it, as the baked table always did, and a third clip
+	 asked for mid-fade joins the other two instead of dropping one.
+	*>
+	AnimationLayer[ANIMATION_LAYERS] layers;
+	uint layer_count;
 
 	<*
-	 The clip a crossfade is coming out of, and its own clock. -1 when nothing is
-	 fading, which is every frame but the fraction of a second after a `play` that
-	 asked for one.
+	 The shared cycle of every phase-locked layer, in [0, 1), and whether there is
+	 one.
 
-	 **Its own clock, not a frozen frame.** A walk faded into a wave goes on
-	 walking underneath for the length of the fade; holding the walk still would
-	 make the legs stop a beat before the arms move, which reads as a hitch rather
-	 than as a transition.
-
-	 One clip deep. A second `play` during a fade drops whatever was fading out and
-	 fades from the clip that was fading *in* — three-way blending is where a mixer
-	 starts, and the header says why this is not one.
+	 A walk and a run blended by speed have different lengths, so two clocks drift
+	 and the feet cross. Locked layers share this one instead: it advances at the
+	 weighted mean of their own rates, and each reads its time as
+	 `start + frac(phase + offset) · duration` — the walk's left foot lands on the
+	 run's left foot whatever the mix.
 	*>
-	int from_clip;
-	float from_time;
-	float from_speed;
-	bool from_loop;
-
-	// Seconds into the fade, and how long it lasts. `fade / fade_duration` is how
-	// much of `clip` has arrived, and reaching 1 is what clears `from_clip`.
-	float fade;
-	float fade_duration;
+	double phase;
+	bool phased;
 
 	<*
 	 Whether this character's joint matrices are computed every frame from its
@@ -390,6 +444,24 @@ struct AnimationPlayer
 	 touches a weight channel, which is almost all of them.
 	*>
 	List{float} weight_scratch;
+
+	<*
+	 What a baked character blending more than one clip is posed from, on the CPU.
+
+	 The table holds one clip a frame, and a crossfade between two of them used to
+	 be a per-vertex mix of joint matrices in the shader — not rigid, and no way to
+	 hold three. So while more than one layer has weight, `blend_layers` samples
+	 each into the asset's own hierarchy, mixes the transforms, composes the joints
+	 and writes `palette` here, every skinned target's joints in a row, which
+	 `MeshPass.write_live_poses` uploads like a live skeleton's. One clip at full
+	 weight goes back to the table and costs one uint again.
+	*>
+	bool composed;
+	List{PosedNode} posed;
+	List{LayerSum} sums;
+	List{Matrix4f} locals;
+	List{Matrix4f} world;
+	List{Matrix4f} palette;
 }
 
 fn void AnimationPlayer.free(&self)
@@ -400,6 +472,16 @@ fn void AnimationPlayer.free(&self)
 	self.skinned = { };
 	self.weight_scratch.free();
 	self.weight_scratch = { };
+	self.posed.free();
+	self.posed = { };
+	self.sums.free();
+	self.sums = { };
+	self.locals.free();
+	self.locals = { };
+	self.world.free();
+	self.world = { };
+	self.palette.free();
+	self.palette = { };
 }
 
 <*
@@ -414,56 +496,296 @@ fn void AnimationPlayer.free(&self)
  `update_world_matrices` runs once per frame over the whole scene and already
  carries a dirty flag down a subtree; doing it per channel would recompute a
  hand's matrix once per joint above it.
+
+ A player whose clocks have all stopped and whose weights have all arrived has
+ nothing to write, and writes nothing — which is what lets a held pose cost
+ nothing and lets the window sleep.
 *>
 fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 {
-	if (self.clip < 0) return;
-	// A fade outlives the clip it is fading *into* stopping: a one-shot shorter
-	// than the fade would otherwise freeze half-blended, since a stopped player
-	// steps nothing.
-	if (!self.playing && self.from_clip < 0) return;
+	if (!self.active()) return;
 
 	Asset* owner = assets.slot(self.asset);
-	if (owner == null || self.clip >= owner.clips.len())
+	if (owner == null)
 	{
-		self.playing = false;
-		self.from_clip = -1;
+		self.layer_count = 0;
+		self.phased = false;
 		return;
 	}
 
-	AnimationClip* clip = &owner.clips[self.clip];
-	if (self.playing) self.time = step_time(clip, self.time, self.speed, self.loop, dt, &self.playing);
+	self.step_clocks(owner, dt);
+	self.step_weights(dt);
+	self.pose(scene, owner);
+	// The frame a fade ends on is posed with the leaving layer still in it, at
+	// nothing, which is what puts its nodes back at rest. If that leaves one clip
+	// at the whole of the picture, it is posed again as one — back on the table
+	// this frame rather than composed for one more.
+	if (self.drop_silent() && self.layer_count == 1) self.pose(scene, owner);
+}
 
-	AnimationClip* from = null;
-	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
+<*
+ Whether anything about this player moves this frame: a clock running, or a
+ weight on its way somewhere.
+*>
+fn bool AnimationPlayer.active(&self)
+{
+	for (uint i = 0; i < self.layer_count; i++)
 	{
-		from = &owner.clips[self.from_clip];
-		// Whether the outgoing clip has run out is not interesting — it is on its
-		// way out either way — so the flag it would set is a local nothing reads.
-		bool running = true;
-		self.from_time = step_time(from, self.from_time, self.from_speed, self.from_loop, dt, &running);
+		AnimationLayer* layer = &self.layers[i];
+		if (layer.playing || layer.weight != layer.target) return true;
+	}
+	return false;
+}
 
-		self.fade += dt;
-		if (self.fade >= self.fade_duration)
+<*
+ The layer the character is heading for: the highest target, the heaviest of
+ those, the newest of those. -1 when the stack is empty.
+
+ By target first, because what a script asks about is the clip it asked for —
+ `play('jump', { fade })` and then `animation.name` is `'jump'` from that frame
+ on, not the walk it is still mostly showing — and because that is also what a
+ `sync` lines up with. A held blend's heaviest clip is the one with the highest
+ target anyway.
+*>
+fn int AnimationPlayer.dominant(&self)
+{
+	int best = -1;
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		if (best < 0) { best = (int)i; continue; }
+		AnimationLayer* held = &self.layers[best];
+		if (layer.target != held.target)
 		{
-			self.from_clip = -1;
-			from = null;
+			if (layer.target > held.target) best = (int)i;
+			continue;
+		}
+		if (layer.weight >= held.weight) best = (int)i;
+	}
+	return best;
+}
+
+<*
+ A layer of this clip whose clock is running, preferring the one rising — which
+ is what makes asking for a clip already playing a no-op rather than a second
+ copy. -1 when there is none, including a held one: asking for that one again is a
+ restart, faded out of where it stopped.
+*>
+fn int AnimationPlayer.playing_layer(&self, int clip)
+{
+	int found = -1;
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		if (layer.clip != clip || !layer.playing) continue;
+		if (found < 0 || layer.target > self.layers[found].target) found = (int)i;
+	}
+	return found;
+}
+
+<*
+ A fresh layer at weight zero, its fields for the caller to fill.
+
+ A full stack makes room by dropping its lightest layer — the one that was
+ leaving anyway, almost always, so what that costs is a few percent of a pose
+ rather than a pop.
+*>
+fn uint AnimationPlayer.add_layer(&self, int clip)
+{
+	if (self.layer_count >= ANIMATION_LAYERS)
+	{
+		uint lightest = 0;
+		for (uint i = 1; i < self.layer_count; i++)
+		{
+			AnimationLayer* layer = &self.layers[i];
+			AnimationLayer* held = &self.layers[lightest];
+			if (layer.weight + layer.target < held.weight + held.target) lightest = i;
+		}
+		self.remove_layer(lightest);
+	}
+	uint at = self.layer_count++;
+	self.layers[at] = { .clip = clip, .speed = 1, .loop = true, .playing = true, .offset = -1 };
+	return at;
+}
+
+fn void AnimationPlayer.remove_layer(&self, uint at)
+{
+	for (uint i = at; i + 1 < self.layer_count; i++) self.layers[i] = self.layers[i + 1];
+	self.layer_count--;
+}
+
+<*
+ Raises one layer to the whole of the picture over `fade` seconds and lowers
+ every other so they all arrive together.
+
+ The one rising goes at a constant 1/fade, so turning back to a clip that was
+ three quarters gone takes three quarters of the fade, not a whole one; the rest
+ fall in proportion to what they hold, so the weights keep summing to one the
+ whole way and no frame of the transition shows the rest pose through it.
+*>
+fn void AnimationPlayer.raise(&self, uint at, float fade)
+{
+	AnimationLayer* up = &self.layers[at];
+	float span = (1.0f - up.weight) * fade;
+	up.target = 1.0f;
+	up.rate = fade > 0 ? 1.0f / fade : 0;
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		if (i == at) continue;
+		AnimationLayer* down = &self.layers[i];
+		down.target = 0;
+		down.rate = span > 0 ? down.weight / span : 0;
+	}
+}
+
+<*
+ Every running clock, stepped by `dt`.
+
+ A phase-locked layer reads its time off the shared cycle rather than its own
+ clock, and the cycle advances at the weighted mean rate of the locked layers —
+ a walk at 1.05 s and a run at 0.67 s, half and half, go round once every
+ 0.82 s, and both are at the same point of their stride the whole way.
+*>
+fn void AnimationPlayer.step_clocks(&self, Asset* owner, float dt)
+{
+	if (self.phased)
+	{
+		double rate = 0;
+		double weight = 0;
+		for (uint i = 0; i < self.layer_count; i++)
+		{
+			AnimationLayer* layer = &self.layers[i];
+			if (layer.offset < 0 || !layer.playing || layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+			AnimationClip* clip = &owner.clips[layer.clip];
+			if (clip.duration <= 0) continue;
+			// The weight it is heading for as well as the one it has, so a lock
+			// faded in from nothing does not stall the cycle on its first frame.
+			float w = layer.weight > layer.target ? layer.weight : layer.target;
+			rate += (double)w * layer.speed / clip.duration;
+			weight += w;
+		}
+		if (weight > 0)
+		{
+			self.phase += dt * rate / weight;
+			self.phase -= math::floor(self.phase);
 		}
 	}
-	else
-	{
-		self.from_clip = -1;
-	}
 
-	if (from != null)
+	for (uint i = 0; i < self.layer_count; i++)
 	{
-		self.apply_blend(scene, owner, from, clip);
+		AnimationLayer* layer = &self.layers[i];
+		if (!layer.playing || layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+		AnimationClip* clip = &owner.clips[layer.clip];
+		if (self.phased && layer.offset >= 0 && clip.duration > 0)
+		{
+			double at = self.phase + layer.offset;
+			at -= math::floor(at);
+			layer.time = clip.start + (float)(at * clip.duration);
+			continue;
+		}
+		layer.time = step_time(clip, layer.time, layer.speed, layer.loop, dt, &layer.playing);
 	}
-	else
+}
+
+<*
+ Sends a layer to nothing over `fade` seconds — unless it is on its way there
+ already, when it keeps the rate it set out at.
+
+ What makes a blend asked for every frame let go of a clip at all. Re-aimed each
+ frame at `weight / fade`, a leaving layer covers the same fraction of what is left
+ every frame and never arrives: an idle a walk was blended out of stayed on the
+ stack at a ten-thousandth for as long as the walk lasted, and kept the character
+ composed on the CPU the whole time.
+*>
+fn void AnimationPlayer.let_go(&self, AnimationLayer* layer, float fade)
+{
+	if (layer.target <= 0 && layer.rate > 0) return;
+	layer.target = 0;
+	layer.rate = fade > 0 ? layer.weight / fade : 0;
+}
+
+<*
+ The player's scratch lists on the heap, before anything grows them — see
+ `blend_layers` for the pool that took them otherwise.
+*>
+fn void AnimationPlayer.own_scratch(&self, sz nodes)
+{
+	if (self.sums.allocator == null) self.sums.init(mem, nodes);
+	if (self.posed.allocator == null) self.posed.init(mem, nodes);
+	if (self.locals.allocator == null) self.locals.init(mem, nodes);
+	if (self.world.allocator == null) self.world.init(mem, nodes);
+	if (self.palette.allocator == null) self.palette.init(mem, 64);
+}
+
+<*
+ Every phase-locked layer put at its point of the shared cycle now, rather than at
+ the next step — so a clip that has just joined a lock is in step on the frame it
+ joined.
+*>
+fn void AnimationPlayer.place_locked(&self, Asset* owner)
+{
+	if (!self.phased) return;
+	for (uint i = 0; i < self.layer_count; i++)
 	{
-		self.write_clip(scene, clip, self.time, 1.0f);
+		AnimationLayer* layer = &self.layers[i];
+		if (layer.offset < 0 || layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+		AnimationClip* clip = &owner.clips[layer.clip];
+		if (clip.duration <= 0) continue;
+		double at = self.phase + layer.offset;
+		at -= math::floor(at);
+		layer.time = clip.start + (float)(at * clip.duration);
 	}
-	self.key_pose(scene, owner, clip);
+}
+
+// Every weight moved toward its target by its rate.
+fn void AnimationPlayer.step_weights(&self, float dt)
+{
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		if (layer.weight == layer.target) continue;
+		float step = layer.rate > 0 ? layer.rate * dt : 1e30f;
+		if (layer.weight < layer.target)
+		{
+			layer.weight = layer.weight + step >= layer.target ? layer.target : layer.weight + step;
+		}
+		else
+		{
+			layer.weight = layer.weight - step <= layer.target ? layer.target : layer.weight - step;
+		}
+	}
+}
+
+<*
+ Layers that have faded all the way out, gone — after the frame they reached
+ zero on was written, so that frame put their nodes back at rest.
+*>
+fn bool AnimationPlayer.drop_silent(&self)
+{
+	uint was = self.layer_count;
+	for (uint i = self.layer_count; i > 0; i--)
+	{
+		AnimationLayer* layer = &self.layers[i - 1];
+		if (layer.weight <= 0 && layer.target <= 0) self.remove_layer(i - 1);
+	}
+	bool locked = false;
+	for (uint i = 0; i < self.layer_count; i++) locked = locked || self.layers[i].offset >= 0;
+	self.phased = self.phased && locked;
+	return self.layer_count != was;
+}
+
+<*
+ Every layer's nodes back to the file's rest pose — what a snap does to the clips
+ it replaces, so a node only they drove does not keep their last pose forever.
+*>
+fn void AnimationPlayer.reset_layers(&self, Scene* scene, Asset* owner)
+{
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		if (layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+		self.reset_targets(scene, owner, &owner.clips[layer.clip]);
+	}
 }
 
 <*
@@ -498,44 +820,173 @@ fn float step_time(AnimationClip* clip, float time, float speed, bool loop, floa
 }
 
 <*
- How much of the incoming clip has arrived: 0 at the moment the fade starts, 1
- when it is over, and 1 whenever nothing is fading.
+ The stack written into the nodes, and into the skin.
 
- Read by both halves — the live path mixes the nodes by it and the baked path
- hands it to the shader — so a character does not fade at two different rates
- depending on which one is posing it.
+ One clip at the whole of the picture is the plain write it always was — exact,
+ and leaving every node the clip does not drive alone. Anything else is
+ `blend_layers`.
 *>
-fn float AnimationPlayer.blend_weight(&self)
+fn void AnimationPlayer.pose(&self, Scene* scene, Asset* owner)
 {
-	if (self.from_clip < 0 || self.fade_duration <= 0) return 1.0f;
-	float weight = self.fade / self.fade_duration;
-	if (weight <= 0) return 0;
-	if (weight >= 1) return 1.0f;
-	return weight;
+	if (self.layer_count == 0) return;
+	AnimationLayer* only = &self.layers[0];
+	if (self.layer_count == 1 && only.weight >= 1.0f && only.clip >= 0 && only.clip < owner.clips.len())
+	{
+		self.write_clip(scene, &owner.clips[only.clip], only.time, 1.0f);
+		self.composed = false;
+	}
+	else
+	{
+		self.blend_layers(scene, owner);
+	}
+	self.key_pose(scene, owner);
 }
 
 <*
- Both clips written into the nodes, mixed by the fade's weight.
+ Every layer mixed into the nodes by its weight, the rest of the weight rest.
 
- **This is the honest half of the crossfade.** It blends the transforms rather
- than the matrices they compose into — a lerp on translation and scale, a slerp on
- rotation — so a joint mid-fade is a rotation of the right length and the limb
- keeps its bones. `shaders/skinning.shady` explains what the baked path does instead
- and why it is allowed to be worse.
-
- Three passes over the channels rather than one, and only while a fade is running.
+ The weights are taken as they are while they sum to one or less — a lone layer at
+ 0.3 is three tenths of a clip over the rest pose, which is what Three.js's mixer
+ does too — and normalised when they sum past it. The pose is built in the asset's
+ own hierarchy first (`posed`), so the same numbers go to whichever nodes this
+ instance has *and* to the palette of a baked character, whose bones it does not.
 *>
-fn void AnimationPlayer.apply_blend(&self, Scene* scene, Asset* owner, AnimationClip* from, AnimationClip* to)
+fn void AnimationPlayer.blend_layers(&self, Scene* scene, Asset* owner)
 {
-	// Every node either clip drives, back to the file's own transform first. A
-	// joint that only one of the two names would otherwise blend out of wherever
-	// last frame left it — a drift with no cause a script can see, and one that
-	// depends on which clip was playing before.
-	self.reset_targets(scene, owner, from);
-	self.reset_targets(scene, owner, to);
+	sz nodes = owner.nodes.len();
+	// Every list on the player is given the heap before it first grows. A list left
+	// to initialise itself takes whichever allocator is current at its first push,
+	// and the first push is often inside a binding's `@pool` — a `blend` from a
+	// script — so its storage was temporary and the pool freed it under the player.
+	self.own_scratch(nodes);
+	while (self.sums.len() < nodes) self.sums.push({ });
+	while (self.posed.len() < nodes) self.posed.push({ });
+	foreach (&sum : self.sums.array_view()[:nodes]) *sum = { };
 
-	self.write_clip(scene, from, self.from_time, 1.0f);
-	self.write_clip(scene, to, self.time, self.blend_weight());
+	float total = 0;
+	for (uint i = 0; i < self.layer_count; i++) if (self.layers[i].weight > 0) total += self.layers[i].weight;
+	float norm = total > 1.0f ? 1.0f / total : 1.0f;
+
+	float[4] value;
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		float w = layer.weight * norm;
+		if (layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+		AnimationClip* clip = &owner.clips[layer.clip];
+		foreach (&channel : clip.channels)
+		{
+			if (channel.node >= nodes) continue;
+			LayerSum* sum = &self.sums[channel.node];
+			// Every node a layer drives is written, at nothing as well: the frame a
+			// layer fades out on is the frame its nodes go back to rest, and a node
+			// skipped then would keep the clip's last pose.
+			if (channel.path == AnimatedPath.WEIGHTS)
+			{
+				sum.morphed = true;
+				continue;
+			}
+			sum.touched = true;
+			if (w <= 0) continue;
+			channel.sample(layer.time, value[..]);
+			switch (channel.path)
+			{
+				case AnimatedPath.TRANSLATION:
+					sum.position += (Vec3){ value[0], value[1], value[2] } * w;
+					sum.position_weight += w;
+				case AnimatedPath.ROTATION:
+					Quaternionf q = { value[0], value[1], value[2], value[3] };
+					if (q.v.dot(owner.nodes[channel.node].rotation.v) < 0) q = -q;
+					sum.rotation.v += q.v * w;
+					sum.rotation_weight += w;
+				case AnimatedPath.SCALE:
+					sum.scale += (Vec3){ value[0], value[1], value[2] } * w;
+					sum.scale_weight += w;
+				default:
+					break;
+			}
+		}
+	}
+
+	// Rest for every node, and the sums over it for the ones a layer drives.
+	foreach (n, &posed : self.posed.array_view()[:nodes])
+	{
+		AssetNode* rest = &owner.nodes[n];
+		*posed = { .position = rest.position, .rotation = rest.rotation, .scale = rest.scale };
+		LayerSum* sum = &self.sums[n];
+		if (!sum.touched) continue;
+		if (sum.position_weight > 0)
+		{
+			posed.position = sum.position + rest.position * (1.0f - sum.position_weight);
+		}
+		if (sum.rotation_weight > 0)
+		{
+			Quaternionf mixed = { .v = sum.rotation.v + rest.rotation.v * (1.0f - sum.rotation_weight) };
+			if (mixed.v.length() > 1e-6f) posed.rotation = mixed.normalize();
+		}
+		if (sum.scale_weight > 0)
+		{
+			posed.scale = sum.scale + rest.scale * (1.0f - sum.scale_weight);
+		}
+
+		if (n >= self.targets.len()) continue;
+		NodeId id = self.targets[n];
+		if (!id.is_set()) continue;
+		Node* node = scene.node(id);
+		if (node == null) continue;
+		node.position = posed.position;
+		node.rotation = posed.rotation;
+		node.scale = posed.scale;
+		scene.mark_moved(id);
+	}
+
+	// Morph weights rest at zero, so the rest's share adds nothing and each layer's
+	// sample simply adds in at its weight.
+	for (uint i = 0; i < self.layer_count; i++)
+	{
+		AnimationLayer* layer = &self.layers[i];
+		float w = layer.weight * norm;
+		if (layer.clip < 0 || layer.clip >= owner.clips.len()) continue;
+		AnimationClip* clip = &owner.clips[layer.clip];
+		foreach (&channel : clip.channels)
+		{
+			if (channel.path != AnimatedPath.WEIGHTS || channel.node >= nodes) continue;
+			if (channel.node >= self.targets.len()) continue;
+			NodeId id = self.targets[channel.node];
+			if (!id.is_set()) continue;
+			LayerSum* sum = &self.sums[channel.node];
+			if (sum.morphed)
+			{
+				// First time this frame: the rest, which is no expression at all.
+				scene.clear_morph_weights(id);
+				sum.morphed = false;
+			}
+			if (w > 0) self.add_weights(scene, channel, id, layer.time, w);
+		}
+	}
+
+	// A baked character's palette, which the table cannot hold for a mix.
+	self.composed = false;
+	if (self.live_skin || self.skinned.len() == 0 || owner.skins.len() == 0) return;
+	while (self.locals.len() < nodes) self.locals.push(matrix::IDENTITY4{float});
+	while (self.world.len() < nodes) self.world.push(matrix::IDENTITY4{float});
+	owner.compose_posed(self.posed.array_view()[:nodes], self.locals.array_view()[:nodes], self.world.array_view()[:nodes]);
+
+	sz joints = 0;
+	foreach (&target : self.skinned)
+	{
+		if (target.skin < owner.skins.len()) joints += owner.skins[target.skin].joints.len();
+	}
+	while (self.palette.len() < joints) self.palette.push(matrix::IDENTITY4{float});
+	sz at = 0;
+	foreach (&target : self.skinned)
+	{
+		if (target.skin >= owner.skins.len()) continue;
+		sz count = owner.skins[target.skin].joints.len();
+		owner.skin_joints(target.skin, self.world.array_view()[:nodes], self.palette.array_view()[at:count]);
+		at += count;
+	}
+	self.composed = true;
 }
 
 <*
@@ -595,66 +1046,63 @@ fn Quaternionf mix_quat(Quaternionf from, Quaternionf to, float weight) @local
 }
 
 <*
- Points every skinned mesh under this player at the baked frame nearest the
- player's current time.
+ Points every skinned mesh under this player at the two baked frames either side
+ of the dominant layer's time, and how far between them it is — when one clip is
+ all of the picture.
 
- The whole of what posing a baked character costs: a divide, a round, a clamp and
- one store per skinned mesh. No matrices are touched and nothing is uploaded.
+ The whole of what posing a baked character costs: a divide, a floor, a clamp and
+ three stores per skinned mesh. No matrices are touched and nothing is uploaded;
+ the shader blends the two frames (`blend_frames`), so a clip sampled thirty times
+ a second plays smoothly at any rate, slowed right down included.
 
- Snapped rather than interpolated, which is the design's one visible compromise:
- at thirty frames a second a walk cycle is a walk cycle, and a performance slow
- enough to show the stepping is what the live palette is for.
+ A composed character — more than one layer with weight — is not keyed at all:
+ `MeshPass.write_live_poses` points it at the palette `blend_layers` wrote.
 
  A skin the asset never baked — the buffer failed, or the file has clips and no
  skeleton — leaves `pose` where `Scene.set_skin` put it, which is the rest pose.
 *>
-fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner, AnimationClip* clip)
+fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner)
 {
-	if (self.skinned.len() == 0 || self.clip < 0) return;
+	if (self.skinned.len() == 0 || self.layer_count == 0) return;
 	// A live character's offset is written by `MeshPass.write_live_poses` from
 	// the bone nodes `apply` has just posed. Keying a baked frame on top would be
 	// two writers for one field, and which one won would depend on call order.
 	if (self.live_skin) return;
 
-	// The clip a fade is leaving, if there is one and the bake holds it. A clip the
-	// bake does not have cancels the fade for this character rather than blending
-	// against a stranger's matrices, which is the same refusal `write_joints` makes
-	// one level down.
-	AnimationClip* previous = null;
-	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
-	{
-		previous = &owner.clips[self.from_clip];
-	}
-	float weight = self.blend_weight();
+	int top = self.dominant();
+	if (top < 0) return;
+	AnimationLayer* layer = &self.layers[top];
+	if (layer.clip < 0 || layer.clip >= owner.clips.len()) return;
+	AnimationClip* clip = &owner.clips[layer.clip];
 
 	foreach (&target : self.skinned)
 	{
-		BakedPose* segment = owner.segment(target.skin, (uint)self.clip);
-		if (segment == null) continue;
-
 		Node* node = scene.node(target.node);
 		if (node == null) continue;
+		node.pose_next = 0;
+		node.pose_t = 0;
+		if (self.composed) continue;
 
-		// Rounded, not truncated: truncation biases every pose half a frame early
-		// and makes a clip that ends exactly on its last key stop one frame short
-		// of it.
-		int frame = (int)((self.time - clip.start) * segment.fps + 0.5f);
+		BakedPose* segment = owner.segment(target.skin, (uint)layer.clip);
+		if (segment == null) continue;
+
+		float position = (layer.time - clip.start) * segment.fps;
+		if (position < 0) position = 0;
+		int frame = (int)math::floor(position);
+		float between = position - (float)frame;
+		// Within a hair of a frame is that frame: four fetches a vertex rather than
+		// eight for a difference no pixel shows, and a clip that ends exactly on its
+		// last key lands on it rather than a ten-thousandth short.
+		if (between > 0.9999f) { frame++; between = 0; }
+		if (between < 0.0001f) between = 0;
+		// The last frame has no next: a one-shot held at its end, or a loop on its
+		// seam, which `plan_segments` made the same pose as the first.
+		int last = (int)segment.frame_count - 1;
+		if (frame >= last) { frame = last; between = 0; }
+
 		node.pose = segment.frame_at(frame);
-
-		node.pose_from = 0;
-		node.blend = 0;
-		if (previous == null) continue;
-
-		BakedPose* was = owner.segment(target.skin, (uint)self.from_clip);
-		if (was == null) continue;
-
-		int from_frame = (int)((self.from_time - previous.start) * was.fps + 0.5f);
-		node.pose_from = was.frame_at(from_frame);
-		// How much of the *outgoing* frame is still showing, which is the shader's
-		// sense of the field and the opposite of `blend_weight`'s. Inverted here
-		// rather than there so that zero — a copy that never faded, a recycled slot
-		// — means "not fading" everywhere it is read.
-		node.blend = 1.0f - weight;
+		node.pose_next = between > 0 ? segment.frame_at(frame + 1) : node.pose;
+		node.pose_t = between;
 	}
 }
 
@@ -726,18 +1174,7 @@ fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, flo
 *>
 fn void AnimationPlayer.repose(&self, Scene* scene, Asset* owner)
 {
-	if (self.clip < 0 || self.clip >= owner.clips.len()) return;
-	AnimationClip* clip = &owner.clips[self.clip];
-
-	if (self.from_clip >= 0 && self.from_clip < owner.clips.len())
-	{
-		self.apply_blend(scene, owner, &owner.clips[self.from_clip], clip);
-	}
-	else
-	{
-		self.write_clip(scene, clip, self.time, 1.0f);
-	}
-	self.key_pose(scene, owner, clip);
+	self.pose(scene, owner);
 }
 
 <*
@@ -769,6 +1206,7 @@ fn void AnimationPlayer.write_weights(
 	uint targets = scene.morph_target_count(id);
 	if (targets == 0 || channel.stride == 0) return;
 
+	if (self.weight_scratch.allocator == null) self.weight_scratch.init(mem, channel.stride);
 	while (self.weight_scratch.len() < channel.stride) self.weight_scratch.push(0);
 	channel.sample(time, self.weight_scratch.array_view());
 
@@ -783,6 +1221,31 @@ fn void AnimationPlayer.write_weights(
 		}
 	}
 
+	scene.set_morph_weights(id, self.weight_scratch.array_view()[0:count]);
+}
+
+<*
+ One WEIGHTS channel's sample, added into the node's morph weights at `weight`.
+
+ The blend's half of `write_weights`: a morph weight rests at zero, so a mix of
+ layers is the sum of their weighted samples and the rest contributes nothing.
+*>
+fn void AnimationPlayer.add_weights(&self, Scene* scene, AnimationChannel* channel, NodeId id, float time, float weight)
+{
+	uint targets = scene.morph_target_count(id);
+	if (targets == 0 || channel.stride == 0) return;
+
+	if (self.weight_scratch.allocator == null) self.weight_scratch.init(mem, channel.stride);
+	while (self.weight_scratch.len() < channel.stride) self.weight_scratch.push(0);
+	channel.sample(time, self.weight_scratch.array_view());
+
+	uint count = channel.stride < targets ? channel.stride : targets;
+	float[] current = scene.morph_weights(id);
+	for (uint i = 0; i < count; i++)
+	{
+		float was = i < current.len ? current[i] : 0;
+		self.weight_scratch[i] = was + self.weight_scratch[i] * weight;
+	}
 	scene.set_morph_weights(id, self.weight_scratch.array_view()[0:count]);
 }
 
