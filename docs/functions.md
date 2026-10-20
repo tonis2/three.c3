@@ -968,17 +968,36 @@ or empty when there is no route. `{ limit }` caps the waypoint count.
 
 The straight lines between them have been checked with a capsule sweep at the agent's own size, so a
 corner it cannot physically round has not been cut and the path does not look like it is walking cell
-centres.
+centres. The capsule stands on `stepHeight`, since anything lower is walked over. Shortcuts are found on
+the grid first and only the ones kept are swept, so the triangles are read once per corner.
 
 The search is A* aimed at the start, so it costs the cells between the two ends rather than the whole
 bake: a route across a town square is well under a millisecond, cheap enough to plan every frame under
-the cursor. When there is no route it searches the goal's whole region before saying so. A crowd
-heading for one place still wants `three.nav.field`, which solves once for all of them.
+the cursor. When there is no route it searches the goal's whole region before saying so. A group sent to
+one place wants `three.nav.paths`; a crowd steering there continuously wants `three.nav.field`.
 
 **Set `blocks = false` on characters.** The sweep that pulls the route tight meets every mesh that blocks,
 including ones added after the bake — so a character standing on a route cuts it, and a character asking
 for a path from where it stands gets an empty one, because its first step starts inside itself.
 `blocks = false` leaves it clickable and raycastable and takes it out of every sweep.
+
+## three.nav.paths(starts, to, options)
+
+One route per start, all to one goal, from one search: an Array with one entry per start, in order, each
+what `three.nav.path` would answer for it alone. `{ limit }` caps each route's waypoint count.
+
+What an RTS does with a selection sent across the map. The search from the goal runs until every start is
+settled, and each unit walks and shortens its own route out of the same answer, so twenty units cost about
+one search and twenty shortenings rather than twenty searches. On a town bake, twenty units sent 60 m
+take about 1 ms in an optimised build.
+
+```js
+const routes = three.nav.paths(units.map(u => u.position), target);
+routes.forEach((route, i) => units[i].follow(route));
+```
+
+Units given separate formation spots are separate goals, so `path` each, or `paths` to the formation's
+centre and offset the last waypoint.
 
 ## three.nav.field(goals)
 

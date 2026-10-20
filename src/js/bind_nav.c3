@@ -43,6 +43,7 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 	self.bind(host, "navCost", &js_nav_cost, 5);
 	self.bind(host, "navSample", &js_nav_sample, 11);
 	self.bind(host, "navPath", &js_nav_path, 10);
+	self.bind(host, "navPaths", &js_nav_paths, 14);
 	self.bind(host, "steer", &js_steer, 15);
 }
 
@@ -509,8 +510,8 @@ fn void js_nav_path(
 		return;
 	}
 
-	Vec3 from = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
-	Vec3 to   = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	Vec3[1] from = { { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) } };
+	Vec3 to      = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
 
 	float[] slots = float_view(&js, argc, args, 7);
 	if (slots.len < 3)
@@ -528,27 +529,109 @@ fn void js_nav_path(
 			*out = qjs::int_value(0);
 			return;
 		}
+		*out = qjs::int_value((int)scene.route_from(&self.pass.assets, field, from[0], slots));
+	};
+}
 
-		// The raw walk is one point per cell. It must reach the goal before a
-		// shortened route is returned; output capacity only limits kept corners.
-		Vec3[] raw   = mem::temp_array(Vec3, scene.nav.field_size());
-		uint count   = scene.nav.walk(field, from, raw);
-		if (count == 0)
+<*
+ `navPaths(starts, startsByteOffset, startsFloats, toX, toY, toZ, buffer,
+ byteOffset, floats, counts, countsByteOffset, countsInts, limit)` — a group,
+ one goal, one search.
+
+ What an RTS does with a selection sent across the map: the search from the goal
+ runs until every start is settled, and each agent then walks and shortens its
+ own route out of the same field. Twenty agents cost about one search and twenty
+ shortenings, against twenty searches through `navPath`.
+
+ `buffer` holds `limit` waypoints per agent, agent `i` from waypoint `i * limit`;
+ `counts` gets each agent's waypoint count, zero for one with no route. It
+ answers with how many agents have a route.
+*>
+fn void js_nav_paths(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	if (!scene.nav.usable())
+	{
+		*out = js.raise("three.nav.paths() needs a baked mesh — call three.nav.bake() first");
+		return;
+	}
+
+	float[] starts = float_view(&js, argc, args, 1);
+	Vec3 to        = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	float[] slots  = float_view(&js, argc, args, 7);
+	int[] counts   = int_view(&js, argc, args, 10);
+	int limit      = arg_int(&js, argc, args, 13);
+
+	sz agents = starts.len / 3;
+	if (agents == 0 || limit < 1 || counts.len < agents || slots.len < agents * (sz)limit * 3)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
+	counts[:agents] = 0;
+
+	@pool()
+	{
+		Vec3[] from = mem::temp_array(Vec3, agents);
+		for (sz i = 0; i < agents; i++) from[i] = { starts[i * 3], starts[i * 3 + 1], starts[i * 3 + 2] };
+
+		float[] field = mem::temp_array(float, scene.nav.field_size());
+		Vec3[1] goals = { to };
+		if (!scene.nav.solve(&goals, field, from))
 		{
 			*out = qjs::int_value(0);
 			return;
 		}
 
-		Vec3[] tight = mem::temp_array(Vec3, (sz)(slots.len / 3));
-		uint kept = scene.shorten_path(&self.pass.assets, &scene.nav, raw[:(sz)count], count, tight, { });
+		int routed = 0;
+		for (sz i = 0; i < agents; i++)
+		{
+			sz base  = i * (sz)limit * 3;
+			counts[i] = (int)scene.route_from(&self.pass.assets, field, from[i], slots[base:(sz)limit * 3]);
+			if (counts[i] > 0) routed++;
+		}
+		*out = qjs::int_value(routed);
+	};
+}
 
+<*
+ Walks a solved field down from one start and shortens what it walked into
+ `slots`, three floats a waypoint.
+
+ @return `How many waypoints were written, including the start; zero when the walk does not reach the goal or the shortened route does not fit.`
+*>
+fn uint Scene.route_from(&self, Assets* assets, float[] field, Vec3 from, float[] slots)
+{
+	@pool()
+	{
+		// The raw walk is one point per cell. It must reach the goal before a
+		// shortened route is returned; output capacity only limits kept corners.
+		Vec3[] raw   = mem::temp_array(Vec3, self.nav.field_size());
+		int[] voxels = mem::temp_array(int, self.nav.field_size());
+		uint count   = self.nav.walk(field, from, raw, voxels);
+		if (count == 0) return 0;
+
+		Vec3[] tight = mem::temp_array(Vec3, slots.len / 3);
+		uint kept = self.shorten_path(assets, &self.nav, raw[:(sz)count], voxels[:(sz)count], count, tight, { });
 		for (uint i = 0; i < kept; i++)
 		{
 			slots[i * 3] = tight[i].x;
 			slots[i * 3 + 1] = tight[i].y;
 			slots[i * 3 + 2] = tight[i].z;
 		}
-		*out = qjs::int_value((int)kept);
+		return kept;
 	};
 }
 

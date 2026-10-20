@@ -362,8 +362,10 @@ fn void a_non_blocking_drawable_is_picked_and_walked_past() @test
 			scene.add(floor);
 			three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
 
-			const feet = new three.Mesh(new three.BoxGeometry(0.8, 0.3, 0.8));
-			feet.position.set(0, 0.15, 0);
+			// Taller than the bake's step: the shortening sweep stands on the step
+			// height, since anything lower is walked over.
+			const feet = new three.Mesh(new three.BoxGeometry(0.8, 1, 0.8));
+			feet.position.set(0, 0.5, 0);
 			scene.add(feet);
 
 			const opts = { radius: 0.4, height: 1.7, step: 0.1, slope: 52, skin: 0.02, snap: 0.1 };
@@ -1100,6 +1102,40 @@ fn void a_path_goes_round_a_wall_and_is_pulled_tight() @test
 
 		test::@check(value == "[true,true,true,false]",
 			"a short route, longer than the straight line, and clear of the wall; got %s", value);
+	};
+}
+
+<*
+ A group sent to one goal gets the route each of its members would get alone.
+
+ `paths` is one search for all of them, so the risk is a member walking a field
+ that stopped before reaching it, or the routes landing in each other's slots.
+*>
+fn void a_group_gets_the_routes_its_members_would_get_alone() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(30, 1, 30));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			const wall = new three.Mesh(new three.BoxGeometry(1, 4, 20));
+			wall.position.set(0, 2, -3);
+			scene.add(wall);
+			three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
+
+			const starts = [[-10, 0, 0], [-8, 0, 4], [-12, 0, -6], [40, 0, 0]];
+			const goal = [10, 0, 0];
+			const group = three.nav.paths(starts, goal);
+			const alone = starts.map(start => three.nav.path(start, goal));
+			const same = group.every((route, i) => route.length === alone[i].length
+				&& route.every((p, j) => p.distanceTo(alone[i][j]) < 1e-4));
+			return [group.length, group.map(r => r.length > 1), same, three.nav.paths([], goal).length];
+		`, "the group script ran");
+
+		test::@check(value == "[4,[true,true,true,false],true,0]",
+			"three routes round the wall, none from off the level, each as it would be alone; got %s", value);
 	};
 }
 

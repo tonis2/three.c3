@@ -441,7 +441,7 @@ is built. Neither happens on the first path query. `three.nav` is the rendered s
 Then two verbs, and the split is the design: `three.nav.path(from, to)` is one agent's route, and
 `three.nav.field(goals)` is a solve kept that a whole crowd samples. A path is an A* search between its two
 ends, cheap for one agent, but a hundred agents heading for one door is a hundred searches for what one field
-answers. A field has
+answers. `three.nav.paths(starts, to)` sits between them: one search, a route for each of a group. A field has
 `direction(point)`, `cost(point)` — Infinity for unreachable — and `dispose()`.
 
 Paths come back shortened against the actual geometry with a capsule sweep at the agent's own size, so they

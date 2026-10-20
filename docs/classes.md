@@ -2245,8 +2245,8 @@ three.nav.field(goals)
 ```
 
 A solved flow field over the current grid from `scene.nav.load()` or `scene.nav.bake()` — the solve kept, which is the whole reason there
-are two navigation verbs instead of one. `three.nav.path` solves the entire reachable set and throws it
-away after one answer, so a hundred agents heading for the same door is a hundred solves for one field.
+are two navigation verbs instead of one. `three.nav.path` searches between its two ends and throws the
+answer away, so a hundred agents heading for the same door is a hundred searches for one field.
 
 `direction(point)` is a unit XZ vector, or zero for nowhere to go — standing on the goal, off the mesh, or
 in a pocket no goal reaches — and `cost(point)` is how those are told apart. Cost is measured along the
