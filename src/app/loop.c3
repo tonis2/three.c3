@@ -226,7 +226,7 @@ fn void pace_frame(uint max_fps, Clock since_start, long* due_ns)
 *>
 fn long headless_tick_ns(uint max_fps)
 {
-	long floor = HEADLESS_FRAME_MS * 1_000_000;
+	long floor = (long)(HEADLESS_FRAME_MS * 1_000_000.0);
 	if (max_fps == 0) return floor;
 	long capped = 1_000_000_000 / (long)max_fps;
 	return capped > floor ? capped : floor;
@@ -766,10 +766,12 @@ fn void? live(
  false while `planarMove(1, 0)` answers a unit vector in the same breath: the
  movement code is fine and unreachable.
 
- The clock is counted, not measured. Frame `i` is told `i * HEADLESS_FRAME_MS`,
- so 600 frames is ten seconds of game time on every machine and the same run
- twice is the same run. A wall clock here would make every assertion about where
- something got to an assertion about how busy the laptop was.
+ The clock is counted, not measured. Every frame after the first is worth
+ exactly a sixtieth of a second (`GameClock.frame_ms`), so 601 frames is ten
+ seconds of game time on every machine, each frame is one fixed step and one
+ solver step, and the same run twice is the same run. A wall clock here would
+ make every assertion about where something got to an assertion about how busy
+ the laptop was.
 
  The first frame is told 0.0, which is what a one-frame `--screenshot` has always
  been told, so `--frames 1` is that mode unchanged rather than that mode plus a
@@ -802,11 +804,13 @@ fn void? play_frames(
 	said.init(mem, 256);
 	defer said.free();
 
+	renderer.pass.clock.frame_ms = HEADLESS_FRAME_MS;
+
 	uint shots = 0;
 	for (uint i = 0; i < frames; i++)
 	{
 		Clock host_started = clock::now();
-		runtime.tick((double)i * (double)HEADLESS_FRAME_MS);
+		runtime.tick((double)i * HEADLESS_FRAME_MS);
 
 		said.clear();
 		runtime.take_frame_output(&said);

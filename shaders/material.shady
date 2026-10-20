@@ -690,8 +690,9 @@ fn bool parallax_basis(
 	pixel = 1.0;
 
 	// Where the texture slides to is a fact about where the camera is, and a
-	// baked image is looked at from everywhere.
-	if (MATERIAL_BAKE) return false;
+	// baked image is looked at from everywhere — a lightmap's diffuse as much as a
+	// baked texture, or every move of the camera would make its tiles stale.
+	if (MATERIAL_BAKE || MATERIAL_LIGHTMAP_BAKE) return false;
 	if (depth == 0.0) return false;
 
 	float3 dp_dx = ddx(s.position);

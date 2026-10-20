@@ -293,7 +293,9 @@ fn bool validation_layer_present()
 
 <*
  The instance extensions three.c3 always wants: the platform surface extension
- and `VK_KHR_surface` itself. Headless drops both — see `create_instance`.
+ and `VK_KHR_surface` itself. Headless drops both — see `create_instance`. On
+ Linux that is both window systems' surfaces, of which `create_instance` keeps
+ the ones the driver offers.
 *>
 fn void push_surface_extensions(vk::ZStringList* out)
 {
@@ -412,8 +414,13 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 
 	// Only meaningful against drivers the loader already discovered: instance
 	// extensions are enumerated before the instance exists, so a driver handed
-	// over at create time is invisible to this check.
-	if (!direct_driver) vk::checkInstanceExtensionSupport(extensions)!;
+	// over at create time is invisible to this check. A Linux driver may offer only
+	// one of the X11 and Wayland surfaces, and the window needs only its own.
+	if (!direct_driver)
+	{
+		vk::keepOfferedSurfaceExtensions(&extensions)!;
+		vk::checkInstanceExtensionSupport(extensions)!;
+	}
 
 	vk::ApplicationInfo app_info = {
 		.pApplicationName = "three.c3",

@@ -47,6 +47,38 @@ fn void allocation_room_includes_alignment_padding() @test
 	);
 }
 
+// A Linux build asks for both window systems' surfaces, and a driver with only
+// one must still bring the instance up. With neither offered the list stays
+// whole, so the extension check names what is missing.
+fn void a_driver_with_one_surface_keeps_only_that_one() @test
+{
+	vk::StringList offered;
+	defer offered.free();
+	offered.push_all({ "VK_KHR_surface", "VK_KHR_xcb_surface" });
+
+	vk::ZStringList requested;
+	defer requested.free();
+	requested.push_all({ "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_surface" });
+	vk::dropUnofferedSurfaceExtensions(&requested, offered);
+	test::eq(requested.len(), 2);
+	test::eq(requested[0].str_view(), "VK_KHR_xcb_surface");
+	test::eq(requested[1].str_view(), "VK_KHR_surface");
+
+	offered.clear();
+	offered.push("VK_KHR_surface");
+	requested.clear();
+	requested.push_all({ "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_surface" });
+	vk::dropUnofferedSurfaceExtensions(&requested, offered);
+	test::eq(requested.len(), 3);
+
+	// An X11-only build keeps its one surface even if only Wayland is offered.
+	offered.push("VK_KHR_wayland_surface");
+	requested.clear();
+	requested.push_all({ "VK_KHR_xcb_surface", "VK_KHR_surface" });
+	vk::dropUnofferedSurfaceExtensions(&requested, offered);
+	test::eq(requested.len(), 2);
+}
+
 <*
  A headless instance + device, torn down on the way out.
 

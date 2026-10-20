@@ -964,6 +964,62 @@ fn void the_three_paths_agree() @test
 }
 
 <*
+ A character whose root has moved, turned and grown draws in the same place by
+ every path.
+
+ `the_three_paths_agree` with the root somewhere other than the origin, which is
+ the case every live-skin test used to leave out. The live palette was written in
+ world space and the shader put the instance's model matrix on top of it, so a
+ live character at x = 4 drew at x = 8 and one turned a quarter turned a half —
+ and with the camera framed on where it should be, it drew off to one side or
+ not at all.
+*>
+fn void a_moved_live_character_draws_where_its_root_is() @test
+{
+	Silhouette[3] seen;
+	for (int path = 0; path < 3; path++)
+	{
+		@with_pass(; three::Renderer* renderer)
+		{
+			three::Scene* scene = renderer.pass.scene;
+			three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+			three::NodeId root = scene.instantiate(id, name: "", skeleton: path == 1, compute_skin: path == 2);
+
+			three::Node* node = scene.node(root);
+			node.position = { 4.0f, 0.5f, -3.0f };
+			float half = 0.45f;
+			node.rotation = { 0, math::sin(half), 0, math::cos(half) };
+			node.scale = { 1.5f, 1.5f, 1.5f };
+			scene.mark_moved(root);
+			scene.update_world_matrices();
+
+			renderer.pass.frame_camera();
+			scene.play(root, "Bend", loop: false, speed: 1.0f, time: 1.0f);
+
+			image::Image shot = renderer.capture()!!;
+			seen[path] = measure(&shot, renderer.clear);
+			shot.free();
+		};
+	}
+
+	String[3] names = { "baked", "live", "compute" };
+	for (int path = 0; path < 3; path++)
+	{
+		test::@check(seen[path].drawn > 0, "the %s path drew nothing where its root is", names[path]);
+	}
+	for (int path = 1; path < 3; path++)
+	{
+		test::@check(
+			math::abs((int)seen[0].drawn - (int)seen[path].drawn) < 40
+				&& seen[0].leftmost == seen[path].leftmost && seen[0].rightmost == seen[path].rightmost,
+			"baked drew %d pixels over columns %d..%d and %s drew %d over %d..%d",
+			seen[0].drawn, seen[0].leftmost, seen[0].rightmost,
+			names[path], seen[path].drawn, seen[path].leftmost, seen[path].rightmost
+		);
+	}
+}
+
+<*
  A compute-routed character costs a draw call of its own.
 
  Stated as a check because it is the flag's price and the kind of thing that is
@@ -1333,19 +1389,16 @@ fn uint clip_called(three::Asset* asset, String name)
 }
 
 <*
- A baked character mid-crossfade names one frame of each clip.
+ A baked character blending two clips is posed on the CPU rather than out of the
+ table.
 
- **This is the whole of what the baked path costs a fade**: two offsets and a
- weight on the instance, so a crowd mid-transition is still a crowd. There are no
- matrices to compute and nothing to upload — the two frames were baked when the
- file first drew — and `shaders/skinning.shady` mixes them.
-
- The offsets are checked against the segments they have to be inside rather than
- against numbers written down here: an offset that lands in the wrong clip's
- segment poses the character out of a table it was never meant to read, which
- draws perfectly and is completely wrong.
+ The table holds one clip a frame, so a fade used to be two frames mixed per vertex
+ in the shader — a mix of joint matrices, which is not a rigid pose, and no room
+ for a third clip. Now a character with more than one layer weighted has its
+ palette composed from the clips' curves (`AnimationPlayer.blend_layers`) and drawn
+ out of the live buffer, and the instance asks the shader for one frame only.
 *>
-fn void a_crossfading_character_names_both_baked_frames() @test
+fn void a_blended_baked_character_is_composed() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
@@ -1354,62 +1407,72 @@ fn void a_crossfading_character_names_both_baked_frames() @test
 		three::NodeId root = scene.instantiate(id);
 		three::NodeId character = node_at(scene, root, "Character");
 
-		three::Asset* asset = renderer.pass.assets.slot(id);
-		if (asset == null || asset.skins.len() == 0) return;
-
-		three::BakedPose* bend = asset.segment(0, clip_called(asset, "Bend"));
-		three::BakedPose* twist = asset.segment(0, clip_called(asset, "Twist"));
-		test::@check(bend != null && twist != null, "both clips baked a segment");
-		if (bend == null || twist == null) return;
-
 		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0.5f);
-		test::@check(scene.node(character).blend == 0,
-			"a character that has never faded carries a blend of %f", scene.node(character).blend);
+		test::@check(!scene.player(root).composed, "one clip at full weight was composed instead of read from the table");
 
 		scene.play(root, "Twist", loop: true, speed: 1.0f, time: 0, fade: 1.0f);
-
-		// At the instant the fade starts the old pose is all there is to see. The
-		// shader reads `blend` as how much of `pose_from` is still showing, so this
-		// being anything but 1 is a character that pops onto the new clip and then
-		// fades back out of it.
-		test::@check(
-			math::abs(scene.node(character).blend - 1.0f) < 0.0001f,
-			"the fade starts showing %f of the outgoing frame, expected all of it",
-			scene.node(character).blend
-		);
-
 		scene.step_animations(0.5f);
+		test::@check(scene.player(root).composed, "half way through a fade the character is still read from the table");
 
-		float weight = scene.node(character).blend;
-		test::@check(
-			math::abs(weight - 0.5f) < 0.0001f,
-			"halfway through a one-second fade %f of the old frame is left, expected 0.5", weight
-		);
-
-		uint from = scene.node(character).pose_from;
-		uint into = scene.node(character).pose;
-		test::@check(
-			from >= bend.frame_offset && from < bend.frame_offset + bend.frame_count * bend.joint_count,
-			"the outgoing offset %d is outside Bend's segment [%d, %d)",
-			from, bend.frame_offset, bend.frame_offset + bend.frame_count * bend.joint_count
-		);
-		test::@check(
-			into >= twist.frame_offset && into < twist.frame_offset + twist.frame_count * twist.joint_count,
-			"the incoming offset %d is outside Twist's segment [%d, %d)",
-			into, twist.frame_offset, twist.frame_offset + twist.frame_count * twist.joint_count
-		);
+		renderer.render_offscreen()!!;
+		uint pose = scene.node(character).pose;
+		test::@check((pose & three::POSE_LIVE) != 0, "the composed palette is not what the character draws from: pose %x", pose);
+		test::@check(scene.node(character).pose_t == 0 && scene.node(character).pose_next == 0,
+			"a composed character still asks the shader for a second frame");
 	};
 }
 
 <*
- A finished fade leaves nothing behind.
+ A composition with all its weight on one clip is that clip's baked frame.
 
- The shader reads `blend` of zero as "one palette lookup", so a fade that ends
- without clearing it costs every character it ever touched a second read of the
- pose table for the rest of the session — and pins it a hair off the clip it is
- playing.
+ The two ways of posing the same instant have to agree, or a character changes
+ shape the moment a second clip is weighted in. A whole second is a baked frame
+ exactly, and a blend that names `Twist` at nothing keeps two layers on the stack,
+ so the palette is composed — and has to equal the table's frame joint for joint.
+ (`Twist` is a millionth rather than nothing, which would not join the stack.)
 *>
-fn void a_finished_fade_clears_the_second_frame() @test
+fn void a_composed_pose_at_full_weight_is_the_baked_frame() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		renderer.pass.assets.ensure_pose_mirror(id);
+		three::Asset* asset = renderer.pass.assets.slot(id);
+
+		scene.play(root, "Bend", loop: false, speed: 0.0f, time: 1.0f);
+		String[2] clips = { "Bend", "Twist" };
+		// A millionth of `Twist` rather than none: a clip blended at nothing is not
+		// put on the stack, and this has to be two layers to compose. A millionth
+		// moves no joint by more than the tolerance below.
+		float[2] weights = { 1.0f, 0.000001f };
+		test::@check(scene.blend(root, clips[..], weights[..]), "the blend was refused");
+
+		three::AnimationPlayer* player = scene.player(root);
+		test::@check(player.composed && player.layer_count == 2, "two layers did not compose");
+
+		three::BakedPose* bend = asset.segment(0, clip_called(asset, "Bend"));
+		test::@check(bend != null, "Bend was not baked");
+		if (bend == null) return;
+		uint frame = bend.frame_at(30);
+		float worst = 0;
+		for (uint j = 0; j < bend.joint_count; j++)
+		{
+			float apart = matrices_apart(player.palette[j], asset.pose_mirror[frame + j]);
+			if (apart > worst) worst = apart;
+		}
+		test::@check(worst < 1e-4f, "the composed palette is %f off Bend's baked frame", worst);
+	};
+}
+
+<*
+ When the fade is over the character goes back to the table.
+
+ Composing costs a hierarchy walk a frame; one clip at full weight costs one uint.
+ A character that stayed composed after its fade would pay the first forever.
+*>
+fn void back_to_one_clip_reads_the_table_again() @test
 {
 	@with_pass(; three::Renderer* renderer)
 	{
@@ -1420,14 +1483,187 @@ fn void a_finished_fade_clears_the_second_frame() @test
 
 		scene.play(root, "Bend", loop: true);
 		scene.play(root, "Twist", loop: true, speed: 1.0f, time: 0, fade: 0.25f);
+		scene.step_animations(0.1f);
+		renderer.render_offscreen()!!;
+		test::@check((scene.node(character).pose & three::POSE_LIVE) != 0, "mid-fade the character was not composed");
 
 		scene.step_animations(0.25f);
-		scene.step_animations(0.1f);
+		test::@check(scene.player(root).layer_count == 1 && !scene.player(root).composed,
+			"after the fade %d layers remain, composed %s", scene.player(root).layer_count, scene.player(root).composed);
+		renderer.render_offscreen()!!;
+		test::@check((scene.node(character).pose & three::POSE_LIVE) == 0,
+			"after the fade the character still draws from the live buffer");
+	};
+}
 
-		test::@check(scene.node(character).blend == 0,
-			"after the fade %f of the old frame is still weighted in", scene.node(character).blend);
-		test::@check(scene.node(character).pose_from == 0,
-			"after the fade the outgoing offset is still %d", scene.node(character).pose_from);
+<*
+ A socket on a composed character sits where the composed bone is.
+
+ The same comparison `a_socket_sits_where_the_live_bone_does` makes, against a
+ table-posed copy at the same instant: a blend with all its weight on `Bend` is
+ `Bend`, so the socket reading the composed palette has to agree with the one
+ reading the table.
+*>
+fn void a_socket_follows_a_composed_pose() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+
+		three::NodeId table = scene.instantiate(id, name: "table");
+		three::NodeId mixed = scene.instantiate(id, name: "mixed");
+		three::NodeId on_table = scene.add_group(table, "on_table");
+		three::NodeId on_mixed = scene.add_group(mixed, "on_mixed");
+		test::@check(scene.attach_socket(on_table, table, "Mid"), "`Mid` would not take a socket");
+		test::@check(scene.attach_socket(on_mixed, mixed, "Mid"), "`Mid` would not take a socket");
+
+		scene.play(table, "Bend", loop: false, speed: 0.0f, time: 1.0f);
+		scene.play(mixed, "Bend", loop: false, speed: 0.0f, time: 1.0f);
+		String[2] clips = { "Bend", "Twist" };
+		// A millionth of `Twist` rather than none: a clip blended at nothing is not
+		// put on the stack, and this has to be two layers to compose. A millionth
+		// moves no joint by more than the tolerance below.
+		float[2] weights = { 1.0f, 0.000001f };
+		test::@check(scene.blend(mixed, clips[..], weights[..]), "the blend was refused");
+		test::@check(scene.player(mixed).composed, "the blended copy is not composed");
+		scene.update_world_matrices();
+
+		// The two roots sit at the same place, so the sockets' world matrices are
+		// comparable directly.
+		float apart = matrices_apart(scene.node(on_table).world, scene.node(on_mixed).world);
+		test::@check(apart < 1e-4f, "the composed socket is %f away from the table's", apart);
+	};
+}
+
+<*
+ A fade turned round mid-way shows the same pose either side of the call.
+
+ Asking for the clip a fade is leaving raises it again from the weight it still
+ has, rather than starting a fresh fade — so the palette composed straight after
+ the call is the palette composed straight before it.
+*>
+fn void a_turned_fade_keeps_the_composed_pose() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+
+		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0.5f);
+		scene.play(root, "Twist", loop: true, speed: 1.0f, time: 0, fade: 1.0f);
+		scene.step_animations(0.25f);
+
+		three::AnimationPlayer* player = scene.player(root);
+		test::@check(player.composed, "a quarter into the fade the character is not composed");
+		Matrix4f[8] before;
+		uint joints = (uint)player.palette.len() < 8 ? (uint)player.palette.len() : 8;
+		for (uint j = 0; j < joints; j++) before[j] = player.palette[j];
+
+		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0, fade: 1.0f);
+		// A frame of no time: the weights and the clocks as the call left them.
+		scene.step_animations(0.0f);
+
+		player = scene.player(root);
+		float worst = 0;
+		for (uint j = 0; j < joints; j++)
+		{
+			float apart = matrices_apart(before[j], player.palette[j]);
+			if (apart > worst) worst = apart;
+		}
+		test::@check(worst < 1e-5f, "turning the fade round moved the pose by %f", worst);
+	};
+}
+
+<*
+ A baked character between two frames names both, and how far between them it is.
+
+ The table is sampled thirty times a second and used to be read at the nearest
+ frame, so a clip slowed down — a walk matched to a slow pace, a landing played
+ out — showed its steps. Now the instance carries the frame either side of the
+ clip's time and the fraction, and the shader blends the two. A fixture clip of
+ two seconds bakes to exactly thirty frames a second, so half a second plus half
+ a frame is frame 15, half way to 16.
+*>
+fn void baked_frames_interpolate() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId character = node_at(scene, root, "Character");
+		three::Asset* asset = renderer.pass.assets.slot(id);
+
+		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0.5f + 0.5f / 30.0f);
+		three::BakedPose* bend = asset.segment(0, clip_called(asset, "Bend"));
+		test::@check(bend != null, "Bend was not baked");
+		if (bend == null) return;
+
+		three::Node* node = scene.node(character);
+		test::@check(node.pose == bend.frame_at(15) && node.pose_next == bend.frame_at(16),
+			"between frames 15 and 16 the copy names offsets %d and %d, expected %d and %d",
+			node.pose, node.pose_next, bend.frame_at(15), bend.frame_at(16));
+		test::@check(math::abs(node.pose_t - 0.5f) < 0.001f, "half way between them reads %f", node.pose_t);
+
+		// Still one draw for the character: two offsets and a fraction are instance
+		// state, like the one offset was.
+		renderer.render_offscreen()!!;
+		test::@check(renderer.pass.stats().draw_calls <= 2, "interpolating split the draw call");
+	};
+}
+
+<*
+ A one-shot that has run out holds its last frame exactly, with nothing to
+ blend toward — the frame after the last is the next clip's first, and reading it
+ would pose the character out of a table it was never meant to read.
+*>
+fn void a_one_shot_ends_on_its_last_frame() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId character = node_at(scene, root, "Character");
+		three::Asset* asset = renderer.pass.assets.slot(id);
+
+		scene.play(root, "Bend", loop: false);
+		scene.step_animations(10.0f);
+		three::BakedPose* bend = asset.segment(0, clip_called(asset, "Bend"));
+		three::Node* node = scene.node(character);
+		uint last = bend.frame_at((int)bend.frame_count - 1);
+		test::@check(node.pose == last && node.pose_next == last && node.pose_t == 0,
+			"the finished one-shot reads %d -> %d at %f, expected its last frame %d held",
+			node.pose, node.pose_next, node.pose_t, last);
+	};
+}
+
+<*
+ Every segment's last frame is its clip's end exactly.
+
+ A flat thirty frames a second puts the last frame of a 1.05 s walk past its end,
+ where the sampler clamps to the last key — so a pose interpolated toward it would
+ stop short of the seam and jump on the wrap. The rate is spread instead, so the
+ frames run from the start to the end inclusive whatever the length.
+*>
+fn void a_loop_seam_is_exact() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		renderer.pass.scene.instantiate(id);
+		three::Asset* asset = renderer.pass.assets.slot(id);
+		test::@check(asset.baked.len() > 0, "the fixture baked nothing");
+		foreach (&segment : asset.baked)
+		{
+			three::AnimationClip* clip = &asset.clips[segment.clip];
+			if (clip.duration <= 0) continue;
+			float end = (float)(segment.frame_count - 1) / segment.fps;
+			test::@check(math::abs(end - clip.duration) < 0.0001f,
+				"`%s`'s last frame is at %f s and the clip ends at %f s", clip.name, end, clip.duration);
+		}
 	};
 }
 
@@ -1435,8 +1671,9 @@ fn void a_finished_fade_clears_the_second_frame() @test
  A crossfade does not split the draw call.
 
  The same thesis `a_crowd_at_different_phases_is_one_draw_call` states, asked of
- the transition rather than of the phase: `pose_from` and `blend` are per instance
- like `pose` is, so half a crowd mid-fade and half not is still one
+ the transition rather than of the phase: a copy mid-fade is composed into the
+ live palette and the shader picks that buffer by one bit of `pose`, which is per
+ instance like the offset is, so half a crowd mid-fade and half not is still one
  `vkCmdDrawIndexed`. If this ever reports more, a fade has become bucket state.
 *>
 fn void a_crowd_mid_crossfade_is_still_one_draw_call() @test

@@ -2,7 +2,7 @@
 
 import { refBounds } from './math.js';
 import { Geometry } from './geometry.js';
-import { Object3D } from './object3d.js';
+import { Object3D, Group } from './object3d.js';
 import { Mesh } from './mesh.js';
 import { Texture } from './texture.js';
 import { DoubleSide, FrontSide, MeshLambertMaterial } from './material.js';
@@ -961,7 +961,9 @@ export class Asset {
 	instantiate(name, options = undefined) {
 		const opt = this._instanceOptions(options);
 		const rows = this._rows(opt.skeleton, opt.physics);
-		const root = new Object3D();
+		// A Group, as the docs have always said — `instanceof three.Group` holds and
+		// `toJSON().type` reads 'Group' — and nothing else about it differs.
+		const root = new Group();
 		// The name is what the tree is *called*, not which part of the file it is.
 		// `node(name)` is the one that picks — see it for why the two are separate.
 		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);

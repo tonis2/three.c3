@@ -166,6 +166,16 @@ Answers with `{ scenes, assets, meshes, textures, bytes }`. The second half is o
 right: two scenes over one kit means disposing either frees nothing, and `bytes` counts texture bytes
 alone. `stats().geometryBytes` before and after is the other half.
 
+## three.reset()
+
+Give the names back so the same file can run again: every Entity class and Widget the script defined is
+disposed (even after its scene is gone), the system registry is cleared and the post chain is dropped.
+What a script calls at its top when it is going to be run more than once — under `--mcp`, every
+`run_script` of an edited file is one more run of the same names.
+
+It does not free the scene being rendered. `new three.Scene()` then `three.disposeInactive()` is that
+half.
+
 ## three.unloadUnused()
 
 Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and every
@@ -1509,6 +1519,68 @@ than the key map.
 
 Every key name there is. The same list the host searches, so it cannot be out of date.
 
+## three.input.clicked
+
+Whether a click finished this frame — `three.input.pointer.clicked` without reading the rest of the mouse. A
+click is a press and a release close together in place and in time, so the release of a drag is not one.
+`three.onClick(fn)` is the same edge with a handler.
+
+## three.input.consume(key)
+
+`pressed(key)` that answers true once a frame. The fixed loop runs zero to eight steps a frame, so an edge
+read with `pressed` inside it is seen by every step or by none; `consume` gives it to the first step that asks
+and answers false to the rest.
+
+## three.input.press(key) / release(key)
+
+Hold a key down from a script, and let it go. A held key, not an event: it stays down until released, the edges
+come out of the same difference a real key's do, and `isDown`, `pressed`, `released`, `consume` and every
+`onKeyDown` handler see it exactly as they see a finger — so a headless test walks a character with
+`press('w')`, sixty frames, `release('w')`.
+
+It adds to the real keyboard rather than replacing it. A press and a release in the same frame still report
+both edges.
+
+## three.input.movePointer(x, y) / movePointerBy(dx, dy)
+
+Put the pointer somewhere, or move it by a distance — the mouse for a run with no hand on it.
+
+- `movePointer` places it in the rendered image's pixels, the coordinates `pointer` answers in and
+  `scene.pick` takes, so a place read off a screenshot can be pressed as it is. It stands in for the window's
+  cursor until the real one moves. The first placed frame has nothing to difference against, so its
+  `dx`/`dy` are zero.
+- `movePointerBy` is a movement and not a place: it adds to `pointer.dx`/`dy` for one frame and leaves `x`/`y`
+  alone, which is what a mouse look is built out of and the only way to turn one headless, where there is no
+  pointer lock to give. Two calls before one frame are one frame's movement.
+
+## three.input.pressButton(button) / releaseButton(button)
+
+Hold a mouse button and let it go: 0 left, 1 right, 2 middle. Held like a key, so a drag is a place, a press,
+another place a frame later and a release, and the press captures — a drag that leaves the widget it began on
+stays that widget's. Or-ed with the real buttons.
+
+## three.input.scroll(dy, dx)
+
+Turn the wheel, in notches, positive away from the user. One frame's worth, added to whatever the window turned.
+
+## three.input.releaseAll()
+
+Let go of every scripted key and button and drop the wheel nothing has spent yet — what a test calls between
+cases, so a held button does not capture the next case's first press. The pointer stays where it was put.
+
+## three.input.pointerLock
+
+Ask for the pointer, and read back whether the platform gave it. Locked, the cursor is hidden and held in the
+window and `pointer.dx`/`dy` come from the mouse itself, so a look keeps turning past the edge of the screen.
+
+```js
+three.onClick(() => { three.input.pointerLock = true; });
+three.onKeyDown('escape', () => { three.input.pointerLock = false; });
+```
+
+A headless run has no window and always reads false, as does a backend with no implementation; nothing throws,
+so a game can fall back to a drag-look. `pointer.locked` says the same thing beside the deltas it is about.
+
 ## three.onKeyDown(key, fn) / three.onKeyUp(key, fn)
 
 Call `fn(keyName)` once when the key goes down (or up), from inside the frame.
@@ -2145,8 +2217,10 @@ whose shadow was not resident bakes without one — raise `three.lights.shadow.m
 a scene with more baked lights than the four that hold shadows by default.
 
 Built-in materials run through `mesh.slang`'s UV-space bake variant. Supported layered materials
-instead compile a bake variant of their generated program, so their blended normal and parallax
-inputs take part. Arbitrary shader bodies and vertex displacement are refused as receivers rather
+instead compile a bake variant of their generated program, so their blended normal takes part.
+Their parallax does not: where a texture slides to depends on where it is seen from, and a tile
+is seen from everywhere, so the bake reads every layer at its own uv and moving the camera never
+makes a tile stale. Arbitrary shader bodies and vertex displacement are refused as receivers rather
 than cached with a different surface.
 
 Area lights are integrated numerically in the bake whatever the frame is using, so the cached
@@ -2168,9 +2242,9 @@ frames:
   the receiver *shadows*, and there is no cheap exact answer to what that is;
 - **a static caster with no tile of its own moving** — the same rule. A mesh whose uvs cannot
   carry a tile still casts into the bake;
-- **a cached receiver's layered material or camera changing** — its blended normal and parallax
-  sampling can change the direct diffuse even though the geometry did not. The tile is disabled
-  immediately and rebuilt for the new material state or view;
+- **a cached receiver's layered material changing** — its blended normal can change the direct
+  diffuse even though the geometry did not. The tile is disabled immediately and rebuilt for the
+  new material state;
 - **a static receiver's shadow material changing** — because alpha testing decides whether the
   surface casts a shadow. Plain albedo, roughness and metalness are not stored in a tile;
 - **a static receiver being added, removed, re-parented, hidden, or joining or leaving
@@ -2181,8 +2255,8 @@ stops being read at all until the next `three.lights.bake()`, which is what make
 `light.baked = false` restore the real-time picture byte for byte.
 
 **A dirty tile is not displayed while it waits.** Its receiver falls back to the complete
-real-time light loop, so a moved light, changed layered normal, or changed camera never presents
-stale cached diffuse. It returns to the atlas after its tile catches up.
+real-time light loop, so a moved light or a changed layered normal never presents stale cached
+diffuse. It returns to the atlas after its tile catches up.
 
 The bake reads the static shadow atlas. Dynamic casters remain live: inside a moving caster's
 current shadow-map footprint, affected receivers bypass their cached tile per fragment and use
@@ -2232,8 +2306,8 @@ A record names its receiver by **node name, mesh index and copy index** — the 
 nodes with the same name and mesh in scene order, so two hundred crates out of one file each
 find their own tile. Beside that it holds the tile's rectangle, its texel density, and a fold
 over the node's world matrix and material state. The header holds the atlas side, the format,
-the set of baked lights the atlas is a sum over, the camera signature needed by layered
-parallax, and a hash over the whole payload. Files from older versions are declined.
+the set of baked lights the atlas is a sum over, and a hash over the whole payload. Files from
+older versions are declined.
 
 ## three.lights.loadBake
 
@@ -2251,9 +2325,9 @@ load: true })` is that whole sentence.
 
 `dirty` is how many loaded tiles have a different receiver transform or material signature.
 Those keep their rectangles but use real-time lighting while they re-bake over the following
-frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. A saved
-layered bake also records its camera signature; a different camera declines the file instead of
-loading view-dependent parallax lighting. The clean tiles are used as saved, texel for texel.
+frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. Where the
+camera is makes no difference: a file loads the same under any view. The clean tiles are used as
+saved, texel for texel.
 
 On the Evil Forest scene, with all ten local lights baked: **about 50 ms to load, against 1.9 s
 to bake**, from a 9.0 MB file, with the frame it produces identical to the baked one pixel for

@@ -98,6 +98,7 @@ fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
 	self.bind(host, "inputText", &js_input_text, 0);
 	self.bind(host, "inputHold", &js_input_hold, 2);
 	self.bind(host, "inputMove", &js_input_move, 2);
+	self.bind(host, "inputNudge", &js_input_nudge, 2);
 	self.bind(host, "inputButtonHold", &js_input_button_hold, 2);
 	self.bind(host, "inputScroll", &js_input_scroll, 2);
 	self.bind(host, "inputReleaseAll", &js_input_release_all, 0);
@@ -266,6 +267,35 @@ fn void js_input_button_hold(
 	}
 
 	self.pointer.hold((uint)button, arg_truth(&js, argc, args, 1));
+}
+
+<*
+ `inputNudge(dx, dy)` — move the pointer by a distance, in image pixels.
+
+ One frame's worth, spent by the frame that reads it, like the wheel below. It
+ reaches `pointer.dx`/`dy` only; the position stays where it was.
+*>
+fn void js_input_nudge(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	float dx = arg_float(&js, argc, args, 0);
+	float dy = arg_float(&js, argc, args, 1);
+	if (!math::is_finite(dx) || !math::is_finite(dy))
+	{
+		*out = js.raise("three.input.movePointerBy(dx, dy) wants a distance in image pixels");
+		return;
+	}
+
+	self.pointer.nudge(dx, dy);
 }
 
 <*

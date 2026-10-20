@@ -4944,6 +4944,196 @@ fn void removing_an_animated_prop_stops_it() @test
 	};
 }
 
+<*
+ `rig.animation` reads the playhead back, and `sync` lands where it says.
+
+ A jump that has to know when its landing is over asks `playing`; a walk faded
+ into a run on the other foot asks `sync: 0.5`. Both through the prelude, which
+ is where `sync`'s `true` and its negative offsets are folded into the one number
+ the host takes. All of the fixture's clips last two seconds.
+*>
+fn void the_playhead_reads_back_and_sync_lands_on_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			const before = rig.animation;
+			new three.Scene().add(rig);
+			const unplayed = rig.animation;
+			rig.play("slide", { loop: false, time: 0.5 });
+			globalThis.rig = rig;
+			return { before, unplayed, now: rig.animation, group: new three.Group().animation };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"before":null`), "a rig out of the scene has a playhead: %s", result.value);
+		test::@check(result.value.contains(`"unplayed":null`), "a rig that never played has a playhead: %s", result.value);
+		test::@check(result.value.contains(`"group":null`), "a hand-built Group has a playhead: %s", result.value);
+		test::@check(
+			result.value.contains(`"now":{"name":"slide","time":0.5,"duration":2,"speed":1,"loop":false,"playing":true,"weight":1,"layers":[{"name":"slide","time":0.5,"duration":2,"speed":1,"loop":false,"playing":true,"weight":1}]}`),
+			"the playhead after play: %s", result.value
+		);
+
+		// Past the end of a one-shot: held on its last frame and no longer playing.
+		advance(run, 0, 2000);
+
+		three::RunResult ended = run.run(`
+			const a = globalThis.rig.animation;
+			// A quarter of a cycle back from the end, then half a cycle on: the
+			// other foot, in a two-second clip, is 0.75 * 2 = 1.5 s. -0.5 is the
+			// same half cycle written the other way.
+			globalThis.rig.play("slide", { time: 1.5 });
+			globalThis.rig.play("spin", { fade: 0.2, sync: 0.5 });
+			const synced = globalThis.rig.animation.time;
+			globalThis.rig.play("blink", { sync: -0.5 });
+			return { playing: a.playing, time: a.time, synced, back: globalThis.rig.animation.time };
+		`);
+		defer ended.free();
+		test::@check(ended.ok, "the second script ran: %s", ended.error);
+		test::@check(ended.value.contains(`"playing":false`), "the finished one-shot still plays: %s", ended.value);
+		test::@check(ended.value.contains(`"time":2`), "the finished one-shot is not on its last frame: %s", ended.value);
+		test::@check(ended.value.contains(`"synced":0.5`), "1.5 s plus half a cycle is 0.5 s: %s", ended.value);
+		test::@check(ended.value.contains(`"back":1.5`), "0.5 s less half a cycle is 1.5 s: %s", ended.value);
+	};
+}
+
+<*
+ `rig.blend` holds several clips, and `animation.layers` reads every one back.
+
+ The script's side of the stack: weights as an object, held — not faded anywhere
+ — and the dominant clip's fields at the top of `animation` with the whole stack
+ under `layers`.
+*>
+fn void blend_holds_weights_and_reads_back_layers() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			new three.Scene().add(rig);
+			globalThis.rig = rig;
+			rig.blend({ slide: 0.25, spin: 0.75 });
+			const a = rig.animation;
+			return { top: a.name, weight: a.weight, layers: a.layers.map((l) => [l.name, l.weight]) };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`"top":"spin","weight":0.75`), "the dominant clip leads: %s", result.value);
+		test::@check(result.value.contains(`"layers":[["slide",0.25],["spin",0.75]]`), "and the stack reads back: %s", result.value);
+
+		advance(run, 0, 500);
+		three::RunResult held = run.run(`return globalThis.rig.animation.layers.map((l) => l.weight).join(',');`);
+		defer held.free();
+		test::@check(held.ok, "the second script ran: %s", held.error);
+		test::@check(held.value == `"0.25,0.75"`, "half a second later the weights are held: %s", held.value);
+	};
+}
+
+<*
+ A blend asked for from a script leaves the character's palette on the heap.
+
+ The first `blend` on a baked character is the first time it is composed, and
+ that is inside the binding's `@pool`. Its scratch lists were left to initialise
+ themselves, took the pool's temporary allocator, and the pool freed them on its
+ way out — so the next frame uploaded a palette out of freed memory, which ran
+ for a few frames in the Evil Forest and then took the heap down with it. Asserted
+ on the allocator, because a use-after-free that has not yet crashed reads fine.
+*>
+fn void a_scripted_blend_keeps_its_palette_on_the_heap() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/skinned.glb").instantiate();
+			new three.Scene().add(rig);
+			rig.play("Bend");
+			rig.blend({ Bend: 0.5, Twist: 0.5 });
+			return rig.animation.layers.length;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value == "2", "the blend holds two clips: %s", result.value);
+
+		bool found = false;
+		foreach (&player : run.pass.scene.players)
+		{
+			if (!player.composed) continue;
+			found = true;
+			test::@check(player.palette.allocator == mem && player.posed.allocator == mem
+				&& player.sums.allocator == mem && player.world.allocator == mem,
+				"the composed character's scratch is not on the heap");
+		}
+		test::@check(found, "no character was composed");
+		advance(run, 0, 200);
+	};
+}
+
+<*
+ `blend` and `play` refuse what they cannot do by name, rather than ignoring it.
+
+ A misspelt option used to be dropped on the floor, so `{ loops: false }` looped
+ and nothing said why. Each of these names the thing that was wrong.
+*>
+fn void blend_refuses_an_unknown_clip_or_option() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			new three.Scene().add(rig);
+			const said = (f) => { try { f(); return 'ok'; } catch (e) { return e.message; } };
+			return [
+				said(() => rig.blend({ walk: 1 })),
+				said(() => rig.blend({ slide: 1 }, { weight: 1 })),
+				said(() => rig.blend({ slide: NaN })),
+				said(() => rig.blend({ slide: 1 }, { sync: { spin: 0.5 } })),
+				said(() => rig.play('slide', { loops: false })),
+				said(() => rig.play('slide', { speed: Infinity })),
+			];
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value.contains(`no animation named \"walk\"`), "an unknown clip is named: %s", result.value);
+		test::@check(result.value.contains(`'weight' is not an option`), "an unknown blend option is named: %s", result.value);
+		test::@check(result.value.contains(`weight of \"slide\" must be a finite number`), "a NaN weight is refused: %s", result.value);
+		test::@check(result.value.contains(`sync names \"spin\"`), "a sync for a clip not blended is refused: %s", result.value);
+		test::@check(result.value.contains(`'loops' is not an option`), "a misspelt play option is named: %s", result.value);
+		test::@check(result.value.contains(`speed must be a finite number`), "an infinite speed is refused: %s", result.value);
+	};
+}
+
+<*
+ `sync: { clip: cycles }` in a blend puts each clip that many cycles along one
+ shared phase. The fixture's clips are two seconds long, so a clip half a cycle on
+ enters at one second, and the pair stay a second apart as they play.
+*>
+fn void sync_offsets_in_a_blend_land_where_they_say() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const rig = three.load("test/fixtures/hierarchy.glb").instantiate();
+			new three.Scene().add(rig);
+			globalThis.rig = rig;
+			rig.blend({ slide: 0.5, spin: 0.5 }, { sync: { slide: 0, spin: 0.5 } });
+			return rig.animation.layers.map((l) => [l.name, l.time]);
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(result.value == `[["slide",0],["spin",1]]`, "the offsets placed the clips: %s", result.value);
+
+		advance(run, 0, 500);
+		three::RunResult later = run.run(`
+			const t = Object.fromEntries(globalThis.rig.animation.layers.map((l) => [l.name, l.time]));
+			return Math.round((t.spin - t.slide) * 1000) / 1000;
+		`);
+		defer later.free();
+		test::@check(later.ok, "the second script ran: %s", later.error);
+		test::@check(later.value == "1", "half a second on they are still a second apart: %s", later.value);
+	};
+}
+
 // ============================================================================
 // material.dispose()
 // ============================================================================

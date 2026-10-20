@@ -2598,14 +2598,17 @@ fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
  nodes, and hands back the buffer's address.
 
  The third of the three pose paths and the expensive one, which is what
- `skeleton: true` buys: the palette is `bone.world * inverse_bind` per joint, read
- off nodes a script may have written between frames — so a look-at, an aim offset
- or a foot planted on a slope moves the skin, none of which a baked table can
- express.
+ `skeleton: true` buys: the palette is `inverse(mesh.world) * bone.world *
+ inverse_bind` per joint — the joint in the mesh's own space, which is what the
+ baked table holds and what the shader puts the instance's model matrix on top of
+ — read off nodes a script may have written between frames, so a look-at, an aim
+ offset or a foot planted on a slope moves the skin, none of which a baked table
+ can express.
 
  The CPU computes it rather than a compute shader, and that is not an oversight.
  `Scene.update_world_matrices` has already produced every bone's world matrix by
- the time this runs, so the work here is one 4x4 multiply per joint. Doing it on
+ the time this runs, so the work here is one inverse per character and two 4x4
+ multiplies per joint. Doing it on
  the GPU would mean uploading sixty matrices so the device could turn them into
  sixty matrices — strictly more traffic than uploading the sixty results, plus a
  dispatch and a barrier. `shaders/skin.shady` is where compute earns its place,
@@ -2637,7 +2640,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	sz needed = 0;
 	foreach (&player : self.scene.players)
 	{
-		if (!player.live_skin) continue;
+		if (!player.live_skin && !player.composed) continue;
 		Asset* owner = self.assets.slot(player.asset);
 		if (owner == null) continue;
 
@@ -2668,9 +2671,31 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 
 	foreach (&player : self.scene.players)
 	{
-		if (!player.live_skin) continue;
+		if (!player.live_skin && !player.composed) continue;
 		Asset* owner = self.assets.slot(player.asset);
 		if (owner == null) continue;
+
+		// A baked character blending several clips, posed on the CPU by
+		// `AnimationPlayer.blend_layers`: its joints arrive finished, in the mesh's
+		// space, every target's in a row — the copy and the offset are the work.
+		if (!player.live_skin)
+		{
+			sz from = 0;
+			foreach (&target : player.skinned)
+			{
+				if (target.skin >= owner.skins.len()) continue;
+				sz count = owner.skins[target.skin].joints.len();
+				Node* mesh_node = self.scene.node(target.node);
+				if (mesh_node != null && from + count <= player.palette.len())
+				{
+					for (sz j = 0; j < count; j++) palette[at + j] = player.palette[from + j];
+					mesh_node.pose = POSE_LIVE | at;
+					at += (uint)count;
+				}
+				from += count;
+			}
+			continue;
+		}
 
 		foreach (&target : player.skinned)
 		{
@@ -2679,6 +2704,14 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 
 			Node* mesh_node = self.scene.node(target.node);
 			if (mesh_node == null) continue;
+
+			// **In the mesh's space, not the world's.** The shader multiplies the
+			// skinned vertex by the instance's own model matrix afterwards, as it
+			// does for a baked frame, so a palette left in world space put a
+			// character whose root had moved to x = 5 at x = 10 and turned a turned
+			// one twice. glTF's joint matrix is exactly this: the inverse of the
+			// mesh node's world, the joint's world, the inverse bind.
+			Matrix4f to_mesh = invert(mesh_node.world);
 
 			// The joints are glTF node indices and `targets` is the map from those
 			// to this instance's own nodes — built at instantiation, which is the
@@ -2692,7 +2725,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 					// A joint whose node was pruned poses nothing rather than reading
 					// a stale matrix: the vertices riding it stay where the bind pose
 					// left them, which is local and visible.
-					if (bone != null) pose = bone.world.mul(skin.inverse_bind[j]);
+					if (bone != null) pose = to_mesh.mul(bone.world).mul(skin.inverse_bind[j]);
 				}
 				palette[at + j] = pose;
 			}

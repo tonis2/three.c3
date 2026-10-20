@@ -861,6 +861,21 @@ downstream of it — the clips, the physics, the fixed loop, the follow camera, 
 handed and `p.time` in a post body — so `timeScale = 0` stops the world, which no amount of a script stopping
 its own arithmetic can do.
 
+## animation-stack
+
+There is no `AnimationMixer`, `AnimationAction` or `clipAction`. Clips are played on the root that
+`asset.instantiate()` returned, by name, and a character holds a stack of up to four of them:
+
+```js
+hero.play('walk', { fade: 0.2 });                               // raise one clip, lower the rest
+hero.blend({ walk: 0.6, run: 0.4 }, { sync: { run: 0.5 } });    // hold several, feet in step
+hero.animation.layers;                                          // what is on the stack, and how much
+```
+
+The weights are the character's, not an action's: there is nothing to keep a handle to, and asking for a clip
+that is already playing re-aims it rather than starting a second copy. Weights summing past one are normalised,
+and to less the rest pose shows through the remainder — Three.js's mixer does the same with its bind pose.
+
 ## fixed-loop-for-gameplay
 
 Gameplay belongs in `three.setFixedLoop(fn)`, which runs at `three.clock.fixedRate` (60 Hz) however fast frames

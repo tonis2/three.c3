@@ -694,8 +694,9 @@ fn String strip_dot(String path) @local
 const String ENTRY_MODULE = "main.js";
 
 // What a frame is worth when there is no window to present one: 60Hz, the rate
-// the vsynced loop above runs at on the displays this is developed on.
-const long HEADLESS_FRAME_MS = 16;
+// the vsynced loop above runs at on the displays this is developed on. Exactly
+// a sixtieth, not 16 — see `GameClock.frame_ms` for what the 0.67 ms cost.
+const double HEADLESS_FRAME_MS = 1000.0 / 60.0;
 
 <*
  Answers JSON-RPC on stdin and stdout by forwarding it to a `three --mcp` that is

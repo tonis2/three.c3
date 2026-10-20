@@ -82,17 +82,17 @@ struct Instance
 	// a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
 	uint pose;
 
-	// The frame this copy is crossfading *out of*, and how much of it is still
-	// showing — 1 when the fade starts and 0 when it is over. 0 and 0 on every
-	// copy that is not mid-fade, which is every copy in almost every frame, and
-	// which is why zero is the value that means "not fading".
+	// The baked frame after `pose`, and how far toward it this copy is — so a
+	// clip sampled thirty times a second plays smoothly at any rate. Zero and
+	// zero on a copy held on one frame, on a live or composed character (whose
+	// palette is exact already) and on everything unskinned.
 	// 
-	// The pair is what makes a crossfade cost a baked character nothing it was
-	// not already paying: two offsets and a weight still disagree per instance
-	// and nothing else does, so a crowd mid-fade is still one draw call. What it
-	// buys and what it costs in accuracy is `skin_matrix` in `shaders/skinning.shady`.
-	uint pose_from;
-	float blend;
+	// The pair is what keeps interpolation free of draw calls: two offsets and a
+	// fraction still disagree per instance and nothing else does, so a crowd at a
+	// hundred phases between frames is still one draw call. The mix is
+	// `blend_frames` in `shaders/skin_math.shady`.
+	uint pose_next;
+	float pose_t;
 
 	// Which slice of this frame's morph weights this copy reads, **plus one** — so
 	// zero is "this copy does not morph", which is the quiet default and what
@@ -1201,8 +1201,8 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 
 	node.skin = -1;
 	node.pose = 0;
-	node.pose_from = 0;
-	node.blend = 0;
+	node.pose_next = 0;
+	node.pose_t = 0;
 	// A character cannot be a static caster — `set_static_caster` refuses one, and
 	// this is the other door: a node may be given a skin *after* it was marked
 	// static, and a pose offset moving is a silhouette moving with no transform to
@@ -1306,25 +1306,22 @@ fn void Scene.start_player(
 
  @param gltf_nodes : `The glTF node index each node came from, one per entry and the same length as the node array.`
 *>
-fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes, bool live_skin = false)
+fn bool Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes, bool live_skin = false)
 {
-	if (self.assets == null) return;
+	if (self.assets == null) return false;
 	Asset* loaded = self.assets.slot(asset);
 	// Skins count as something to play. A rigged character with no clips still
 	// needs a player, because a player is what holds the map from the file's joint
 	// nodes to this instance's — which is what the live palette is computed
 	// through. Without this a `skeleton: true` character with no animation would
 	// have bones a script could move and nothing that read them.
-	if (loaded == null || (loaded.clips.len() == 0 && loaded.skins.len() == 0)) return;
+	if (loaded == null || (loaded.clips.len() == 0 && loaded.skins.len() == 0)) return false;
 
 	self.drop_player(root);
 
 	AnimationPlayer player = {
 		.root = root,
 		.asset = asset,
-		.clip = -1,
-		.from_clip = -1,
-		.speed = 1,
 		.live_skin = live_skin && loaded.skins.len() > 0,
 	};
 	player.targets.init(mem, loaded.nodes.len());
@@ -1349,6 +1346,7 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 	self.collect_skinned(root, &player.skinned);
 
 	self.players.push(player);
+	return true;
 }
 
 <*
@@ -1364,7 +1362,8 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 
  @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
  @param time : `Seconds into the clip to start at, measured from its own start. What a crowd needs: a hundred characters playing one walk cycle at a hundred phases is a hundred different values of this and one baked clip.`
- @param fade : `Seconds to crossfade out of whatever is playing. Zero is the snap, and asking for one when the clip named is already the clip playing is a no-op — which is what makes calling this every frame from a state machine safe.`
+ @param fade : `Seconds to crossfade out of whatever is posing the character, playing or held. Zero is the snap, and asking for one when the clip named is already the clip playing only takes its speed and loop — which is what makes calling this every frame from a state machine safe.`
+ @param sync : `Where to start in cycles of the clip being left rather than in seconds: the incoming clip starts at the outgoing one's phase plus this, in [0, 1). Negative is no sync, and so is there being nothing to sync from. Overrides time.`
  @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
 *>
 fn bool Scene.play(
@@ -1374,7 +1373,8 @@ fn bool Scene.play(
 	bool loop = true,
 	float speed = 1.0f,
 	float time = 0,
-	float fade = 0
+	float fade = 0,
+	float sync = -1
 )
 {
 	if (self.assets == null) return false;
@@ -1397,44 +1397,203 @@ fn bool Scene.play(
 
 	self.assets.ensure_clip(player.asset, (uint)found);
 
-	// **Asking to fade into the clip already playing does nothing at all.** The
-	// call a locomotion state machine makes is `play(state.clip, { fade })` every
-	// time it runs, and restarting the fade on every one of those would hold the
-	// character at the start of a fade forever. Restarting a clip outright is
-	// still `play` without a fade.
-	if (fade > 0 && player.playing && player.clip == found) return true;
+	AnimationClip* incoming = &self.assets.slot(player.asset).clips[found];
 
-	// What the fade leaves behind, taken before the fields below are overwritten.
-	// Nothing playing means nothing to fade from, and fading up out of a rest pose
-	// is a pop with extra steps — so the fade is skipped rather than half-applied.
-	if (fade > 0 && player.playing && player.clip >= 0)
+	// **Asking to fade into the clip already playing does not restart it.** The
+	// call a locomotion state machine makes is `play(state.clip, { fade, speed })`
+	// every time it runs, and restarting the fade on every one of those would hold
+	// the character at the start of a fade forever. The speed and the loop flag
+	// are taken, though, because a walk whose rate follows the ground speed is the
+	// same walk asked for every frame at a slightly different rate — and the clip
+	// is raised again if it was on its way out, which is a walk, run, walk inside
+	// one fade turning round from the mix it had reached rather than popping.
+	// Restarting a clip outright is still `play` without a fade.
+	if (fade > 0)
 	{
-		player.from_clip = player.clip;
-		player.from_time = player.time;
-		player.from_speed = player.speed;
-		player.from_loop = player.loop;
-		player.fade = 0;
-		player.fade_duration = fade;
+		int running = player.playing_layer(found);
+		if (running >= 0)
+		{
+			AnimationLayer* layer = &player.layers[running];
+			layer.speed = speed;
+			layer.loop = loop;
+			player.raise((uint)running, fade);
+			return true;
+		}
+	}
+
+	// Where the clip starts: `time`, or — for `sync` — the phase of the clip the
+	// character is heading for now (`AnimationPlayer.dominant`), so a walk faded
+	// into a run lands the run on the same step rather than on its own first frame.
+	float start = incoming.start + time;
+	int top = player.dominant();
+	if (sync >= 0 && top >= 0)
+	{
+		AnimationLayer* now = &player.layers[top];
+		if (now.clip >= 0 && now.clip < loaded.clips.len())
+		{
+			AnimationClip* current = &loaded.clips[now.clip];
+			if (current.duration > 0 && incoming.duration > 0)
+			{
+				double phase = (double)(now.time - current.start) / current.duration + sync;
+				phase -= math::floor(phase);
+				start = incoming.start + (float)(phase * incoming.duration);
+			}
+		}
+	}
+	// A phase past the end wraps rather than being refused, so a crowd can be
+	// spread with `i / count * duration` and not have to know the duration.
+	if (loop) start = (float)clip_loop_time(incoming, start);
+
+	// **A fade joins the stack; a snap replaces it.** Whatever is posing the
+	// character — playing, held at the end of a one-shot, or `stop()`ped — is what
+	// the fade leaves, frozen if it was frozen. Only a character that has never
+	// played has nothing to fade from, and fading up out of a rest pose is a pop
+	// with extra steps, so that fade is a snap.
+	if (fade > 0 && player.layer_count > 0)
+	{
+		uint at = player.add_layer(found);
+		AnimationLayer* layer = &player.layers[at];
+		layer.time = start;
+		layer.speed = speed;
+		layer.loop = loop;
+		player.raise(at, fade);
 	}
 	else
 	{
-		player.from_clip = -1;
+		// The clips it replaces let go of their nodes, so one they drove and this
+		// one does not is not left in their last pose.
+		player.reset_layers(self, loaded);
+		player.layer_count = 1;
+		player.phased = false;
+		player.layers[0] = {
+			.clip = found, .time = start, .speed = speed, .loop = loop, .playing = true,
+			.weight = 1.0f, .target = 1.0f, .offset = -1,
+		};
 	}
-
-	player.clip = found;
-	player.speed = speed;
-	player.loop = loop;
-	player.playing = true;
-	player.time = self.assets.slot(player.asset).clips[found].start + time;
-	// A phase past the end wraps rather than being refused, so a crowd can be
-	// spread with `i / count * duration` and not have to know the duration.
-	if (loop) player.time = (float)clip_loop_time(&self.assets.slot(player.asset).clips[found], player.time);
 
 	// Posed at the frame it asked for rather than sitting in its bind pose until
 	// something steps the clock — nodes and skin both, which is what `repose` is.
 	player.repose(self, loaded);
 	// And anything hanging off a bone with it: a sword attached to a character
 	// that is then played should be in the played hand, not in the rest hand.
+	self.update_sockets();
+	return true;
+}
+
+<*
+ Holds several clips at once, at the weights asked for.
+
+ `play` raises one clip to the whole of the picture; this sets the target of each
+ clip named and lowers every other, over `fade` seconds — a walk and a run mixed by
+ how fast the character is going, an aim layered at a third over an idle. Called
+ every frame with weights that change a little each time, which is what it is for:
+ a clip already on the stack is never restarted, only re-aimed.
+
+ `offsets` locks a clip to the shared cycle, that many cycles on (`sync`), so two
+ loops of different lengths keep their feet together; negative leaves it on its
+ own clock. Weights summing past one are normalised; summing to less leaves the
+ rest pose showing through the remainder.
+
+ @param fade : `Seconds for the weights to arrive. Zero is the next frame.`
+ @param speed : `The rate every named clip plays at.`
+ @return `False if the subtree has no player or any name is not one of its clips — and then nothing changed.`
+*>
+fn bool Scene.blend(&self, NodeId root, String[] clips, float[] weights, float fade = 0, float[] offsets = {}, float speed = 1.0f)
+{
+	if (self.assets == null) return false;
+	AnimationPlayer* player = self.player(root);
+	if (player == null) return false;
+	Asset* loaded = self.assets.slot(player.asset);
+	if (loaded == null || clips.len != weights.len || clips.len > ANIMATION_LAYERS) return false;
+
+	int[ANIMATION_LAYERS] found;
+	foreach (k, name : clips)
+	{
+		found[k] = -1;
+		foreach (i, &candidate : loaded.clips)
+		{
+			if (candidate.name == name) { found[k] = (int)i; break; }
+		}
+		if (found[k] < 0) return false;
+	}
+	foreach (k, index : found[:clips.len]) self.assets.ensure_clip(player.asset, (uint)index);
+	loaded = self.assets.slot(player.asset);
+
+	// Everything not named leaves.
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		bool named = false;
+		foreach (index : found[:clips.len]) named = named || (layer.clip == index && layer.playing);
+		if (named) continue;
+		player.let_go(layer, fade);
+	}
+
+	bool locking = !player.phased;
+	foreach (k, index : found[:clips.len])
+	{
+		int at = player.playing_layer(index);
+		float offset = k < offsets.len ? offsets[k] : -1.0f;
+		// A clip held at nothing that is not already on the stack has nothing to
+		// show and no weight to lose. Adding it would put a layer on for a frame
+		// and drop it again, every frame a walk is blended with a run it is not
+		// running — and two layers compose the pose on the CPU where one reads the
+		// table. It joins, phase-locked, the frame its weight is more than nothing.
+		if (at < 0 && weights[k] <= 0) continue;
+		if (at < 0)
+		{
+			at = (int)player.add_layer(index);
+			AnimationClip* clip = &loaded.clips[index];
+			AnimationLayer* fresh = &player.layers[at];
+			fresh.time = clip.start;
+			if (offset >= 0 && player.phased && clip.duration > 0)
+			{
+				double cycle = player.phase + offset;
+				cycle -= math::floor(cycle);
+				fresh.time = clip.start + (float)(cycle * clip.duration);
+			}
+		}
+		AnimationLayer* layer = &player.layers[at];
+		float target = weights[k] > 0 ? weights[k] : 0;
+		if (target <= 0)
+		{
+			player.let_go(layer, fade);
+		}
+		else
+		{
+			layer.target = target;
+			float distance = target > layer.weight ? target - layer.weight : layer.weight - target;
+			layer.rate = fade > 0 ? distance / fade : 0;
+		}
+		layer.speed = speed;
+		layer.loop = true;
+		layer.offset = offset;
+	}
+
+	// A lock that starts now starts from where the heaviest locked clip already is,
+	// so taking up the lock does not jump its stride.
+	if (locking)
+	{
+		int anchor = -1;
+		for (uint i = 0; i < player.layer_count; i++)
+		{
+			AnimationLayer* layer = &player.layers[i];
+			if (layer.offset < 0) continue;
+			if (anchor < 0 || layer.weight > player.layers[anchor].weight) anchor = (int)i;
+		}
+		if (anchor >= 0)
+		{
+			AnimationLayer* layer = &player.layers[anchor];
+			AnimationClip* clip = &loaded.clips[layer.clip];
+			double cycle = clip.duration > 0 ? (double)(layer.time - clip.start) / clip.duration - layer.offset : 0;
+			player.phase = cycle - math::floor(cycle);
+			player.phased = true;
+		}
+	}
+
+	player.place_locked(loaded);
+	if (fade <= 0) player.step_weights(0);
+	player.repose(self, loaded);
 	self.update_sockets();
 	return true;
 }
@@ -1450,11 +1609,15 @@ fn bool Scene.stop(&self, NodeId root)
 {
 	AnimationPlayer* player = self.player(root);
 	if (player == null) return false;
-	player.playing = false;
-	// And the fade with it. A stopped player still steps the clip it is fading out
-	// of — that is what finishes a fade whose destination is a short one-shot — so
-	// leaving this set would make `stop()` mean "keep moving for another 200ms".
-	player.from_clip = -1;
+	// Every clock and every weight where it is: a stopped player steps nothing, and
+	// a fade frozen half way stays half way until something is played.
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		layer.playing = false;
+		layer.target = layer.weight;
+		layer.rate = 0;
+	}
 	return true;
 }
 
@@ -1475,7 +1638,7 @@ fn bool Scene.step_animations(&self, float dt)
 	foreach (&player : self.players)
 	{
 		player.advance(self, self.assets, dt);
-		if (player.playing) playing = true;
+		if (player.active()) playing = true;
 	}
 	// After the players, because a socket reads the pose they have just written.
 	self.update_sockets();
@@ -1493,7 +1656,7 @@ fn bool Scene.is_animating(&self)
 {
 	foreach (&player : self.players)
 	{
-		if (player.playing) return true;
+		if (player.active()) return true;
 	}
 	return false;
 }
@@ -1588,8 +1751,8 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// skeleton, reading joint matrices out of an asset it does not name.
 	node.skin = -1;
 	node.pose = 0;
-	node.pose_from = 0;
-	node.blend = 0;
+	node.pose_next = 0;
+	node.pose_t = 0;
 	node.morph = 0;
 	node.preskinned = false;
 	// Dynamic until a script says otherwise, and reset for `material`'s reason: a
@@ -2760,13 +2923,13 @@ fn void Scene.build_draw_list(
 						.variant, // The whole of what a hundred characters at a hundred phases disagree
 						// about. Zero on everything that is not skinned, which the shader
 						// reads as nothing because the bucket's flags say there is no skin.
-					.pose = node
-						.pose, // Zero on everything that is not mid-crossfade. `AnimationPlayer`
-						// is the only writer of either.
-					.pose_from = node.pose_from,
-					.blend = node
-						.blend, // Written by `MeshPass.write_morph_weights` just before this walk,
-						// and zero on everything it did not touch.
+					.pose = node.pose,
+					// The next baked frame and how far toward it; zero on everything
+					// held on one frame. `AnimationPlayer` is the only writer of either.
+					.pose_next = node.pose_next,
+					.pose_t = node.pose_t,
+					// Written by `MeshPass.write_morph_weights` just before this walk,
+					// and zero on everything it did not touch.
 					.morph = node.morph,
 					.lightmap = self.lightmap_live ? node.lightmap : (float[4]) { 0, 0, 0, 0 },
 			};

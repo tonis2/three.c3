@@ -170,16 +170,14 @@ struct Node
 	uint pose;
 
 	<*
-	 The frame a crossfade is coming *out of*, and how much of it is still showing
-	 — 1 when the fade starts, counting down to 0 as the new pose arrives.
+	 The baked frame after `pose`, and how far toward it the clip's time is.
 
-	 Zero and zero except during a fade, and only on a baked character: a live one
-	 blends on its bone nodes, where the arithmetic is on transforms rather than on
-	 matrices and there is nothing for the shader to do. Copied straight into
-	 `Instance.pose_from` and `Instance.blend`.
+	 Zero and zero on a copy held on one frame — the end of a one-shot, a
+	 `stop()` — and on every live or composed character, whose palette is exact
+	 already. Copied straight into `Instance.pose_next` and `Instance.pose_t`.
 	*>
-	uint pose_from;
-	float blend;
+	uint pose_next;
+	float pose_t;
 
 	<*
 	 Which slice of this frame's morph weights this node's copy reads, plus one.
