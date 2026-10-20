@@ -72,7 +72,8 @@ own `main.js`).
 
 `.mcp.json` in this repo already points there, so an agent session in a checkout picks it up.
 Two tools: `run_script` answers with everything the script logged, the scene's stats and a
-PNG of the frame, and `screenshot` re-renders it. The API is [`docs/`](docs/), and
+PNG of the frame (at most 1568 px on its longest side, and `image: false` leaves it out), and
+`screenshot` re-renders it. The API is [`docs/`](docs/), and
 `run_script`'s description gives agents the path to it.
 
 ### Building

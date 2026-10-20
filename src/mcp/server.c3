@@ -31,6 +31,7 @@ module three;
 
 import std::io::file;
 import std::io::path;
+import std::math;
 import std::collections::object;
 import std::encoding::base64;
 import image;
@@ -79,7 +80,7 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 		{
 			.name = "run_script",
 			.description = run_script_description(),
-			.input_schema = `{"type":"object","properties":{"code":{"type":"string","description":"Alias of source."},"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."}},"anyOf":[{"required":["source"]},{"required":["code"]}]}`,
+			.input_schema = `{"type":"object","properties":{"code":{"type":"string","description":"Alias of source."},"source":{"type":"string","description":"The script. Runs as an async function body, so top-level await works. three.debug.write(x) is how it answers with a value; what it writes arrives in the debug field."},"image":{"type":"boolean","description":"Whether the reply carries a PNG of the frame. Default true. false for a script that only reads or changes data: the reply is the report alone and no frame is drawn for it."}},"anyOf":[{"required":["source"]},{"required":["code"]}]}`,
 			.handler = &tool_run_script,
 			.user_data = host,
 			.raw_content = true,
@@ -89,8 +90,9 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 	server.add_tool(
 		{
 			.name = "screenshot",
-			.description = "Render the current scene and return the frame as a PNG. Optionally also write it "
-				"to a file. Takes no view arguments — move three.camera from a script.",
+			.description = "Render the current scene and return the frame as a PNG, at most 1568 px on its "
+				"longest side. Optionally also write it to a file, at full size. Takes no view arguments — "
+				"move three.camera from a script.",
 			.input_schema = `{"type":"object","properties":{"path":{"type":"string","description":"Where to also write the PNG. Omit to only receive the image."}}}`,
 			.handler = &tool_screenshot,
 			.user_data = host,
@@ -131,6 +133,9 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 		detail.append_string("run_script needs a `source` (or `code`) string: the JavaScript to run");
 		return TOOL_NEEDS_SOURCE~;
 	}
+
+	bool with_image = true;
+	if (try wanted = args.get_bool("image")) with_image = wanted;
 
 	RunResult result = host.runtime.run(source, "<run_script>");
 	defer result.free();
@@ -205,9 +210,7 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 		report.append_char('}');
 	}
 
-	report.append_char('}');
-
-	return content_with_frame(host, report.str_view());
+	return content_with_frame(host, &report, with_image);
 }
 
 // ============================================================================
@@ -249,8 +252,7 @@ fn String? tool_screenshot(Object* args, void* user_data, DString* detail)
 		append_json_string(&report, path);
 	}
 
-	report.append_char('}');
-	return content_with_frame(host, report.str_view());
+	return content_with_frame(host, &report);
 }
 
 // ============================================================================
@@ -273,7 +275,8 @@ fn String run_script_description()
 	if (text.len) return text;
 	char[]? written = io::bprintf(&buffer,
 		"Run a JavaScript scene script and get back everything it logged, everything it "
-		"wrote with three.debug.write, the scene's stats, and a PNG of the frame. The API "
+		"wrote with three.debug.write, the scene's stats, and a PNG of the frame (at most "
+		"1568 px on its longest side; image:false leaves it out). The API "
 		"is Three.js-shaped: "
 		"three.load, three.Scene, three.Mesh, three.Group, position/rotation/scale, add/remove. "
 		"It is documented in Markdown in %s - read README.md and differences.md there before "
@@ -349,42 +352,77 @@ fn String parent_of(String dir) @private
 // ============================================================================
 
 <*
+ The longest edge a reply's PNG may have, in pixels.
+
+ A client scales a bigger image down to about this before a model sees it, so
+ the pixels above it are bytes on the wire that nobody reads.
+*>
+const uint FRAME_MAX_EDGE = 1568;
+
+<*
  A content array: the report as text, and the frame as a PNG when there is a
- device to render one with.
+ device to render one with and the caller wants one.
 
  A run with no device is not an error — the scene-math half of the API works
  without one — so the image block is left out rather than the call failing.
 
- @param report : `The JSON the text block carries. Escaped into it here.`
+ A frame longer than `FRAME_MAX_EDGE` is scaled down to it, and the report then
+ gains an `image` block with both sizes, so a pixel read off the picture can be
+ turned back into a pixel of the render.
+
+ @param report : `The report's JSON object, still open. Closed and escaped into the text block here.`
+ @param with_image : `False to leave the frame out and not draw one.`
  @return `The content array, allocated from mem, for a raw_content tool.`
 *>
-fn String? content_with_frame(ToolHost* host, String report)
+fn String? content_with_frame(ToolHost* host, DString* report, bool with_image = true)
 {
 	DString out;
 	out.init(mem, 4096);
 	defer out.free();
 
-	out.append_string(`[{"type":"text","text":`);
-	append_json_string(&out, report);
-	out.append_char('}');
-
-	if (host.renderer != null)
+	@pool()
 	{
-		@pool()
+		String data = "";
+		if (with_image && host.renderer != null)
 		{
 			image::Image? frame = host.renderer.capture(tmem);
 			if (try shot = frame)
 			{
-				char[]? encoded = png::save_bytes(&shot, tmem);
+				image::Image sent = shot;
+				uint edge = math::max(shot.width, shot.height);
+				bool scaled = edge > FRAME_MAX_EDGE;
+				// Rounded up, so a thin frame cannot lose a side to zero.
+				if (scaled)
+				{
+					uint width = (uint)(((ulong)shot.width * FRAME_MAX_EDGE + edge - 1) / edge);
+					uint height = (uint)(((ulong)shot.height * FRAME_MAX_EDGE + edge - 1) / edge);
+					sent = shot.resize(width, height, tmem);
+				}
+				char[]? encoded = png::save_bytes(&sent, tmem);
 				if (try bytes = encoded)
 				{
-					out.append_string(`,{"type":"image","mimeType":"image/png","data":"`);
-					out.append_string(base64::tencode(bytes));
-					out.append_string(`"}`);
+					data = base64::tencode(bytes);
+					if (scaled)
+					{
+						report.appendf(`,"image":{"width":%d,"height":%d,"renderWidth":%d,"renderHeight":%d}`,
+							sent.width, sent.height, shot.width, shot.height)!!;
+					}
 				}
 			}
-		};
-	}
+		}
+		report.append_char('}');
+
+		out.append_string(`[{"type":"text","text":`);
+		append_json_string(&out, report.str_view());
+		out.append_char('}');
+
+		if (data.len > 0)
+		{
+			out.append_string(`,{"type":"image","mimeType":"image/png","data":"`);
+			out.append_string(data);
+			out.append_string(`"}`);
+		}
+	};
 
 	out.append_char(']');
 	return out.copy_str(mem);
