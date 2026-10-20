@@ -783,11 +783,7 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 		if (!cache.projected(identity, projection_state, &rect, &world_box))
 		{
 			collision::Aabb3 local = mesh.bounds;
-			if (node.skin >= 0)
-			{
-				Asset* owner = self.assets.slot(node.asset);
-				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-			}
+			if (node.skin >= 0) local = self.scene.skinned_box(&self.assets, id, node.asset, local);
 			if (soft != null) local = soft.bounds;
 			world_box = local.transform_matrix(node.world);
 			collision::Aabb3 box = world_box;

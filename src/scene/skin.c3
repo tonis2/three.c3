@@ -712,6 +712,26 @@ fn LivePalette* Scene.live_palette(&self, NodeId id)
 }
 
 <*
+ The box a skinned node's mesh reaches, in its own space: the live palette's
+ when one poses it, else the baked frames' union, else `bounds`.
+
+ Culling, the scene cache and the shadow pass all ask this. A rest box in any of
+ them loses a limb that leaves it — culled, or left unrepainted.
+*>
+fn collision::Aabb3 Scene.skinned_box(&self, Assets* assets, NodeId id, AssetId asset, collision::Aabb3 bounds)
+{
+	Asset* owner = assets.slot(asset);
+	if (owner != null && owner.pose_matrices > 0) bounds = owner.skinned_bounds;
+	// Checked first so a scene that poses nothing by hand pays no scan.
+	if (self.palettes.len() > 0)
+	{
+		LivePalette* posed = self.live_palette(id);
+		if (posed != null) bounds = posed.bounds;
+	}
+	return bounds;
+}
+
+<*
  Poses one node's mesh by matrices the caller computed.
 
  	`scene.set_palette(model, palette);`

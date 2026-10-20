@@ -2705,26 +2705,7 @@ fn void Scene.build_draw_list(
 			// modeller drew around the rest pose — which looks like a character that
 			// vanishes at certain camera angles during certain frames.
 			collision::Aabb3 local = mesh.bounds;
-			if (node.skin >= 0)
-			{
-				Asset* owner = assets.slot(node.asset);
-				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-				// A node posed from outside is not described by the bake at all: its
-				// asset's `skinned_bounds` is the union over frames nobody sampled,
-				// which for an asset `Assets.attach_skin` built is just the rest box.
-				// So the box this frame's palette actually reaches wins — measured by
-				// `set_palette`, which is the only moment those matrices are known.
-				//
-				// Guarded on the list being non-empty rather than searched
-				// unconditionally, so a scene that poses nothing by hand — every scene
-				// until one does — pays one compare per skinned node and no scan.
-				if (self.palettes.len() > 0)
-				{
-					NodeId here          = { (uint)slot, node.generation };
-					LivePalette* posed   = self.live_palette(here);
-					if (posed != null) local = posed.bounds;
-				}
-			}
+			if (node.skin >= 0) local = self.skinned_box(assets, id, node.asset, local);
 			// A soft body is not the shape it was modelled as, and the mesh's own
 			// bounds describe the shape it stopped being. The box the solver
 			// measured this frame is the one it is actually drawn at.

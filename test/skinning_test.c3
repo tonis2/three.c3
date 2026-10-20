@@ -2292,6 +2292,90 @@ fn void a_live_palette_is_culled_against_where_it_reaches() @test
 }
 
 <*
+ A limb the palette takes outside the rest box is redrawn by the scene cache.
+
+ The cache repaints only the screen box of what changed. Measured from the rest
+ box, a limb past it is left out, and the frame keeps last frame's pixels there.
+*>
+fn void a_live_palette_is_redrawn_where_it_reaches() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:cache");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+		// Posed at rest first: the first palette in a scene redraws everything.
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float} };
+		renderer.pass.scene.set_palette(node, palette[..]);
+		renderer.pass.frame_camera();
+		image::Image rest_shot = renderer.capture()!!;
+		Silhouette rest = measure(&rest_shot, renderer.clear);
+		rest_shot.free();
+
+		palette[1] = matrix::IDENTITY4{float}.translate({ 1.5f, 0, 0 });
+		renderer.pass.scene.set_palette(node, palette[..]);
+		ulong before = renderer.scene_cache_pixels;
+		image::Image cached = renderer.capture()!!;
+		defer cached.free();
+		ulong redrawn = renderer.scene_cache_pixels - before;
+		test::@check(redrawn > 0 && redrawn < (ulong)W * H, "the pose redrew part of the frame, %d pixels", redrawn);
+		test::@check(
+			measure(&cached, renderer.clear).rightmost > rest.rightmost,
+			"the moved row is in view"
+		);
+
+		renderer.scene_cache_disabled = true;
+		defer renderer.scene_cache_disabled = false;
+		image::Image full = renderer.capture()!!;
+		defer full.free();
+
+		usz differing = 0;
+		foreach (i, byte : cached.pixels) if (byte != full.pixels[i]) differing++;
+		test::@check(differing == 0, "the cached frame matches a full redraw, %d bytes differ", differing);
+	};
+}
+
+<*
+ A limb the palette takes outside the rest box still reaches a shadow view that
+ sees only the limb, so it is drawn into that view and casts its shadow.
+*>
+fn void a_live_palette_reaches_a_shadow_view_where_it_reaches() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::AssetId id = built_bar(renderer, "test:bar:shadow");
+		renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+		three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "bar");
+		renderer.pass.scene.set_skin(node, 0);
+		Matrix4f[2] palette = { matrix::IDENTITY4{float}, matrix::IDENTITY4{float}.translate({ 4, 0, 0 }) };
+		renderer.pass.scene.set_palette(node, palette[..]);
+		renderer.pass.frame_camera();
+		renderer.capture()!!.free();
+
+		// x from 3 to 5: the moved row, and none of the rest box.
+		three::Frustum view = { .planes = {
+			{ .normal = { 1, 0, 0 }, .distance = -3 }, { .normal = { -1, 0, 0 }, .distance = 5 },
+			{ .normal = { 0, 1, 0 }, .distance = 10 }, { .normal = { 0, -1, 0 }, .distance = 10 },
+			{ .normal = { 0, 0, 1 }, .distance = 10 }, { .normal = { 0, 0, -1 }, .distance = 10 },
+		} };
+		bool found = false;
+		foreach (bucket : renderer.pass.scene.buckets)
+		{
+			if (bucket.asset != id) continue;
+			found = true;
+			three::GpuMesh* mesh = renderer.pass.assets.mesh(bucket.asset, bucket.mesh);
+			three::Material* material = renderer.pass.material(bucket.material);
+			test::@check(
+				renderer.pass.shadow_range_reaches(mesh, material, bucket, 0, bucket.count, &view),
+				"the moved row reaches a view that sees only it"
+			);
+		}
+		test::@check(found, "the bar has a bucket");
+	};
+}
+
+<*
  A palette does not outlive the node it poses.
 
  A `NodeId` carries a generation, so a stale entry can never be written into the

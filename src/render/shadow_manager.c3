@@ -448,16 +448,8 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 	// may do more than its declared culling margin. Keep both on the safe path.
 	if (mesh.morph_targets > 0 || material.vertex.len > 0) return true;
 	collision::Aabb3 local = mesh.bounds;
-	if (mesh.has_skin)
-	{
-		Asset* owner = self.assets.slot(bucket.asset);
-		if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-	}
-	if (bucket.node != NO_NODE)
-	{
-		SoftMesh* soft = self.scene.physics.soft_for(bucket.node);
-		if (soft != null) local = soft.bounds;
-	}
+	SoftMesh* soft = bucket.node != NO_NODE ? self.scene.physics.soft_for(bucket.node) : null;
+	if (soft != null) local = soft.bounds;
 	Vec3 centre;
 	float range2 = 0;
 	if (point != null)
@@ -467,8 +459,17 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 	}
 	for (uint n = 0; n < count; n++)
 	{
-		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
-		collision::Aabb3 box = local.transform_matrix(copy.model);
+		uint at = bucket.first + offset + n;
+		Instance* copy = &self.shadow_instances[at];
+		collision::Aabb3 reach = local;
+		// Each copy of a skin is its own node, posed apart from the others.
+		if (mesh.has_skin && soft == null)
+		{
+			uint slot = self.scene.draws[(sz)at].slot;
+			NodeId id = { slot, self.scene.nodes[slot].generation };
+			reach = self.scene.skinned_box(&self.assets, id, bucket.asset, local);
+		}
+		collision::Aabb3 box = reach.transform_matrix(copy.model);
 		if (material.bounds > 0)
 		{
 			float margin = material.bounds;
