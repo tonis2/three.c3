@@ -198,11 +198,12 @@ new three.ShaderMaterial({
 })
 ```
 
-`Vertex` is the varyings: `position` (world), `normal`, `uv`, `color` and `variant` are read back
-after your body runs; `local` (object space) and `index` (the vertex number) are inputs. The normal
-is not recomputed for you. Always pass `bounds` — the number of world units the body can displace by
-— because culling tests the mesh's undisplaced box and geometry outside it is dropped while still on
-screen.
+`Vertex` is the varyings: `position`, `normal`, `uv`, `color` and `variant` are read back after
+your body runs; `local` (the bind pose) and `index` (the vertex number) are inputs. `position` and
+`normal` are in object space — the body runs before the mesh's own transform, so what it does scales
+and turns with the mesh. The normal is not recomputed for you. Always pass `bounds` — how far the body
+can displace a vertex, in the mesh's own units — because culling tests the mesh's undisplaced box and
+geometry outside it is dropped while still on screen.
 
 ## one-module
 

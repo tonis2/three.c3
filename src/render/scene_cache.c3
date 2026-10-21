@@ -824,15 +824,16 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 			if (soft != null) local = soft.bounds;
 			world_box = local.transform_matrix(node.world);
 			collision::Aabb3 box = world_box;
-			float margin = material.bounds;
+			// A vertex body's margin is in the mesh's units, like its displacement,
+			// so it grows the box before the transform.
+			if (material.bounds > 0)
+			{
+				collision::Aabb3 reach = local.grow(material.bounds);
+				box = reach.transform_matrix(node.world);
+			}
 			// AO can change receivers around a moving occluder, not only the pixels the
 			// occluder covers. Its world-space search radius is the conservative growth.
-			if (self.ambient_occlusion.live) margin += self.ambient_occlusion.radius;
-			if (margin > 0)
-			{
-				float m = margin;
-				box = { .min = box.min - { m,m,m }, .max = box.max + { m,m,m } };
-			}
+			if (self.ambient_occlusion.live) box = box.grow(self.ambient_occlusion.radius);
 			if (cache.full)
 			{
 				unprojected = true;

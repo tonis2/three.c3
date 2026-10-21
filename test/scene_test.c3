@@ -1900,6 +1900,59 @@ fn void a_displacement_is_culled_unless_the_material_says_how_far() @test
 	};
 }
 
+<*
+ `material.bounds` is in the mesh's own units, because the body's are.
+
+ `displace` sees the vertex before the model matrix, so a body that adds 7.5 to
+ `v.position.x` on a node scaled by four moves it thirty metres. A margin grown in
+ world units after the transform would cover 7.5 of those thirty and cull the copy
+ where it actually draws.
+
+ The node sits thirty metres off to the left at scale four, and the body brings
+ it back to the middle of the screen with a shift of 7.5 and a margin of 8. In
+ object units that margin reaches the camera; in world units it stops twenty
+ metres short.
+
+ **Proved by injection.** The margin grown after `transform_matrix` rather than
+ before, as it was: this draws nothing while the unscaled test above stays green.
+*>
+fn void a_displacement_margin_scales_with_the_node() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::MeshPass* pass = &renderer.pass;
+		pass.lighting = { .count = 1, .ambient = 1, .lights = { [0] = { .direction = { 0, 0, 1, 0 }, .color = { 1, 1, 1, 1 } } } };
+		pass.camera.target = { 0, 0, 0 };
+		pass.camera.yaw = 0;
+		pass.camera.pitch = 0;
+		pass.camera.distance = 14;
+
+		three::AssetId quad = pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+
+		uint bounded;
+		@pool()
+		{
+			three::MaterialUniform[1] uniforms = { { "shift", 1, 1 } };
+			bounded = pass.create_material(
+				&renderer.gpu, &renderer.target, FLAT_GREEN, uniforms[..],
+				three::SIDE_DOUBLE, three::BLENDING_NONE, {}, SHIFT_X, 8.0
+			)!!;
+		};
+		pass.material(bounded).set_uniform("shift", (float[]) { 7.5 })!!;
+
+		three::NodeId node = pass.scene.add_mesh(quad, 0);
+		pass.scene.set_position(node, { -30, 0, 0 });
+		pass.scene.set_scale(node, { 4, 4, 4 });
+		pass.scene.set_material(node, bounded);
+
+		image::Image kept = renderer.capture()!!;
+		defer kept.free();
+		uint with = count_drawn(&kept, renderer.clear);
+		test::@check(with > 100,
+			"a scaled copy displaced by its own units draws where the body put it: %d pixels", with);
+	};
+}
+
 // ============================================================================
 // What a frame stopped paying for — plan.md §19.5
 // ============================================================================

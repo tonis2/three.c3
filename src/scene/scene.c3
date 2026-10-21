@@ -2743,23 +2743,23 @@ fn void Scene.build_draw_list(
 			// bounds describe the shape it stopped being. The box the solver
 			// measured this frame is the one it is actually drawn at.
 			if (soft != null) local = soft.bounds;
-			collision::Aabb3 box = local.transform_matrix(node.world);
 
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
 			// material says how far it moves things and the box grows by that much.
-			// Grown in *world* units after the transform rather than in object units
-			// before it, because the displacement in a body is world-space too:
-			// `v.position + something` is metres of scene, whatever the node is
-			// scaled by.
-			// 
+			// Grown in *object* units before the transform rather than in world
+			// units after it, because the displacement in a body is object-space
+			// too: `displace` runs before the model matrix, so a body's
+			// `v.position + something` is scaled and turned by the node like the
+			// vertex it moved.
+			//
 			// Zero for every material that has no vertex body, so the common case
 			// adds one compare and no arithmetic.
 			if (node.material < margins.len && margins[node.material] > 0)
 			{
-				float m = margins[node.material];
-				box = { .min = box.min - { m, m, m }, .max = box.max + { m, m, m } };
+				local = local.grow(margins[node.material]);
 			}
+			collision::Aabb3 box = local.transform_matrix(node.world);
 			visible = frustum == null || frustum.contains(box);
 			if (!visible)
 			{

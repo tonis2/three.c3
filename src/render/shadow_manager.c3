@@ -469,13 +469,9 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 			NodeId id = { slot, self.scene.nodes[slot].generation };
 			reach = self.scene.skinned_box(&self.assets, id, bucket.asset, local);
 		}
+		// The body's margin is in the mesh's units, like its displacement.
+		if (material.bounds > 0) reach = reach.grow(material.bounds);
 		collision::Aabb3 box = reach.transform_matrix(copy.model);
-		if (material.bounds > 0)
-		{
-			float margin = material.bounds;
-			box = { .min = box.min - { margin, margin, margin },
-				.max = box.max + { margin, margin, margin } };
-		}
 		if (point != null)
 		{
 			Vec3 nearest = math::min(math::max(centre, box.min), box.max);
@@ -507,16 +503,12 @@ fn bool MeshPass.shadow_range_rect(&self, GpuMesh* mesh, Material* material, Buc
 {
 	if (count == 0) return true;
 	collision::Aabb3 local = mesh.bounds;
+	// The body's margin is in the mesh's units, like its displacement.
+	if (material.bounds > 0) local = local.grow(material.bounds);
 	for (uint n = 0; n < count; n++)
 	{
 		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
 		collision::Aabb3 box = local.transform_matrix(copy.model);
-		if (material.bounds > 0)
-		{
-			float margin = material.bounds;
-			box = { .min = box.min - { margin, margin, margin },
-				.max = box.max + { margin, margin, margin } };
-		}
 		float min_x = 1.0f;
 		float min_y = 1.0f;
 		float max_x = -1.0f;
