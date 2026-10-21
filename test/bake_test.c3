@@ -910,6 +910,60 @@ fn void a_receiver_that_moved_since_the_save_is_the_only_dirty_tile() @test
 }
 
 <*
+ A texture nobody's material names dirties no tile, live or loaded.
+
+ A tile's signature used to fold the assets' revision, which every texture
+ install and release anywhere in the process bumps — so a level that loaded one
+ more image after its bake re-baked every tile it had, and a cache file matched
+ only a launch that happened to load its images in the same count. The same file
+ loading back clean after an unrelated texture came is the launch-to-launch half
+ of that.
+*>
+fn void an_unrelated_texture_dirties_no_tile() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@with_assets(run)
+		{
+			three::RunResult built = run.run(TWO_PLANES);
+			defer built.free();
+			test::@check(built.ok, "the scene built: %s", built.error);
+			image::Image warm = renderer.capture()!!;
+			warm.free();
+
+			three::RunResult saved = run.run(
+				`point.baked = true;
+				 const b = three.lights.bake({ texelsPerMetre: 32 });
+				 return [b.receivers, three.lights.saveBake('pair.lightmap').tiles].join(' ');`
+			);
+			defer saved.free();
+			test::@check(saved.value == `"2 2"`, "two receivers, two tiles saved: %s", saved.value);
+
+			three::RunResult added = run.run(
+				`globalThis.unrelated = new three.DataTexture(new Uint8Array([9, 8, 7, 255]), 1, 1); return 1;`
+			);
+			defer added.free();
+			test::@check(added.ok, "the texture was made: %s", added.error);
+			for (uint i = 0; i < 4; i++)
+			{
+				image::Image tick = renderer.capture()!!;
+				tick.free();
+			}
+			three::RunResult live = run.run(`return three.stats().lightmapDirty;`);
+			defer live.free();
+			test::@check(live.value == "0", "an unrelated texture dirtied %s live tiles", live.value);
+
+			three::RunResult loaded = run.run(
+				`const l = three.lights.loadBake('pair.lightmap'); return [l.tiles, l.dirty].join(' ');`
+			);
+			defer loaded.free();
+			test::@check(loaded.value == `"2 0"`,
+				"the bake loads back clean after an unrelated texture: %s", loaded.value);
+		};
+	};
+}
+
+<*
  A generated layered material uses its own lightmap program, including its final
  mapped normal, and a change to the material dirties its tile. The camera does
  not: the bake reads the stack without its parallax, so moving the view leaves

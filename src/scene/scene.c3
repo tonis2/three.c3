@@ -1736,7 +1736,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// line is really for is the slot that is not: `Scene.bounds` reads the node
 	// *pool* rather than the tree, so a slot `update_branch` never reaches would
 	// answer with a stranger's box instead of with its own identity transform.
+	// And not slid from either: the fit is the stranger's mesh.
 	node.world_box_current = false;
+	node.world_box_fitted = false;
 	// Reset like everything else here, and for a sharper reason: this slot may have
 	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
 	// would draw with a stranger's shader.
@@ -2479,11 +2481,42 @@ fn collision::Aabb3 Scene.node_world_box(&self, Node* node, GpuMesh* mesh)
 	{
 		return node.world_box;
 	}
-	node.world_box = world_mesh_bounds(node.world, mesh);
-	node.world_box_hull = mesh.hull_positions.len;
+	// **A node that only slid keeps its fit.** Every vertex through the matrix is
+	// exact, and for a character that walks it was every vertex of the character
+	// every frame — the walk writes his position each frame whether or not he turns.
+	// Where the rotation and scale are the ones the box was fitted under, the exact
+	// box of the moved vertices is the old one moved by the same amount.
+	if (node.world_box_fitted && node.world_box_hull == mesh.hull_positions.len
+		&& same_linear_part(node.world_box_world, node.world))
+	{
+		Vec3 by = {
+			node.world.m[12] - node.world_box_world.m[12],
+			node.world.m[13] - node.world_box_world.m[13],
+			node.world.m[14] - node.world_box_world.m[14],
+		};
+		node.world_box = { .min = node.world_box.min + by, .max = node.world_box.max + by };
+	}
+	else
+	{
+		node.world_box = world_mesh_bounds(node.world, mesh);
+		node.world_box_hull = mesh.hull_positions.len;
+		node.world_box_fitted = true;
+		self.bounds_fits++;
+	}
+	node.world_box_world = node.world;
 	node.world_box_current = true;
-	self.bounds_fits++;
 	return node.world_box;
+}
+
+// Whether two matrices rotate and scale alike, so that they differ by a
+// translation alone.
+fn bool same_linear_part(Matrix4f a, Matrix4f b) @local
+{
+	foreach (i : (uint[9]){ 0, 1, 2, 4, 5, 6, 8, 9, 10 })
+	{
+		if (a.m[i] != b.m[i]) return false;
+	}
+	return true;
 }
 
 // ============================================================================

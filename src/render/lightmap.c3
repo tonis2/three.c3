@@ -189,7 +189,19 @@ fn bool LightmapMaterialKey.equals(self, LightmapMaterialKey other) @operator(==
 
 alias LightmapMaterialSignatures = HashMap{LightmapMaterialKey, ulong};
 
-fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
+<*
+ What a tile's texels depend on besides geometry and lights, folded.
+
+ Two answers to two questions. In a session, a texture is its slot and the
+ install that filled it — so a texture loaded or freed anywhere else changes
+ nothing here, where a process-wide counter used to re-bake every tile. `lasting`
+ is the one written to a file and compared on the next launch, where slots are
+ handed out again in whatever order that run loads in: a texture is then its
+ pixels, by the content hash the loader already keeps.
+
+ @param lasting : `The signature a cache file stores, rather than this session's.`
+*>
+fn ulong MeshPass.lightmap_material_signature(&self, Node* node, bool lasting = false)
 {
 	Material* material = self.material(node.material);
 	GpuMesh* mesh = self.assets.mesh(node.asset, node.mesh);
@@ -211,9 +223,33 @@ fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
 	signature = hash_bytes(signature, &mesh.base_color, float[4]::size);
 	signature = hash_bytes(signature, &node.color, float[4]::size);
 	uint[DRAW_TEXTURE_INDICES] textures = texture_index_row(&self.assets, material, mesh);
-	signature = hash_bytes(signature, &textures, uint[DRAW_TEXTURE_INDICES]::size);
-	// A decoded image may replace its contents without changing its bindless slot.
-	return hash_bytes(signature, &self.assets.revision, uint::size);
+	uint fallback = self.assets.texture_fallback_slot();
+	foreach (slot : textures)
+	{
+		if (slot == fallback || !self.assets.texture_alive((int)slot))
+		{
+			signature = @hash_value(signature, uint::max);
+			continue;
+		}
+		SharedTexture* shared = &self.assets.textures[slot];
+		if (!lasting)
+		{
+			signature = @hash_value(signature, slot);
+			signature = @hash_value(signature, shared.installed);
+			continue;
+		}
+		// A computed image has no hash and no fixed contents; it is the same image
+		// to a file only in that it is computed at this binding.
+		Texture* texture = &shared.texture;
+		signature = @hash_value(signature, texture.storage != FORMAT_UNDEFINED);
+		signature = @hash_value(signature, texture.hash);
+		signature = @hash_value(signature, texture.width);
+		signature = @hash_value(signature, texture.height);
+		signature = @hash_value(signature, texture.levels);
+		signature = @hash_value(signature, texture.nearest);
+		signature = hash_bytes(signature, &texture.format, TextureFormat::size);
+	}
+	return signature;
 }
 
 struct LightmapMaterialPipeline
@@ -1633,7 +1669,10 @@ const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
 // 7: no camera in the header, because a layered tile no longer depends on one —
 // and a 6 holds layered tiles baked through the parallax of the view it was
 // saved from, so it is declined rather than loaded as view-free.
-const uint LIGHTMAP_FILE_VERSION = 7;
+// 8: a tile's material signature names its textures by content rather than by
+// slot and a process-wide counter, which no two launches agreed on — a 7's
+// signatures mismatch everywhere, and declining it is a bake instead of a re-bake.
+const uint LIGHTMAP_FILE_VERSION = 8;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1855,7 +1894,9 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 				.y = tile.y,
 				.size = tile.size,
 				.density = map.density,
-				.material_signature = tile.material_signature,
+				// Zero for a tile still waiting to be re-baked, which no live material
+				// folds to, so the next load re-bakes it rather than trusting its texels.
+				.material_signature = node.lightmap_dirty ? 0 : self.lightmap_material_signature(node, lasting: true),
 			};
 		}
 	};
@@ -1968,7 +2009,7 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 				.material_signature = self.lightmap_material_signature(node),
 			};
 			moved[i] = saved[found].world != lightmap_world_hash(node.world)
-				|| saved[found].material_signature != tiles[i].material_signature;
+				|| saved[found].material_signature != self.lightmap_material_signature(node, lasting: true);
 			if (moved[i]) dirty++;
 		}
 

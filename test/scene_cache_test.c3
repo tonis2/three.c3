@@ -5,6 +5,8 @@ import three_tests::device;
 import std::core::test;
 import vk;
 import image;
+import collision;
+import std::math::matrix;
 
 fn vk::Rect2D rect(int x, int y, uint width, uint height) => {
 	.offset = { x, y }, .extent = { width, height }
@@ -56,6 +58,32 @@ fn void global_changes_invalidate_the_whole_attachment() @test
 	(void)cache.finish();
 	cache.begin({ 32, 24 }, 2);
 	test::@check(three::scene_cache_same(cache.finish(), rect(0, 0, 32, 24)));
+}
+
+// A frame redrawn whole leaves its copies unprojected, so a still frame settles
+// each one under its camera before comparing — and one that is gone before then
+// was drawn somewhere nobody measured, which only the whole frame covers.
+fn void an_unprojected_copy_settles_or_redraws_everything() @test
+{
+	SceneCache cache;
+	defer cache.free();
+	collision::Aabb3 box = { .min = { -0.5f, -0.5f, 0.1f }, .max = { 0.5f, 0.5f, 0.2f } };
+	Matrix4f camera = matrix::IDENTITY4{float};
+	cache.begin({ 100, 80 }, 1);
+	cache.observe(1, 10, {}, 5, box, true, box);
+	cache.observe(2, 10, {}, 5, box, true, box);
+	(void)cache.finish();
+
+	cache.begin({ 100, 80 }, 1);
+	cache.settle(1, camera);
+	vk::Rect2D settled;
+	collision::Aabb3 world;
+	test::@check(cache.projected(1, 5, &settled, &world), "a settled copy is a projection hit");
+	test::@check(three::scene_cache_same(settled, rect(22, 17, 56, 46)), "settled at %d,%d %dx%d",
+		settled.offset.x, settled.offset.y, settled.extent.width, settled.extent.height);
+	cache.observe(1, 10, settled, 5, world);
+	test::@check(three::scene_cache_same(cache.finish(), rect(0, 0, 100, 80)),
+		"copy 2 vanished unprojected and only the whole frame covers it");
 }
 
 fn void cached_movement_matches_a_forced_full_depth_prepass() @test

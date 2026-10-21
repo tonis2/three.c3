@@ -132,6 +132,11 @@ struct Node
 	collision::Aabb3 world_box;
 	usz world_box_hull;
 	bool world_box_current;
+	// The world matrix `world_box` was last made current under, and whether it
+	// was ever fitted at all: a box fitted under the same rotation and scale is
+	// moved by the translation rather than refitted. `create_slot` clears it.
+	Matrix4f world_box_world;
+	bool world_box_fitted;
 
 	// How this node draws. Indexes `MeshPass.materials`; `DEFAULT_MATERIAL` is
 	// the built-in shader every node starts on, and it is a shared index rather

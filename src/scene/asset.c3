@@ -766,6 +766,11 @@ struct SharedTexture
 	Texture texture;
 	uint refs;
 	bool alive;
+	// `Assets.revision` as this slot's texture went in: different for every
+	// install, and the same for as long as that texture stays. What a cache keyed
+	// on one slot compares, so another slot's texture coming or going is not a
+	// change to it.
+	uint installed;
 }
 
 <*
@@ -4696,11 +4701,11 @@ fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded, bool write_tabl
 	if (self.free_textures.len() > 0)
 	{
 		index = self.free_textures.pop()!!;
-		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true };
+		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true, .installed = self.revision };
 	}
 	else
 	{
-		self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
+		self.textures.push({ .texture = uploaded, .refs = 1, .alive = true, .installed = self.revision });
 		index = (uint)self.textures.len() - 1;
 	}
 
