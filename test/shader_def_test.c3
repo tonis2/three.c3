@@ -520,8 +520,8 @@ fn void the_ported_mesh_is_lit() @test
 		"the metallic-roughness map multiplies the material's own roughness and metalness");
 	test::@check(source.contains("occlusion = map_texel(occlusion_map,"),
 		"the occlusion map reaches the crevice the ambient terms scale by");
-	test::@check(source.contains("emissive *= srgb_to_linear(map_texel(emissive_map,"),
-		"and the emissive map multiplies what the record set");
+	test::@check(source.contains("emissive *= map_texel(emissive_map,"),
+		"and the emissive map multiplies what the record set, decoded once by its sRGB format");
 	test::@check(source.contains("Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);")
 		&& source.contains("Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);"),
 		"the shadow atlases are declared at the bindings the pass already writes");
