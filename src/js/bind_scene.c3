@@ -193,7 +193,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightShadowSet", &js_light_shadow_set, 3);
 	self.bind(host, "lightBakedGet", &js_light_baked_get, 1);
 	self.bind(host, "lightBakedSet", &js_light_baked_set, 2);
-	self.bind(host, "lightsBake", &js_lights_bake, 3);
+	self.bind(host, "lightsBake", &js_lights_bake, 4);
 	self.bind(host, "lightsBakeBudget", &js_lights_bake_budget, 1);
 	self.bind(host, "lightsSaveBake", &js_lights_save_bake, 1);
 	self.bind(host, "lightsLoadBake", &js_lights_load_bake, 1);
@@ -3551,10 +3551,11 @@ fn void js_light_baked_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 }
 
 <*
- `lightsBake(texelsPerMetre, maxBytes)` — the bake itself, as
- `[receivers, skipped, texels, bytes, ms]`.
+ `lightsBake(texelsPerMetre, maxBytes, budgetMs, progressive)` — the bake itself,
+ as `[receivers, skipped, texels, bytes, ms, dirty]`.
 
- Synchronous, and it reads the shadow atlas as the last frame left it — a light
+ Synchronous unless `progressive`, which bakes one budget's worth and answers
+ with the rest as `dirty` — `MeshPass.bake_lightmaps`. Either way it reads the shadow atlas as the last frame left it — a light
  whose shadow was not resident bakes without one. A scene with no eligible
  receiver answers with five zeros rather than raising: nothing eligible is a
  property of the file's uvs, not a mistake in the call.
@@ -3577,6 +3578,7 @@ fn void js_lights_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 		options.budget_ms = math::clamp(budget, 0.1f, 1000.0f);
 		self.pass.lightmap.budget_ms = options.budget_ms;
 	}
+	options.progressive = arg_truth(&js, argc, args, 3);
 
 	LightmapResult answer = { };
 	if (try baked = self.pass.bake_lightmaps(options)) answer = baked;
@@ -3586,6 +3588,7 @@ fn void js_lights_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 	js.set_index(list, 2, qjs::number_value((double)answer.texels));
 	js.set_index(list, 3, qjs::number_value((double)answer.bytes));
 	js.set_index(list, 4, qjs::number_value(answer.ms));
+	js.set_index(list, 5, qjs::number_value((double)answer.dirty));
 	*out = list;
 }
 

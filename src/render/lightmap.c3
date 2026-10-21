@@ -316,6 +316,9 @@ struct LightmapOptions
 	usz max_bytes;
 	// How much bake work a frame may do to catch up with the dirty tiles.
 	float budget_ms;
+	// Bake one budget's worth now and leave the rest dirty, for the catch-up to
+	// finish over the frames after — see `MeshPass.bake_lightmaps`.
+	bool progressive;
 }
 
 const LightmapOptions DEFAULT_LIGHTMAP_OPTIONS = {
@@ -332,6 +335,8 @@ struct LightmapResult
 	usz texels;
 	usz bytes;
 	double ms;
+	// Tiles a progressive bake left for the catch-up. Zero after a whole one.
+	uint dirty;
 }
 
 struct Lightmap
@@ -1110,6 +1115,14 @@ fn uint MeshPass.lightmap_receivers(&self, uint[] slots, float[] wanted, float d
  Every node's tile is cleared first, so a second call replaces the first rather
  than leaving copies pointing into an atlas that has been repacked.
 
+ `options.progressive` packs the same atlas but renders only the first batch the
+ catch-up's budget pays for, and marks every other tile dirty. Those are
+ `bake_dirty_tiles`' work over the frames that follow, into the rectangles the
+ packing gave them, and until then they shade in real time, as any dirty tile
+ does. A scene whose whole bake takes seconds keeps drawing while it fills in,
+ rather than holding one frame for all of it; `stats().lightmapDirty` reaching
+ zero is when it is done, and what a save has to wait for.
+
  @return ? LIGHTMAP_NO_DEVICE : `No GPU. Nothing to run the bake on.`
  @return ? LIGHTMAP_NO_ATLAS : `Nothing eligible, or nothing that fits the byte budget.`
 *>
@@ -1192,23 +1205,50 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	if (side == 0) return LIGHTMAP_NO_ATLAS~;
 
 	map.ensure_image(gpu, side)!;
-	self.record_lightmap(gpu, tiles.array_view(), side, whole: true)!;
+	// A progressive bake's first batch is sized the way the catch-up sizes one, so
+	// this frame pays what each of the following frames will. Still a whole
+	// submission: it is what clears the atlas the rest are drawn into.
+	sz first = tiles.len();
+	if (options.progressive)
+	{
+		// From the seed rather than what the last atlas's catch-up learned: that
+		// was a different packing, and a number grown on a few small tiles would
+		// take this whole bake into the first frame.
+		map.batch_texels = LIGHTMAP_BATCH_TEXELS;
+		usz texels = 0;
+		first = 0;
+		while (first < tiles.len())
+		{
+			usz one = (usz)tiles[first].size * (usz)tiles[first].size;
+			if (first > 0 && texels + one > map.batch_texels) break;
+			texels += one;
+			first++;
+		}
+	}
+	self.record_lightmap(gpu, tiles.array_view()[0:first], side, whole: true)!;
 
 	// The tiles the copies read, written back only once the bake has landed — a
 	// node pointing into an atlas the submission did not fill would draw whatever
-	// was there before.
+	// was there before. The ones it did not fill wait dirty for the catch-up.
 	float inv = 1.0f / (float)side;
-	foreach (&tile : tiles)
+	foreach (i, &tile : tiles)
 	{
+		Node* node = &self.scene.nodes[tile.node];
+		tile.material_signature = self.lightmap_material_signature(node);
+		if ((sz)i >= first)
+		{
+			node.lightmap_dirty = true;
+			continue;
+		}
 		uint inner = tile.size - 2 * LIGHTMAP_TILE_PAD;
-		self.scene.nodes[tile.node].lightmap = {
+		node.lightmap = {
 			(float)(tile.x + LIGHTMAP_TILE_PAD) * inv,
 			(float)(tile.y + LIGHTMAP_TILE_PAD) * inv,
 			(float)inner * inv,
 			(float)inner * inv,
 		};
-		tile.material_signature = self.lightmap_material_signature(&self.scene.nodes[tile.node]);
 	}
+	map.dirty = (uint)(tiles.len() - first);
 	map.adopt(tiles.array_view(), self.scene.id, density * scale);
 	map.live = true;
 	map.signature = self.baked_light_signature();
@@ -1227,6 +1267,7 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 		.texels = texels,
 		.bytes = map.bytes(),
 		.ms = ms,
+		.dirty = map.dirty,
 	};
 	return map.last;
 }

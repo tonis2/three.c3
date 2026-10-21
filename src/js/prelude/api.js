@@ -614,6 +614,11 @@ const lights = {
 	// static receiver afterwards marks the tiles it reaches dirty, and those
 	// are re-baked over the following frames inside `bake.budgetMs`.
 	//
+	// `progressive: true` bakes one `budgetMs` worth now and leaves the rest of
+	// the tiles dirty for the frames that follow, so a bake of seconds does not
+	// hold one frame for all of it. They shade in real time until baked, and
+	// `three.stats().lightmapDirty` reaching 0 is when it is done.
+	//
 	// `load: true` reads a saved atlas first and bakes only if there is none
 	// that fits; `save: true` writes one afterwards. Either may be a path.
 	bake(options = null) {
@@ -627,11 +632,16 @@ const lights = {
 				return { receivers, skipped: 0, texels: 0, bytes, ms, dirty, loaded: true };
 			}
 		}
-		const [receivers, skipped, texels, bytes, ms] = H.lightsBake(
+		const [receivers, skipped, texels, bytes, ms, dirty] = H.lightsBake(
 			'texelsPerMetre' in o ? +o.texelsPerMetre : 0,
 			'maxBytes' in o ? +o.maxBytes : 0,
-			'budgetMs' in o ? +o.budgetMs : 0);
-		const answer = { receivers, skipped, texels, bytes, ms, dirty: 0, loaded: false };
+			'budgetMs' in o ? +o.budgetMs : 0,
+			!!o.progressive);
+		const answer = { receivers, skipped, texels, bytes, ms, dirty, loaded: false };
+		if (o.save && receivers > 0 && dirty > 0) {
+			throw new Error('three.lights.bake: save waits for a progressive bake to finish — '
+				+ 'call three.lights.saveBake() once three.stats().lightmapDirty is 0');
+		}
 		if (o.save && receivers > 0) {
 			answer.saved = lights.saveBake(typeof o.save === 'string' ? o.save : undefined);
 		}

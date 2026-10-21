@@ -2208,6 +2208,19 @@ atlas is `RGBA16F`, eight bytes a texel — a lightmap is a colour attachment fi
 image second, and a shared-exponent format is not required to be renderable. `budgetMs` sets
 `three.lights.bake.budgetMs`, below.
 
+```js
+const b = three.lights.bake({ texelsPerMetre: 48, budgetMs: 4, progressive: true });
+// b.dirty tiles are still to come; save once three.stats().lightmapDirty is 0
+```
+
+A whole bake is one submission and one wait, so a large scene holds one frame for all of it —
+seconds, long enough for a desktop to call the window unresponsive. `progressive: true` packs
+the same atlas but renders only the first `budgetMs` worth of tiles, and leaves the rest dirty
+for the catch-up below to finish over the following frames. Those shade in real time until their
+tile lands, as any dirty tile does, and the finished atlas is the one a whole bake writes, texel
+for texel. `save: true` refuses a progressive bake, because there is nothing finished to write
+yet: call `three.lights.saveBake()` once `three.stats().lightmapDirty` reaches 0.
+
 `load` reads a saved atlas first and bakes only if there is none that fits this scene; `save`
 writes one afterwards. Either may be `true` for the default path or a path of its own —
 `three.lights.saveBake` and `three.lights.loadBake` are the same two verbs on their own.
