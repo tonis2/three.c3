@@ -174,33 +174,20 @@ fn qjs::Value save_fault(qjs::Context* js, fault err, String verb)
 	switch (err)
 	{
 		case SAVE_NAME_REFUSED:
-			return js.raise(
-				string::tformat(
-					"%s wants a save name of letters, digits, dash, underscore or dot — at most %d of them, "
-						"not starting with a dot. A save is a NAME and not a path: there are no subdirectories "
-						"under the save folder and no way to leave it.",
-					verb,
-					SAVE_NAME_MAX
-				)
-			);
+			return js.raisef("%s wants a save name of letters, digits, dash, underscore or dot — at most %d of them, "
+				"not starting with a dot. A save is a NAME and not a path: there are no subdirectories "
+				"under the save folder and no way to leave it.",
+				verb, SAVE_NAME_MAX);
 		case SAVE_DIR_UNSET:
-			return js.raise(
-				string::tformat(
-					"%s has nowhere to write: no save folder has been named. Call "
-						"three.configure({ saveDir: 'my-game' }) at the top of main.js. A game booted with "
-						"--assets takes the directory's own name when it says nothing; a --script or --mcp run "
-						"has no directory to be named after and has to be told.",
-					verb
-				)
-			);
+			return js.raisef("%s has nowhere to write: no save folder has been named. Call "
+				"three.configure({ saveDir: 'my-game' }) at the top of main.js. A game booted with "
+				"--assets takes the directory's own name when it says nothing; a --script or --mcp run "
+				"has no directory to be named after and has to be told.",
+				verb);
 		default:
-			return js.raise(
-				string::tformat(
-					"%s could not open the save folder. There is no writable application-data directory on this "
-						"machine — no home directory, or one that refused to be written to.",
-					verb
-				)
-			);
+			return js.raisef("%s could not open the save folder. There is no writable application-data directory on this "
+				"machine — no home directory, or one that refused to be written to.",
+				verb);
 	}
 }
 
@@ -294,7 +281,7 @@ fn void js_save_write_text(
 		String body = arg_text(&js, argc, args, 1, tmem);
 		if (catch err = file::save(where, (char[])body))
 		{
-			*out = js.raise(string::tformat("three.save.write could not write %s: %s", where, err));
+			*out = js.raisef("three.save.write could not write %s: %s", where, err);
 			return;
 		}
 		*out = qjs::bool_value(true);
@@ -340,7 +327,7 @@ fn void js_save_read_text(
 		char[]? bytes = file::load(tmem, where);
 		if (catch err = bytes)
 		{
-			*out = js.raise(string::tformat("three.save.read could not read %s: %s", where, err));
+			*out = js.raisef("three.save.read could not read %s: %s", where, err);
 			return;
 		}
 		*out = js.string((String)bytes);
@@ -369,10 +356,10 @@ fn void js_save_write_bytes(
 			return;
 		}
 
-		char[] body = argc > 1 ? js.bytes(args[1]) : (char[]){};
+		char[] body = arg_bytes(&js, argc, args, 1);
 		if (catch err = file::save(where, body))
 		{
-			*out = js.raise(string::tformat("three.save.writeBytes could not write %s: %s", where, err));
+			*out = js.raisef("three.save.writeBytes could not write %s: %s", where, err);
 			return;
 		}
 		*out = qjs::bool_value(true);
@@ -447,7 +434,7 @@ fn void js_save_read_into(
 			return;
 		}
 
-		char[] target = argc > 1 ? js.bytes(args[1]) : (char[]){};
+		char[] target = arg_bytes(&js, argc, args, 1);
 		if (target.len == 0)
 		{
 			*out = qjs::int_value(0);
@@ -457,7 +444,7 @@ fn void js_save_read_into(
 		char[]? bytes = file::load(tmem, where);
 		if (catch err = bytes)
 		{
-			*out = js.raise(string::tformat("three.save.readBytes could not read %s: %s", where, err));
+			*out = js.raisef("three.save.readBytes could not read %s: %s", where, err);
 			return;
 		}
 
@@ -545,7 +532,7 @@ fn void js_save_remove(
 		}
 		if (catch err = path::delete((Path)where))
 		{
-			*out = js.raise(string::tformat("three.save.remove could not delete %s: %s", where, err));
+			*out = js.raisef("three.save.remove could not delete %s: %s", where, err);
 			return;
 		}
 		*out = qjs::bool_value(true);

@@ -256,12 +256,7 @@ fn void js_input_button_hold(
 	{
 		@pool()
 		{
-			*out = js.raise(
-				string::tformat(
-					"three.input.pressButton(button) takes 0 (left), 1 (right) or 2 (middle); got %d",
-					button
-				)
-			);
+			*out = js.raisef("three.input.pressButton(button) takes 0 (left), 1 (right) or 2 (middle); got %d", button);
 		};
 		return;
 	}
@@ -469,45 +464,12 @@ fn void JsRuntime.dispatch_keys(&self)
 *>
 fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 {
-	bool kept = true;
-
+	qjs::Value name = self.js.string(handler.row.name);
+	defer self.js.release(name);
 	@pool()
 	{
-		qjs::Value[1] args = { self.js.string(handler.row.name) };
-		defer self.js.release(args[0]);
-
-		qjs::Value? answer = self.js.call(handler.body, qjs::undefined_value(), args[..]);
-		if (catch err = answer)
-		{
-			self.report_frame_failure(
-				self.timed_out ? self.frame_timeout_message()
-					: string::tformat(
-						"the '%s' key handler threw and was stopped: %s",
-						handler.row.name,
-						self.js.exception(tmem)
-					)
-			);
-			kept = false;
-		}
-		else
-		{
-			bool promised = self.is_thenable(answer);
-			self.js.release(answer);
-			if (promised)
-			{
-				self.report_frame_failure(
-					string::tformat(
-						"the '%s' key handler returned a promise. It has to finish inside the frame, "
-							"so it must be synchronous — do the awaiting in a run_script instead",
-						handler.row.name
-					)
-				);
-				kept = false;
-			}
-		}
+		return self.call_handler(handler.body, { name }, string::tformat("the '%s' key handler", handler.row.name));
 	};
-
-	return kept;
 }
 
 <*
@@ -550,7 +512,7 @@ fn void JsRuntime.clear_key_handlers(&self)
 *>
 fn void JsRuntime.dispatch_click(&self)
 {
-	if (!self.click_active || !self.input.mouse.clicked) return;
+	if (!self.click_handler.active || !self.input.mouse.clicked) return;
 
 	bool kept = true;
 
@@ -569,28 +531,7 @@ fn void JsRuntime.dispatch_click(&self)
 		};
 		defer self.js.release(args[0]);
 
-		qjs::Value? answer = self.js.call(self.click_fn, qjs::undefined_value(), args[..]);
-		if (catch err = answer)
-		{
-			self.report_frame_failure(
-				self.timed_out ? self.frame_timeout_message()
-					: string::tformat("the click handler threw and was stopped: %s", self.js.exception(tmem))
-			);
-			kept = false;
-		}
-		else
-		{
-			bool promised = self.is_thenable(answer);
-			self.js.release(answer);
-			if (promised)
-			{
-				self.report_frame_failure(
-					"the click handler returned a promise. It has to finish inside the frame, "
-						"so it must be synchronous — do the awaiting in a run_script instead"
-				);
-				kept = false;
-			}
-		}
+		kept = self.call_handler(self.click_handler.callback, args[..], "the click handler");
 	};
 
 	if (!kept) self.clear_click_handler();
@@ -601,10 +542,7 @@ fn void JsRuntime.dispatch_click(&self)
 *>
 fn void JsRuntime.clear_click_handler(&self)
 {
-	if (!self.click_active) return;
-	self.click_active = false;
-	self.js.release(self.click_fn);
-	self.click_fn = qjs::undefined_value();
+	self.click_handler.release(&self.js);
 }
 
 // ============================================================================
@@ -628,9 +566,7 @@ fn KeyName? named_key(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* a
 		row = find_key(name);
 		if (catch err = row)
 		{
-			*out = js.raise(
-				string::tformat("there is no key called '%s' — three.input.keys() lists every name there is", name)
-			);
+			*out = js.raisef("there is no key called '%s' — three.input.keys() lists every name there is", name);
 		}
 	};
 	return row;
@@ -773,13 +709,9 @@ fn void js_on_key(
 	{
 		@pool()
 		{
-			*out = js.raise(
-				string::tformat(
-					"there is room for %d key handlers and they are all taken — "
-						"unbind one with three.onKeyDown(key, null)",
-					MAX_KEY_HANDLERS
-				)
-			);
+			*out = js.raisef("there is room for %d key handlers and they are all taken — "
+				"unbind one with three.onKeyDown(key, null)",
+				MAX_KEY_HANDLERS);
 		};
 		return;
 	}
@@ -918,8 +850,7 @@ fn void js_on_click(
 	self.clear_click_handler();
 	if (clearing) return;
 
-	self.click_fn = js.retain(args[0]);
-	self.click_active = true;
+	self.click_handler.hold(&js, args[0]);
 }
 
 <*
@@ -1089,14 +1020,8 @@ fn void js_window_resize(
 	int height = arg_int(&js, argc, args, 1);
 	if (width < 1 || height < 1 || width > WINDOW_MAX_SIDE || height > WINDOW_MAX_SIDE)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
-				WINDOW_MAX_SIDE,
-				width,
-				height
-			)
-		);
+		*out = js.raisef("three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
+			WINDOW_MAX_SIDE, width, height);
 		return;
 	}
 
@@ -1218,13 +1143,7 @@ fn void js_window_title_set(
 		}
 		if (wanted.len > WINDOW_TITLE_MAX)
 		{
-			*out = js.raise(
-				string::tformat(
-					"three.window.title takes at most %d bytes and was given %d",
-					WINDOW_TITLE_MAX,
-					wanted.len
-				)
-			);
+			*out = js.raisef("three.window.title takes at most %d bytes and was given %d", WINDOW_TITLE_MAX, wanted.len);
 			return;
 		}
 
@@ -1452,13 +1371,8 @@ fn void js_window_max_fps_set(
 	double wanted = arg_number(&js, argc, args, 0);
 	if (wanted != wanted || wanted < 0.0 || wanted > (double)WINDOW_MAX_FPS)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
-				WINDOW_MAX_FPS,
-				wanted
-			)
-		);
+		*out = js.raisef("three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
+			WINDOW_MAX_FPS, wanted);
 		return;
 	}
 	uint fps = (uint)(wanted + 0.5);

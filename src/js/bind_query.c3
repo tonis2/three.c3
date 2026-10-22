@@ -117,8 +117,8 @@ fn void js_query_box(
 	qjs::Context js = qjs::wrap(ctx);
 
 	collision::Aabb3 box = {
-		{ arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) },
-		{ arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) },
+		arg_vec3(&js, argc, args, 0),
+		arg_vec3(&js, argc, args, 3),
 	};
 	box.fix();
 
@@ -153,7 +153,7 @@ fn void js_overlap_sphere(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 centre  = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	Vec3 centre  = arg_vec3(&js, argc, args, 0);
 	float radius = arg_float(&js, argc, args, 3);
 
 	int[] slots = int_view(&js, argc, args, 4);
@@ -197,8 +197,8 @@ fn void js_raycast_all(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 origin    = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 direction = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 origin    = arg_vec3(&js, argc, args, 0);
+	Vec3 direction = arg_vec3(&js, argc, args, 3);
 
 	float length = direction.length();
 	if (length < 1e-12f)
@@ -235,17 +235,7 @@ fn void js_raycast_all(
 fn qjs::Value sweep_value(JsRuntime* self, qjs::Context* js, SweepHit hit) @local
 {
 	if (!hit.hit) return qjs::null_value();
-
-	qjs::Value found = js.object();
-	js.set_property(found, "node", handle_value(js, hit.node));
-	js.set_property(found, "fraction", qjs::number_value(hit.fraction));
-	js.set_property(found, "distance", qjs::number_value(hit.distance));
-	js.set_property(found, "point", vec3_value(js, hit.point));
-	js.set_property(found, "normal", vec3_value(js, hit.normal));
-
-	Node* node = self.pass.scene.node(hit.node);
-	js.set_property(found, "name", js.string(node == null ? "" : node.name));
-	return found;
+	return hit_object(self, js, hit.node, hit.distance, hit.point, hit.normal, math::max(hit.fraction, 0.0f));
 }
 
 <*
@@ -267,8 +257,8 @@ fn void js_sweep(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 from    = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 to      = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 from    = arg_vec3(&js, argc, args, 0);
+	Vec3 to      = arg_vec3(&js, argc, args, 3);
 	float radius = arg_float(&js, argc, args, 6);
 	float half   = arg_float(&js, argc, args, 7);
 
@@ -344,8 +334,8 @@ fn void js_move_and_slide(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 centre = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 motion = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 centre = arg_vec3(&js, argc, args, 0);
+	Vec3 motion = arg_vec3(&js, argc, args, 3);
 
 	MoveOptions options = default_move_options();
 	options.radius = arg_float(&js, argc, args, 6);
@@ -380,8 +370,8 @@ fn void js_move_and_slide(
 	js.set_property(value, "stepped", qjs::bool_value(result.stepped));
 	js.set_property(value, "slides", qjs::int_value((int)result.slides));
 	js.set_property(value, "normal", vec3_value(&js, result.normal));
-	js.set_property(value, "ground", result.ground.is_set() ? handle_value(&js, result.ground) : qjs::null_value());
-	js.set_property(value, "hit", result.hit.is_set() ? handle_value(&js, result.hit) : qjs::null_value());
+	js.set_property(value, "ground", node_handle_or_null(&js, result.ground));
+	js.set_property(value, "hit", node_handle_or_null(&js, result.hit));
 	js.set_property(value, "groundVelocity", vec3_value(&js, result.ground_velocity));
 	*out = value;
 }

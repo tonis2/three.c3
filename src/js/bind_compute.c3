@@ -97,17 +97,40 @@ fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
 
 // --- Handles -----------------------------------------------------------------
 
+<*
+ The live slot a handle names in the list `slots` points at, or null. Both slot types carry `live`
+ and `generation`, and a handle kept past its `free()` names a moved generation.
+*>
+macro live_slot(slots, ComputeHandle handle)
+{
+	if (handle.index >= slots.len()) return null;
+	var slot = &(*slots)[handle.index];
+	return slot.live && slot.generation == handle.generation ? slot : null;
+}
+
+<*
+ A free slot in `slots`, or a new one.
+
+ The generation of a reused slot moves, so a handle a script kept past its
+ `free()` cannot reach whatever was made in its place.
+*>
+macro uint free_slot_in(slots)
+{
+	foreach (i, &slot : *slots)
+	{
+		if (slot.live) continue;
+		slot.generation++;
+		return (uint)i;
+	}
+	slots.push({ .generation = 1 });
+	return (uint)(slots.len() - 1);
+}
+
 fn StorageSlot* storage_slot(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
 {
-	ComputeHandle handle = compute_handle_of(encoded);
-	if (handle.index >= self.storage_slots.len()
-		|| !self.storage_slots[handle.index].live
-		|| self.storage_slots[handle.index].generation != handle.generation)
-	{
-		*out = js.raise("this buffer handle is not live - it was never made here, or it has been freed");
-		return null;
-	}
-	return &self.storage_slots[handle.index];
+	StorageSlot* slot = live_slot(&self.storage_slots, compute_handle_of(encoded));
+	if (slot == null) *out = js.raise("this buffer handle is not live - it was never made here, or it has been freed");
+	return slot;
 }
 
 fn StorageBuffer* storage_buffer(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
@@ -118,46 +141,14 @@ fn StorageBuffer* storage_buffer(JsRuntime* self, int encoded, qjs::Context* js,
 
 fn KernelSlot* kernel_slot(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
 {
-	ComputeHandle handle = compute_handle_of(encoded);
-	if (handle.index >= self.kernel_slots.len()
-		|| !self.kernel_slots[handle.index].live
-		|| self.kernel_slots[handle.index].generation != handle.generation)
-	{
-		*out = js.raise("this kernel handle is not live - it was never made here, or it has been freed");
-		return null;
-	}
-	return &self.kernel_slots[handle.index];
+	KernelSlot* slot = live_slot(&self.kernel_slots, compute_handle_of(encoded));
+	if (slot == null) *out = js.raise("this kernel handle is not live - it was never made here, or it has been freed");
+	return slot;
 }
 
-<*
- A free slot, or a new one.
+fn uint storage_slot_for(JsRuntime* self) @local => free_slot_in(&self.storage_slots);
 
- The generation of a reused slot moves, so a handle a script kept past its
- `free()` cannot reach whatever was made in its place.
-*>
-fn uint storage_slot_for(JsRuntime* self) @local
-{
-	foreach (i, &slot : self.storage_slots)
-	{
-		if (slot.live) continue;
-		slot.generation++;
-		return (uint)i;
-	}
-	self.storage_slots.push({ .generation = 1 });
-	return (uint)(self.storage_slots.len() - 1);
-}
-
-fn uint kernel_slot_for(JsRuntime* self) @local
-{
-	foreach (i, &slot : self.kernel_slots)
-	{
-		if (slot.live) continue;
-		slot.generation++;
-		return (uint)i;
-	}
-	self.kernel_slots.push({ .generation = 1 });
-	return (uint)(self.kernel_slots.len() - 1);
-}
+fn uint kernel_slot_for(JsRuntime* self) @local => free_slot_in(&self.kernel_slots);
 
 <*
  Hand a buffer the host made to the script, as a handle `three.compute.adopt`
@@ -189,11 +180,8 @@ fn int JsRuntime.adopt_storage_buffer(&self, StorageBuffer* buffer)
 *>
 fn StorageBuffer* JsRuntime.storage_buffer_of(&self, int encoded)
 {
-	ComputeHandle handle = compute_handle_of(encoded);
-	if (handle.index >= self.storage_slots.len()) return null;
-	StorageSlot* slot = &self.storage_slots[handle.index];
-	if (!slot.live || slot.generation != handle.generation) return null;
-	return slot.buffer;
+	StorageSlot* slot = live_slot(&self.storage_slots, compute_handle_of(encoded));
+	return slot == null ? null : slot.buffer;
 }
 
 <*
@@ -210,11 +198,7 @@ fn void flush_compute(JsRuntime* self)
 
 fn Compute* runtime_compute(JsRuntime* self, qjs::Context* js, qjs::Value* out) @local
 {
-	if (self.renderer == null)
-	{
-		*out = js.raise("three.compute needs a GPU device and this context has none");
-		return null;
-	}
+	if (!self.needs_device(js, "three.compute", out)) return null;
 	return &self.renderer.compute;
 }
 
@@ -351,9 +335,8 @@ fn void js_compute_write_buffer(
 	Compute* compute = &self.renderer.compute;
 	if (catch buffer.write(compute, (usz)at, whole.ptr + offset, (usz)count))
 	{
-		*out = js.raise(string::tformat(
-			"three.compute.write wanted %d bytes at %d and the buffer holds %d",
-			(long)count, at, (long)buffer.size));
+		*out = js.raisef("three.compute.write wanted %d bytes at %d and the buffer holds %d",
+			(long)count, at, (long)buffer.size);
 		return;
 	}
 }
@@ -400,9 +383,8 @@ fn void js_compute_read_buffer(
 	}
 	if ((usz)(count + at) > buffer.size)
 	{
-		*out = js.raise(string::tformat(
-			"three.compute.read wanted %d bytes at %d and the buffer holds %d",
-			(long)count, at, (long)buffer.size));
+		*out = js.raisef("three.compute.read wanted %d bytes at %d and the buffer holds %d",
+			(long)count, at, (long)buffer.size);
 		return;
 	}
 
@@ -614,15 +596,14 @@ fn void js_compute_spirv(
 	char[]? bytes = file::load(tmem, asked);
 	if (catch err = bytes)
 	{
-		*out = js.raise(string::tformat("could not read %s: %s", asked, err));
+		*out = js.raisef("could not read %s: %s", asked, err);
 		return;
 	}
 	if (bytes.len < 4 || *(uint*)bytes.ptr != SPIRV_MAGIC)
 	{
-		*out = js.raise(string::tformat(
-			"%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
-				"goes to three.compute.kernel as text",
-			asked));
+		*out = js.raisef("%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
+			"goes to three.compute.kernel as text",
+			asked);
 		return;
 	}
 
@@ -663,33 +644,28 @@ fn void install_kernel(
 		switch (err)
 		{
 			case COMPUTE_UNSUPPORTED_SUBGROUP_SIZE:
-				*out = js.raise(string::tformat(
-					"%s is written for a subgroup of %d lanes, and this device %s", name, shader.subgroup_size,
-					limits.subgroup_size_control
-						? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
-						: "cannot be asked for a subgroup size"));
+				*out = js.raisef("%s is written for a subgroup of %d lanes, and this device %s",
+					name, shader.subgroup_size, limits.subgroup_size_control
+					? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
+					: "cannot be asked for a subgroup size");
 			case COMPUTE_KERNEL_NO_ENTRY:
-				*out = js.raise(string::tformat("%s has no compute entry point `%s`", name, entry));
+				*out = js.raisef("%s has no compute entry point `%s`", name, entry);
 			case COMPUTE_UNSUPPORTED_BINDING:
-				*out = js.raise(string::tformat(
-					"%s binds something a kernel cannot: storage buffers, storage images (image2d<...>) and "
-						"sampled textures (Sampler2D) are what a kernel takes, one per binding and all in set 0",
-					name));
+				*out = js.raisef("%s binds something a kernel cannot: storage buffers, storage images (image2d<...>) and "
+					"sampled textures (Sampler2D) are what a kernel takes, one per binding and all in set 0",
+					name);
 			case COMPUTE_IMAGE_FEATURE:
-				*out = js.raise(string::tformat(
-					"%s declares a storage image this device cannot have: an extended format needs "
-						"shaderStorageImageExtendedFormats, and an image2d<float4> whose format the host picks needs "
-						"shaderStorageImage%sWithoutFormat - name the format, e.g. image2d<rgba16f>",
-					name, limits.storage_image_read_without_format ? "Write" : "Read"));
+				*out = js.raisef("%s declares a storage image this device cannot have: an extended format needs "
+					"shaderStorageImageExtendedFormats, and an image2d<float4> whose format the host picks needs "
+					"shaderStorageImage%sWithoutFormat - name the format, e.g. image2d<rgba16f>",
+					name, limits.storage_image_read_without_format ? "Write" : "Read");
 			case COMPUTE_TOO_MANY_IMAGES:
-				*out = js.raise(string::tformat(
-					"%s declares more storage images than the %d this device binds per kernel",
-					name, limits.max_per_stage_storage_images));
+				*out = js.raisef("%s declares more storage images than the %d this device binds per kernel",
+					name, limits.max_per_stage_storage_images);
 			case COMPUTE_NOT_READY:
-				*out = js.raise(string::tformat(
-					"%s declares more than %d bindings - split it", name, COMPUTE_MAX_BINDINGS));
+				*out = js.raisef("%s declares more than %d bindings - split it", name, COMPUTE_MAX_BINDINGS);
 			default:
-				*out = js.raise(string::tformat("%s could not be built: %s", name, err));
+				*out = js.raisef("%s could not be built: %s", name, err);
 		}
 		return;
 	}
@@ -702,10 +678,9 @@ fn void install_kernel(
 		kernel.free(self.renderer.gpu.handle);
 		alloc::free(mem, kernel);
 		self.kernel_slots[index].live = false;
-		*out = js.raise(string::tformat(
-			"%s declares no compute workgroup size - a module whose size is an `OpExecutionModeId` "
-				"cannot be dispatched by this host yet",
-			name));
+		*out = js.raisef("%s declares no compute workgroup size - a module whose size is an `OpExecutionModeId` "
+			"cannot be dispatched by this host yet",
+			name);
 		return;
 	}
 
@@ -781,9 +756,8 @@ fn void js_compute_dispatch(
 	ComputeBinding[COMPUTE_MAX_BINDINGS] views;
 	if ((uint)given != kernel.binding_count)
 	{
-		*out = js.raise(string::tformat(
-			"this kernel binds %d buffers and images and %d were given - they go in the shader's own order",
-			(int)kernel.binding_count, given));
+		*out = js.raisef("this kernel binds %d buffers and images and %d were given - they go in the shader's own order",
+			(int)kernel.binding_count, given);
 		return;
 	}
 	ulong alignment = self.renderer.gpu.limits.min_storage_buffer_offset_alignment;
@@ -802,16 +776,14 @@ fn void js_compute_dispatch(
 			int index = (int)js.number(element);
 			if (self.pass == null || !self.pass.assets.texture_alive(index))
 			{
-				*out = js.raise(string::tformat(
-					"binding %d (%s) is an image that has been disposed", i, kernel.binding_names[i]));
+				*out = js.raisef("binding %d (%s) is an image that has been disposed", i, kernel.binding_names[i]);
 				return;
 			}
 			Texture* image = self.pass.assets.texture_at(index);
 			String wrong = storage_image_mismatch(&self.renderer.gpu, info, image);
 			if (wrong.len > 0)
 			{
-				*out = js.raise(string::tformat("binding %d (%s) cannot take this image: %s",
-					i, kernel.binding_names[i], wrong));
+				*out = js.raisef("binding %d (%s) cannot take this image: %s", i, kernel.binding_names[i], wrong);
 				return;
 			}
 			views[i] = { .image = image };
@@ -842,16 +814,14 @@ fn void js_compute_dispatch(
 		if (buffer == null) return;
 		if (offset < 0 || size < 0 || (usz)(offset + size) > buffer.size || (usz)offset >= buffer.size)
 		{
-			*out = js.raise(string::tformat(
-				"binding %d (%s) asks for %d bytes at %d of a buffer of %d",
-				i, kernel.binding_names[i], size, offset, (long)buffer.size));
+			*out = js.raisef("binding %d (%s) asks for %d bytes at %d of a buffer of %d",
+				i, kernel.binding_names[i], size, offset, (long)buffer.size);
 			return;
 		}
 		if ((ulong)offset % alignment != 0)
 		{
-			*out = js.raise(string::tformat(
-				"binding %d (%s) starts at byte %d, and this device binds at multiples of %d",
-				i, kernel.binding_names[i], offset, (long)alignment));
+			*out = js.raisef("binding %d (%s) starts at byte %d, and this device binds at multiples of %d",
+				i, kernel.binding_names[i], offset, (long)alignment);
 			return;
 		}
 		views[i] = { .buffer = buffer.view((usz)offset, (usz)size) };
@@ -860,8 +830,7 @@ fn void js_compute_dispatch(
 	char[] push = argc >= 3 ? js.bytes(args[2]) : (char[]){ };
 	if (push.len > 0 && push.len < kernel.push_size)
 	{
-		*out = js.raise(string::tformat(
-			"this kernel's push block is %d bytes and %d were given", (int)kernel.push_size, (int)push.len));
+		*out = js.raisef("this kernel's push block is %d bytes and %d were given", (int)kernel.push_size, (int)push.len);
 		return;
 	}
 
@@ -891,7 +860,7 @@ fn void js_compute_dispatch(
 
 	// The seventh argument is `independent`: true skips the barrier after this
 	// dispatch, for a caller that knows the next command does not read it.
-	bool barrier = !(argc >= 7 && js.truth(args[6]));
+	bool barrier = !arg_truth(&js, argc, args, 6);
 
 	if (catch compute.dispatch_bindings(kernel, views[:kernel.binding_count],
 		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z, barrier))
@@ -928,15 +897,14 @@ fn void js_compute_copy(
 	long source_offset      = (long)arg_number(&js, argc, args, 1);
 	long destination_offset = (long)arg_number(&js, argc, args, 3);
 	long count              = (long)arg_number(&js, argc, args, 4);
-	bool barrier            = !(argc >= 6 && js.truth(args[5]));
+	bool barrier            = !arg_truth(&js, argc, args, 5);
 
 	if (source_offset < 0 || destination_offset < 0 || count <= 0
 		|| (usz)(source_offset + count) > source.size
 		|| (usz)(destination_offset + count) > destination.size)
 	{
-		*out = js.raise(string::tformat(
-			"three.compute.copy of %d bytes from %d (of %d) to %d (of %d) does not fit",
-			count, source_offset, (long)source.size, destination_offset, (long)destination.size));
+		*out = js.raisef("three.compute.copy of %d bytes from %d (of %d) to %d (of %d) does not fit",
+			count, source_offset, (long)source.size, destination_offset, (long)destination.size);
 		return;
 	}
 
@@ -971,13 +939,12 @@ fn void js_compute_fill(
 	long offset  = (long)arg_number(&js, argc, args, 1);
 	long count   = (long)arg_number(&js, argc, args, 2);
 	uint word    = (uint)(ulong)arg_number(&js, argc, args, 3);
-	bool barrier = !(argc >= 5 && js.truth(args[4]));
+	bool barrier = !arg_truth(&js, argc, args, 4);
 
 	if (offset < 0 || count <= 0 || offset % 4 != 0 || count % 4 != 0 || (usz)(offset + count) > buffer.size)
 	{
-		*out = js.raise(string::tformat(
-			"three.compute.fill of %d bytes at %d does not fit a buffer of %d, or is not in whole 4-byte words",
-			count, offset, (long)buffer.size));
+		*out = js.raisef("three.compute.fill of %d bytes at %d does not fit a buffer of %d, or is not in whole 4-byte words",
+			count, offset, (long)buffer.size);
 		return;
 	}
 
@@ -1201,9 +1168,8 @@ fn void js_compute_create_image(
 	uint largest = gpu.limits.max_image_dimension_2d;
 	if (width < 1 || height < 1 || width > largest || height > largest)
 	{
-		*out = js.raise(string::tformat(
-			"three.compute.image wants a width and a height from 1 to %d, and was given %dx%d",
-			largest, width, height));
+		*out = js.raisef("three.compute.image wants a width and a height from 1 to %d, and was given %dx%d",
+			largest, width, height);
 		return;
 	}
 
@@ -1272,13 +1238,13 @@ fn Texture* compute_image(JsRuntime* self, qjs::Context* js, int index, String v
 {
 	if (self.pass == null || !self.pass.assets.texture_alive(index))
 	{
-		*out = js.raise(string::tformat("%s: this image has been disposed", verb));
+		*out = js.raisef("%s: this image has been disposed", verb);
 		return null;
 	}
 	Texture* image = self.pass.assets.texture_at(index);
 	if (image.storage == FORMAT_UNDEFINED)
 	{
-		*out = js.raise(string::tformat("%s: this is an uploaded texture, not a three.compute.image", verb));
+		*out = js.raisef("%s: this is an uploaded texture, not a three.compute.image", verb);
 		return null;
 	}
 	return image;
@@ -1306,16 +1272,16 @@ fn void js_compute_read_image(
 	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.read()", out);
 	if (image == null) return;
 
-	char[] into = argc > 1 ? js.bytes(args[1]) : (char[]) { };
+	char[] into = arg_bytes(&js, argc, args, 1);
 	sz need = image.storage_read_size();
 	if (into.len < need)
 	{
-		*out = js.raise(string::tformat("image.read() needs %d bytes for this image and was given %d", need, into.len));
+		*out = js.raisef("image.read() needs %d bytes for this image and was given %d", need, into.len);
 		return;
 	}
 	if (catch err = image.read_storage(compute, into))
 	{
-		*out = js.raise(string::tformat("image.read() could not copy the image back: %s", err));
+		*out = js.raisef("image.read() could not copy the image back: %s", err);
 	}
 }
 
@@ -1340,16 +1306,16 @@ fn void js_compute_write_image(
 	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.write()", out);
 	if (image == null) return;
 
-	char[] values = argc > 1 ? js.bytes(args[1]) : (char[]) { };
+	char[] values = arg_bytes(&js, argc, args, 1);
 	sz need = image.storage_read_size();
 	if (values.len < need)
 	{
-		*out = js.raise(string::tformat("image.write() needs %d bytes for this image and was given %d", need, values.len));
+		*out = js.raisef("image.write() needs %d bytes for this image and was given %d", need, values.len);
 		return;
 	}
 	if (catch err = image.write_storage(compute, values))
 	{
-		*out = js.raise(string::tformat("image.write() could not upload the image: %s", err));
+		*out = js.raisef("image.write() could not upload the image: %s", err);
 	}
 }
 

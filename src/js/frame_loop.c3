@@ -220,7 +220,7 @@ fn bool JsRuntime.is_animating(&self)
 	// A promise waiting on a frame, or work a handler queued: both are JavaScript
 	// that has to run on the next tick, so both are a reason to have one.
 	if (self.frame_waiters.len() > 0 || (self.ready && self.js.jobs_waiting())) return true;
-	return self.frame_active || self.fixed_active || self.late_active || self.key_handler_count > 0 || self.click_active;
+	return self.frame_loop.active || self.fixed_loop.active || self.late_loop.active || self.key_handler_count > 0 || self.click_handler.active;
 }
 
 <*
@@ -452,9 +452,9 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	// ordering argument the clip and the solver make one level up, and it is why
 	// both of those are above the early return while this is not: they are the
 	// host's work and this is a script's.
-	if (!self.timed_out && self.fixed_active) self.call_fixed(fixed_steps);
+	if (!self.timed_out && self.fixed_loop.active) self.call_fixed(fixed_steps);
 	long after_fixed = (long)self.started.to_now();
-	if (!self.timed_out && self.frame_active) self.call_frame(self.pass.clock.time * 1000.0);
+	if (!self.timed_out && self.frame_loop.active) self.call_frame(self.pass.clock.time * 1000.0);
 	long after_frame = (long)self.started.to_now();
 	if (!self.timed_out) self.wake_frame_waiters();
 	if (!self.timed_out) self.drain_frame_jobs();
@@ -466,7 +466,7 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	// frame for as long as the camera is gliding.
 	self.follow_camera(delta_ms);
 	followed = true;
-	if (!self.timed_out && self.late_active) self.call_late(self.pass.clock.time * 1000.0);
+	if (!self.timed_out && self.late_loop.active) self.call_late(self.pass.clock.time * 1000.0);
 	long after_late = (long)self.started.to_now();
 
 	spend.handlers_ns = after_handlers;
@@ -509,13 +509,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 *>
 fn void JsRuntime.call_frame(&self, double time_ms)
 {
-	if (!self.call_loop(self.frame_fn, time_ms, FRAME_CALLBACK)) self.clear_frame();
+	if (!self.call_loop(self.frame_loop.callback, time_ms, FRAME_CALLBACK)) self.clear_frame();
 }
 
 // The late systems, once, after the follow camera. `call_frame`'s contract.
 fn void JsRuntime.call_late(&self, double time_ms)
 {
-	if (!self.call_loop(self.late_fn, time_ms, LATE_CALLBACK)) self.clear_late();
+	if (!self.call_loop(self.late_loop.callback, time_ms, LATE_CALLBACK)) self.clear_late();
 }
 
 <*
@@ -537,7 +537,7 @@ fn void JsRuntime.call_fixed(&self, int steps)
 	for (int i = 0; i < steps; i++)
 	{
 		if (self.timed_out) break;
-		if (!self.call_loop(self.fixed_fn, dt, FIXED_CALLBACK, keep_on_timeout: true))
+		if (!self.call_loop(self.fixed_loop.callback, dt, FIXED_CALLBACK, keep_on_timeout: true))
 		{
 			// **A step that ran out of budget is not a step that misbehaved.** Of
 			// the three ways a callback can fail, a throw and a promise are the
@@ -555,6 +555,49 @@ fn void JsRuntime.call_fixed(&self, int steps)
 			return;
 		}
 	}
+}
+
+<*
+ Releases what a frame callback answered, and refuses a promise: it has to finish
+ inside the frame. Asked only of an object, so a callback that returns nothing —
+ which is all of them — costs one tag comparison.
+
+ @param who : `The callback, as the sentence names it: "the click handler".`
+ @return `false when it answered with a promise. The reason is already reported.`
+*>
+fn bool JsRuntime.settle_answer(&self, qjs::Value answer, String who)
+{
+	bool promised = self.is_thenable(answer);
+	self.js.release(answer);
+	if (!promised) return true;
+	self.report_frame_failure(string::tformat("%s returned a promise. It has to finish inside the frame, "
+		"so it must be synchronous — do the awaiting in a run_script instead", who));
+	return false;
+}
+
+<*
+ Calls one of the frame's event handlers and says whether it survived: a throw,
+ a timeout or a promise stops it, and is reported once in a sentence naming `who`.
+ The arguments stay the caller's to release.
+*>
+fn bool JsRuntime.call_handler(&self, qjs::Value handler, qjs::Value[] args, String who)
+{
+	bool survived;
+	@pool()
+	{
+		qjs::Value? answer = self.js.call(handler, qjs::undefined_value(), args);
+		if (catch err = answer)
+		{
+			self.report_frame_failure(self.timed_out ? self.frame_timeout_message()
+				: string::tformat("%s threw and was stopped: %s", who, self.js.exception(tmem)));
+			survived = false;
+		}
+		else
+		{
+			survived = self.settle_answer(answer, who);
+		}
+	};
+	return survived;
 }
 
 <*
@@ -612,23 +655,7 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what,
 		}
 		else
 		{
-			// Asked before the value is released, and only of an object: a callback
-			// that returns nothing — which is all of them — costs one tag
-			// comparison.
-			bool promised = self.is_thenable(answer);
-			self.js.release(answer);
-
-			if (promised)
-			{
-				self.report_frame_failure(
-					string::tformat(
-						"%s returned a promise. It has to finish inside the frame, "
-							"so it must be synchronous — do the awaiting in a run_script instead",
-						what
-					)
-				);
-				survived = false;
-			}
+			survived = self.settle_answer(answer, what);
 		}
 	};
 	return survived;
@@ -674,29 +701,20 @@ fn void JsRuntime.clear_frame_waiters(&self)
 *>
 fn void JsRuntime.clear_frame(&self)
 {
-	if (!self.frame_active) return;
-	self.js.release(self.frame_fn);
-	self.frame_fn = qjs::undefined_value();
-	self.frame_active = false;
+	self.frame_loop.release(&self.js);
 }
 
 // The same, for the fixed loop. `close` calls both, and for the same reason: the
 // reference has to go back while there is still a context to give it to.
 fn void JsRuntime.clear_fixed(&self)
 {
-	if (!self.fixed_active) return;
-	self.js.release(self.fixed_fn);
-	self.fixed_fn = qjs::undefined_value();
-	self.fixed_active = false;
+	self.fixed_loop.release(&self.js);
 }
 
 // And for the late systems.
 fn void JsRuntime.clear_late(&self)
 {
-	if (!self.late_active) return;
-	self.js.release(self.late_fn);
-	self.late_fn = qjs::undefined_value();
-	self.late_active = false;
+	self.late_loop.release(&self.js);
 }
 
 <*
@@ -968,8 +986,7 @@ fn void js_set_frame(
 		return;
 	}
 
-	self.frame_fn = js.retain(args[0]);
-	self.frame_active = true;
+	self.frame_loop.hold(&js, args[0]);
 }
 
 <*
@@ -1001,8 +1018,7 @@ fn void js_set_late(
 		return;
 	}
 
-	self.late_fn = js.retain(args[0]);
-	self.late_active = true;
+	self.late_loop.hold(&js, args[0]);
 }
 
 <*
@@ -1045,7 +1061,7 @@ fn void js_frame_stats(
 	js.set_property(ms, "host", qjs::number_value(spend.host_ns / 1e6));
 
 	qjs::Value object = js.object();
-	js.set_property(object, "running", qjs::bool_value(self.frame_active));
+	js.set_property(object, "running", qjs::bool_value(self.frame_loop.active));
 	js.set_property(object, "ticks", qjs::number_value((double)self.frame_ticks));
 	js.set_property(object, "overruns", qjs::number_value((double)self.frame_overruns));
 	// Fixed steps the clock owed and gave up on — `GameClock.take_fixed_steps`.
@@ -1089,8 +1105,7 @@ fn void js_set_fixed(
 		return;
 	}
 
-	self.fixed_fn = js.retain(args[0]);
-	self.fixed_active = true;
+	self.fixed_loop.hold(&js, args[0]);
 }
 
 <*

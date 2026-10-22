@@ -97,12 +97,8 @@ fn void js_physics_add(
 			case "kinematic": kind = BodyKind.KINEMATIC;
 			case "trigger": kind = BodyKind.TRIGGER;
 			default:
-				*out = js.raise(
-					string::tformat(
-						"'%s' is not a body kind — it is one of dynamic, static, kinematic or trigger",
-						kind_name
-					)
-				);
+				*out = js.raisef("'%s' is not a body kind — it is one of dynamic, static, kinematic or trigger",
+					kind_name);
 				return;
 		}
 
@@ -115,12 +111,8 @@ fn void js_physics_add(
 			case "hull": shape = ColliderShape.HULL;
 			case "heightfield": shape = ColliderShape.HEIGHTFIELD;
 			default:
-				*out = js.raise(
-					string::tformat(
-						"'%s' is not a collider shape — it is one of box, sphere, capsule, hull or heightfield",
-						shape_name
-					)
-				);
+				*out = js.raisef("'%s' is not a collider shape — it is one of box, sphere, capsule, hull or heightfield",
+					shape_name);
 				return;
 		}
 
@@ -222,11 +214,7 @@ fn void js_physics_gravity_set(
 	if (scene == null) return;
 
 	scene.physics.set_gravity(
-		{
-			arg_float(&js, argc, args, 1),
-			arg_float(&js, argc, args, 2),
-			arg_float(&js, argc, args, 3),
-		}
+		arg_vec3(&js, argc, args, 1)
 	);
 }
 
@@ -249,10 +237,7 @@ fn void js_physics_gravity_get(
 	// that creates a world.
 	Vec3 gravity = scene.physics.opened ? scene.physics.world.gravity : PHYSICS_GRAVITY;
 
-	qjs::Value triple = js.array();
-	js.set_index(triple, 0, qjs::number_value((double)gravity.x));
-	js.set_index(triple, 1, qjs::number_value((double)gravity.y));
-	js.set_index(triple, 2, qjs::number_value((double)gravity.z));
+	qjs::Value triple = numbers_value(&js, { (double)gravity.x, (double)gravity.y, (double)gravity.z });
 	*out = triple;
 }
 
@@ -293,13 +278,10 @@ fn void js_physics_transform(
 	}
 
 	Vec3 euler     = euler_from_quat(node.rotation);
-	qjs::Value six = js.array();
-	js.set_index(six, 0, qjs::number_value((double)node.position.x));
-	js.set_index(six, 1, qjs::number_value((double)node.position.y));
-	js.set_index(six, 2, qjs::number_value((double)node.position.z));
-	js.set_index(six, 3, qjs::number_value((double)euler.x));
-	js.set_index(six, 4, qjs::number_value((double)euler.y));
-	js.set_index(six, 5, qjs::number_value((double)euler.z));
+	qjs::Value six = numbers_value(&js, {
+		(double)node.position.x, (double)node.position.y, (double)node.position.z, (double)euler.x, (double)euler.y,
+		(double)euler.z,
+	});
 	*out = six;
 }
 
@@ -335,43 +317,31 @@ fn collision::Rigidbody* pushable(
 	PhysicsBody* body = ref.scene.physics.body_for(id);
 	if (body == null)
 	{
-		*out = js.raise(string::tformat("%s needs a body — three.physics.add(object) first", verb));
+		*out = js.raisef("%s needs a body — three.physics.add(object) first", verb);
 		return null;
 	}
 	if (body.kind == BodyKind.STATIC)
 	{
-		*out = js.raise(
-			string::tformat(
-				"%s cannot move a static body: its inverse mass is zero, so an impulse is arithmetically nothing. Give it a mass, or move its transform directly",
-				verb
-			)
-		);
+		*out = js.raisef("%s cannot move a static body: its inverse mass is zero, so an impulse is arithmetically nothing. Give it a mass, or move its transform directly",
+			verb);
 		return null;
 	}
 	if (body.kind == BodyKind.KINEMATIC)
 	{
-		*out = js.raise(
-			string::tformat(
-				"%s cannot move a kinematic body: the solver drives it from the transform your script writes, so a velocity set here is discarded a fraction of a step later. Move object.position instead",
-				verb
-			)
-		);
+		*out = js.raisef("%s cannot move a kinematic body: the solver drives it from the transform your script writes, so a velocity set here is discarded a fraction of a step later. Move object.position instead",
+			verb);
 		return null;
 	}
 	if (body.kind == BodyKind.TRIGGER)
 	{
-		*out = js.raise(
-			string::tformat("%s cannot move a trigger: a trigger detects overlaps and is never integrated", verb)
-		);
+		*out = js.raisef("%s cannot move a trigger: a trigger detects overlaps and is never integrated", verb);
 		return null;
 	}
 
 	collision::Rigidbody* rigid = ref.scene.physics.rigidbody_for(id);
 	if (rigid == null)
 	{
-		*out = js.raise(
-			string::tformat("%s found the body's record but not the solver's, which should not happen", verb)
-		);
+		*out = js.raisef("%s found the body's record but not the solver's, which should not happen", verb);
 		return null;
 	}
 	ref.scene.physics.wake(rigid);
@@ -415,13 +385,10 @@ fn void js_physics_velocity_get(
 		return;
 	}
 
-	qjs::Value six = js.array();
-	js.set_index(six, 0, qjs::number_value((double)rigid.linear_velocity.x));
-	js.set_index(six, 1, qjs::number_value((double)rigid.linear_velocity.y));
-	js.set_index(six, 2, qjs::number_value((double)rigid.linear_velocity.z));
-	js.set_index(six, 3, qjs::number_value((double)rigid.angular_velocity.x));
-	js.set_index(six, 4, qjs::number_value((double)rigid.angular_velocity.y));
-	js.set_index(six, 5, qjs::number_value((double)rigid.angular_velocity.z));
+	qjs::Value six = numbers_value(&js, {
+		(double)rigid.linear_velocity.x, (double)rigid.linear_velocity.y, (double)rigid.linear_velocity.z,
+		(double)rigid.angular_velocity.x, (double)rigid.angular_velocity.y, (double)rigid.angular_velocity.z,
+	});
 	*out = six;
 }
 
@@ -454,11 +421,7 @@ fn void js_physics_linear_set(
 	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.setVelocity");
 	if (rigid == null) return;
 
-	rigid.linear_velocity = {
-		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3),
-		arg_float(&js, argc, args, 4)
-	};
+	rigid.linear_velocity = arg_vec3(&js, argc, args, 2);
 }
 
 <*
@@ -480,11 +443,7 @@ fn void js_physics_angular_set(
 	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.setAngularVelocity");
 	if (rigid == null) return;
 
-	rigid.angular_velocity = {
-		arg_float(&js, argc, args, 2),
-		arg_float(&js, argc, args, 3),
-		arg_float(&js, argc, args, 4)
-	};
+	rigid.angular_velocity = arg_vec3(&js, argc, args, 2);
 }
 
 <*
@@ -516,8 +475,8 @@ fn void js_physics_impulse(
 	collision::Rigidbody* rigid = pushable(self, &js, argc, args, out, "three.physics.applyImpulse");
 	if (rigid == null) return;
 
-	Vec3 impulse = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
-	Vec3 point = { arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) };
+	Vec3 impulse = arg_vec3(&js, argc, args, 2);
+	Vec3 point = arg_vec3(&js, argc, args, 5);
 
 	if (point.length_sq() == 0.0f)
 	{
@@ -550,7 +509,7 @@ fn void js_physics_torque_impulse(
 	if (rigid == null) return;
 
 	rigid.apply_angular_impulse(
-		{ arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) }
+		arg_vec3(&js, argc, args, 2)
 	);
 }
 
@@ -649,8 +608,8 @@ fn void js_physics_joint(
 
 		JointSpec spec = {
 			.has_pivot = arg_truth(&js, argc, args, 4),
-			.pivot = { arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7) },
-			.axis = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) },
+			.pivot = arg_vec3(&js, argc, args, 5),
+			.axis = arg_vec3(&js, argc, args, 8),
 			.collide = arg_truth(&js, argc, args, 11),
 			.stiffness = arg_float(&js, argc, args, 12),
 			.damping = arg_float(&js, argc, args, 13),
@@ -904,7 +863,7 @@ fn void js_physics_soft_pin(
 	Vec3 at = points[particle];
 	if (arg_truth(&js, argc, args, 3))
 	{
-		at = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+		at = arg_vec3(&js, argc, args, 4);
 	}
 
 	*out = qjs::bool_value(ref.scene.physics.pin_soft(ref.id, particle, at));
@@ -963,15 +922,10 @@ fn void js_on_trigger(
 		return;
 	}
 
-	if (self.trigger_active)
-	{
-		self.js.release(self.trigger_fn);
-		self.trigger_active = false;
-	}
+	self.trigger_handler.release(&self.js);
 	if (clearing) return;
 
-	self.trigger_fn = js.retain(args[0]);
-	self.trigger_active = true;
+	self.trigger_handler.hold(&js, args[0]);
 }
 
 fn void js_on_contact(
@@ -993,15 +947,10 @@ fn void js_on_contact(
 		return;
 	}
 
-	if (self.contact_active)
-	{
-		self.js.release(self.contact_fn);
-		self.contact_active = false;
-	}
+	self.contact_handler.release(&self.js);
 	if (clearing) return;
 
-	self.contact_fn = js.retain(args[0]);
-	self.contact_active = true;
+	self.contact_handler.hold(&js, args[0]);
 }
 
 <*
@@ -1010,16 +959,8 @@ fn void js_on_contact(
 *>
 fn void JsRuntime.clear_physics_handlers(&self)
 {
-	if (self.trigger_active)
-	{
-		self.js.release(self.trigger_fn);
-		self.trigger_active = false;
-	}
-	if (self.contact_active)
-	{
-		self.js.release(self.contact_fn);
-		self.contact_active = false;
-	}
+	self.trigger_handler.release(&self.js);
+	self.contact_handler.release(&self.js);
 }
 
 // The rendered scene's, in all three of these: they are the frame's half of
@@ -1059,29 +1000,27 @@ fn void JsRuntime.report_diverged_bodies(&self)
 *>
 fn void JsRuntime.dispatch_physics_events(&self)
 {
-	if (self.pass.scene.physics.trigger_events.len() > 0 && self.trigger_active)
+	if (self.pass.scene.physics.trigger_events.len() > 0 && self.trigger_handler.active)
 	{
 		foreach (hit : self.pass.scene.physics.trigger_events)
 		{
 			if (self.timed_out) break;
-			if (!self.call_physics_handler(self.trigger_fn, self.trigger_event_value(hit), "trigger"))
+			if (!self.call_physics_handler(self.trigger_handler.callback, self.trigger_event_value(hit), "trigger"))
 			{
-				self.js.release(self.trigger_fn);
-				self.trigger_active = false;
+				self.trigger_handler.release(&self.js);
 				break;
 			}
 		}
 	}
 
-	if (self.pass.scene.physics.contact_events.len() > 0 && self.contact_active)
+	if (self.pass.scene.physics.contact_events.len() > 0 && self.contact_handler.active)
 	{
 		foreach (hit : self.pass.scene.physics.contact_events)
 		{
 			if (self.timed_out) break;
-			if (!self.call_physics_handler(self.contact_fn, self.contact_event_value(hit), "contact"))
+			if (!self.call_physics_handler(self.contact_handler.callback, self.contact_event_value(hit), "contact"))
 			{
-				self.js.release(self.contact_fn);
-				self.contact_active = false;
+				self.contact_handler.release(&self.js);
 				break;
 			}
 		}
@@ -1118,11 +1057,6 @@ fn qjs::Value JsRuntime.contact_event_value(&self, ContactHit hit)
 	return event;
 }
 
-fn qjs::Value node_handle_or_null(qjs::Context* js, NodeId id) @local
-{
-	if (!id.is_set()) return qjs::null_value();
-	return handle_value(js, id);
-}
 
 
 <*
@@ -1135,39 +1069,9 @@ fn qjs::Value node_handle_or_null(qjs::Context* js, NodeId id) @local
 *>
 fn bool JsRuntime.call_physics_handler(&self, qjs::Value handler, qjs::Value event, String what)
 {
-	bool kept = true;
-
+	defer self.js.release(event);
 	@pool()
 	{
-		qjs::Value[1] handler_args = { event };
-		defer self.js.release(event);
-
-		qjs::Value? answer = self.js.call(handler, qjs::undefined_value(), handler_args[..]);
-		if (catch err = answer)
-		{
-			self.report_frame_failure(
-				self.timed_out ? self.frame_timeout_message()
-					: string::tformat("the %s handler threw and was stopped: %s", what, self.js.exception(tmem))
-			);
-			kept = false;
-		}
-		else
-		{
-			bool promised = self.is_thenable(answer);
-			self.js.release(answer);
-			if (promised)
-			{
-				self.report_frame_failure(
-					string::tformat(
-						"the %s handler returned a promise. It has to finish inside the frame, "
-							"so it must be synchronous — do the awaiting in a run_script instead",
-						what
-					)
-				);
-				kept = false;
-			}
-		}
+		return self.call_handler(handler, { event }, string::tformat("the %s handler", what));
 	};
-
-	return kept;
 }
