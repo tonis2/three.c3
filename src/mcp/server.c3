@@ -338,13 +338,9 @@ fn String docs_location()
 *>
 fn String parent_of(String dir) @private
 {
-	usz at = dir.len;
-	while (at > 0)
-	{
-		at--;
-		if (dir[at] == '/' || dir[at] == '\\') return at == 0 ? dir[:1] : dir[:at];
-	}
-	return dir;
+	sz at = last_separator(dir);
+	if (at < 0) return dir;
+	return at == 0 ? dir[:1] : dir[:(usz)at];
 }
 
 // ============================================================================

@@ -739,20 +739,18 @@ fn void? live(
 		// `run_script`, and draining it here would take it away from the agent that
 		// asked. With no listener there is no next run — the terminal is the only
 		// reader there will ever be.
-		if (!serving)
-		{
-			said.clear();
-			runtime.take_frame_output(&said);
-			if (said.len() > 0) io::print(said.str_view());
-			// A callback that was stopped says so once, here, where somebody is
-			// watching - otherwise the window just stops moving.
-			if (runtime.frame_error.len() > 0)
-			{
-				io::printfn("three: %s", runtime.frame_error.str_view());
-				runtime.frame_error.clear();
-			}
-		}
+		// `take_frame_output` carries a stopped callback's reason too, so it says so
+		// once, here, where somebody is watching.
+		if (!serving) print_frame_output(&runtime, &said);
 	}
+}
+
+// Prints what the frames logged since the last call, through a reused buffer.
+fn void print_frame_output(JsRuntime* runtime, DString* said)
+{
+	said.clear();
+	runtime.take_frame_output(said);
+	if (said.len() > 0) io::print(said.str_view());
 }
 
 <*
@@ -812,9 +810,7 @@ fn void? play_frames(
 		Clock host_started = clock::now();
 		runtime.tick((double)i * HEADLESS_FRAME_MS);
 
-		said.clear();
-		runtime.take_frame_output(&said);
-		if (said.len() > 0) io::print(said.str_view());
+		print_frame_output(runtime, &said);
 
 		// `three.quit()` is honoured here as anywhere: the request was made from
 		// JavaScript and the tick that carried it is over, so nothing of the

@@ -267,6 +267,27 @@ function lightAt(index, stable = true) {
 // mock pass has no active scene yet. Its host reads stay lazy in the getters.
 const light = lightAt(0, false);
 
+// The ambient occlusion settings a script may give, each refused by name.
+function occlusionRadius(n) {
+	if (!Number.isFinite(n) || n <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
+	return n;
+}
+function occlusionIntensity(n) {
+	if (!Number.isFinite(n) || n < 0 || n > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
+	return n;
+}
+function occlusionBias(n) {
+	if (!Number.isFinite(n) || n < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
+	return n;
+}
+
+// Sets one field of a tuple the host holds, leaving the others as they are.
+function patchHost(get, set, index, value) {
+	const values = get();
+	values[index] = value;
+	set(...values);
+}
+
 Object.defineProperties(light, {
 	// 0 leaves a face turned away from every light black; 1 removes the
 	// shading entirely and everything is its own flat colour.
@@ -328,31 +349,13 @@ Object.defineProperties(light, {
 		get() {
 			return {
 				get enabled() { return H.occlusionGet()[0] !== 0; },
-				set enabled(v) {
-					const [, radius, intensity, bias] = H.occlusionGet();
-					H.occlusionSet(v ? 1 : 0, radius, intensity, bias);
-				},
+				set enabled(v) { patchHost(H.occlusionGet, H.occlusionSet, 0, v ? 1 : 0); },
 				get radius() { return H.occlusionGet()[1]; },
-				set radius(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
-					const [enabled, , intensity, bias] = H.occlusionGet();
-					H.occlusionSet(enabled, n, intensity, bias);
-				},
+				set radius(v) { patchHost(H.occlusionGet, H.occlusionSet, 1, occlusionRadius(+v)); },
 				get intensity() { return H.occlusionGet()[2]; },
-				set intensity(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n < 0 || n > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
-					const [enabled, radius, , bias] = H.occlusionGet();
-					H.occlusionSet(enabled, radius, n, bias);
-				},
+				set intensity(v) { patchHost(H.occlusionGet, H.occlusionSet, 2, occlusionIntensity(+v)); },
 				get bias() { return H.occlusionGet()[3]; },
-				set bias(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
-					const [enabled, radius, intensity] = H.occlusionGet();
-					H.occlusionSet(enabled, radius, intensity, n);
-				},
+				set bias(v) { patchHost(H.occlusionGet, H.occlusionSet, 3, occlusionBias(+v)); },
 			};
 		},
 		set(v) {
@@ -362,13 +365,12 @@ Object.defineProperties(light, {
 				return;
 			}
 			if (typeof v !== 'object') throw new TypeError('three.light.occlusion takes true, false, or an object');
-			const nextRadius = 'radius' in v ? +v.radius : radius;
-			const nextIntensity = 'intensity' in v ? +v.intensity : intensity;
-			const nextBias = 'bias' in v ? +v.bias : bias;
-			if (!Number.isFinite(nextRadius) || nextRadius <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
-			if (!Number.isFinite(nextIntensity) || nextIntensity < 0 || nextIntensity > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
-			if (!Number.isFinite(nextBias) || nextBias < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
-			H.occlusionSet('enabled' in v ? (v.enabled ? 1 : 0) : enabled, nextRadius, nextIntensity, nextBias);
+			H.occlusionSet(
+				'enabled' in v ? (v.enabled ? 1 : 0) : enabled,
+				occlusionRadius('radius' in v ? +v.radius : radius),
+				occlusionIntensity('intensity' in v ? +v.intensity : intensity),
+				occlusionBias('bias' in v ? +v.bias : bias),
+			);
 		},
 	},
 
@@ -395,8 +397,7 @@ Object.defineProperties(light, {
 			// — a project that does not ask pays for none of it.
 			get enabled() { return H.shadowGet()[0] !== 0; },
 			set enabled(v) {
-				const [, size, bias, intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 0, v ? 1 : 0);
 			},
 
 			// Texels per side. Clamped to 256..8192 and rounded down to a
@@ -404,8 +405,7 @@ Object.defineProperties(light, {
 			// allocated rather than as what was typed.
 			get size() { return H.shadowGet()[1]; },
 			set size(v) {
-				const [enabled, , bias, intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, +v, bias, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 1, +v);
 			},
 
 			// Extra depth offset in the light's clip space, 0 by default.
@@ -416,8 +416,7 @@ Object.defineProperties(light, {
 			// tune.
 			get bias() { return H.shadowGet()[2]; },
 			set bias(v) {
-				const [enabled, size, , intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, size, +v, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 2, +v);
 			},
 
 			// How dark a shadow is, 0 to 1. 1 takes the whole directional
@@ -425,8 +424,7 @@ Object.defineProperties(light, {
 			// shadow is never black unless the ambient floor is zero.
 			get intensity() { return H.shadowGet()[3]; },
 			set intensity(v) {
-				const [enabled, size, bias, , distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, +v, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 3, +v);
 			},
 
 			// How far down the view direction the map is fitted, in world
@@ -441,8 +439,7 @@ Object.defineProperties(light, {
 			// ground; too large and they are soft mush.
 			get distance() { return H.shadowGet()[4]; },
 			set distance(v) {
-				const [enabled, size, bias, intensity, , follow] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, intensity, +v, follow);
+				patchHost(H.shadowGet, H.shadowSet, 4, +v);
 			},
 
 			// Whether the map is fitted around what the camera can see,
@@ -467,8 +464,7 @@ Object.defineProperties(light, {
 			// stutter — there is no default that knows which.
 			get follow() { return H.shadowGet()[5] !== 0; },
 			set follow(v) {
-				const [enabled, size, bias, intensity, distance] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, intensity, distance, v ? 1 : 0);
+				patchHost(H.shadowGet, H.shadowSet, 5, v ? 1 : 0);
 			},
 
 			// Where the map actually landed last frame, read-only.
@@ -573,8 +569,7 @@ const lights = {
 			// shadowed light has moved a few metres, so nothing blinks.
 			get maxLocal() { return H.pointShadowGet()[4]; },
 			set maxLocal(v) {
-				const [e,s,b,i] = H.pointShadowGet();
-				H.pointShadowSet(e, s, b, i, +v);
+				patchHost(H.pointShadowGet, H.pointShadowSet, 4, +v);
 			},
 		};
 	},

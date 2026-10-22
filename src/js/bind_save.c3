@@ -112,8 +112,7 @@ fn String? JsRuntime.save_directory(&self)
 	// and `--assets ./game` are the same directory and must be the same folder.
 	usz end = root.len;
 	while (end > 0 && (root[end - 1] == '/' || root[end - 1] == '\\')) end--;
-	usz start = end;
-	while (start > 0 && root[start - 1] != '/' && root[start - 1] != '\\') start--;
+	usz start = (usz)(last_separator(root[:end]) + 1);
 	String slug = root[start:end - start];
 	if (!valid_slot(slug)) return SAVE_DIR_UNSET~;
 
