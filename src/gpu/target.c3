@@ -310,6 +310,22 @@ fn vk::MemoryBarrier2 storage_memory_barrier()
 }
 
 <*
+ Makes what a compute pass wrote to storage buffers visible to the stage that
+ reads it next.
+*>
+fn void compute_to_stage_barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 reader)
+{
+	vk::MemoryBarrier2 barrier = {
+		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
+		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.dstStageMask = reader,
+		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setMemoryBarriers({ barrier }));
+}
+
+<*
  The depth attachment, finished being written and about to be sampled.
 
  `shader_read_barrier`'s shape over the depth aspect. Both differences are

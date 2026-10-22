@@ -1844,7 +1844,7 @@ fn SkinPipeline? SkinPipeline.init_cluster(&self, Gpu* gpu, ShaderModule* mod)
 }
 
 fn SkinPipeline? SkinPipeline.init_compute(&self, Gpu* gpu, ShaderModule* mod,
-	ShaderEntry[] entries, PushFieldLayout[] contract) @local
+	ShaderEntry[] entries, PushFieldLayout[] contract)
 {
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
 	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;

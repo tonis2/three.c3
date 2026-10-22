@@ -1733,125 +1733,46 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		// left here is the seven the def reserves, which are the same images
 		// for every draw in the frame.
 		SampledBindings samplers;
-		// Binding 1, the first reserved one, and asked for by index rather than
-		// assumed to be there: the compiler may drop a sampler the linked program
-		// never reads, and pushing a write for a binding the layout does not
-		// declare is a validation error. Both defs read it today, so the answer is
-		// yes today.
-		// 
+		vk::DescriptorImageInfo white = self.assets.texture_at(NO_TEXTURE).descriptor();
+		bool shadowed = self.shadows.live || self.point_shadows.live;
+		ShadowAtlas* atlas = &self.shadow_manager.atlas;
+		vk::DescriptorImageInfo shadow = shadowed ? atlas.descriptor(self.shadow_manager.sample_static) : white;
 		// The white 1x1 when there is no shadow pass, which is not a fallback but
 		// the correct value: a depth of 1 is the far plane, nothing is in front of
 		// anything, and `shadow_factor` comes out lit. So shadows on and shadows off
 		// are the same pipeline and the same descriptor layout, differing by which
 		// image is in one slot.
-		if (pipeline_declares_binding(pipeline, SHADOW_BINDING))
-		{
-			samplers.add(
-				SHADOW_BINDING,
-				(self.shadows.live || self.point_shadows.live) ? self.shadow_manager.atlas.descriptor(self.shadow_manager.sample_static) : self.assets.texture_at(NO_TEXTURE)
-				.descriptor());
-		}
-		// Binding 2, the third reserved one, on the same terms: the sky when the
-		// scene has one and the white 1x1 when it does not. What stops that white
-		// from putting a mirror finish on everything is `FrameBlock.environment.x`,
-		// which is zero in a frame with no environment — so shading with a sky and
-		// shading without one are one pipeline and one layout.
-		if (pipeline_declares_binding(pipeline, ENVIRONMENT_BINDING))
-		{
-			int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
-			samplers.add(ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, POINT_SHADOW_BINDING))
-		{
-			samplers.add(POINT_SHADOW_BINDING, self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, AMBIENT_OCCLUSION_BINDING))
-		{
-			samplers.add(AMBIENT_OCCLUSION_BINDING, self.ambient_occlusion.live
-				? self.ambient_occlusion.descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_BINDING, (self.shadows.live || self.point_shadows.live)
-				? self.shadow_manager.atlas.descriptor(self.shadow_manager.sample_static) : self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
-				self.shadow_manager.sample_static, self.shadows.live || self.point_shadows.live));
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-				self.shadow_manager.atlas.compare_descriptor(true,
-					self.shadows.live || self.point_shadows.live));
-		}
-		if (pipeline_declares_binding(pipeline, LTC_LUT_BINDING))
-		{
-			samplers.add(LTC_LUT_BINDING, self.ltc.live
-				? self.ltc.descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
-		{
-			// The shared white image until a bake has run, and unread then: a copy
-			// with no tile carries a zero size, which the vertex stage turns into the
-			// flag that stops the fragment stage sampling at all.
-			samplers.add(LIGHTMAP_BINDING, self.lightmap.live
-				? self.lightmap.descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
+		samplers.add_if(pipeline, SHADOW_BINDING, shadow);
+		// The sky when the scene has one and the white 1x1 when it does not. What
+		// stops that white from putting a mirror finish on everything is
+		// `FrameBlock.environment.x`, which is zero in a frame with no environment —
+		// so shading with a sky and shading without one are one pipeline and one layout.
+		int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
+		samplers.add_if(pipeline, ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
+		samplers.add_if(pipeline, POINT_SHADOW_BINDING, white);
+		samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING,
+			self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : white);
+		samplers.add_if(pipeline, SHADOW_ATLAS_BINDING, shadow);
+		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING,
+			atlas.compare_descriptor(self.shadow_manager.sample_static, shadowed));
+		samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, atlas.compare_descriptor(true, shadowed));
+		samplers.add_if(pipeline, LTC_LUT_BINDING, self.ltc.live ? self.ltc.descriptor() : white);
+		// The shared white image until a bake has run, and unread then: a copy
+		// with no tile carries a zero size, which the vertex stage turns into the
+		// flag that stops the fragment stage sampling at all.
+		samplers.add_if(pipeline, LIGHTMAP_BINDING, self.lightmap.live ? self.lightmap.descriptor() : white);
 		samplers.push(cmd, pipeline);
 
+		// Offset on the CPU rather than passed as a base index: the shader reads
+		// instance zero of its own slice, and `push.draw[0]` is always this
+		// bucket's record whatever else is in the buffer.
 		MeshPush push = {
-			.frame = (FrameBlock*)frame_address, // Offset on the CPU rather than passed as a base index: the shader then
-			// reads instance zero of its own slice and never has to know whether
-			// SV_InstanceID includes firstInstance.
-			.instances = (Instance*)(instance_address
-				+ (ulong)bucket.first
-					* Instance::size), // And this bucket's own record, for the same reason — `push.draw[0]` is
-					// always the right one, whatever else is in the buffer.
+			.frame = (FrameBlock*)frame_address,
+			.instances = (Instance*)(instance_address + (ulong)bucket.first * Instance::size),
 			.draw = (DrawRecord*)(draw_address + (ulong)at * DrawRecord::size),
 		};
-		// The reflected size, not `MeshPush::size`. The two agree at 24 today and
-		// have not always: the block used to end in a `uint` that C3 followed with
-		// four bytes of tail padding, and the Slang-era report was 76 where the
-		// struct occupied 80 — pushing 80 into a 76-byte range is a validation error.
-		// 
-		// Worth knowing how it fails, because it is not how it sounds: the picture
-		// is pixel-identical either way on this driver, so no test here catches it
-		// and only the validation layer does. It is still undefined behaviour, and a
-		// driver that took the spec literally would drop the push and render
-		// nothing.
-		// 
-		// Both this and the range in `MeshPipeline.init` read the same reflected
-		// field, so they cannot drift without an edit that hardcodes one of them.
-		// 
-		// The mesh contract first, the material's uniforms on top of it. A
-		// `Material.block` is laid out *as the push block itself* rather than as a
-		// list of values, so this is two memcpys with no per-uniform loop and no
-		// offset arithmetic here.
-		char[PUSH_BUDGET] staging;
-		uint push_size = pipeline.shader.push_size;
-		mem::copy(&staging[0], (char*)&push, MeshPush::size);
-		if (push_size > MATERIAL_PUSH_START)
-		{
-			mem::copy(
-				&staging[MATERIAL_PUSH_START],
-				&material.block[MATERIAL_PUSH_START],
-				(sz)(push_size - MATERIAL_PUSH_START)
-			);
-		}
-
-		// The spilled uniform table, if this material has one. Written over the
-		// bytes the block copy above already put there — `material_table` is a
-		// pointer field of the block like the other three, and `Material.block`'s
-		// copy of it is stale by definition because the buffer moves every frame.
-		if (material.table_pointer != NO_TABLE_POINTER && material.table.len > 0)
-		{
-			ulong table = self.table_address + (ulong)material.table_offset;
-			mem::copy(&staging[material.table_pointer], (char*)&table, ulong::size);
-		}
-
-		vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, push_size, &staging);
+		ulong table = material.table.len > 0 ? self.table_address + (ulong)material.table_offset : 0;
+		push_mesh_constants(cmd, pipeline, push, material, table);
 
 		// Index binding is independent of vertex bindings, which is why the pass can
 		// have an index buffer and no vertex input state at all.
@@ -2287,15 +2208,8 @@ fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBloc
 	sz needed = (sz)self.prepared_views.len();
 	if (needed == 0) return;
 
-	if (self.extra_frame_capacity[slot] < needed)
-	{
-		sz capacity = self.extra_frame_capacity[slot] > 0 ? self.extra_frame_capacity[slot] : 2;
-		while (capacity < needed) capacity *= 2;
-		vk::Memory grown = gpu.create_dynamic(capacity * FrameBlock::size)!;
-		if (self.extra_frame_blocks[slot].buffer != null) self.extra_frame_blocks[slot].free();
-		self.extra_frame_blocks[slot] = grown;
-		self.extra_frame_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.extra_frame_blocks[slot], &self.extra_frame_capacity[slot], needed, 2,
+		FrameBlock::size)!;
 
 	FrameBlock[] blocks = alloc::new_array(tmem, FrameBlock, needed);
 	foreach (i, view : self.prepared_views)
@@ -2319,15 +2233,7 @@ fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBloc
 fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
 {
 	sz needed = self.lighting.count;
-	if (self.light_capacity[slot] < needed)
-	{
-		sz capacity = self.light_capacity[slot] > 0 ? self.light_capacity[slot] : 16;
-		while (capacity < needed) capacity *= 2;
-		vk::Memory grown = gpu.create_dynamic(capacity * Light::size)!;
-		if (self.light_buffers[slot].buffer != null) self.light_buffers[slot].free();
-		self.light_buffers[slot] = grown;
-		self.light_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.light_buffers[slot], &self.light_capacity[slot], needed, 16, Light::size)!;
 	self.light_buffers[slot].upload(&self.lighting.lights[0], needed * Light::size);
 	self.frame_key = hash_bytes(self.frame_key, &self.lighting.lights[0], (usz)(needed * Light::size));
 	return self.light_buffers[slot].address;
@@ -2390,16 +2296,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	{
 		// The producer may be an older submission. Submission order puts it before
 		// this barrier, and the slot fence makes the buffers safe to retain.
-		vk::MemoryBarrier2 cached_barrier = {
-			.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
-			.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-			.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-			.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
-		};
-		vk::DependencyInfo cached_dependency = { .sType = STRUCTURE_TYPE_DEPENDENCY_INFO,
-			.memoryBarrierCount = 1, .pMemoryBarriers = &cached_barrier };
-		vk::cmdPipelineBarrier2(cmd, &cached_dependency);
+		compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
 		return;
 	}
 	self.cluster_overflow[slot].upload(&zero, uint::size);
@@ -2424,16 +2321,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	self.cluster_keys[slot] = key;
 	self.cluster_cached[slot] = true;
 	self.cluster_dispatches++;
-	vk::MemoryBarrier2 barrier = {
-		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
-		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
-	};
-	vk::DependencyInfo dependency = { .sType = STRUCTURE_TYPE_DEPENDENCY_INFO,
-		.memoryBarrierCount = 1, .pMemoryBarriers = &barrier };
-	vk::cmdPipelineBarrier2(cmd, &dependency);
+	compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
 }
 
 <*
@@ -2455,19 +2343,10 @@ fn Instance*? MeshPass.grow_instances(&self, Gpu* gpu, uint slot, sz needed)
 {
 	if (needed == 0) return null;
 
-	if (self.instance_capacity[slot] < needed)
-	{
-		sz capacity = self.instance_capacity[slot] > 0 ? self.instance_capacity[slot] : INITIAL_INSTANCES;
-		while (capacity < needed) capacity *= 2;
-
-		// Safe only because this slot's fence has been waited on before recording —
-		// see the header. Freeing the *other* slot's buffer here would be a
-		// use-after-free the validation layers would not always see.
-		if (self.instance_buffers[slot].buffer != null) self.instance_buffers[slot].free();
-
-		self.instance_buffers[slot] = gpu.create_dynamic((sz)(capacity * Instance::size))!;
-		self.instance_capacity[slot] = capacity;
-	}
+	// This slot's own buffer only: freeing the *other* slot's would be a
+	// use-after-free the validation layers would not always see.
+	gpu.grow_slot_buffer(&self.instance_buffers[slot], &self.instance_capacity[slot], needed, INITIAL_INSTANCES,
+		Instance::size)!;
 
 	return (Instance*)self.instance_buffers[slot].data();
 }
@@ -2558,14 +2437,7 @@ fn void? MeshPass.write_tables(&self, Gpu* gpu, uint slot)
 	self.table_address = 0;
 	if (wanted == 0) return;
 
-	if (self.table_capacity[slot] < wanted)
-	{
-		sz capacity = self.table_capacity[slot] > 0 ? self.table_capacity[slot] : 1024;
-		while (capacity < wanted) capacity *= 2;
-		if (self.table_buffers[slot].buffer != null) self.table_buffers[slot].free();
-		self.table_buffers[slot] = gpu.create_dynamic(capacity)!;
-		self.table_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.table_buffers[slot], &self.table_capacity[slot], wanted, 1024, 1)!;
 
 	char* into = (char*)self.table_buffers[slot].data();
 	foreach (&material : self.materials)
@@ -2582,15 +2454,8 @@ fn void? MeshPass.write_tables(&self, Gpu* gpu, uint slot)
 *>
 fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
 {
-	if (self.draw_capacity[slot] >= count) return;
-
-	sz capacity = self.draw_capacity[slot] > 0 ? self.draw_capacity[slot] : INITIAL_INSTANCES;
-	while (capacity < count) capacity *= 2;
-
-	if (self.draw_buffers[slot].buffer != null) self.draw_buffers[slot].free();
-
-	self.draw_buffers[slot] = gpu.create_dynamic((sz)(capacity * DrawRecord::size))!;
-	self.draw_capacity[slot] = capacity;
+	gpu.grow_slot_buffer(&self.draw_buffers[slot], &self.draw_capacity[slot], count, INITIAL_INSTANCES,
+		DrawRecord::size)!;
 }
 
 <*
@@ -2653,18 +2518,8 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	foreach (&entry : self.scene.palettes) needed += entry.matrices.len();
 	if (needed == 0) return 0;
 
-	if (self.pose_capacity[slot] < needed)
-	{
-		sz capacity = self.pose_capacity[slot] > 0 ? self.pose_capacity[slot] : INITIAL_INSTANCES;
-		while (capacity < needed) capacity *= 2;
-
-		// Safe only because this slot's fence has been waited on — the same rule the
-		// instance and draw buffers are freed under.
-		if (self.pose_buffers[slot].buffer != null) self.pose_buffers[slot].free();
-
-		self.pose_buffers[slot] = gpu.create_dynamic((sz)(capacity * Matrix4f::size))!;
-		self.pose_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.pose_buffers[slot], &self.pose_capacity[slot], needed, INITIAL_INSTANCES,
+		Matrix4f::size)!;
 
 	Matrix4f* palette = (Matrix4f*)self.pose_buffers[slot].data();
 	uint at           = 0;
@@ -2794,18 +2649,7 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 	}
 	if (needed == 0) return 0;
 
-	if (self.morph_capacity[slot] < needed)
-	{
-		sz capacity = self.morph_capacity[slot] > 0 ? self.morph_capacity[slot] : 64;
-		while (capacity < needed) capacity *= 2;
-
-		// Safe only because this slot's fence has been waited on — the same rule
-		// the instance, draw and palette buffers are freed under.
-		if (self.morph_buffers[slot].buffer != null) self.morph_buffers[slot].free();
-
-		self.morph_buffers[slot] = gpu.create_dynamic(float::size * (sz)capacity)!;
-		self.morph_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.morph_buffers[slot], &self.morph_capacity[slot], needed, 64, float::size)!;
 
 	float* weights = (float*)self.morph_buffers[slot].data();
 	uint at        = 0;
@@ -2883,18 +2727,7 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 	}
 	if (needed == 0) return 0;
 
-	if (self.soft_capacity[slot] < needed)
-	{
-		sz capacity = self.soft_capacity[slot] > 0 ? self.soft_capacity[slot] : INITIAL_INSTANCES;
-		while (capacity < needed) capacity *= 2;
-
-		// Safe only because this slot's fence has been waited on — the same rule
-		// every other per-slot buffer here is freed under.
-		if (self.soft_buffers[slot].buffer != null) self.soft_buffers[slot].free();
-
-		self.soft_buffers[slot] = gpu.create_dynamic((sz)(capacity * Vec3::size))!;
-		self.soft_capacity[slot] = capacity;
-	}
+	gpu.grow_slot_buffer(&self.soft_buffers[slot], &self.soft_capacity[slot], needed, INITIAL_INSTANCES, Vec3::size)!;
 
 	Vec3* vertices = (Vec3*)self.soft_buffers[slot].data();
 
@@ -2973,21 +2806,11 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 	// character through compute never reads `shaders/skin.shady` off disk.
 	if (!self.skin_pipeline.ready) self.build_skin_pipeline(gpu)!;
 
-	if (self.posed_capacity[slot] < needed)
-	{
-		sz capacity = self.posed_capacity[slot] > 0 ? self.posed_capacity[slot] : INITIAL_INSTANCES;
-		while (capacity < needed) capacity *= 2;
-
-		// This slot's fence has been waited on, so the GPU is not still reading it —
-		// the same rule the instance, draw and pose buffers are grown under.
-		if (self.posed_buffers[slot].buffer != null) self.posed_buffers[slot].free();
-
-		// Device-local: written by the GPU and read by the GPU in the same frame, so
-		// there is nothing for the CPU to map and no reason to pay for a
-		// host-visible heap.
-		self.posed_buffers[slot] = gpu.create_device_storage((sz)(capacity * SkinnedVertex::size))!;
-		self.posed_capacity[slot] = capacity;
-	}
+	// Device-local: written by the GPU and read by the GPU in the same frame, so
+	// there is nothing for the CPU to map and no reason to pay for a
+	// host-visible heap.
+	gpu.grow_slot_buffer(&self.posed_buffers[slot], &self.posed_capacity[slot], needed, INITIAL_INSTANCES,
+		SkinnedVertex::size, device_local: true)!;
 
 	ulong output_address = self.posed_buffers[slot].address;
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_COMPUTE, self.skin_pipeline.handle);
@@ -3037,19 +2860,7 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 	}
 
 	// Everything written above, against everything that reads it below.
-	vk::MemoryBarrier2 barrier = {
-		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
-		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
-	};
-	vk::DependencyInfo dependency = {
-		.sType = STRUCTURE_TYPE_DEPENDENCY_INFO,
-		.memoryBarrierCount = 1,
-		.pMemoryBarriers = &barrier,
-	};
-	vk::cmdPipelineBarrier2(cmd, &dependency);
+	compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_VERTEX_SHADER_BIT);
 }
 
 <*

@@ -1153,30 +1153,18 @@ fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst) @dynami
 *>
 fn void PostStage.add_chain_samplers(&self, SampledBindings* samplers, PassIo io)
 {
-	if (pipeline_declares_binding(&self.pipeline, 0)) samplers.add(0, sampled_with(io.sampler, io.prev));
-	if (pipeline_declares_binding(&self.pipeline, 1)) samplers.add(1, sampled_with(io.sampler, io.scene));
+	samplers.add_if(&self.pipeline, 0, sampled_with(io.sampler, io.prev));
+	samplers.add_if(&self.pipeline, 1, sampled_with(io.sampler, io.scene));
 	// The depth buffer, in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than
 	// `SHADER_READ_ONLY_OPTIMAL` — a different layout and a different sampler from
 	// the two above, which is why it does not go through `sampled_with`.
-	if (pipeline_declares_binding(&self.pipeline, 2))
-	{
-		samplers.add(
-			2,
-			{
-				.sampler = io.depth_sampler,
-				.imageView = io.depth,
-				.imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-			}
-		);
-	}
+	samplers.add_if(&self.pipeline, 2,
+		{ .sampler = io.depth_sampler, .imageView = io.depth, .imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL });
 	// The third source. `io.tap` is the view of whatever pass this one names, and
 	// the chain has already transitioned it — a tapped stage's output goes to
 	// SHADER_READ_ONLY_OPTIMAL after it runs like every other stage's, and it is
 	// an image nothing overwrites in between.
-	if (pipeline_declares_binding(&self.pipeline, POST_TAP_BINDING))
-	{
-		samplers.add(POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
-	}
+	samplers.add_if(&self.pipeline, POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
 	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets, POST_BINDING_FIRST);
 }
 

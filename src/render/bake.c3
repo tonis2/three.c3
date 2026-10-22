@@ -79,6 +79,12 @@ import vk;
 // needs no GPU, and this is the part of it that does.
 faultdef BAKE_NEEDS_A_DEVICE;
 
+// The frame images a bake has none of, each bound to the white 1x1.
+const uint[*] BAKE_WHITE_BINDINGS = {
+	SHADOW_BINDING, POINT_SHADOW_BINDING, SHADOW_ATLAS_BINDING, LTC_LUT_BINDING,
+	LIGHTMAP_BINDING, ENVIRONMENT_BINDING, AMBIENT_OCCLUSION_BINDING,
+};
+
 <*
  What `scene.export(path, { bake: true })` bakes at, in texels a side. Square,
  because a uv square is what is being rasterised.
@@ -311,58 +317,15 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		// here is the frame's images, which a bake mostly does not have.
 		SampledBindings samplers;
 		// Asked rather than assumed, and the answer is normally *no*: under
-		// `MATERIAL_BAKE` nothing reads `shadow_map`, so the compiler drops it and pushing a
-		// write for a binding the layout does not declare would be a validation
-		// error. The white 1x1 is here for the compile that keeps it anyway.
-		if (pipeline_declares_binding(pipeline, SHADOW_BINDING))
-		{
-			samplers.add(SHADOW_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, POINT_SHADOW_BINDING))
-		{
-			samplers.add(POINT_SHADOW_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
-				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-				self.pass.shadow_manager.atlas.compare_descriptor(false, false));
-		}
-		// Normally dropped by the linker: the bake sets `MATERIAL_BAKE`, which is
-		// what makes the area integration numeric and leaves nothing reading the
-		// table. Here for the compile that keeps it, and the frame block's
-		// `lighting.w` is zero either way.
-		if (pipeline_declares_binding(pipeline, LTC_LUT_BINDING))
-		{
-			samplers.add(LTC_LUT_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		// Dropped by the linker for `ltc_lut`'s reason — under `MATERIAL_BAKE` nothing
-		// shades, so nothing reads a lightmap either. Here for the compile that keeps
-		// it, and the instance's own tile is zero-sized either way.
-		if (pipeline_declares_binding(pipeline, LIGHTMAP_BINDING))
-		{
-			samplers.add(LIGHTMAP_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		// The ported bake keeps its declarations where the Slang one let the
-		// linker drop them, so the two frame images the unlit path never
-		// samples still need a descriptor: an unwritten one is undefined even
-		// when no load reaches it.
-		if (pipeline_declares_binding(pipeline, ENVIRONMENT_BINDING))
-		{
-			samplers.add(ENVIRONMENT_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, AMBIENT_OCCLUSION_BINDING))
-		{
-			samplers.add(AMBIENT_OCCLUSION_BINDING, self.pass.assets.texture_at(NO_TEXTURE).descriptor());
-		}
+		// `MATERIAL_BAKE` nothing shades, so the linker drops the shadow maps, the
+		// LTC table, the lightmap, the sky and the occlusion image. The white 1x1 is
+		// for a compile that keeps one anyway — an unwritten descriptor is undefined
+		// even when no load reaches it.
+		vk::DescriptorImageInfo white = self.pass.assets.texture_at(NO_TEXTURE).descriptor();
+		foreach (binding : BAKE_WHITE_BINDINGS) samplers.add_if(pipeline, binding, white);
+		vk::DescriptorImageInfo unlit = self.pass.shadow_manager.atlas.compare_descriptor(false, false);
+		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, unlit);
+		samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, unlit);
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {
@@ -370,25 +333,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 			.instances = (Instance*)self.instance.address,
 			.draw = (DrawRecord*)self.draw.address,
 		};
-		// The mesh contract, then the material's uniforms on top of it, then the
-		// table pointer over the stale copy in the block — `MeshPass.record` byte for
-		// byte, and it has the argument for each of the three.
-		char[PUSH_BUDGET] staging;
-		uint push_size = pipeline.shader.push_size;
-		mem::copy(&staging[0], (char*)&push, MeshPush::size);
-		if (push_size > MATERIAL_PUSH_START)
-		{
-			mem::copy(
-				&staging[MATERIAL_PUSH_START],
-				&material.block[MATERIAL_PUSH_START],
-				(sz)(push_size - MATERIAL_PUSH_START)
-			);
-		}
-		if (material.table_pointer != NO_TABLE_POINTER && table_address != 0)
-		{
-			mem::copy(&staging[material.table_pointer], (char*)&table_address, ulong::size);
-		}
-		vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, push_size, &staging);
+		push_mesh_constants(cmd, pipeline, push, material, table_address);
 
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 		// One copy. A batch's thousand placements are one answer by construction —

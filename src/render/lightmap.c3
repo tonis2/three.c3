@@ -1290,6 +1290,29 @@ fn void lightmap_sort_tiles(LightmapTile[] tiles) @local
 }
 
 <*
+ Whatever the linked program kept. Under the bake defines almost every sampler
+ is dropped — nothing reads a colour — and pushing a write for a binding the
+ layout does not declare is a validation error. The compare bindings read the
+ static atlas, which is what lights a bake.
+*>
+fn void MeshPass.push_lightmap_samplers(&self, vk::CommandBuffer cmd, MeshPipeline* pipeline)
+{
+	SampledBindings samplers;
+	foreach (declared : pipeline.shader.bindings)
+	{
+		if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+		if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
+			|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
+		samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
+	}
+	ShadowAtlas* atlas = &self.shadow_manager.atlas;
+	vk::DescriptorImageInfo statics = atlas.compare_descriptor(true, atlas.static_initialized);
+	samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, statics);
+	samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, statics);
+	samplers.push(cmd, pipeline);
+}
+
+<*
  The submission: one rendering over the tiles asked for, one draw each through
  the viewport, then the readback, the seam sweep and the upload back.
 
@@ -1437,20 +1460,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 	// and the seam sweep works on it as if it were an image of its own.
 	vk::BufferImageCopy[] regions = mem::new_array(vk::BufferImageCopy, tiles.len);
 	defer mem::free(regions);
-	sz packed = 0;
-	foreach (i, tile : tiles)
-	{
-		regions[i] = {
-			.bufferOffset = (vk::DeviceSize)packed,
-			.bufferRowLength = tile.size,
-			.bufferImageHeight = tile.size,
-			.imageSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0,
-				.layerCount = 1 },
-			.imageOffset = { (int)tile.x, (int)tile.y, 0 },
-			.imageExtent = { tile.size, tile.size, 1 },
-		};
-		packed += (sz)tile.size * (sz)tile.size * (sz)LIGHTMAP_TEXEL_BYTES;
-	}
+	sz packed = (sz)lightmap_regions(tiles, regions);
 
 	map.staging = vk::new_buffer(
 		&gpu.allocator,
@@ -1491,30 +1501,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
 		gpu.texture_table.bind(cmd, pipeline.layout);
 
-		SampledBindings samplers;
-		// Whatever the linked program kept. Under the bake defines almost every
-		// sampler is dropped — nothing reads a colour — and pushing a write for a
-		// binding the layout does not declare is a validation error.
-		foreach (declared : pipeline.shader.bindings)
-		{
-			if (declared.set != 0) continue;
-			if (declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-			if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
-				|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
-			samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
-				true, self.shadow_manager.atlas.static_initialized));
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-				self.shadow_manager.atlas.compare_descriptor(
-					true, self.shadow_manager.atlas.static_initialized));
-		}
-		samplers.push(cmd, pipeline);
+		self.push_lightmap_samplers(cmd, pipeline);
 
 		// A tile the rendering loaded rather than cleared holds the last bake, margin
 		// and all, and the sweep below reads the alpha to decide which texels a
@@ -1558,47 +1545,16 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			MeshPipeline* selected = tile_pipelines[i];
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, selected.handle);
 			gpu.texture_table.bind(cmd, selected.layout);
-			SampledBindings selected_samplers;
-			foreach (declared : selected.shader.bindings)
-			{
-				if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-				if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
-					|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
-				selected_samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
-			}
-			if (pipeline_declares_binding(selected, SHADOW_ATLAS_COMPARE_BINDING))
-			{
-				selected_samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
-					self.shadow_manager.atlas.compare_descriptor(
-						true, self.shadow_manager.atlas.static_initialized));
-			}
-			if (pipeline_declares_binding(selected, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-			{
-				selected_samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-					self.shadow_manager.atlas.compare_descriptor(
-						true, self.shadow_manager.atlas.static_initialized));
-			}
-			selected_samplers.push(cmd, selected);
+			self.push_lightmap_samplers(cmd, selected);
 			MeshPush push = {
 				.frame = (FrameBlock*)map.frame.address,
 				.instances = (Instance*)(map.instances.address + (ulong)i * Instance::size),
 				.draw = (DrawRecord*)(map.draws.address + (ulong)i * DrawRecord::size),
 			};
-			char[PUSH_BUDGET] pushed = {};
-			mem::copy(&pushed, &push, MeshPush::size);
 			Material* material = self.material(node.material);
-			uint push_size = selected.shader.push_size;
-			if (material != null && push_size > MATERIAL_PUSH_START)
-			{
-				mem::copy(&pushed[MATERIAL_PUSH_START], &material.block[MATERIAL_PUSH_START],
-					(sz)(push_size - MATERIAL_PUSH_START));
-				if (material.table_pointer != NO_TABLE_POINTER && self.table_address != 0)
-				{
-					ulong table = self.table_address + (ulong)material.table_offset;
-					mem::copy(&pushed[material.table_pointer], &table, ulong::size);
-				}
-			}
-			vk::cmdPushConstants(cmd, selected.layout, selected.shader.stages, 0, push_size, &pushed);
+			ulong table = material != null && self.table_address != 0
+				? self.table_address + (ulong)material.table_offset : 0;
+			push_mesh_constants(cmd, selected, push, material, table);
 			vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 			vk::cmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);
 		}
@@ -1637,30 +1593,10 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 
 	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
 	{
-		vk::ImageMemoryBarrier2 to_destination = {
-			...IMAGE_BARRIER, .image = map.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_destination }));
+		map.transition(cmd, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		vk::cmdCopyBufferToImage(cmd, map.staging.buffer, map.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			(uint)regions.len, regions.ptr);
-		vk::ImageMemoryBarrier2 to_shader = {
-			...IMAGE_BARRIER, .image = map.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-			.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
+		map.transition(cmd, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}!;
 	map.revision++;
 }
