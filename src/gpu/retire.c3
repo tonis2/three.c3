@@ -186,7 +186,7 @@ fn void Gpu.retire_memory(
 {
 	// A stream a mesh never had, a view an image was created without. Cheaper to
 	// answer here than at each of the dozen call sites.
-	if (memory.buffer == null && view == null && sampler == null) return;
+	if (memory.buffer == null && memory.image == null && view == null && sampler == null) return;
 
 	if (self.handle == null)
 	{
