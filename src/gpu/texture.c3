@@ -18,16 +18,7 @@ import vk;
  costs one wrongly shared texture, and the check below compares dimensions before
  trusting the hash.
 *>
-fn ulong content_hash(char[] bytes)
-{
-	ulong hash = 0xcbf29ce484222325;
-	foreach (byte : bytes)
-	{
-		hash ^= (ulong)byte;
-		hash *= 0x100000001b3;
-	}
-	return hash;
-}
+fn ulong content_hash(char[] bytes) => hash_octets(KEY_SEED, bytes.ptr, bytes.len);
 
 <*
  The same hash over a run of slices, as though they were one.
@@ -44,15 +35,8 @@ fn ulong content_hash(char[] bytes)
 *>
 fn ulong content_hash_levels(char[][] levels)
 {
-	ulong hash = 0xcbf29ce484222325;
-	foreach (level : levels)
-	{
-		foreach (byte : level)
-		{
-			hash ^= (ulong)byte;
-			hash *= 0x100000001b3;
-		}
-	}
+	ulong hash = KEY_SEED;
+	foreach (level : levels) hash = hash_octets(hash, level.ptr, level.len);
 	return hash;
 }
 
@@ -450,27 +434,15 @@ fn Texture? Gpu.create_texture(
 		.hash = content_hash(rgba),
 	};
 
-	texture.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format)
-		.setExtent({ .width = width, .height = height, .depth = 1 })
-		.setMipLevels(levels)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(
-			IMAGE_TILING_OPTIMAL
-		)/* TRANSFER_SRC as well as DST, so `read_pixels` can copy the image back *//* and each mip level can be the blit source for the one below it. It costs *//* a usage bit and nothing else, and without it the readback is not merely *//* slow but invalid: the layer answers *//* `VUID-VkImageMemoryBarrier2-oldLayout-01212`, because an image may not *//* be moved to a layout its usage flags do not admit. */
-		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(self.handle)!;
+	// TRANSFER_SRC as well as DST, so `read_pixels` can copy the image back and
+	// each mip level can be the blit source for the one below it. Without it the
+	// readback is invalid: an image may not enter a layout its usage does not
+	// admit (`VUID-VkImageMemoryBarrier2-oldLayout-01212`).
+	texture.memory = self.create_device_image(format, width, height,
+		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT, levels)!;
+	texture.image = texture.memory.image;
 
-	texture.memory = vk::create_image_buffer(texture.image, &self.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	vk::Memory stage = vk::new_buffer(
-		&self.allocator,
-		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: rgba.ptr,
-		data_size: rgba.len,
-	)!;
+	vk::Memory stage = self.create_upload(rgba.len, rgba.ptr)!;
 	defer stage.free();
 
 	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)
@@ -480,18 +452,7 @@ fn Texture? Gpu.create_texture(
 		// that reads as black — it is a blit destination in a layout the blit does
 		// not admit (`VUID-vkCmdBlitImage-dstImageLayout-00226`), with undefined
 		// contents after.
-		vk::ImageMemoryBarrier2 to_transfer = {
-			...IMAGE_BARRIER,
-			.image = texture.image,
-			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-			.srcAccessMask = (vk::AccessFlags2)0,
-			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = { ...COLOR_LEVEL, .levelCount = levels },
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_transfer }));
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ upload_barrier(texture.image, levels) }));
 
 		vk::BufferImageCopy region = {
 			.bufferOffset = 0,
@@ -630,18 +591,7 @@ fn void? Gpu.finish_texture(&self, Texture* texture, vk::Format format, bool nea
 {
 	uint levels = texture.levels;
 
-	texture.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = levels,
-				.baseArrayLayer = 0,
-				.layerCount = 1,
-			}
-		)
-		.setImage(texture.image)
-		.build(self.handle)!;
+	texture.view = self.create_view_2d(texture.image, format, IMAGE_ASPECT_COLOR_BIT, levels)!;
 
 	vk::Filter filter        = nearest ? FILTER_NEAREST : FILTER_LINEAR;
 	vk::SamplerMipmapMode mode = nearest ? SAMPLER_MIPMAP_MODE_NEAREST : SAMPLER_MIPMAP_MODE_LINEAR;
@@ -735,28 +685,12 @@ fn Texture? Gpu.create_texture_levels(
 		.nearest = nearest,
 	};
 
-	texture.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(vkformat)
-		.setExtent({ .width = width, .height = height, .depth = 1 })
-		.setMipLevels(count)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		// `TRANSFER_SRC` is here for the same reason as on the RGBA8 path and not
-		// for the blit: an image may only enter a layout its usage admits, so
-		// without it a later readback is invalid rather than merely refused.
-		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(self.handle)!;
+	// `TRANSFER_SRC` for the RGBA8 path's reason: a later readback needs it.
+	texture.memory = self.create_device_image(vkformat, width, height,
+		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT, count)!;
+	texture.image = texture.memory.image;
 
-	texture.memory = vk::create_image_buffer(texture.image, &self.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	vk::Memory stage = vk::new_buffer(
-		&self.allocator,
-		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: total,
-	)!;
+	vk::Memory stage = self.create_upload(total)!;
 	defer stage.free();
 
 	// Packed straight into the mapped staging memory rather than into a host
@@ -789,50 +723,57 @@ fn Texture? Gpu.create_texture_levels(
 
 	texture.hash = content_hash_levels(levels);
 
+	self.upload_levels(texture.image, &stage, regions[:count])!;
+
+	self.finish_texture(&texture, vkformat, nearest)!;
+	return texture;
+}
+
+<*
+ Every level of `image`, from nothing into `TRANSFER_DST_OPTIMAL` for a copy.
+*>
+fn vk::ImageMemoryBarrier2 upload_barrier(vk::Image image, uint levels)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+		.srcAccessMask = (vk::AccessFlags2)0,
+		.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		.subresourceRange = { ...COLOR_LEVEL, .levelCount = levels },
+	};
+}
+
+<*
+ Copies a filled staging buffer into a fresh image, one region a level, and
+ leaves every level in `SHADER_READ_ONLY_OPTIMAL` for the fragment shader.
+
+ Every level in one copy: they are disjoint subresources with nothing to order
+ between them.
+*>
+fn void? Gpu.upload_levels(&self, vk::Image image, vk::Memory* stage, vk::BufferImageCopy[] regions)
+{
+	uint levels = (uint)regions.len;
 	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)
 	{
-		vk::ImageMemoryBarrier2 to_transfer = {
-			...IMAGE_BARRIER,
-			.image = texture.image,
-			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-			.srcAccessMask = (vk::AccessFlags2)0,
-			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = { ...COLOR_LEVEL, .levelCount = count },
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_transfer }));
-
-		// Every level in one call. They are independent writes to disjoint
-		// subresources, so there is nothing to order between them.
-		vk::cmdCopyBufferToImage(
-			cmd,
-			stage.buffer,
-			texture.image,
-			IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			count,
-			&regions[0]
-		);
-
-		// One barrier for the whole chain, because every level is in the same
-		// layout — which is the part the generated path cannot do.
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ upload_barrier(image, levels) }));
+		vk::cmdCopyBufferToImage(cmd, stage.buffer, image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, levels, regions.ptr);
 		vk::ImageMemoryBarrier2 to_shader = {
 			...IMAGE_BARRIER,
-			.image = texture.image,
+			.image = image,
 			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
 			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
 			.dstAccessMask = ACCESS_2_SHADER_READ_BIT,
 			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = { ...COLOR_LEVEL, .levelCount = count },
+			.subresourceRange = { ...COLOR_LEVEL, .levelCount = levels },
 		};
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
 	}!;
-
-	self.finish_texture(&texture, vkformat, nearest)!;
-	return texture;
 }
 
 <*
@@ -896,13 +837,7 @@ fn void? Texture.read_pixels(&self, Gpu* gpu, char[] dst)
 
 	sz bytes = (sz)self.width * (sz)self.height * 4;
 
-	vk::Memory readback = vk::new_buffer(
-		&gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: bytes,
-	)!;
+	vk::Memory readback = gpu.create_readback(bytes)!;
 	defer readback.free();
 
 	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)

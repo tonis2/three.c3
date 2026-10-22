@@ -774,9 +774,7 @@ fn void MeshPass.bake_dirty_tiles(&self, Gpu* gpu)
 
 fn usz Lightmap.bytes(&self) => self.image != null ? (usz)self.memory.size : 0;
 
-fn vk::DescriptorImageInfo Lightmap.descriptor(&self) => {
-	.sampler = self.sampler, .imageView = self.view, .imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-};
+fn vk::DescriptorImageInfo Lightmap.descriptor(&self) => sampled_with(self.sampler, self.view);
 
 fn void Lightmap.free_buffers(&self)
 {
@@ -896,35 +894,18 @@ fn void? Lightmap.ensure_image(&self, Gpu* gpu, uint side)
 	if (self.image != null && self.side == side) return;
 	self.free_image(gpu);
 
-	defer catch
-	{
-		if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
-		if (self.memory.image != null) { self.memory.free(); }
-		else if (self.image != null) { vk::destroyImage(gpu.handle, self.image, null); }
-		self.image = (vk::Image)null;
-		self.view = (vk::ImageView)null;
-		self.memory = { };
-	}
-
-	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(LIGHTMAP_FORMAT)
-		.setExtent({ .width = side, .height = side, .depth = 1 })
-		.setMipLevels(1).setArrayLayers(1).setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT
-			| IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
-	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(LIGHTMAP_FORMAT)
-		.setSubresourceRange(COLOR_LEVEL).setImage(self.image).build(gpu.handle)!;
+	GpuImage atlas = gpu.create_image_2d(LIGHTMAP_FORMAT, { side, side }, IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+		| IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
+	defer catch atlas.destroy(gpu);
 	if (self.sampler == null)
 	{
 		// Linear and clamped: the tile is a picture of a surface, so it wants
 		// filtering, and the margin is what keeps a tap inside its own tile.
-		self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-			.setMinLod(0).setMaxLod(0).setBorderColor(BORDER_COLOR_FLOAT_TRANSPARENT_BLACK).build(gpu.handle)!;
+		self.sampler = gpu.clamp_sampler(FILTER_LINEAR, BORDER_COLOR_FLOAT_TRANSPARENT_BLACK)!;
 	}
+	self.image = atlas.image;
+	self.view = atlas.view;
+	self.memory = atlas.memory;
 	self.side = side;
 }
 
@@ -1824,12 +1805,7 @@ fn void? Lightmap.read_tiles(&self, Gpu* gpu, LightmapTile[] tiles, char[] into)
 		usz packed = lightmap_regions(tiles, regions);
 		if (packed > into.len) return LIGHTMAP_NO_ATLAS~;
 
-		vk::Memory staging = vk::new_buffer(
-			&gpu.allocator,
-			usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-			properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			data_size: (sz)packed,
-		)!;
+		vk::Memory staging = gpu.create_readback((sz)packed)!;
 		defer staging.free();
 
 		gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
@@ -1852,12 +1828,7 @@ fn void? Lightmap.write_tiles(&self, Gpu* gpu, LightmapTile[] tiles, char[] from
 		usz packed = lightmap_regions(tiles, regions);
 		if (packed > from.len) return LIGHTMAP_BAD_FILE~;
 
-		vk::Memory staging = vk::new_buffer(
-			&gpu.allocator,
-			usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-			properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			data_size: (sz)packed,
-		)!;
+		vk::Memory staging = gpu.create_upload((sz)packed)!;
 		defer staging.free();
 		mem::copy(staging.data(), from.ptr, (sz)packed);
 

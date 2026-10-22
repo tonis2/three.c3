@@ -82,7 +82,7 @@ const String[*] SHADY_ARGUMENTS = { "scalar-layout" };
 *>
 macro ShaderModule compile_shady(ShaderDef def, $Type)
 {
-	return compile_shady_inner(def, $Type, null, { });
+	return compile_shady_cached(def, $Type, null, { });
 }
 
 <*
@@ -112,50 +112,24 @@ fn ShaderModule compile_compute_shader(String name, String source)
 	// walks one - and a zeroed list is what `ShaderModule.free` expects.
 	mod.layout.push_fields.init(mem, 1);
 
-	shady::Diagnostic diagnostic;
-	shady::DiagnosticList warnings;
-	warnings.init(mem, 4);
-
-	char[]? compiled = shady::compile(source, &diagnostic, scalar_layout: true, warnings: &warnings);
-	if (catch compiled)
-	{
-		mod.ok = false;
-		mod.diagnostic = diagnostic.render(mem);
-		diagnostic.free();
-		copy_compute_warnings(&mod, &warnings);
-		foreach (warning : warnings) warning.free();
-		warnings.free();
-		return mod;
-	}
-	diagnostic.free();
-
-	if (compiled.len < 4 || *(uint*)compiled.ptr != SPIRV_MAGIC)
-	{
-		// Unreachable for this emitter, but a module that is not SPIR-V is not
-		// something a pipeline can load.
-		mod.ok = false;
-		mod.diagnostic = "three: shady returned something that is not a SPIR-V module".copy(mem);
-		alloc::free(mem, compiled);
-		copy_compute_warnings(&mod, &warnings);
-		foreach (warning : warnings) warning.free();
-		warnings.free();
-		return mod;
-	}
-	mod.spirv = compiled;
-
-	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
-	mod.layout.stages = stage_union(mod.entries.array_view());
+	if (!compile_shady_spirv(&mod, source)) return mod;
 	// Not walked from a C3 struct, so it is read out of the module's own
 	// `@pushconstant` block instead - see `reflect_push_block_size`.
 	mod.layout.push_size = reflect_push_block_size(mod.spirv);
-	mod.local_size = reflect_local_size(mod.spirv);
-	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
-
 	mod.ok = true;
-	copy_compute_warnings(&mod, &warnings);
-	foreach (warning : warnings) warning.free();
-	warnings.free();
 	return mod;
+}
+
+<*
+ A module off disk, with the workgroup shape that is not in the file read back
+ out of the module itself.
+*>
+fn bool load_cached_module(ShaderCacheKey key, ShaderModule* loaded) @local
+{
+	if (!shader_cache_try_load(key, loaded)) return false;
+	loaded.local_size = reflect_local_size(loaded.spirv);
+	loaded.subgroup_size = reflect_subgroup_size(loaded.spirv);
+	return true;
 }
 
 <*
@@ -181,12 +155,7 @@ fn ShaderModule compile_compute_shader_cached(String name, String source)
 		};
 
 		ShaderModule loaded;
-		if (shader_cache_try_load(key, &loaded))
-		{
-			loaded.local_size = reflect_local_size(loaded.spirv);
-			loaded.subgroup_size = reflect_subgroup_size(loaded.spirv);
-			return loaded;
-		}
+		if (load_cached_module(key, &loaded)) return loaded;
 
 		ShaderModule mod = compile_compute_shader(name, source);
 		if (mod.ok) shader_cache_save(key, &mod);
@@ -393,19 +362,63 @@ fn uint[3] reflect_local_size(char[] spirv, uint only_entry = 0)
 	return size;
 }
 
-fn void copy_compute_warnings(ShaderModule* mod, shady::DiagnosticList* warnings) @local
+<*
+ Runs shady over `source` and reflects the result into `mod`: its SPIR-V, entry
+ points, bindings, stages and workgroup shape. A successful compile can still
+ warn, and the warnings become the diagnostic.
+
+ False when there is no module, with the reason in the diagnostic.
+*>
+fn bool compile_shady_spirv(ShaderModule* mod, String source) @local
 {
+	shady::Diagnostic diagnostic;
+	shady::DiagnosticList warnings;
+	warnings.init(mem, 4);
+	defer
+	{
+		foreach (warning : warnings) warning.free();
+		warnings.free();
+	}
+
+	char[]? compiled = shady::compile(source, &diagnostic, scalar_layout: true, warnings: &warnings);
+	if (catch compiled)
+	{
+		mod.diagnostic = diagnostic.render(mem);
+		diagnostic.free();
+		return false;
+	}
+	diagnostic.free();
+
+	if (compiled.len < 4 || compiled.len % 4 != 0 || *(uint*)compiled.ptr != SPIRV_MAGIC)
+	{
+		// Unreachable for this emitter, but a module that is not SPIR-V is not
+		// something a pipeline can load.
+		mod.diagnostic = "three: shady returned something that is not a SPIR-V module".copy(mem);
+		alloc::free(mem, compiled);
+		return false;
+	}
+
 	@pool()
 	{
 		DString notes;
 		notes.tinit(256);
-		foreach (warning : *warnings)
+		foreach (warning : warnings)
 		{
 			if (notes.str_view().len > 0) notes.append_char('\n');
 			notes.append_string(warning.to_string(tmem));
 		}
 		if (notes.str_view().len > 0) mod.diagnostic = notes.copy_str(mem);
 	};
+
+	mod.spirv = compiled;
+	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
+	mod.layout.stages = stage_union(mod.entries.array_view());
+	// A def can be a compute module too - a compute post pass is one - and the
+	// dispatch is sized by what the body's `@threads` said. Zero on a module with
+	// no compute entry, which is every graphics def.
+	mod.local_size = reflect_local_size(mod.spirv);
+	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
+	return true;
 }
 
 <*
@@ -655,11 +668,6 @@ fn uint type_size(
 *>
 macro ShaderModule compile_shady_cached(ShaderDef def, $Type, bool* compiled, ShaderSpec[] specs)
 {
-	return compile_shady_inner(def, $Type, compiled, specs);
-}
-
-macro ShaderModule compile_shady_inner(ShaderDef def, $Type, bool* compiled, ShaderSpec[] specs)
-{
 	DString source;
 	source.tinit(64 * 1024);
 	append_shader_def(&source, def, $Type);
@@ -720,14 +728,7 @@ fn ShaderModule compile_shady_cached_source(
 		};
 
 		ShaderModule loaded;
-		if (shader_cache_try_load(key, &loaded))
-		{
-			// Not in the file, and read back out of the module the way
-			// `compile_compute_shader_cached` reads it - see `compile_shady_source`.
-			loaded.local_size = reflect_local_size(loaded.spirv);
-			loaded.subgroup_size = reflect_subgroup_size(loaded.spirv);
-			return loaded;
-		}
+		if (load_cached_module(key, &loaded)) return loaded;
 
 		ShaderModule mod = compile_shady_source(source, def, walked, walked_align);
 		if (compiled != null) *compiled = true;
@@ -816,60 +817,13 @@ fn ShaderModule compile_shady_source(
 		push_size = align_up(at + table, align);
 	}
 
-	shady::Diagnostic diagnostic;
-	shady::DiagnosticList warnings;
-	warnings.init(mem, 4);
-
-	char[]? compiled = shady::compile(source, &diagnostic, scalar_layout: true, warnings: &warnings);
-	if (catch compiled)
+	if (!compile_shady_spirv(&mod, source))
 	{
-		foreach (warning : warnings) warning.free();
-		warnings.free();
-
-		mod.ok = false;
-		mod.diagnostic = diagnostic.render(mem);
-		diagnostic.free();
 		free_shader_fields(&fields);
 		return mod;
 	}
-	diagnostic.free();
-
-	// A successful compile can still warn; `ShaderModule` carries that too.
-	@pool()
-	{
-		DString notes;
-		notes.tinit(256);
-		foreach (warning : warnings)
-		{
-			if (notes.str_view().len > 0) notes.append_char('\n');
-			notes.append_string(warning.to_string(tmem));
-		}
-		if (notes.str_view().len > 0) mod.diagnostic = notes.copy_str(mem);
-	};
-	foreach (warning : warnings) warning.free();
-	warnings.free();
-
-	if (compiled.len < 4 || compiled.len % 4 != 0 || *(uint*)compiled.ptr != SPIRV_MAGIC)
-	{
-		// Unreachable for this emitter, but a module that is not SPIR-V is
-		// not something a pipeline can load.
-		mod.ok = false;
-		mod.diagnostic = "three: shady returned something that is not a SPIR-V module".copy(mem);
-		alloc::free(mem, compiled);
-		free_shader_fields(&fields);
-		return mod;
-	}
-	mod.spirv = compiled;
-
-	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count);
-	mod.layout.stages = stage_union(mod.entries.array_view());
 	mod.layout.push_size = push_size;
 	mod.layout.push_fields = fields; // moved: the module owns the fields from here
-	// A def can be a compute module too - a compute post pass is one - and the
-	// dispatch is sized by what the body's `@threads` said. Zero on a module with
-	// no compute entry, which is every graphics def.
-	mod.local_size = reflect_local_size(mod.spirv);
-	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
 	mod.ok = true;
 	return mod;
 }

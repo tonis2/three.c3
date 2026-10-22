@@ -95,11 +95,6 @@ $assert POST_PUSH_START + POST_UNIFORM_BUDGET == PUSH_BUDGET : "the post uniform
 // coordinate in the string the agent typed.
 const String POST_BODY_NAME = "post";
 
-// What everything three.c3 generated is called. Self-describing rather than
-// short, because a note from inside the generated module names this file
-// whatever the body did.
-const String POST_PREAMBLE_NAME = "three.post";
-
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
 char[POST_DIAGNOSTIC_MAX] post_message @local;

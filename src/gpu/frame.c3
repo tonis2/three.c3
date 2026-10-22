@@ -96,6 +96,14 @@ fn ulong hash_octets(ulong hash, void* data, usz bytes)
 	return hash;
 }
 
+// Runs the body and adds how long it took to `*wait_ns`, when there is one.
+macro @timed(long* wait_ns; @body)
+{
+	Clock started = clock::now();
+	@body();
+	if (wait_ns != null) *wait_ns += (long)started.to_now();
+}
+
 // One FNV-1a step over a value of any width, for the scalars a key folds in.
 macro ulong @hash_value(ulong hash, value) => hash_octets(hash, &&(value), (usz)@sizeof(value));
 
@@ -885,21 +893,15 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 	vk::Fence fence        = self.frames.fences[slot];
 	vk::Semaphore acquired = self.frames.image_available[slot];
 
-	Clock waited = clock::now();
-	fence.wait(self.gpu.handle)!;
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
+	@timed(wait_ns) { fence.wait(self.gpu.handle)!; };
 
 	uint index;
-	waited = clock::now();
-	vk::Result acquire = vk::extensions.vkAcquireNextImageKHR(
-		self.gpu.handle,
-		self.viewer.handle,
-		ulong::max,
-		acquired,
-		(vk::Fence)null,
-		&index
-	);
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
+	vk::Result acquire;
+	@timed(wait_ns)
+	{
+		acquire = vk::extensions.vkAcquireNextImageKHR(self.gpu.handle, self.viewer.handle, ulong::max,
+			acquired, (vk::Fence)null, &index);
+	};
 	// The fence is deliberately still signalled here: nothing was submitted, so
 	// resetting it would deadlock the next frame's wait.
 	if (acquire == ERROR_OUT_OF_DATE_KHR)
@@ -945,7 +947,7 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 		self.ui.record(cmd, self.composite.extent)!;
 		vk::cmdEndRendering(cmd);
 		self.composite.close(cmd);
-		self.viewer.record_blit_from(cmd, self.composite.color, self.composite.extent, index);
+		self.viewer.record_blit_from(cmd, self.composite.color.image, self.composite.extent, index);
 	}
 	else
 	{
@@ -963,9 +965,8 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 		.setSwapchains({ self.viewer.handle })
 		.setImageIndices({ index });
 
-	waited = clock::now();
-	vk::Result presented = vk::extensions.vkQueuePresentKHR(self.gpu.graphics.handle, &present);
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
+	vk::Result presented;
+	@timed(wait_ns) { presented = vk::extensions.vkQueuePresentKHR(self.gpu.graphics.handle, &present); };
 
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -995,64 +996,32 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 *>
 fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long* wait_ns = null)
 {
-	if (wait_ns != null) *wait_ns = 0;
 	vk::Memory readback = self.target.create_readback(&self.gpu)!;
 	defer readback.free();
-
-	uint slot       = self.frames.slot;
-	vk::Fence fence = self.frames.fences[slot];
-	Clock waited = clock::now();
-	fence.wait(self.gpu.handle)!;
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
-	fence.reset(self.gpu.handle)!;
-	self.gpu.begin_frame();
-
-	vk::CommandBuffer cmd = self.frames.buffers[slot];
-	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
-	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
-
-	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd)!;
-	self.target.record_readback(cmd, &readback);
-	self.timer.end(cmd, slot);
-
-	vk::endCommandBuffer(cmd)!;
-	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
-
+	self.render_offscreen(wait_ns, readback: &readback)!;
 	// The buffer is host-coherent and the fence covers the copy, so there is
 	// nothing to invalidate and nothing to map — vk::Memory pages stay mapped.
-	waited = clock::now();
-	fence.wait(self.gpu.handle)!;
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
-
-	// Collected here rather than left to this slot's next `begin`, which is two
-	// frames away: a caller that captures and then asks what it cost should be
-	// told about the capture it just took, not the one before it.
-	self.timer.collect(&self.gpu, slot)!;
-
-	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 	return self.target.decode_readback(&readback, allocator);
 }
 
 <*
- Renders one frame into the target and stops there.
+ Renders one frame into the target and stops there, or copies it into
+ `readback` when one is given.
 
- `capture` without the readback, which is what `three.render(scene)` from a
- script wants: the pixels are read back once at the end of a run, and a script
- calling `render()` in a loop should not pay for a buffer allocation and a host
- copy each time. It exists rather than `render()` being a no-op so that a scene
- which cannot be drawn says so at the line that asked for it.
+ Without a readback this is what `three.render(scene)` from a script wants: the
+ pixels are read back once at the end of a run, and a script calling `render()`
+ in a loop should not pay for a buffer allocation and a host copy each time. It
+ exists rather than `render()` being a no-op so that a scene which cannot be
+ drawn says so at the line that asked for it.
 
  @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn - see record_scene. False for three.render(), which is an explicit ask; the offscreen half of a host driving its own loop is what passes true.`
 *>
-fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = false)
+fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = false, vk::Memory* readback = null)
 {
 	if (wait_ns != null) *wait_ns = 0;
 	uint slot       = self.frames.slot;
 	vk::Fence fence = self.frames.fences[slot];
-	Clock waited = clock::now();
-	fence.wait(self.gpu.handle)!;
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
+	@timed(wait_ns) { fence.wait(self.gpu.handle)!; };
 	fence.reset(self.gpu.handle)!;
 	self.gpu.begin_frame();
 
@@ -1062,6 +1031,7 @@ fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = 
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
 	self.record_scene(cmd, may_skip: may_skip)!;
+	if (readback != null) self.target.record_readback(cmd, readback);
 	self.timer.end(cmd, slot);
 
 	vk::endCommandBuffer(cmd)!;
@@ -1070,11 +1040,10 @@ fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = 
 	// Waited on here rather than left to the next frame's fence: the instance
 	// buffer for this slot is rewritten on the next record, and it may not be
 	// while the GPU is still reading it.
-	waited = clock::now();
-	fence.wait(self.gpu.handle)!;
-	if (wait_ns != null) *wait_ns += (long)waited.to_now();
-	// The wait is already paid for, so the frame's own timing is free to take —
-	// same argument as in `capture`.
+	@timed(wait_ns) { fence.wait(self.gpu.handle)!; };
+	// Collected here rather than left to this slot's next `begin`, which is two
+	// frames away: a caller that renders and then asks what it cost should be
+	// told about the frame it just drew, not the one before it.
 	self.timer.collect(&self.gpu, slot)!;
 	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 }

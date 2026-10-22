@@ -647,7 +647,7 @@ fn char[] read_shadow_depth(three::Renderer* renderer)
 		vk::ImageMemoryBarrier2 read = {
 			...three::IMAGE_BARRIER,
 			.subresourceRange = three::DEPTH_LEVEL,
-			.image = atlas.image,
+			.image = atlas.live.image,
 			.srcStageMask = vk::PipelineStageFlagBits2.PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 			.srcAccessMask = vk::AccessFlagBits2.ACCESS_2_SHADER_SAMPLED_READ_BIT
 				| vk::AccessFlagBits2.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -667,7 +667,7 @@ fn char[] read_shadow_depth(three::Renderer* renderer)
 			.imageOffset = { 0, 0, 0 },
 			.imageExtent = { atlas.width, atlas.height, 1 },
 		};
-		vk::cmdCopyImageToBuffer(cmd, atlas.image, vk::ImageLayout.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vk::cmdCopyImageToBuffer(cmd, atlas.live.image, vk::ImageLayout.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			staging.buffer, 1, &region);
 
 		vk::ImageMemoryBarrier2 restore = {
@@ -2974,7 +2974,7 @@ fn void point_shadow_resources_survive_resize_toggle_and_light_removal() @test
 		device::reserve_point_shadow_pages(renderer);
 		renderer.capture()!!.free();
 		usz large = renderer.pass.shadow_manager.atlas.bytes();
-		test::@check(renderer.pass.shadow_manager.atlas.static_image == null,
+		test::@check(renderer.pass.shadow_manager.atlas.statics.image == null,
 			"a scene with no static caster allocates no atlas cache");
 
 		three::RunResult resized = run.run(`three.lights.shadow.size = 256`);

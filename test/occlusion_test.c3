@@ -259,7 +259,7 @@ fn void disabled_ao_allocates_nothing_and_enable_builds_the_target_extent() @tes
 
 		renderer.capture()!!.free();
 		three::AmbientOcclusion* ao = &renderer.pass.ambient_occlusion;
-		vk::Image before = ao.image;
+		vk::Image before = ao.depth.image;
 		usz before_bytes = ao.bytes();
 		test::@check(!ao.live, "disabled AO reported a live pass");
 
@@ -267,7 +267,7 @@ fn void disabled_ao_allocates_nothing_and_enable_builds_the_target_extent() @tes
 		defer enabled.free();
 		test::@check(enabled.ok, "lifecycle AO toggle worked: %s", enabled.error);
 		renderer.capture()!!.free();
-		test::@check(ao.image != null, "enabled AO did not create its depth image");
+		test::@check(ao.depth.image != null, "enabled AO did not create its depth image");
 		test::@check(ao.live, "enabled AO did not record a depth pass");
 		test::@check(ao.extent.width == W && ao.extent.height == H,
 			"AO depth extent is %dx%d, target is %dx%d", ao.extent.width, ao.extent.height, W, H);
@@ -276,8 +276,8 @@ fn void disabled_ao_allocates_nothing_and_enable_builds_the_target_extent() @tes
 		defer disabled.free();
 		renderer.capture()!!.free();
 		test::@check(!ao.live, "turning AO off still records its pass");
-		test::@check(ao.image != null, "toggle discarded the reusable AO allocation");
-		test::@check(before == null || before == ao.image || before_bytes == ao.bytes(),
+		test::@check(ao.depth.image != null, "toggle discarded the reusable AO allocation");
+		test::@check(before == null || before == ao.depth.image || before_bytes == ao.bytes(),
 			"disabled AO replaced an existing reusable allocation");
 	};
 }

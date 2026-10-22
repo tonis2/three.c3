@@ -522,19 +522,19 @@ fn void composite_at_two_extents() @test
 
 		// Nothing is allocated until something asks, so a run that never brings
 		// an interface up never pays for this.
-		test::@check(composite.color == null, "a fresh composite already held an image");
+		test::@check(composite.color.image == null, "a fresh composite already held an image");
 		test::@check(composite.bytes() == 0, "a fresh composite already counted bytes");
 
 		composite.ensure(gpu, { .width = 320, .height = 240 })!!;
-		vk::Image first    = composite.color;
-		vk::ImageView view = composite.color_view;
+		vk::Image first    = composite.color.image;
+		vk::ImageView view = composite.color.view;
 		test::@check(first != null, "ensure did not build an image");
 		test::@check(composite.bytes() > 0, "the image is bound to no memory");
 
 		// The same size again: this is asked on every presented frame.
 		composite.ensure(gpu, { .width = 320, .height = 240 })!!;
-		test::@check(composite.color == first, "asking for the size it already is rebuilt it");
-		test::@check(composite.color_view == view, "the view was rebuilt for the same size");
+		test::@check(composite.color.image == first, "asking for the size it already is rebuilt it");
+		test::@check(composite.color.view == view, "the view was rebuilt for the same size");
 
 		// Asserted on the bytes rather than on the handles: the old image is
 		// destroyed before the new one is created, and a driver is free to hand
@@ -551,7 +551,7 @@ fn void composite_at_two_extents() @test
 		);
 
 		composite.free(gpu);
-		test::@check(composite.color == null, "free left the image behind");
+		test::@check(composite.color.image == null, "free left the image behind");
 		// Twice, because `Renderer.free` runs after a path that may already have
 		// freed it, and a second `vkDestroyImage` on a live handle is not a
 		// thing the validation layer forgives.

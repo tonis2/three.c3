@@ -2,29 +2,22 @@ module three;
 
 import vk;
 
-faultdef SHADOW_ATLAS_BUDGET;
-
 struct ShadowTile { uint x; uint y; uint size; }
 struct ShadowRect { uint x; uint y; uint width; uint height; }
 
 struct ShadowAtlas
 {
-	vk::Image image;
-	vk::ImageView view;
-	vk::Memory memory;
+	GpuImage live;
 	vk::Sampler sampler;
 	// The same image again, through a depth-compare sampler: one tap is four
 	// texel comparisons filtered in the texture unit.
 	vk::Sampler compare_sampler;
 	// A 1x1 depth image the compare descriptor points at when there is no atlas:
 	// a comparison sampler is only defined against a depth image.
-	vk::Image blank_image;
-	vk::ImageView blank_view;
-	vk::Memory blank_memory;
+	GpuImage blank;
 	bool blank_ready;
-	vk::Image static_image;
-	vk::ImageView static_view;
-	vk::Memory static_memory;
+	// Static casters only, copied into `live` under the moving ones.
+	GpuImage statics;
 	vk::Format format;
 	uint width;
 	uint height;
@@ -34,45 +27,20 @@ struct ShadowAtlas
 	bool static_target;
 }
 
-fn usz ShadowAtlas.bytes(&self) => (usz)(self.memory.size + self.static_memory.size);
+fn usz ShadowAtlas.bytes(&self) => (usz)(self.live.memory.size + self.statics.memory.size);
 
-fn void? ShadowAtlas.create_image(&self, Gpu* gpu, uint width, uint height,
-	vk::Image* image, vk::ImageView* view, vk::Memory* memory, usz max_bytes = usz::max)
+const vk::ImageUsageFlags SHADOW_ATLAS_USAGE = IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT
+	| IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT;
+
+fn GpuImage? ShadowAtlas.create_image(&self, Gpu* gpu, uint width, uint height, usz max_bytes = usz::max)
 {
-	vk::Image made_image;
-	vk::ImageView made_view;
-	vk::Memory made_memory;
-	defer catch
-	{
-		if (made_view != null) vk::destroyImageView(gpu.handle, made_view, null);
-		if (made_memory.image != null) { made_memory.free(); }
-		else if (made_image != null) { vk::destroyImage(gpu.handle, made_image, null); }
-	}
-	made_image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.format)
-		.setExtent({ width, height, 1 }).setMipLevels(1).setArrayLayers(1).setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL).setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT
-		| IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
-	vk::MemoryRequirements requirements = made_image.getMemoryRequirements(gpu.handle);
-	usz required = (usz)requirements.size;
-	usz alignment = (usz)requirements.alignment;
-	if (alignment > 0) required = (required + alignment - 1) / alignment * alignment;
-	if (required > max_bytes) return SHADOW_ATLAS_BUDGET~;
-	made_memory = vk::create_image_buffer(made_image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-	made_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.format)
-		.setSubresourceRange({ .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 })
-		.setImage(made_image).build(gpu.handle)!;
-	*image = made_image; *view = made_view; *memory = made_memory;
+	return gpu.create_image_2d(self.format, { width, height }, SHADOW_ATLAS_USAGE, IMAGE_ASPECT_DEPTH_BIT, 1, max_bytes);
 }
 
 fn void ShadowAtlas.destroy_images(&self, Gpu* gpu)
 {
-	if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
-	if (self.memory.image != null) self.memory.free();
-	if (self.static_view != null) vk::destroyImageView(gpu.handle, self.static_view, null);
-	if (self.static_memory.image != null) self.static_memory.free();
-	self.image = (vk::Image)null; self.view = (vk::ImageView)null; self.memory = { };
-	self.static_image = (vk::Image)null; self.static_view = (vk::ImageView)null; self.static_memory = { };
+	self.live.free(gpu);
+	self.statics.free(gpu);
 	self.width = 0; self.height = 0; self.initialized = false; self.static_initialized = false;
 }
 
@@ -93,19 +61,15 @@ fn void ShadowAtlas.pick_format(&self, Gpu* gpu)
 *>
 fn void? ShadowAtlas.ensure_compare(&self, Gpu* gpu)
 {
-	if (self.compare_sampler != null && self.blank_image != null) return;
+	if (self.compare_sampler != null && self.blank.image != null) return;
 	self.pick_format(gpu);
 	if (self.compare_sampler == null)
 	{
-		self.compare_sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST).setMinLod(0).setMaxLod(0)
-			.setCompareEnable(1).setCompareOp(COMPARE_OP_LESS_OR_EQUAL)
-			.setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
+		self.compare_sampler = gpu.clamp_sampler(FILTER_LINEAR, compare: COMPARE_OP_LESS_OR_EQUAL)!;
 	}
-	if (self.blank_image == null)
+	if (self.blank.image == null)
 	{
-		self.create_image(gpu, 1, 1, &self.blank_image, &self.blank_view, &self.blank_memory)!;
+		self.blank = self.create_image(gpu, 1, 1)!;
 		self.blank_ready = false;
 	}
 }
@@ -113,74 +77,64 @@ fn void? ShadowAtlas.ensure_compare(&self, Gpu* gpu)
 // One barrier, once, so the blank is readable in the layout its descriptor names.
 fn void ShadowAtlas.record_blank(&self, vk::CommandBuffer cmd)
 {
-	if (self.blank_image == null || self.blank_ready) return;
-	self.begin_image(cmd, self.blank_image, false, true);
-	self.finish_image(cmd, self.blank_image);
+	if (self.blank.image == null || self.blank_ready) return;
+	self.begin_image(cmd, self.blank.image, false, true);
+	self.finish_image(cmd, self.blank.image);
 	self.blank_ready = true;
 }
 
 fn void? ShadowAtlas.ensure(&self, Gpu* gpu, uint width, uint height, bool want_static = false,
 	usz max_bytes = usz::max)
 {
-	if (self.image != null && self.width == width && self.height == height && self.bytes() > max_bytes)
+	if (self.live.image != null && self.width == width && self.height == height && self.bytes() > max_bytes)
 	{
-		return SHADOW_ATLAS_BUDGET~;
+		return IMAGE_OVER_BUDGET~;
 	}
-	if (self.image == null || self.width != width || self.height != height)
+	if (self.live.image == null || self.width != width || self.height != height)
 	{
-		if (self.image != null) { gpu.wait_idle(); self.destroy_images(gpu); }
+		self.destroy_images(gpu);
 		self.pick_format(gpu);
-		self.create_image(gpu, width, height, &self.image, &self.view, &self.memory, max_bytes)!;
+		self.live = self.create_image(gpu, width, height, max_bytes)!;
 		defer catch self.destroy_images(gpu);
 		if (self.sampler == null)
 		{
-			self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
-				.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST).setMinLod(0).setMaxLod(0)
-				.setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
+			self.sampler = gpu.clamp_sampler(FILTER_NEAREST)!;
 		}
 		self.width = width; self.height = height;
 		self.generation++;
 	}
-	if (want_static && self.static_image == null)
+	if (want_static && self.statics.image == null)
 	{
-		usz used = (usz)self.memory.size;
+		usz used = (usz)self.live.memory.size;
 		usz available = used < max_bytes ? max_bytes - used : 0;
-		self.create_image(gpu, width, height, &self.static_image, &self.static_view, &self.static_memory, available)!;
+		self.statics = self.create_image(gpu, width, height, available)!;
 		self.static_initialized = false;
 	}
 }
 
 fn vk::DescriptorImageInfo ShadowAtlas.descriptor(&self, bool sample_static = false)
 {
-	return { .sampler = self.sampler, .imageView = sample_static ? self.static_view : self.view,
+	return { .sampler = self.sampler, .imageView = sample_static ? self.statics.view : self.live.view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 }
 
 fn vk::DescriptorImageInfo ShadowAtlas.compare_descriptor(&self, bool sample_static = false, bool live = true)
 {
-	vk::ImageView view = sample_static ? self.static_view : self.view;
+	vk::ImageView view = sample_static ? self.statics.view : self.live.view;
 	bool readable = live && view != null && (sample_static ? self.static_initialized : self.initialized);
-	return { .sampler = self.compare_sampler, .imageView = readable ? view : self.blank_view,
+	return { .sampler = self.compare_sampler, .imageView = readable ? view : self.blank.view,
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 }
 
 fn void ShadowAtlas.begin_image(&self, vk::CommandBuffer cmd, vk::Image image, bool initialized, bool discard)
 {
-	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = image,
-		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.oldLayout = discard || !initialized ? IMAGE_LAYOUT_UNDEFINED : IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } };
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_open_barrier(image, discard || !initialized) }));
 }
 
 fn void ShadowAtlas.begin_live(&self, vk::CommandBuffer cmd, bool discard = false)
-{ self.static_target = false; self.begin_image(cmd, self.image, self.initialized, discard); }
+{ self.static_target = false; self.begin_image(cmd, self.live.image, self.initialized, discard); }
 fn void ShadowAtlas.begin_static(&self, vk::CommandBuffer cmd, bool discard = false)
-{ self.static_target = true; self.begin_image(cmd, self.static_image, self.static_initialized, discard); }
+{ self.static_target = true; self.begin_image(cmd, self.statics.image, self.static_initialized, discard); }
 
 fn void ShadowAtlas.begin_tile(&self, vk::CommandBuffer cmd, ShadowTile tile, bool clear)
 {
@@ -189,7 +143,7 @@ fn void ShadowAtlas.begin_tile(&self, vk::CommandBuffer cmd, ShadowTile tile, bo
 
 fn void ShadowAtlas.begin_tile_rect(&self, vk::CommandBuffer cmd, ShadowTile tile, ShadowRect rect, bool clear)
 {
-	vk::ImageView target = self.static_target ? self.static_view : self.view;
+	vk::ImageView target = self.static_target ? self.statics.view : self.live.view;
 	vk::RenderingAttachmentInfo depth = vk::renderingAttachmentInfo().setImageView(target)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(clear ? ATTACHMENT_LOAD_OP_CLEAR : ATTACHMENT_LOAD_OP_LOAD)
@@ -204,16 +158,10 @@ fn void ShadowAtlas.begin_tile_rect(&self, vk::CommandBuffer cmd, ShadowTile til
 
 fn void ShadowAtlas.finish_image(&self, vk::CommandBuffer cmd, vk::Image image)
 {
-	vk::ImageMemoryBarrier2 barrier = { ...IMAGE_BARRIER, .image = image,
-		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, .dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } };
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ barrier }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_sample_barrier(image) }));
 }
-fn void ShadowAtlas.end_live(&self, vk::CommandBuffer cmd) { self.finish_image(cmd, self.image); self.initialized = true; }
-fn void ShadowAtlas.end_static(&self, vk::CommandBuffer cmd) { self.finish_image(cmd, self.static_image); self.static_initialized = true; }
+fn void ShadowAtlas.end_live(&self, vk::CommandBuffer cmd) { self.finish_image(cmd, self.live.image); self.initialized = true; }
+fn void ShadowAtlas.end_static(&self, vk::CommandBuffer cmd) { self.finish_image(cmd, self.statics.image); self.static_initialized = true; }
 
 // Leaves the live atlas in attachment layout for dynamic LOAD overlays.
 fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowRect[] tiles)
@@ -221,17 +169,17 @@ fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowRect[] tiles
 	if (tiles.len == 0) return;
 	self.static_target = false;
 	vk::ImageMemoryBarrier2[2] before = {
-		{ ...IMAGE_BARRIER, .image = self.static_image, .srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		{ ...IMAGE_BARRIER, .image = self.statics.image, .srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 			.srcAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
 			.oldLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } },
-		{ ...IMAGE_BARRIER, .image = self.image, .srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+			.subresourceRange = DEPTH_LEVEL },
+		{ ...IMAGE_BARRIER, .image = self.live.image, .srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 			.srcAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT, .dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
 			.oldLayout = self.initialized ? IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : IMAGE_LAYOUT_UNDEFINED,
 			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } },
+			.subresourceRange = DEPTH_LEVEL },
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(before[..]));
 	foreach (tile : tiles)
@@ -239,21 +187,21 @@ fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowRect[] tiles
 		vk::ImageCopy region = { .srcSubresource = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .layerCount = 1 },
 			.srcOffset = { (int)tile.x, (int)tile.y, 0 }, .dstSubresource = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .layerCount = 1 },
 			.dstOffset = { (int)tile.x, (int)tile.y, 0 }, .extent = { tile.width, tile.height, 1 } };
-		vk::cmdCopyImage(cmd, self.static_image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			self.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+		vk::cmdCopyImage(cmd, self.statics.image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			self.live.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 	}
 	vk::ImageMemoryBarrier2[2] after = {
-		{ ...IMAGE_BARRIER, .image = self.static_image, .srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		{ ...IMAGE_BARRIER, .image = self.statics.image, .srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 			.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT, .dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
 			.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT, .oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } },
-		{ ...IMAGE_BARRIER, .image = self.image, .srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.subresourceRange = DEPTH_LEVEL },
+		{ ...IMAGE_BARRIER, .image = self.live.image, .srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
 			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
 			.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 			.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-			.subresourceRange = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 } },
+			.subresourceRange = DEPTH_LEVEL },
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(after[..]));
 }
@@ -261,10 +209,9 @@ fn void ShadowAtlas.copy_static(&self, vk::CommandBuffer cmd, ShadowRect[] tiles
 fn void ShadowAtlas.free(&self, Gpu* gpu)
 {
 	if (gpu.handle == null) return;
-	gpu.wait_idle(); self.destroy_images(gpu);
-	if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
-	if (self.compare_sampler != null) vk::destroySampler(gpu.handle, self.compare_sampler, null);
-	if (self.blank_view != null) vk::destroyImageView(gpu.handle, self.blank_view, null);
-	if (self.blank_memory.image != null) self.blank_memory.free();
+	self.destroy_images(gpu);
+	self.blank.free(gpu);
+	gpu.retire_memory({ }, sampler: self.sampler);
+	gpu.retire_memory({ }, sampler: self.compare_sampler);
 	*self = { };
 }

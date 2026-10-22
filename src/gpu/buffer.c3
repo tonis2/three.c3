@@ -131,3 +131,30 @@ fn vk::Memory? Gpu.create_device_storage(&self, sz size)
 		data_size: size,
 	);
 }
+<*
+ Host-visible memory one copy to the device reads from, filled from `data` when
+ there is any. Freed by the caller once the copy has finished.
+*>
+fn vk::Memory? Gpu.create_upload(&self, sz size, void* data = null)
+{
+	return vk::new_buffer(
+		&self.allocator,
+		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
+		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data: data,
+		data_size: size,
+	);
+}
+
+<*
+ Host-visible memory one copy from the device lands in.
+*>
+fn vk::Memory? Gpu.create_readback(&self, sz size)
+{
+	return vk::new_buffer(
+		&self.allocator,
+		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
+		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		data_size: size,
+	);
+}

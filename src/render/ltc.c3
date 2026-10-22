@@ -32,10 +32,8 @@ faultdef LTC_FORMAT_UNSUPPORTED, LTC_TABLE_CORRUPT;
 
 struct LtcTable
 {
-	vk::Image image;
-	vk::ImageView view;
+	GpuImage table;
 	vk::Sampler sampler;
-	vk::Memory memory;
 	<*
 	 True once the table is on the device and bound. `FrameBlock.lighting.w`
 	 carries it into the shader, and false there means the numeric integration —
@@ -70,82 +68,35 @@ fn void? LtcTable.ensure(&self, Gpu* gpu)
 	defer catch
 	{
 		if (self.sampler != null) vk::destroySampler(gpu.handle, self.sampler, null);
-		if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
-		if (self.memory.image != null) { self.memory.free(); }
-		else if (self.image != null) { vk::destroyImage(gpu.handle, self.image, null); }
+		self.table.destroy(gpu);
 		*self = { .attempted = true };
 	}
 
-	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(LTC_TABLE_FORMAT)
-		.setExtent({ .width = LTC_TABLE_WIDTH, .height = LTC_TABLE_HEIGHT, .depth = 1 })
-		.setMipLevels(1).setArrayLayers(1).setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_SAMPLED_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
-	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+	self.table.memory = gpu.create_device_image(LTC_TABLE_FORMAT, LTC_TABLE_WIDTH, LTC_TABLE_HEIGHT,
+		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_SAMPLED_BIT)!;
+	self.table.image = self.table.memory.image;
 
-	vk::Memory stage = vk::new_buffer(
-		&gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: &LTC_TABLE_BYTES[0],
-		data_size: LTC_TABLE_BYTES.len,
-	)!;
+	vk::Memory stage = gpu.create_upload(LTC_TABLE_BYTES.len, &LTC_TABLE_BYTES[0])!;
 	defer stage.free();
+	vk::BufferImageCopy[1] region = { {
+		.imageSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
+		.imageExtent = { LTC_TABLE_WIDTH, LTC_TABLE_HEIGHT, 1 },
+	} };
+	gpu.upload_levels(self.table.image, &stage, region[..])!;
 
-	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
-	{
-		vk::ImageMemoryBarrier2 to_transfer = {
-			...IMAGE_BARRIER, .image = self.image,
-			.srcStageMask = PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-			.srcAccessMask = (vk::AccessFlags2)0,
-			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_transfer }));
-
-		vk::BufferImageCopy region = {
-			.imageSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-			.imageExtent = { LTC_TABLE_WIDTH, LTC_TABLE_HEIGHT, 1 },
-		};
-		vk::cmdCopyBufferToImage(cmd, stage.buffer, self.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-		vk::ImageMemoryBarrier2 to_shader = {
-			...IMAGE_BARRIER, .image = self.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-			.dstAccessMask = ACCESS_2_SHADER_READ_BIT,
-			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
-	}!;
-
-	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(LTC_TABLE_FORMAT)
-		.setSubresourceRange(COLOR_LEVEL).setImage(self.image).build(gpu.handle)!;
+	self.table.view = gpu.create_view_2d(self.table.image, LTC_TABLE_FORMAT)!;
 	// Clamped and linear, which is the whole sampler: the fit is smooth in both
 	// axes, and the half-texel bias the shader applies keeps a tap inside its own
 	// half of the image so the two tables never blend into each other.
-	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-		.setMinLod(0).setMaxLod(0).setBorderColor(BORDER_COLOR_FLOAT_OPAQUE_WHITE).build(gpu.handle)!;
+	self.sampler = gpu.clamp_sampler(FILTER_LINEAR)!;
 
 	self.live = true;
 }
 
-fn vk::DescriptorImageInfo LtcTable.descriptor(&self) => {
-	.sampler = self.sampler, .imageView = self.view, .imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-};
+fn vk::DescriptorImageInfo LtcTable.descriptor(&self) => sampled_with(self.sampler, self.table.view);
 
 fn void LtcTable.free(&self, Gpu* gpu)
 {
-	if (self.image == null) { *self = { }; return; }
-	gpu.retire_memory(self.memory, self.view, self.sampler);
+	if (self.table.exists()) gpu.retire_memory(self.table.memory, self.table.view, self.sampler);
 	*self = { };
 }

@@ -272,7 +272,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 	uint requested_sun = sun_size;
 	uint requested_local = local_size;
 	bool want_static = self.scene.static_nodes > 0;
-	bool reuse = manager.atlas.image != null && manager.request_sun == requested_sun
+	bool reuse = manager.atlas.live.image != null && manager.request_sun == requested_sun
 		&& manager.request_local == requested_local && manager.request_views == views
 		&& manager.request_local_texels == local_texels
 		&& manager.request_texels == entries.budget.max_texels
@@ -746,7 +746,7 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	{
 		if (catch self.shadows.build_cutout_pipeline(gpu)) self.shadows.cutout_refused = true;
 	}
-	if (statics > 0 && !changing && manager.atlas.image != null)
+	if (statics > 0 && !changing && manager.atlas.live.image != null)
 	{
 		if (catch manager.atlas.ensure(gpu, manager.atlas.width, manager.atlas.height, true,
 			entries.budget.max_bytes))

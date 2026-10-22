@@ -179,20 +179,6 @@ const ShaderEntry[*] SHADOW_ENTRIES = {
 };
 
 <*
- The same file's entry points in its cut-out variant.
-
- Two, because a fragment stage is the only place a `discard` can happen and a
- cut-out shadow is a discard. It is a module of its own
- (`shaders/shadow_cutout.shady`) rather than a second entry point in the first
- one, so that the pipeline every ordinary caster shares has no sampler in its
- layout at all.
-*>
-const ShaderEntry[*] SHADOW_CUTOUT_ENTRIES = {
-	{ "vertexMain", STAGE_VERTEX },
-	{ "fragmentMain", STAGE_FRAGMENT },
-};
-
-<*
  The cut-out module's own entry names, for the shady side.
 
  The vertex entry is spelled differently because the shady module carries
@@ -824,11 +810,6 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "relief", 388, 16 },
 };
 
-// How many of those the shader's generated declaration carries. All of them,
-// since the walk emits the whole struct; the constant stays as the one place a
-// field written ahead of the shaders would be excused.
-const uint DRAW_RECORD_SHADER_FIELDS = DRAW_RECORD_FIELDS.len;
-
 <*
  The whole of the post pass's push contract: one `float4` and nothing else.
 
@@ -1432,6 +1413,44 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 	return *self;
 }
 
+// Whether a kernel asking for `lanes` a subgroup can have them. Zero asks for nothing.
+fn bool GpuLimits.offers_subgroup(&self, uint lanes)
+{
+	return lanes == 0 || (self.subgroup_size_control && lanes >= self.min_subgroup_size && lanes <= self.max_subgroup_size);
+}
+
+<*
+ A compute pipeline over one entry point, held to exactly `lanes` a subgroup
+ when that is not zero. Check `GpuLimits.offers_subgroup` first.
+*>
+fn vk::Pipeline? Gpu.create_compute_pipeline(&self, vk::ShaderModule module_handle, char* entry,
+	vk::PipelineLayout layout, uint lanes = 0)
+{
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
+		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+		.requiredSubgroupSize = lanes,
+	};
+	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
+		.setStage(vk::pipelineShaderStageCreateInfo()
+			.setNext(lanes != 0 ? (void*)&required_lanes : null)
+			.setStage(SHADER_STAGE_COMPUTE_BIT)
+			.setMod(module_handle)
+			.setName(entry))
+		.setLayout(layout);
+	vk::Pipeline handle;
+	vk::createComputePipelines(self.handle, self.driver_cache.handle, 1, &info, null, &handle)!;
+	return handle;
+}
+
+// The vertex and fragment entries every drawing pipeline links under.
+fn vk::PipelineShaderStageCreateInfo[2] draw_stages(vk::ShaderModule module_handle) @local
+{
+	return {
+		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_VERTEX_BIT).setMod(module_handle).setName("vertexMain"),
+		vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT).setMod(module_handle).setName("fragmentMain"),
+	};
+}
+
 <*
  Builds the mesh pipeline from a compiled module.
 
@@ -1459,13 +1478,7 @@ fn MeshPipeline? MeshPipeline.init(
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::PipelineShaderStageCreateInfo[2] stages = {
-		vk::pipelineShaderStageCreateInfo()
-		.setStage(SHADER_STAGE_VERTEX_BIT)
-		.setMod(module_handle)
-		.setName("vertexMain"), vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT)
-			.setMod(module_handle)
-			.setName("fragmentMain"), };
+	vk::PipelineShaderStageCreateInfo[2] stages = draw_stages(module_handle);
 
 	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
@@ -1577,13 +1590,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::PipelineShaderStageCreateInfo[2] stages = {
-		vk::pipelineShaderStageCreateInfo()
-		.setStage(SHADER_STAGE_VERTEX_BIT)
-		.setMod(module_handle)
-		.setName("vertexMain"), vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_FRAGMENT_BIT)
-			.setMod(module_handle)
-			.setName("fragmentMain"), };
+	vk::PipelineShaderStageCreateInfo[2] stages = draw_stages(module_handle);
 
 	// Colour only. `setDepthAttachmentFormat` is absent rather than set to
 	// FORMAT_UNDEFINED for readability; the zero the struct starts with is
@@ -1663,29 +1670,15 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
 		return SHADER_WORKGROUP_TOO_LARGE~;
 	}
 	uint lanes = mod.subgroup_size;
-	if (lanes != 0 && (!limits.subgroup_size_control || lanes < limits.min_subgroup_size || lanes > limits.max_subgroup_size))
-	{
-		return SHADER_SUBGROUP_SIZE_UNSUPPORTED~;
-	}
+	if (!limits.offers_subgroup(lanes)) return SHADER_SUBGROUP_SIZE_UNSUPPORTED~;
 
 	self.build_layouts(gpu, mod, contract, { entry }, texture_table: false)!;
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
-		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
-		.requiredSubgroupSize = lanes,
-	};
-	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(vk::pipelineShaderStageCreateInfo()
-			.setNext(lanes != 0 ? (void*)&required_lanes : null)
-			.setStage(SHADER_STAGE_COMPUTE_BIT)
-			.setMod(module_handle)
-			.setName((ZString)entry.name.zstr_tcopy()))
-		.setLayout(self.layout);
-
-	if (catch err = vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &self.handle))
+	vk::Pipeline? handle = gpu.create_compute_pipeline(module_handle, (ZString)entry.name.zstr_tcopy(), self.layout, lanes);
+	if (catch err = handle)
 	{
 		// Built above and not yet anyone's: a failed pipeline must not strand them.
 		self.layout.free(gpu.handle);
@@ -1694,6 +1687,7 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
 		return err~;
 	}
 
+	self.handle = handle;
 	self.shader = mod.layout.copy();
 	self.bind_point = PIPELINE_BIND_POINT_COMPUTE;
 	self.local_size = size;
@@ -1841,11 +1835,22 @@ struct SkinPipeline
 *>
 fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 {
+	return self.init_compute(gpu, mod, SKIN_ENTRIES[..], SKIN_PUSH_FIELDS[..]);
+}
+
+fn SkinPipeline? SkinPipeline.init_cluster(&self, Gpu* gpu, ShaderModule* mod)
+{
+	return self.init_compute(gpu, mod, CLUSTER_ENTRIES[..], CLUSTER_PUSH_FIELDS[..]);
+}
+
+fn SkinPipeline? SkinPipeline.init_compute(&self, Gpu* gpu, ShaderModule* mod,
+	ShaderEntry[] entries, PushFieldLayout[] contract) @local
+{
 	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
 	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
 
-	check_entry_points(mod, SKIN_ENTRIES[..])!;
-	check_push_block(&mod.layout, SKIN_PUSH_FIELDS[..])!;
+	check_entry_points(mod, entries)!;
+	check_push_block(&mod.layout, contract)!;
 
 	vk::PushConstantRange push_range = {
 		.stageFlags = SHADER_STAGE_COMPUTE_BIT,
@@ -1859,14 +1864,7 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_COMPUTE_BIT).setMod(module_handle)
-			.setName("computeMain"))
-		.setLayout(self.layout);
-
-	vk::Pipeline handle;
-	vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &handle)!;
-	self.handle = handle;
+	self.handle = gpu.create_compute_pipeline(module_handle, "computeMain", self.layout)!;
 
 	// Moved, exactly as `MeshPipeline.init` moves it: the pipeline outlives the
 	// module it was built from.
@@ -1874,26 +1872,6 @@ fn SkinPipeline? SkinPipeline.init(&self, Gpu* gpu, ShaderModule* mod)
 	mod.layout = { };
 	self.ready = true;
 
-	return *self;
-}
-
-fn SkinPipeline? SkinPipeline.init_cluster(&self, Gpu* gpu, ShaderModule* mod)
-{
-	if (!gpu.limits.scalar_block_layout) return NO_SCALAR_BLOCK_LAYOUT~;
-	if (mod.layout.push_size > gpu.limits.max_push_constants_size) return PUSH_BLOCK_TOO_LARGE~;
-	check_entry_points(mod, CLUSTER_ENTRIES[..])!;
-	check_push_block(&mod.layout, CLUSTER_PUSH_FIELDS[..])!;
-	vk::PushConstantRange range = { .stageFlags = SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = mod.layout.push_size };
-	self.layout = vk::pipelineLayoutCreateInfo().setPushConstantRanges({ range }).build(gpu.handle)!;
-	vk::ShaderModule shader = vk::loadShaderModule(gpu.handle, mod.spirv)!;
-	defer shader.free(gpu.handle);
-	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(vk::pipelineShaderStageCreateInfo().setStage(SHADER_STAGE_COMPUTE_BIT).setMod(shader).setName("computeMain"))
-		.setLayout(self.layout);
-	vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &self.handle)!;
-	self.shader = mod.layout;
-	mod.layout = { };
-	self.ready = true;
 	return *self;
 }
 
