@@ -331,6 +331,25 @@ fn String Physics.transform_refusal(&self, NodeId node)
 }
 
 <*
+ The sphere radius that holds a box of half-size `extent`. Circumscribed on the
+ largest axis rather than inscribed, so a corner of the art cannot poke through
+ the floor — which reads as a bug in the solver.
+*>
+fn float sphere_radius_for(Vec3 extent) => math::max(extent.x, math::max(extent.y, extent.z));
+
+<*
+ A capsule about +Y, which is `shapes.c3`'s axis and this project's up, around a
+ box of half-size `extent`. The height is the cylindrical section only, matching
+ the library's KHR_implicit_shapes reading, so the caps are what the rest of the
+ bound pays for. `Exporter.write_node_physics` writes the same numbers.
+*>
+fn collision::Capsule capsule_for(Vec3 extent)
+{
+	float radius = math::max(extent.x, extent.z);
+	return { .height = math::max(0.0f, (extent.y - radius) * 2.0f), .radius_top = radius, .radius_bottom = radius };
+}
+
+<*
  Builds the collider a body will carry, from the mesh the node draws.
 
  The collider comes from the asset. A box and a sphere are the mesh's own bounds,
@@ -367,24 +386,12 @@ fn void*? Physics.build_collider(&self, Assets* assets, Node* node, ColliderShap
 			// The bound's own centre, and the radius that contains it. A sphere
 			// inscribed instead would let a corner of the art poke through the
 			// floor, which reads as a bug in the solver.
-			*sphere = {
-				.center = (slot.bounds.min + slot.bounds.max) * 0.5f,
-				.radius = math::max(extent.x, math::max(extent.y, extent.z)),
-			};
+			*sphere = { .center = (slot.bounds.min + slot.bounds.max) * 0.5f, .radius = sphere_radius_for(extent) };
 			return sphere;
 
 		case CAPSULE:
-			// About +Y, which is `shapes.c3`'s axis and this project's up. The
-			// height is the cylindrical section only, matching the library's
-			// KHR_implicit_shapes reading, so the caps are what the rest of the
-			// bound pays for.
-			float radius = math::max(extent.x, extent.z);
 			collision::Capsule* capsule = mem::new(collision::Capsule);
-			*capsule = {
-				.height = math::max(0.0f, (extent.y - radius) * 2.0f),
-				.radius_top = radius,
-				.radius_bottom = radius,
-			};
+			*capsule = capsule_for(extent);
 			return capsule;
 
 		case HULL:
@@ -1466,27 +1473,9 @@ fn bool SoftMesh.refresh(&self, collision::SoftBody* body)
 		self.bounds.max = math::max(self.bounds.max, local);
 	}
 
-	// Area-weighted, which is what the un-normalized cross product already is:
-	// a big triangle should have more say in a shared vertex's normal than a
-	// sliver does.
-	foreach (&normal : self.normals) *normal = { 0, 0, 0 };
-	foreach (triangle : body.triangles)
-	{
-		uint i0 = triangle[0];
-		uint i1 = triangle[1];
-		uint i2 = triangle[2];
-		if (i0 >= count || i1 >= count || i2 >= count) continue;
-		Vec3 face = (body.positions[i1] - body.positions[i0]).cross(body.positions[i2] - body.positions[i0]);
-		self.normals[i0] += face;
-		self.normals[i1] += face;
-		self.normals[i2] += face;
-	}
-	foreach (&normal : self.normals)
-	{
-		// A vertex no triangle reached, or one whose triangles cancelled out. Up,
-		// rather than a zero the shader would light as black.
-		*normal = normal.length_sq() > 1e-12f ? normal.normalize() : (Vec3) { 0, 1, 0 };
-	}
+	// Up for a vertex no triangle reached, rather than a zero the shader would
+	// light as black.
+	smooth_normals(body.positions.array_view(), body.triangles.array_view(), self.normals, { 0, 1, 0 });
 	return true;
 }
 
@@ -1505,6 +1494,19 @@ fn SoftMesh* Physics.soft_for(&self, NodeId node)
 		if (soft.node == node) return soft;
 	}
 	return null;
+}
+
+<*
+ The solver's soft body for a node, or null. Taken fresh at each call for
+ `rigidbody_for`'s reason: a later `add_softbody` may move the solver's storage.
+*>
+fn collision::SoftBody* Physics.softbody_for(&self, NodeId node)
+{
+	SoftMesh* record = self.soft_for(node);
+	if (record == null) return null;
+	collision::SoftBody*? body = self.world.find_softbody(record.id);
+	if (catch body) return null;
+	return body;
 }
 
 <*
@@ -1667,12 +1669,8 @@ fn bool Physics.remove_soft(&self, NodeId node)
 *>
 fn bool Physics.pin_soft(&self, NodeId node, sz particle, Vec3 at)
 {
-	SoftMesh* record = self.soft_for(node);
-	if (record == null) return false;
-
-	collision::SoftBody*? body = self.world.find_softbody(record.id);
-	if (catch body) return false;
-	if (particle < 0 || particle >= body.positions.len()) return false;
+	collision::SoftBody* body = self.softbody_for(node);
+	if (body == null || particle < 0 || particle >= body.positions.len()) return false;
 
 	body.wake();
 	body.pin_particle(particle, at);
@@ -1686,12 +1684,8 @@ fn bool Physics.pin_soft(&self, NodeId node, sz particle, Vec3 at)
 *>
 fn bool Physics.unpin_soft(&self, NodeId node, sz particle, float mass)
 {
-	SoftMesh* record = self.soft_for(node);
-	if (record == null) return false;
-
-	collision::SoftBody*? body = self.world.find_softbody(record.id);
-	if (catch body) return false;
-	if (particle < 0 || particle >= body.positions.len()) return false;
+	collision::SoftBody* body = self.softbody_for(node);
+	if (body == null || particle < 0 || particle >= body.positions.len()) return false;
 
 	body.wake();
 	body.unpin_particle(particle, mass);
@@ -1707,10 +1701,6 @@ fn bool Physics.unpin_soft(&self, NodeId node, sz particle, float mass)
 *>
 fn Vec3[] Physics.soft_points(&self, NodeId node)
 {
-	SoftMesh* record = self.soft_for(node);
-	if (record == null) return { };
-
-	collision::SoftBody*? body = self.world.find_softbody(record.id);
-	if (catch body) return { };
-	return body.positions.array_view();
+	collision::SoftBody* body = self.softbody_for(node);
+	return body != null ? body.positions.array_view() : { };
 }

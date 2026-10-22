@@ -373,16 +373,7 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 
 	@pool()
 	{
-		ulong hash = 0xcbf29ce484222325u;
-		foreach (height : field.heights)
-		{
-			uint bits = bitcast(height, uint);
-			for (uint byte = 0; byte < 4; byte++)
-			{
-				hash ^= (ulong)((bits >> (byte * 8)) & 0xff);
-				hash *= 0x100000001b3u;
-			}
-		}
+		ulong hash = hash_octets(KEY_SEED, field.heights.entries, (usz)(field.heights.len() * float::size));
 		String key = string::tformat(
 			"terrain:%f:%f:%d:%f:%x",
 			field.width,

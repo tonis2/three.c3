@@ -730,6 +730,24 @@ fn Texture? Gpu.create_texture_levels(
 }
 
 <*
+ What the texture's levels occupy on the device.
+
+ Through the format rather than as `width * height * 4`, which over-reports a
+ BC7 texture fourfold. `image_size` also rounds up to whole blocks, so the small
+ levels — where a block costs the same 16 bytes however few texels are left in
+ it — are counted as the device holds them.
+*>
+fn usz Texture.device_bytes(&self)
+{
+	usz total = 0;
+	for (uint level = 0; level < self.levels; level++)
+	{
+		total += (usz)self.format.image_size(level_extent(self.width, level), level_extent(self.height, level));
+	}
+	return total;
+}
+
+<*
  Every level of `image`, from nothing into `TRANSFER_DST_OPTIMAL` for a copy.
 *>
 fn vk::ImageMemoryBarrier2 upload_barrier(vk::Image image, uint levels)

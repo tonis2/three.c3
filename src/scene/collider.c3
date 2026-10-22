@@ -76,8 +76,6 @@ enum AssetShape : char
 	CYLINDER,
 }
 
-fn bool AssetShape.is_implicit(self) => self != AssetShape.MESH && self != AssetShape.HULL;
-
 <*
  One node's `KHR_physics_rigid_bodies` block, as the file states it.
 
@@ -349,13 +347,8 @@ fn void read_implicit_shape(AssetBody* body, gltf::Shape shape) @local
 			body.shape = AssetShape.SPHERE;
 			body.radius = shape.radius;
 		case CAPSULE:
-			body.shape = AssetShape.CAPSULE;
-			body.height = shape.height;
-			body.radius_top = shape.radius_top;
-			body.radius_bottom = shape.radius_bottom;
-			body.radius = math::max(shape.radius_top, shape.radius_bottom);
 		case CYLINDER:
-			body.shape = AssetShape.CYLINDER;
+			body.shape = shape.type == CAPSULE ? AssetShape.CAPSULE : AssetShape.CYLINDER;
 			body.height = shape.height;
 			body.radius_top = shape.radius_top;
 			body.radius_bottom = shape.radius_bottom;
@@ -598,7 +591,7 @@ fn void record_joints(Asset* asset, gltf::Gltf* doc) @local
 		}
 
 		Matrix4f world = source.global_matrix();
-		joint.pivot = { world.m[12], world.m[13], world.m[14] };
+		joint.pivot = translation_of(world);
 
 		gltf::PhysicsJoint* description = &doc.physics_joints[(uint)source.joint];
 		foreach (limit : description.linear_limits) joint.limits.push(read_joint_limit(0, limit));

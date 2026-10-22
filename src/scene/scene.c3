@@ -900,29 +900,31 @@ fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 	{
 		self.query.drop();
 	}
-	if (node == null || node.static_caster) self.static_revision++;
 	if (node == null)
 	{
+		self.static_revision++;
 		self.lightmap_dirty_all = true;
 		self.lightmap_changes++;
 	}
 	else if (node.static_caster)
 	{
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 	}
 }
 
 <*
- This copy's lightmap tile is out of date, and so is whatever it shadows.
+ A static caster changed: the cached static shadow map is stale, and so are this
+ copy's lightmap tile and whatever it shadows.
 
- Beside every `static_revision++` that has a node in hand: what invalidates a
- cached shadow map invalidates a cached lightmap. The difference is the reach —
+ What invalidates a cached shadow map invalidates a cached lightmap. The
+ difference is the reach —
  a shadow map is one image and a lightmap is a tile per copy, so the node is
  remembered and `MeshPass.resolve_lightmap` spreads the change to the receivers
  the baked lights could carry it to.
 *>
-fn void Scene.dirty_lightmap(&self, Node* node)
+fn void Scene.static_changed(&self, Node* node)
 {
+	self.static_revision++;
 	node.lightmap_dirty = true;
 	node.lightmap_seed = true;
 	self.lightmap_changes++;
@@ -1211,8 +1213,7 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 	{
 		node.static_caster = false;
 		self.static_nodes--;
-		self.static_revision++;
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 		node.lightmap = { 0, 0, 0, 0 };
 	}
 	if (skin < 0 || self.assets == null) return;
@@ -1384,15 +1385,7 @@ fn bool Scene.play(
 	Asset* loaded = self.assets.slot(player.asset);
 	if (loaded == null) return false;
 
-	int found = -1;
-	foreach (i, &candidate : loaded.clips)
-	{
-		if (candidate.name == clip)
-		{
-			found = (int)i;
-			break;
-		}
-	}
+	int found = loaded.find_clip(clip);
 	if (found < 0) return false;
 
 	self.assets.ensure_clip(player.asset, (uint)found);
@@ -1509,11 +1502,7 @@ fn bool Scene.blend(&self, NodeId root, String[] clips, float[] weights, float f
 	int[ANIMATION_LAYERS] found;
 	foreach (k, name : clips)
 	{
-		found[k] = -1;
-		foreach (i, &candidate : loaded.clips)
-		{
-			if (candidate.name == name) { found[k] = (int)i; break; }
-		}
+		found[k] = loaded.find_clip(name);
 		if (found[k] < 0) return false;
 	}
 	foreach (k, index : found[:clips.len]) self.assets.ensure_clip(player.asset, (uint)index);
@@ -2029,11 +2018,7 @@ fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
 	if (node == null) return;
 
 	bool now = parent_visible && node.visible;
-	if (node.static_caster && node.world_visible != now)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster && node.world_visible != now) self.static_changed(node);
 	node.world_visible = now;
 
 	sz count = node.children.len();
@@ -2111,11 +2096,7 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	// box is where it was. What *can* change is whether this copy casts at all —
 	// `MeshPass.casts_shadow` reads the material's blend mode — so a static caster
 	// changing material is a static map to rebuild.
-	if (node.static_caster)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster) self.static_changed(node);
 }
 
 <*
@@ -2160,8 +2141,7 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 	{
 		self.static_nodes--;
 	}
-	self.static_revision++;
-	self.dirty_lightmap(node);
+	self.static_changed(node);
 	// A node that has stopped being static has stopped being a receiver: it is
 	// about to move, and a tile it kept reading would be last position's light.
 	if (!wanted) node.lightmap = { 0, 0, 0, 0 };
@@ -2264,7 +2244,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	bool changed = parent_changed || node.dirty;
 	if (changed)
 	{
-		Vec3 before = { node.world.m[12], node.world.m[13], node.world.m[14] };
+		Vec3 before = node.world_position();
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
 		if (node.had_world)
@@ -2273,7 +2253,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		}
 		else
 		{
-			node.prev_world = { node.world.m[12], node.world.m[13], node.world.m[14] };
+			node.prev_world = node.world_position();
 			node.had_world = true;
 		}
 		node.dirty = false;
@@ -2289,11 +2269,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		// static, so nothing there would have said anything — and the wall's world
 		// matrix changed all the same. `changed` carries down the tree, so asking
 		// here catches the whole subtree of every move.
-		if (node.static_caster)
-		{
-			self.static_revision++;
-			self.dirty_lightmap(node);
-		}
+		if (node.static_caster) self.static_changed(node);
 	}
 
 	node.world_visible = parent_visible && node.visible;
@@ -2390,6 +2366,18 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
 	return true;
 }
 
+// `box` into `total`, or `total` becomes it when `found` says there is nothing yet.
+fn void union_into(collision::Aabb3* total, bool* found, collision::Aabb3 box)
+{
+	if (*found)
+	{
+		total.expand_by_aabb(box);
+		return;
+	}
+	*total = box;
+	*found = true;
+}
+
 <*
  The tight world-space box of one mesh under one transform.
 
@@ -2440,24 +2428,9 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 {
 	if (mesh.hull_positions.len == 0) return mesh.bounds.transform_matrix(m);
 
-	float[<16>] v = m.m;
-	collision::Aabb3 box;
-	foreach (i, p : mesh.hull_positions)
-	{
-		Vec3 world = {
-			v[0] * p.x + v[4] * p.y + v[8] * p.z + v[12],
-			v[1] * p.x + v[5] * p.y + v[9] * p.z + v[13],
-			v[2] * p.x + v[6] * p.y + v[10] * p.z + v[14],
-		};
-		if (i == 0)
-		{
-			box = { .min = world, .max = world };
-		}
-		else
-		{
-			box.expand_by_point(world);
-		}
-	}
+	Vec3 first = transform_point(m, mesh.hull_positions[0]);
+	collision::Aabb3 box = { .min = first, .max = first };
+	foreach (p : mesh.hull_positions[1..]) box.expand_by_point(transform_point(m, p));
 	return box;
 }
 
@@ -3149,16 +3122,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
-		collision::Aabb3 box = self.node_world_box(node, mesh);
-		if (!found)
-		{
-			total = box;
-			found = true;
-		}
-		else
-		{
-			total.expand_by_aabb(box);
-		}
+		union_into(&total, &found, self.node_world_box(node, mesh));
 	}
 
 	// The unit box is cached like any other answer. An empty scene is asked this
@@ -3218,16 +3182,7 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 			// The same cache `Scene.bounds` fills, and filled here for the same reason:
 			// a script measuring one piece per frame while the level stands still
 			// should pay for the piece.
-			collision::Aabb3 box = self.node_world_box(node, mesh);
-			if (!*found)
-			{
-				*total = box;
-				*found = true;
-			}
-			else
-			{
-				total.expand_by_aabb(box);
-			}
+			union_into(total, found, self.node_world_box(node, mesh));
 		}
 	}
 

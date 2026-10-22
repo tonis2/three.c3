@@ -1314,17 +1314,6 @@ fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
 	};
 }
 
-<*
- One FNV-1a step over a single uint, split out because the ribbon key mixes a lot
- of them and the multiplier is easier to trust in one place.
-*>
-fn ulong ribbon_fnv(ulong hash, uint bits) @inline
-{
-	hash ^= (ulong)bits;
-	hash *= 0x100000001b3u;
-	return hash;
-}
-
 // Read one number out of a flat array argument, with the same finite backstop the
 // other geometry reads use: `prelude.js` refuses a non-finite component with a
 // sentence naming its index, and zero is what a forged call gets instead of
@@ -1411,7 +1400,7 @@ fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 		geometry.init();
 		defer geometry.free();
 
-		ulong hash = 0xcbf29ce484222325u;
+		ulong hash = KEY_SEED;
 		for (usz i = 0; i < count; i++)
 		{
 			Vec3 position = { 0, 0, 0 };
@@ -1420,13 +1409,13 @@ fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 			{
 				position[axis] = ribbon_float(&js, args[0], (uint)(i * 3 + axis));
 				normal[axis] = ribbon_float(&js, args[1], (uint)(i * 3 + axis));
-				hash = ribbon_fnv(hash, bitcast(position[axis], uint));
-				hash = ribbon_fnv(hash, bitcast(normal[axis], uint));
+				hash = @hash_value(hash, position[axis]);
+				hash = @hash_value(hash, normal[axis]);
 			}
 			float ux = ribbon_float(&js, args[2], (uint)(i * 2));
 			float uy = ribbon_float(&js, args[2], (uint)(i * 2 + 1));
-			hash = ribbon_fnv(hash, bitcast(ux, uint));
-			hash = ribbon_fnv(hash, bitcast(uy, uint));
+			hash = @hash_value(hash, ux);
+			hash = @hash_value(hash, uy);
 			geometry.vertex(position, normal, { ux, uy });
 		}
 

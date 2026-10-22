@@ -388,7 +388,7 @@ fn void Asset.compose_posed(&self, PosedNode[] posed, Matrix4f[] locals, Matrix4
 	foreach (i, &node : posed)
 	{
 		if (i >= locals.len) break;
-		locals[i] = matrix::IDENTITY4{float}.translate(node.position).mul(node.rotation.to_matrix()).scale(node.scale);
+		locals[i] = trs(node.position, node.rotation, node.scale);
 	}
 
 	foreach (root : self.roots)
@@ -458,33 +458,20 @@ fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[]
 *>
 fn void measure_skinned_bounds(Asset* asset, Matrix4f[] poses) @local
 {
-	collision::Aabb3 bind = asset.bounds;
-	bool first            = true;
+	asset.skinned_bounds = bounds_over(asset.bounds, poses);
+}
 
-	foreach (pose : poses)
-	{
-		collision::Aabb3 moved = bind.transform_matrix(pose);
-		if (first)
-		{
-			asset.skinned_bounds = moved;
-			first = false;
-			continue;
-		}
-		asset.skinned_bounds = {
-			.min = {
-				math::min(asset.skinned_bounds.min.x, moved.min.x),
-				math::min(asset.skinned_bounds.min.y, moved.min.y),
-				math::min(asset.skinned_bounds.min.z, moved.min.z),
-			},
-			.max = {
-				math::max(asset.skinned_bounds.max.x, moved.max.x),
-				math::max(asset.skinned_bounds.max.y, moved.max.y),
-				math::max(asset.skinned_bounds.max.z, moved.max.z),
-			},
-		};
-	}
-
-	if (first) asset.skinned_bounds = bind;
+<*
+ `bind` through every joint matrix, unioned, or `bind` itself when there are
+ none. Conservative in the safe direction: a joint that moves a hand moves the
+ whole box.
+*>
+fn collision::Aabb3 bounds_over(collision::Aabb3 bind, Matrix4f[] poses)
+{
+	if (poses.len == 0) return bind;
+	collision::Aabb3 box = bind.transform_matrix(poses[0]);
+	foreach (pose : poses[1..]) box.expand_by_aabb(bind.transform_matrix(pose));
+	return box;
 }
 
 <*
@@ -783,30 +770,7 @@ fn bool Scene.set_palette(&self, NodeId id, Matrix4f[] matrices)
 	// through every joint matrix, unioned. Conservative in the safe direction, a
 	// joint that moves a hand moving the whole box.
 	collision::Aabb3 bind = node.mesh < owner.meshes.len() ? owner.meshes[node.mesh].bounds : owner.bounds;
-	bool first            = true;
-	foreach (pose : entry.matrices)
-	{
-		collision::Aabb3 moved = bind.transform_matrix(pose);
-		if (first)
-		{
-			entry.bounds = moved;
-			first = false;
-			continue;
-		}
-		entry.bounds = {
-			.min = {
-				math::min(entry.bounds.min.x, moved.min.x),
-				math::min(entry.bounds.min.y, moved.min.y),
-				math::min(entry.bounds.min.z, moved.min.z),
-			},
-			.max = {
-				math::max(entry.bounds.max.x, moved.max.x),
-				math::max(entry.bounds.max.y, moved.max.y),
-				math::max(entry.bounds.max.z, moved.max.z),
-			},
-		};
-	}
-	if (first) entry.bounds = bind;
+	entry.bounds = bounds_over(bind, entry.matrices.array_view());
 	return true;
 }
 
@@ -1077,7 +1041,7 @@ fn Matrix4f mix_rigid(Matrix4f from, Matrix4f to, float weight) @local
 	Vec3 position = from_position + (to_position - from_position) * weight;
 	Vec3 scale = from_scale + (to_scale - from_scale) * weight;
 	Quaternionf rotation = from_rotation.slerp(to_rotation, weight);
-	return matrix::IDENTITY4{float}.translate(position).mul(rotation.to_matrix()).scale(scale);
+	return trs(position, rotation, scale);
 }
 
 <*

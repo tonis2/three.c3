@@ -49,7 +49,7 @@
  ## Invalidation
 
  A tile is a fact about a light and a surface, so it goes stale when either
- moves. `Scene.dirty_lightmap` marks the copy beside every bump of
+ moves. `Scene.static_changed` marks the copy with every bump of
  `Scene.static_revision` — the same events the cached shadow map is invalidated
  by — and `JsRuntime.set_lighting` marks what a baked light's own change reaches.
  `MeshPass.resolve_lightmap` spreads a moved receiver's change to the receivers
@@ -607,7 +607,7 @@ fn collision::Aabb3 MeshPass.node_lightmap_box(&self, Node* node)
 		? self.assets.mesh(node.asset, node.mesh) : null;
 	if (mesh == null)
 	{
-		Vec3 at = { node.world.m[12], node.world.m[13], node.world.m[14] };
+		Vec3 at = node.world_position();
 		return { at, at };
 	}
 	return self.scene.node_world_box(node, mesh);
@@ -914,11 +914,7 @@ fn void? Lightmap.ensure_image(&self, Gpu* gpu, uint side)
 // anything else.
 fn float lightmap_area_scale(Matrix4f world) @local
 {
-	Matrix3f linear = {
-		.m = { world.m[0], world.m[1], world.m[2], world.m[4], world.m[5], world.m[6],
-			world.m[8], world.m[9], world.m[10] }
-	};
-	float det = math::abs(linear.determinant());
+	float det = math::abs(linear_determinant(world));
 	if (det <= 1e-12f) return 0;
 	float side = (float)math::pow((double)det, 1.0 / 3.0);
 	return side * side;

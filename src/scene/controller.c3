@@ -512,7 +512,7 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 		Node* floor_node = self.node(floor.node);
 		if (floor_node != null && floor_node.had_world)
 		{
-			Vec3 now   = { floor_node.world.m[12], floor_node.world.m[13], floor_node.world.m[14] };
+			Vec3 now   = floor_node.world_position();
 			Vec3 delta = now - floor_node.prev_world;
 			// Carry the capsule with the floor. Jumping (upward motion) is left
 			// alone so a lift does not glue you to itself on the way up.

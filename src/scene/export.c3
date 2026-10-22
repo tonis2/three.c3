@@ -1291,18 +1291,11 @@ fn void Exporter.write_node_physics(&self, NodeId id, uint written, bool mesh_wr
 		case BOX:
 			collider.shape = (int)self.out.add_shape({ .type = BOX, .size = extent * 2.0f });
 		case SPHERE:
-			float radius = math::max(extent.x, math::max(extent.y, extent.z));
-			collider.shape = (int)self.out.add_shape({ .type = SPHERE, .radius = radius });
+			collider.shape = (int)self.out.add_shape({ .type = SPHERE, .radius = sphere_radius_for(extent) });
 		case CAPSULE:
-			float radius = math::max(extent.x, extent.z);
-			collider.shape = (int)self.out.add_shape(
-				{
-					.type = CAPSULE,
-					.height = math::max(0.0f, (extent.y - radius) * 2.0f),
-					.radius_top = radius,
-					.radius_bottom = radius,
-				}
-			);
+			collision::Capsule capsule = capsule_for(extent);
+			collider.shape = (int)self.out.add_shape({ .type = CAPSULE, .height = capsule.height,
+				.radius_top = capsule.radius_top, .radius_bottom = capsule.radius_bottom });
 		case HEIGHTFIELD:
 			return;
 	}
@@ -1960,7 +1953,7 @@ fn int? Exporter.geometry_for(&self, AssetId asset, uint mesh)
 		written.uvs = (int)self.out.add_vec2(streams.uvs.array_view());
 	}
 	// Float VEC4, whatever width the file stored it at. glTF allows COLOR_0 as
-	// normalized bytes or shorts as well, and `@each_color` has already widened
+	// normalized bytes or shorts as well, and `read_colors` has already widened
 	// whichever it was; narrowing it again to guess at the original spelling would
 	// be a lossy step for the sake of a detail nothing reads back.
 	if (streams.colors.len() == streams.positions.len())
@@ -2033,13 +2026,20 @@ fn void Exporter.read_influences(&self, Asset* asset, gltf::Primitive primitive,
 		joints.push(influence[2]);
 		joints.push(influence[3]);
 	};
-	asset.stream.@each_weight(primitive, 0 ; Vec4 weight, sz i)
+	// The import path's reader, which knows the normalised ubyte and ushort
+	// encodings, and its normalisation, so the file gets the weights that drew.
+	List{Vec4} influences;
+	influences.init(mem, vertices);
+	defer influences.free();
+	read_weights(&asset.stream, primitive, &influences);
+	normalize_weights(&influences);
+	foreach (weight : influences)
 	{
 		weights.push(weight.x);
 		weights.push(weight.y);
 		weights.push(weight.z);
 		weights.push(weight.w);
-	};
+	}
 
 	if (joints.len() != vertices * 4 || weights.len() != vertices * 4) return;
 	// Narrowed back to bytes by the writer wherever the joint count allows it,
@@ -3256,38 +3256,7 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 	gltf::Mesh source = asset.stream.gltf.meshes[mesh.gltf_mesh];
 	if (mesh.gltf_primitive < 0 || mesh.gltf_primitive >= source.primitives.len()) return false;
 
-	gltf::Primitive primitive = source.primitives[mesh.gltf_primitive];
-	asset.stream.@each_position(primitive ; Vec3 position, sz i)
-	{
-		out.positions.push(position);
-	};
-	if (out.positions.len() == 0) return false;
-
-	asset.stream.@each_normal(primitive ; Vec3 normal, sz i)
-	{
-		out.normals.push(normal);
-	};
-	asset.stream.@each_texcoord(primitive, 0 ; Vec2 uv, sz i)
-	{
-		out.uvs.push(uv);
-	};
-	// Set 0 only. `CUSTOM_materials_layers` lets a mask name an attribute, and every
-	// attribute it can name that this renderer reads is COLOR_0 —
-	// `Assets.load_material_layers` uploads one colour stream per mesh.
-	asset.stream.@each_color(primitive, 0 ; Vec4 color, sz i)
-	{
-		out.colors.push(color);
-	};
-
-	read_indices(&asset.stream, primitive, &out.indices);
-	// A primitive with no index accessor is a plain vertex list, and glTF lets a
-	// primitive be written the same way — but the writer's dedup and the reader's
-	// bucket both key on an index accessor being there.
-	if (out.indices.len() == 0)
-	{
-		for (uint i = 0; i < out.positions.len(); i++) out.indices.push(i);
-	}
-	return true;
+	return read_primitive_streams(&asset.stream, source.primitives[mesh.gltf_primitive], out);
 }
 
 <*
@@ -3307,33 +3276,15 @@ fn bool read_stream_geometry(Asset* asset, GpuMesh* mesh, GeometryBuilder* out) 
 fn bool read_hull_geometry(GpuMesh* mesh, GeometryBuilder* out) @local
 {
 	foreach (position : mesh.hull_positions) out.positions.push(position);
-	foreach (i, position : mesh.hull_positions) out.normals.push({ 0, 0, 0 });
-
+	foreach (position : mesh.hull_positions) out.normals.push({ 0, 0, 0 });
+	// A vertex no triangle reached keeps a zero normal rather than a NaN one.
+	// glTF requires unit normals, and zero is the lesser of the two lies.
+	smooth_normals(mesh.hull_positions, mesh.hull_triangles, out.normals.array_view(), { 0, 0, 0 });
 	foreach (triangle : mesh.hull_triangles)
 	{
-		uint a = triangle[0];
-		uint b = triangle[1];
-		uint c = triangle[2];
-		if (a >= out.positions.len() || b >= out.positions.len() || c >= out.positions.len()) continue;
-
-		Vec3 face = (mesh.hull_positions[b] - mesh.hull_positions[a]).cross(
-			mesh.hull_positions[c] - mesh.hull_positions[a]
-		);
-		out.normals[a] = out.normals[a] + face;
-		out.normals[b] = out.normals[b] + face;
-		out.normals[c] = out.normals[c] + face;
-
-		out.indices.push(a);
-		out.indices.push(b);
-		out.indices.push(c);
-	}
-
-	foreach (i, normal : out.normals)
-	{
-		float length = math::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-		// A vertex no triangle reached keeps a zero normal rather than a NaN one.
-		// glTF requires unit normals, and zero is the lesser of the two lies.
-		out.normals[i] = length > 0 ? normal / length : (Vec3) { 0, 0, 0 };
+		if (triangle[0] >= out.positions.len() || triangle[1] >= out.positions.len()
+			|| triangle[2] >= out.positions.len()) continue;
+		foreach (corner : triangle) out.indices.push(corner);
 	}
 
 	// Now that the normals are unit, the projection. A vertex no triangle reached
