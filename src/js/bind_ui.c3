@@ -76,6 +76,11 @@ struct UiHandlers
 	// fact of it thrown away, and the two are separate because most panels want
 	// only the small one.
 	qjs::Value pointer;
+	// A `nodeGraph`'s two: everything it reports goes to `graph` as one event
+	// object, which `js/prelude/ui.js` fans out to the named handlers, and
+	// `query` answers whether a wire may run between two ports.
+	qjs::Value graph;
+	qjs::Value query;
 	bool has_click;
 	bool has_change;
 	bool has_commit;
@@ -87,6 +92,8 @@ struct UiHandlers
 	bool has_dismiss;
 	bool has_choose;
 	bool has_pointer;
+	bool has_graph;
+	bool has_query;
 }
 
 fn void UiHandlers.release(&self, qjs::Context* js)
@@ -102,6 +109,8 @@ fn void UiHandlers.release(&self, qjs::Context* js)
 	if (self.has_dismiss) js.release(self.dismiss);
 	if (self.has_choose) js.release(self.choose);
 	if (self.has_pointer) js.release(self.pointer);
+	if (self.has_graph) js.release(self.graph);
+	if (self.has_query) js.release(self.query);
 	*self = { };
 }
 
@@ -250,6 +259,7 @@ fn UiLayer*? JsRuntime.ui_layer(&self, qjs::Context* js, qjs::Value* out)
 		return UI_NO_DEVICE~;
 	}
 	self.renderer.ui.on_event(&js_ui_event, self);
+	self.renderer.ui.on_query(&js_ui_query);
 	return &self.renderer.ui;
 }
 
@@ -509,6 +519,11 @@ fn void js_ui_patch(
 			.max = prop_float(&js, props, "max"),
 			.has_size = has_prop(&js, props, "size"),
 			.size = prop_vec2(&js, props, "size"),
+			.has_view = has_prop(&js, props, "pan"),
+			.pan = prop_vec2(&js, props, "pan"),
+			.zoom = prop_float(&js, props, "zoom"),
+			.has_at = has_prop(&js, props, "at"),
+			.at = prop_vec2(&js, props, "at"),
 		};
 		layer.patch(node, fields);
 
@@ -538,6 +553,20 @@ fn void js_ui_patch(
 		{
 			layer.reset_list(node);
 			read_menus(&js, layer, props, node);
+			relist = true;
+		}
+		else if (has_prop(&js, props, "items"))
+		{
+			layer.reset_list(node);
+			read_entries(&js, layer, props, node);
+			relist = true;
+		}
+		else if (has_prop(&js, props, "nodes") || has_prop(&js, props, "ports") || has_prop(&js, props, "wires"))
+		{
+			// The three share the node's strings, so a patch naming one is a
+			// reset of all three — the two it did not name are put back as they
+			// were.
+			relist_graph(&js, layer, props, node);
 			relist = true;
 		}
 		if (relist) layer.relist(node);
@@ -658,7 +687,7 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	UiLayer* layer = &self.renderer.ui;
 
 	int kind = (int)prop_number(js, value, "k", -1);
-	if (kind < 0 || kind > UiNodeKind.DIALOG.ordinal) return UI_BAD_PARENT~;
+	if (kind < 0 || kind > UiNodeKind.CONTEXT_MENU.ordinal) return UI_BAD_PARENT~;
 
 	UiNodeSpec spec = {
 		.kind = UiNodeKind::from_ordinal((usz)kind),
@@ -713,6 +742,16 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 		.has_checked = has_prop(js, value, "checked"),
 		.has_selected = has_prop(js, value, "selected"),
 		.has_offset = has_prop(js, value, "offset"),
+
+		.pan = prop_vec2(js, value, "pan"),
+		.zoom = prop_float(js, value, "zoom"),
+		.has_view = has_prop(js, value, "pan"),
+		.searchable = prop_truth(js, value, "searchable"),
+		.graph_plane = prop_vec4(js, value, "planeColor"),
+		.graph_grid = prop_vec4(js, value, "gridColor"),
+		.graph_card = prop_vec4(js, value, "cardColor"),
+		.graph_header = prop_vec4(js, value, "headerColor"),
+		.graph_border = prop_vec4(js, value, "cardBorder"),
 	};
 
 	UiHandlers taken;
@@ -727,6 +766,8 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	taken.has_dismiss = take_handler(js, value, "onDismiss", &taken.dismiss);
 	taken.has_choose  = take_handler(js, value, "onChoose", &taken.choose);
 	taken.has_pointer = take_handler(js, value, "onPointer", &taken.pointer);
+	taken.has_graph = take_handler(js, value, "onGraph", &taken.graph);
+	taken.has_query = take_handler(js, value, "canConnect", &taken.query);
 
 	spec.on_click  = taken.has_click;
 	spec.on_change = taken.has_change;
@@ -739,6 +780,12 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	spec.on_dismiss = taken.has_dismiss;
 	spec.on_choose  = taken.has_choose;
 	spec.on_pointer = taken.has_pointer;
+	spec.on_graph = taken.has_graph;
+	spec.on_query = taken.has_query;
+	// A pan reported only to a graph that asked: it fires every frame of a
+	// drag, and a script that does not keep the view would re-render for
+	// nothing on each one.
+	spec.on_view = taken.has_graph && prop_truth(js, value, "graphView");
 
 	// Where a `fileBrowser` may look, decided here and enforced in
 	// `render/ui.c3`. This file is the one that knows what an assets directory
@@ -777,6 +824,12 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 			// borrowed `String[]` the snapshot fills in, and a second pair of
 			// push verbs for it would differ from `push_option` by nothing.
 			read_options(js, layer, value, index);
+		case NODE_GRAPH:
+			read_graph_nodes(js, layer, value, index);
+			read_graph_ports(js, layer, value, index);
+			read_graph_wires(js, layer, value, index);
+		case CONTEXT_MENU:
+			read_entries(js, layer, value, index);
 		default:
 			break;
 	}
@@ -910,6 +963,113 @@ fn void read_rows(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index)
 	}
 }
 
+<*
+ A `nodeGraph`'s nodes, as `js/prelude/ui.js` normalised them: `pos`, `width`,
+ `title`, `tag`, `header` (a colour), `flags` as bits — selected 1, error 2,
+ running 4, muted 8 — and `progress`.
+*>
+fn void read_graph_nodes(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+{
+	qjs::Value list = js.property(node, "nodes");
+	defer js.release(list);
+	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
+	for (long i = 0; i < count; i++)
+	{
+		qjs::Value entry = js.index(list, (uint)i);
+		defer js.release(entry);
+		uint flags = (uint)math::max(prop_number(js, entry, "flags"), 0.0);
+		layer.push_graph_node(index, {
+			.pos = prop_vec2(js, entry, "pos"),
+			.width = prop_float(js, entry, "width"),
+			.title = prop_text(js, entry, "title", tmem),
+			.tag = prop_text(js, entry, "tag", tmem),
+			.header = prop_vec4(js, entry, "header"),
+			.flags = flags,
+			.progress = prop_float(js, entry, "progress"),
+		});
+	}
+}
+
+<*
+ A `nodeGraph`'s ports: `node`, `output`, `label`, `color`, `square`, `hollow`.
+*>
+fn void read_graph_ports(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+{
+	qjs::Value list = js.property(node, "ports");
+	defer js.release(list);
+	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
+	for (long i = 0; i < count; i++)
+	{
+		qjs::Value entry = js.index(list, (uint)i);
+		defer js.release(entry);
+		layer.push_graph_port(index, {
+			.node = (usz)math::max(prop_number(js, entry, "node"), 0.0),
+			.output = prop_truth(js, entry, "output"),
+			.label = prop_text(js, entry, "label", tmem),
+			.color = prop_vec4(js, entry, "color"),
+			.square = prop_truth(js, entry, "square"),
+			.hollow = prop_truth(js, entry, "hollow"),
+		});
+	}
+}
+
+<*
+ A `nodeGraph`'s wires: `from` and `to` port indices, `color`, `selected`.
+*>
+fn void read_graph_wires(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+{
+	qjs::Value list = js.property(node, "wires");
+	defer js.release(list);
+	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
+	for (long i = 0; i < count; i++)
+	{
+		qjs::Value entry = js.index(list, (uint)i);
+		defer js.release(entry);
+		layer.push_graph_wire(index, {
+			.from = (usz)math::max(prop_number(js, entry, "from"), 0.0),
+			.to = (usz)math::max(prop_number(js, entry, "to"), 0.0),
+			.color = prop_vec4(js, entry, "color"),
+			.selected = prop_truth(js, entry, "selected"),
+		});
+	}
+}
+
+<*
+ Replaces whichever of a `nodeGraph`'s three lists a patch names, and keeps the
+ others — see `UiLayer.reset_graph`.
+*>
+fn void relist_graph(qjs::Context* js, UiLayer* layer, qjs::Value props, uint node) @local
+{
+	bool nodes = has_prop(js, props, "nodes");
+	bool ports = has_prop(js, props, "ports");
+	bool wires = has_prop(js, props, "wires");
+	layer.reset_graph(node, nodes, ports, wires);
+	if (nodes) read_graph_nodes(js, layer, props, node);
+	if (ports) read_graph_ports(js, layer, props, node);
+	if (wires) read_graph_wires(js, layer, props, node);
+}
+
+<*
+ A `contextMenu`'s entries: `label`, `category`, `hint`, `disabled`.
+*>
+fn void read_entries(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+{
+	qjs::Value list = js.property(node, "items");
+	defer js.release(list);
+	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
+	for (long i = 0; i < count; i++)
+	{
+		qjs::Value entry = js.index(list, (uint)i);
+		defer js.release(entry);
+		layer.push_context_item(index, {
+			.label = prop_text(js, entry, "label", tmem),
+			.category = prop_text(js, entry, "category", tmem),
+			.hint = prop_text(js, entry, "hint", tmem),
+			.disabled = prop_truth(js, entry, "disabled"),
+		});
+	}
+}
+
 // ============================================================================
 // Events, on their way in
 // ============================================================================
@@ -942,6 +1102,89 @@ fn qjs::Value JsRuntime.pointer_object(&self, UiEvent event)
 	self.js.set_property(out, "alt", qjs::bool_value((event.modifiers & 4) != 0));
 	self.js.set_property(out, "meta", qjs::bool_value((event.modifiers & 8) != 0));
 	return out;
+}
+
+<*
+ A GRAPH event as the object `js/prelude/ui.js`'s fan-out reads: `type` says
+ which, and the rest are the fields that type fills — see `UiGraphEvent`.
+*>
+fn qjs::Value JsRuntime.graph_object(&self, UiEvent event)
+{
+	qjs::Context* js = &self.js;
+	qjs::Value out = js.object();
+	js.set_property(out, "type", js.string(ui_graph_name(event.graph)));
+	js.set_property(out, "index", qjs::number_value((double)event.index));
+	js.set_property(out, "item", qjs::number_value((double)event.item));
+	js.set_property(out, "target", qjs::number_value((double)event.target));
+	js.set_property(out, "x", qjs::number_value((double)event.at.x));
+	js.set_property(out, "y", qjs::number_value((double)event.at.y));
+	js.set_property(out, "sx", qjs::number_value((double)event.screen.x));
+	js.set_property(out, "sy", qjs::number_value((double)event.screen.y));
+	js.set_property(out, "value", qjs::number_value((double)event.value));
+	js.set_property(out, "done", qjs::bool_value(event.flag));
+	if (event.graph == UiGraphEvent.BOX)
+	{
+		qjs::Value list = js.array();
+		foreach (i, n : event.list) js.set_index(list, (uint)i, qjs::number_value((double)n));
+		js.set_property(out, "list", list);
+	}
+	return out;
+}
+
+fn String ui_graph_name(UiGraphEvent kind) @local
+{
+	switch (kind)
+	{
+		case SELECT: return "select";
+		case BOX: return "box";
+		case MOVE: return "move";
+		case CONNECT: return "connect";
+		case DISCONNECT: return "disconnect";
+		case WIRE_SELECT: return "wireSelect";
+		case WIRE_DROPPED: return "wireDropped";
+		case CONTEXT: return "context";
+		case COMMAND: return "command";
+		case ADD: return "add";
+		case VIEW: return "view";
+	}
+}
+
+<*
+ A question from a widget, answered by the script: whether a `nodeGraph` wire
+ may run from one port to the other. A handler that throws is stopped and every
+ later question answered yes, the rule `js_ui_event` follows for every other
+ callback.
+*>
+fn bool js_ui_query(void* host, uint node, UiEvent event) @local
+{
+	JsRuntime* self = (JsRuntime*)host;
+	if (!self.ready) return true;
+	if ((sz)node >= self.ui_handlers.len()) return true;
+	UiHandlers* handlers = &self.ui_handlers[node];
+	if (!handlers.has_query) return true;
+
+	self.ui_dispatching = true;
+	defer self.ui_dispatching = false;
+	bool yes = true;
+	@pool()
+	{
+		qjs::Value[2] argv = { qjs::number_value((double)event.index), qjs::number_value((double)event.item) };
+		qjs::Value? answer = self.js.call(handlers.query, qjs::undefined_value(), argv[:2]);
+		if (catch err = answer)
+		{
+			self.report_frame_failure(
+				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.js.exception(tmem))
+			);
+			self.js.release(handlers.query);
+			handlers.has_query = false;
+		}
+		else
+		{
+			yes = self.js.truth(answer);
+			self.js.release(answer);
+		}
+	};
+	return yes;
 }
 
 fn String ui_phase_name(UiPointerPhase phase) @local
@@ -1085,6 +1328,23 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			what = "onChange";
 			argc = 1;
 			argv[0] = self.js.string(event.text);
+		case GRAPH:
+			// One handler for the lot, fanned out by name in the prelude, and the
+			// event built only when somebody is there to take it.
+			callback = handlers.graph;
+			alive = &handlers.has_graph;
+			what = "nodeGraph";
+			if (handlers.has_graph)
+			{
+				argc = 1;
+				argv[0] = self.graph_object(event);
+			}
+		case MENU_CHOOSE:
+			callback = handlers.choose;
+			alive = &handlers.has_choose;
+			what = "onChoose";
+			argc = 1;
+			argv[0] = qjs::int_value((int)event.index);
 		case POINTER:
 			// One object rather than nine positional arguments. Everything else
 			// here hands over the one number the widget changed; this hands over
@@ -1248,6 +1508,7 @@ fn void JsRuntime.release_ui(&self)
 	if (self.renderer == null) return;
 	self.renderer.ui.clear_tree();
 	self.renderer.ui.on_event(null, null);
+	self.renderer.ui.on_query(null);
 	self.renderer.ui.release_textures();
 }
 

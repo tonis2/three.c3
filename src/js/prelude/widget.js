@@ -100,6 +100,10 @@ const SYSTEM = 'ui.widgets';
 const VALUES = [
 	'text', 'value', 'checked', 'open', 'selected', 'offset',
 	'disabled', 'color', 'min', 'max', 'size', 'ops', 'options', 'rows', 'menus',
+	// A node graph's data and view, and a context menu's entries and opening
+	// point: moving a node, wiring it, panning and opening the menu are all
+	// patches, never a rebuild of the editors on the cards.
+	'nodes', 'ports', 'wires', 'view', 'items', 'at',
 ];
 const VALUE = new Set(VALUES);
 
@@ -109,6 +113,8 @@ const VALUE = new Set(VALUES);
 const HANDLER = new Set([
 	'onClick', 'onChange', 'onCommit', 'onSubmit', 'onSelect', 'onToggle', 'onHover',
 	'onConfirm', 'onDismiss', 'onChoose', 'onPointer',
+	'onBox', 'onMove', 'canConnect', 'onConnect', 'onDisconnect', 'onWireSelect', 'onWireDropped',
+	'onContext', 'onCommand', 'onAddRequest', 'onView',
 ]);
 
 // Not enumerable: a widget is a plain object a game puts its own fields on, and
@@ -161,6 +167,10 @@ const SCHEMA = {
 	// is a caption in its body, which is what somebody writing
 	// `new Dialog('About', 'three.c3 0.1.0')` meant.
 	dialog: { container: true, text: 'title', bool: 'open', fn: 'onDismiss' },
+	nodeGraph: { container: true },
+	nodeCard: { container: true, number: 'node' },
+	portRow: { container: true, number: 'port' },
+	contextMenu: { list: 'items', bool: 'open', fn: 'onChoose' },
 };
 
 // The nine anchors, spelled the way a person says them. `'top-left'`,
@@ -347,6 +357,36 @@ export class ConfirmDialog extends Node { constructor(...args) { super('confirmD
 export class MenuBar extends Node { constructor(...args) { super('menu', args); } }
 export class FileBrowser extends Node { constructor(...args) { super('fileBrowser', args); } }
 export class Dialog extends Node { constructor(...args) { super('dialog', args); } }
+
+// A node editor, and the menu that adds to one.
+//
+//     new NodeGraph({ nodes, ports, wires, onMove, onConnect, ... },
+//         ...nodes.map((n, i) => new NodeCard(i, body(n))))
+//
+// The data is the app's, by index: `nodes` ({ pos, title, tag, width, header,
+// selected, error, running, muted, progress }), `ports` ({ node, output, label,
+// color, square, hollow }) and `wires` ({ from, to, color, selected }), and the
+// graph reports what the user did — onSelect(node, mode), onBox(nodes, mode),
+// onMove(dx, dy, done), canConnect(from, to), onConnect(from, to),
+// onDisconnect(wire), onWireSelect(wire, mode), onWireDropped(port, plane,
+// screen), onContext(target, index, plane, screen), onCommand(name),
+// onAddRequest(plane, screen), onView(pan, zoom). The app changes its data and
+// renders again; a move, a wire or a selection is a patch.
+//
+// Each card is a `NodeCard(node, body)`. A `PortRow(port, row)` in a body puts
+// that port level with the row — the socket of a setting that can be wired.
+// The editors on the cards are ordinary widgets and work at any zoom.
+//
+// Colours: `planeColor`, `gridColor`, `cardColor`, `headerColor`, `cardBorder`,
+// `textColor` and `accent` (the selection); any left out are cui's own.
+//
+// `ContextMenu` opens where it is told (`open`, `at` — a point on screen, as
+// the graph's callbacks hand it), searchable or not, and calls onChoose(index)
+// or onDismiss(). Mount it last, beside the graph, so it paints over it.
+export class NodeGraph extends Node { constructor(...args) { super('nodeGraph', args); } }
+export class NodeCard extends Node { constructor(...args) { super('nodeCard', args); } }
+export class PortRow extends Node { constructor(...args) { super('portRow', args); } }
+export class ContextMenu extends Node { constructor(...args) { super('contextMenu', args); } }
 
 // What a card is made of, since every interface here is made of cards: a
 // background behind a padded column, sized to what is in it.
@@ -787,4 +827,5 @@ export const nodes = {
 	Rect, Label, Drawing,
 	Button, Checkbox, Slider, Select, Tree, TextField,
 	ConfirmDialog, MenuBar, FileBrowser, Dialog,
+	NodeGraph, NodeCard, PortRow, ContextMenu,
 };

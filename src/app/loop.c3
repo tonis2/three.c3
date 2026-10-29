@@ -404,7 +404,7 @@ fn WindowFrame drive_window(
 		// tick is a whole `pump` — which on the iteration that runs a slow tool call
 		// is seconds, and would turn every click that straddled it into a hold.
 		.input = keyboard.step(
-			ui_keys ? (FrameKeys){ } : keys,
+			ui_keys ? (FrameKeys){ } : keys.without(renderer.ui.taken),
 			ui_keys ? "" : typed,
 			to_script,
 			(double)now_ns / 1_000_000.0

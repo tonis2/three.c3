@@ -41,6 +41,7 @@ const KIND = {
 	rect: 8, label: 9, draw: 10,
 	button: 11, checkbox: 12, slider: 13, select: 14, tree: 15, textfield: 16,
 	confirmDialog: 17, menu: 18, fileBrowser: 19, dialog: 20,
+	nodeGraph: 21, nodeCard: 22, portRow: 23, contextMenu: 24,
 };
 
 // The seven Painter primitives and a picture, in the order `UiOpKind` declares them.
@@ -210,6 +211,116 @@ function normaliseOps(ops, where) {
 }
 
 // -----------------------------------------------------------------------
+// A node editor
+
+const SELECT_MODE = ['replace', 'add', 'toggle'];
+const GRAPH_TARGET = ['background', 'node', 'port', 'wire'];
+const GRAPH_COMMAND = ['delete', 'copy', 'cut', 'paste', 'duplicate', 'selectAll', 'undo', 'redo'];
+
+// The graph's three lists, by index: wires and cards name nodes and ports by
+// their position here. Flags cross as bits, the order `UiGraphNode` reads.
+function normaliseGraphNodes(nodes, where) {
+	if (nodes === undefined || nodes === null) return [];
+	if (!Array.isArray(nodes)) throw new TypeError(`${where} wants an array of nodes`);
+	return nodes.map((n, i) => {
+		const at = `${where}[${i}]`;
+		if (n === null || typeof n !== 'object') throw new TypeError(`${at} is { pos, title, ... }`);
+		const out = {
+			pos: pair(n.pos ?? n.at, `${at} pos`, [0, 0]),
+			title: String(n.title ?? ''),
+			flags: (n.selected ? 1 : 0) | (n.error ? 2 : 0) | (n.running ? 4 : 0) | (n.muted ? 8 : 0),
+		};
+		put(out, 'width', n.width === undefined ? undefined : num(n.width, `${at} width`));
+		if (n.tag !== undefined && n.tag !== null) out.tag = String(n.tag);
+		put(out, 'header', colour(n.header, `${at} header`));
+		put(out, 'progress', n.progress === undefined ? undefined : num(n.progress, `${at} progress`));
+		return out;
+	});
+}
+
+function normaliseGraphPorts(ports, where) {
+	if (ports === undefined || ports === null) return [];
+	if (!Array.isArray(ports)) throw new TypeError(`${where} wants an array of ports`);
+	return ports.map((p, i) => {
+		const at = `${where}[${i}]`;
+		if (p === null || typeof p !== 'object') throw new TypeError(`${at} is { node, output, label, color }`);
+		const out = { node: num(p.node, `${at} node`), output: !!p.output, label: String(p.label ?? '') };
+		put(out, 'color', colour(p.color, `${at} color`));
+		if (p.square || p.shape === 'square') out.square = true;
+		if (p.hollow) out.hollow = true;
+		return out;
+	});
+}
+
+function normaliseGraphWires(wires, where) {
+	if (wires === undefined || wires === null) return [];
+	if (!Array.isArray(wires)) throw new TypeError(`${where} wants an array of wires`);
+	return wires.map((w, i) => {
+		const at = `${where}[${i}]`;
+		if (w === null || typeof w !== 'object') throw new TypeError(`${at} is { from, to }`);
+		const out = { from: num(w.from, `${at} from`), to: num(w.to, `${at} to`) };
+		put(out, 'color', colour(w.color, `${at} color`));
+		if (w.selected) out.selected = true;
+		return out;
+	});
+}
+
+function normaliseEntries(items, where) {
+	if (items === undefined || items === null) return [];
+	if (!Array.isArray(items)) throw new TypeError(`${where} wants an array of items`);
+	return items.map((item, i) => {
+		if (typeof item === 'string') return { label: item };
+		if (item === null || typeof item !== 'object') {
+			throw new TypeError(`${where}[${i}] is a string or { label, category, hint, disabled }`);
+		}
+		const out = { label: String(item.label ?? '') };
+		if (item.category) out.category = String(item.category);
+		if (item.hint) out.hint = String(item.hint);
+		if (item.disabled) out.disabled = true;
+		return out;
+	});
+}
+
+// A view as `pan` and `zoom`, from `{ pan: [x, y], zoom }` or `{ x, y, zoom }`.
+function readView(view, where, out) {
+	if (view === undefined || view === null) return;
+	if (typeof view !== 'object') throw new TypeError(`${where} wants { pan: [x, y], zoom }`);
+	out.pan = pair(view.pan ?? [view.x ?? 0, view.y ?? 0], `${where} pan`, [0, 0]);
+	out.zoom = num(view.zoom ?? 1, `${where} zoom`);
+}
+
+// The graph reports through ONE host handler; this turns each event back into
+// the named callback a script attached, with the arguments that callback is
+// documented to take. Built per node, from whichever handlers it has.
+function graphDispatcher(node, where) {
+	const fns = {};
+	for (const name of ['onSelect', 'onBox', 'onMove', 'onConnect', 'onDisconnect', 'onWireSelect',
+		'onWireDropped', 'onContext', 'onCommand', 'onAddRequest', 'onView']) {
+		const fn = handler(node[name], `${where} ${name}`);
+		if (fn !== undefined) fns[name] = fn;
+	}
+	if (Object.keys(fns).length === 0) return undefined;
+	return (e) => {
+		const plane = [e.x, e.y];
+		const screen = [e.sx, e.sy];
+		switch (e.type) {
+			case 'select': return fns.onSelect?.(e.target, SELECT_MODE[e.item]);
+			case 'box': return fns.onBox?.(e.list ?? [], SELECT_MODE[e.item]);
+			case 'move': return fns.onMove?.(e.x, e.y, e.done);
+			case 'connect': return fns.onConnect?.(e.index, e.item);
+			case 'disconnect': return fns.onDisconnect?.(e.index);
+			case 'wireSelect': return fns.onWireSelect?.(e.index, SELECT_MODE[e.item]);
+			case 'wireDropped': return fns.onWireDropped?.(e.index, plane, screen);
+			case 'context': return fns.onContext?.(GRAPH_TARGET[e.index], e.target, plane, screen);
+			case 'command': return fns.onCommand?.(GRAPH_COMMAND[e.index]);
+			case 'add': return fns.onAddRequest?.(plane, screen);
+			case 'view': return fns.onView?.(plane, e.value);
+		}
+		return undefined;
+	};
+}
+
+// -----------------------------------------------------------------------
 // Nodes
 
 function normalise(node, path) {
@@ -338,6 +449,43 @@ function normalise(node, path) {
 			// borrowed array of strings and the host fills it with one verb.
 			out.options = (node.mask ?? []).map(String);
 			break;
+		case 'nodeGraph':
+			// A node editor. The data is three lists by index — see
+			// `normaliseGraphNodes` — and the children are `nodeCard`s naming a
+			// node each. Its handlers are fanned out of one host handler, so the
+			// generic readers below must not also bind the ones that share a
+			// name with another kind's (`onSelect`).
+			out.nodes = normaliseGraphNodes(node.nodes, `${where} nodes`);
+			out.ports = normaliseGraphPorts(node.ports, `${where} ports`);
+			out.wires = normaliseGraphWires(node.wires, `${where} wires`);
+			readView(node.view, `${where} view`, out);
+			put(out, 'onGraph', graphDispatcher(node, where));
+			put(out, 'canConnect', handler(node.canConnect, `${where} canConnect`));
+			if (node.onView) out.graphView = true;
+			// Its colours; `accent` (the selection) and `textColor` are read by
+			// the shared block above.
+			put(out, 'planeColor', colour(node.planeColor, `${where} planeColor`));
+			put(out, 'gridColor', colour(node.gridColor, `${where} gridColor`));
+			put(out, 'cardColor', colour(node.cardColor, `${where} cardColor`));
+			put(out, 'headerColor', colour(node.headerColor, `${where} headerColor`));
+			put(out, 'cardBorder', colour(node.cardBorder, `${where} cardBorder`));
+			return finishGraph(out, node, path, where);
+		case 'nodeCard':
+			out.selected = num(node.node, `${where} node`);
+			break;
+		case 'portRow':
+			out.selected = num(node.port, `${where} port`);
+			break;
+		case 'contextMenu':
+			// Opened at a point on screen: `open` rides on `checked` and `at` on
+			// `margin`, the fields a dialog and an anchor already spend.
+			out.items = normaliseEntries(node.items, `${where} items`);
+			if (node.open !== undefined) out.checked = !!node.open;
+			put(out, 'margin', node.at === undefined ? undefined : pair(node.at, `${where} at`, [0, 0]));
+			if (node.searchable) out.searchable = true;
+			if (node.placeholder !== undefined) out.suffix = String(node.placeholder);
+			out.size = [num(node.width ?? 0, `${where} width`), num(node.maxHeight ?? 0, `${where} maxHeight`)];
+			break;
 		case 'dialog':
 			// A floating titled panel, and the ONE kind here whose children are
 			// its own subtree rather than a list the host copies: they are built
@@ -383,7 +531,15 @@ function normalise(node, path) {
 	// widget cui hit-tests for you, and one that wanted raw coordinates would be
 	// asking to reimplement the widget it is standing on.
 	put(out, 'onPointer', handler(node.onPointer, `${where} onPointer`));
+	return finishChildren(out, node, path, type, where);
+}
 
+// A graph's children, without the generic handler reading above.
+function finishGraph(out, node, path, where) {
+	return finishChildren(out, node, path, 'nodeGraph', where);
+}
+
+function finishChildren(out, node, path, type, where) {
 	// `child` and `children` are the same thing said two ways, because a Padding
 	// with one child reads badly as an array of one and a Column with six reads
 	// badly as six nested properties.
@@ -612,6 +768,13 @@ export const ui = {
 		if ('options' in props) out.options = (props.options ?? []).map(String);
 		if ('rows' in props) out.rows = normaliseRows(props.rows, `${where} rows`);
 		if ('menus' in props) out.menus = normaliseMenus(props.menus, `${where} menus`);
+		// A node graph's data and view, and where a context menu opens.
+		if ('nodes' in props) out.nodes = normaliseGraphNodes(props.nodes, `${where} nodes`);
+		if ('ports' in props) out.ports = normaliseGraphPorts(props.ports, `${where} ports`);
+		if ('wires' in props) out.wires = normaliseGraphWires(props.wires, `${where} wires`);
+		if ('view' in props) readView(props.view, `${where} view`, out);
+		if ('items' in props) out.items = normaliseEntries(props.items, `${where} items`);
+		if ('at' in props) out.at = pair(props.at, `${where} at`, [0, 0]);
 		H.uiPatch(String(key), out);
 	},
 
