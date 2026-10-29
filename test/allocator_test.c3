@@ -153,16 +153,18 @@ fn void trim_gives_back_idle_pages_only() @test
 	};
 }
 
-// A deferred delete holds its page until `sync()`, and gives it back after.
-fn void a_deferred_delete_holds_its_page_until_sync() @test
+// `free_later` holds its page for `frames_in_flight` (2) syncs; the sync that
+// frees the block also gives the emptied page back.
+fn void a_later_free_holds_its_page_for_the_frames_in_flight() @test
 {
 	@with_allocator(; vk::MemoryAllocator* a)
 	{
 		vk::Memory later = make(a, 4 * MB);
-		later.mark_deleted();
-		test::@check(a.trim() == 0, "trim released a page with a pending delete in it");
+		later.free_later();
+		test::@check(a.trim() == 0, "trim released a page with a pending free in it");
 		a.sync();
-		test::@check(a.stats().idle_pages == 1, "sync did not give the block back");
-		test::@check(a.trim() == 4 * MB, "the page did not go back after sync");
+		test::@check(a.trim() == 0, "one sync freed a block the GPU may still be using");
+		a.sync();
+		test::@check(a.stats().pages == 0, "the second sync did not give the page back");
 	};
 }
