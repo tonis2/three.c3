@@ -128,18 +128,10 @@ fn String convex_key(Vec3[] points, Allocator allocator)
 	// FNV-1a, 64-bit. Not cryptographic and does not need to be — it only has to
 	// not collide by accident, and a collision needs two different clouds of the
 	// *same point count* landing on the same 64 bits.
-	ulong hash = 0xcbf29ce484222325;
+	ulong hash = KEY_SEED;
 	foreach (point : points)
 	{
-		for (usz axis = 0; axis < 3; axis++)
-		{
-			uint bits = bitcast(point[axis], uint);
-			for (usz byte = 0; byte < 4; byte++)
-			{
-				hash ^= (ulong)((bits >> (uint)(byte * 8)) & 0xff);
-				hash *= 0x100000001b3;
-			}
-		}
+		for (usz axis = 0; axis < 3; axis++) hash = @hash_value(hash, point[axis]);
 	}
 	return string::format(allocator, "<convex n=%d h=%x>", points.len, hash);
 }

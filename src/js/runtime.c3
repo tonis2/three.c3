@@ -263,6 +263,35 @@ fn void RunResult.free(&self)
 }
 
 <*
+ A JavaScript function the runtime holds on to and calls back later: a loop, a
+ click handler, a physics event. `callback` is a retained reference and is only
+ meaningful while `active`.
+*>
+struct HeldFn
+{
+	qjs::Value callback;
+	bool active;
+}
+
+fn HeldFn held_nothing() => { .callback = qjs::undefined_value() };
+
+// Replaces whatever was held with `value`, retained.
+fn void HeldFn.hold(&self, qjs::Context* js, qjs::Value value)
+{
+	self.release(js);
+	self.callback = js.retain(value);
+	self.active = true;
+}
+
+// Gives the reference back. Has to happen while the context is still open.
+fn void HeldFn.release(&self, qjs::Context* js)
+{
+	if (!self.active) return;
+	js.release(self.callback);
+	*self = held_nothing();
+}
+
+<*
  One engine, and the host state it drives.
 
  `pass` is required and `renderer` is not: the scene graph, the handles, the
@@ -319,17 +348,17 @@ struct JsRuntime
 	bool settled;
 	bool rejected;
 
-	// The animation loop, all of it owned by `js/frame_loop.c3`. `frame_fn` is a
-	// retained reference and is only meaningful while `frame_active`; releasing it
-	// is the one piece of cleanup that has to happen before the context closes
-	// rather than after, which is why `close` leads with it.
-	qjs::Value frame_fn;
-	bool frame_active;
-	// The fixed loop, the same way. Separate from `frame_fn` because they are
+	// The animation loop, all of it owned by `js/frame_loop.c3`. Releasing it is
+	// the one piece of cleanup that has to happen before the context closes rather
+	// than after, which is why `close` leads with it.
+	HeldFn frame_loop;
+	// The fixed loop, the same way. Separate from `frame_loop` because they are
 	// called a different number of times with a different argument — the clock
 	// decides how many of these a frame owes.
-	qjs::Value fixed_fn;
-	bool fixed_active;
+	HeldFn fixed_loop;
+	// The late systems, the same way again: called once a frame after the follow
+	// camera has moved, for whatever has to agree with where the camera ended up.
+	HeldFn late_loop;
 	bool in_frame;
 	long frame_ticks;
 	DString frame_log;
@@ -358,7 +387,7 @@ struct JsRuntime
 
 	<*
 	 The widget callbacks `three.ui.set` attached, one entry per node of the live
-	 snapshot — `js/bind_ui.c3`. Retained like `frame_fn`, and released before the
+	 snapshot — `js/bind_ui.c3`. Retained like `frame_loop`, and released before the
 	 context closes for the same reason.
 
 	 `ui_pending` is a snapshot a widget handler asked for while it was being
@@ -417,11 +446,9 @@ struct JsRuntime
 	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
 	usz key_handler_count;
 
-	// The click handler, also `js/bind_input.c3`'s. Retained like `frame_fn`, only
-	// meaningful while `click_active`, and released with the other two before the
-	// context closes.
-	qjs::Value click_fn;
-	bool click_active;
+	// The click handler, also `js/bind_input.c3`'s, released with the loops before
+	// the context closes.
+	HeldFn click_handler;
 
 	// The turntable's hand on the window — `scene/controls.c3`.
 	// 
@@ -441,10 +468,8 @@ struct JsRuntime
 	// itself is on the `Scene` — a body names a `NodeId` and the node pool those
 	// index into is per scene — and these are here because a handler is a property
 	// of the script, not of the world it happens to be watching.
-	qjs::Value trigger_fn;
-	bool trigger_active;
-	qjs::Value contact_fn;
-	bool contact_active;
+	HeldFn trigger_handler;
+	HeldFn contact_handler;
 
 	// `import`, wired up by `js/modules.c3` over `quickjs.c3l`'s loader. An empty
 	// root means no `--assets` boot and no disk imports at all, which is what a
@@ -617,8 +642,12 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	// draws one — `js/bind_ui.c3`.
 	self.ui_handlers.init(mem, 0);
 	self.ui_pending = qjs::undefined_value();
-	self.frame_fn = qjs::undefined_value();
-	self.click_fn = qjs::undefined_value();
+	self.frame_loop = held_nothing();
+	self.fixed_loop = held_nothing();
+	self.late_loop = held_nothing();
+	self.click_handler = held_nothing();
+	self.trigger_handler = held_nothing();
+	self.contact_handler = held_nothing();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
 	self.ready = true;
@@ -652,6 +681,7 @@ fn void JsRuntime.close(&self)
 	// into an engine that would no longer be there to release it into.
 	self.clear_frame();
 	self.clear_fixed();
+	self.clear_late();
 	self.clear_key_handlers();
 	self.clear_click_handler();
 	self.clear_physics_handlers();
@@ -837,7 +867,7 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		.warnings = self.advice.copy_str(mem),
 		.stats = stats,
 		.timing = self.renderer != null ? self.renderer.timing() : (FrameTiming) { },
-		.frame_running = self.frame_active,
+		.frame_running = self.frame_loop.active,
 		.frame_ticks = frame_ticks,
 		.frame_overruns = frame_overruns,
 		.frame_error = frame_error,

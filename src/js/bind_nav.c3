@@ -43,6 +43,7 @@ fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 	self.bind(host, "navCost", &js_nav_cost, 5);
 	self.bind(host, "navSample", &js_nav_sample, 11);
 	self.bind(host, "navPath", &js_nav_path, 10);
+	self.bind(host, "navPaths", &js_nav_paths, 14);
 	self.bind(host, "steer", &js_steer, 15);
 }
 
@@ -71,7 +72,7 @@ fn void js_nav_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Va
 		}
 		if (profile == null)
 		{
-			*out = js.raise(string::tformat("that asset has no navigation profile named '%s'", wanted));
+			*out = js.raisef("that asset has no navigation profile named '%s'", wanted);
 			return;
 		}
 		if (!scene.load_nav(profile)) { *out = qjs::null_value(); return; }
@@ -112,8 +113,8 @@ fn void js_nav_bake(
 	if (settings.has_bounds)
 	{
 		settings.bounds = {
-			{ arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9) },
-			{ arg_float(&js, argc, args, 10), arg_float(&js, argc, args, 11), arg_float(&js, argc, args, 12) },
+			arg_vec3(&js, argc, args, 7),
+			arg_vec3(&js, argc, args, 10),
 		};
 		settings.bounds.fix();
 	}
@@ -350,7 +351,7 @@ fn void js_nav_direction(
 	if (scene == null) return;
 
 	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	Vec3 point    = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point    = arg_vec3(&js, argc, args, 2);
 
 	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 	*out = vec3_value(&js, direction);
@@ -388,7 +389,7 @@ fn void js_nav_cost(
 		return;
 	}
 
-	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point = arg_vec3(&js, argc, args, 2);
 	float cost = scene.nav.cost_at(field, point);
 	*out = qjs::number_value(cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost);
 }
@@ -478,16 +479,12 @@ fn void js_nav_sample(
  `navPath(fromX, fromY, fromZ, toX, toY, toZ, buffer, byteOffset, floats)` — one
  agent, one route, shortened against the geometry.
 
- This solves a whole field and throws it away, which is the cost the two-verb
- split exists to make visible: a hundred agents heading for one door is a hundred
- solves for one answer, and `three.nav.field()` is that answer kept. A single
- wanderer replanning occasionally is what this is for.
-
- Dijkstra from the goal rather than A* from the start, for reuse:
- `collision::VoxelGrid.solve_field` is a written and tested chamfer transform
- with no priority queue in it, and it is fast for the one broad sheet a nav layer
- is. A* would be asymptotically better on a long route through a maze and would
- be a second pathfinder to keep correct.
+ A* from the goal towards the start, through the same solver `three.nav.field()`
+ uses: the search stops once the start is settled, so its cost is the cells
+ between the two ends rather than the whole bake — on a town-sized grid, a click
+ across a square was a 50 ms full solve and is now a fraction of a millisecond.
+ Searching from the goal is what lets `walk` descend the result from the start.
+ When there is no route the search still exhausts the goal's region.
 
  The Float32Array's capacity is in waypoints, three floats each. It answers with
  how many were written, including the start, and zero when there is no route.
@@ -513,8 +510,8 @@ fn void js_nav_path(
 		return;
 	}
 
-	Vec3 from = { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) };
-	Vec3 to   = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	Vec3[1] from = { arg_vec3(&js, argc, args, 1) };
+	Vec3 to      = arg_vec3(&js, argc, args, 4);
 
 	float[] slots = float_view(&js, argc, args, 7);
 	if (slots.len < 3)
@@ -527,32 +524,114 @@ fn void js_nav_path(
 	{
 		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!scene.nav.solve(&goals, field))
+		if (!scene.nav.solve(&goals, field, &from))
+		{
+			*out = qjs::int_value(0);
+			return;
+		}
+		*out = qjs::int_value((int)scene.route_from(&self.pass.assets, field, from[0], slots));
+	};
+}
+
+<*
+ `navPaths(starts, startsByteOffset, startsFloats, toX, toY, toZ, buffer,
+ byteOffset, floats, counts, countsByteOffset, countsInts, limit)` — a group,
+ one goal, one search.
+
+ What an RTS does with a selection sent across the map: the search from the goal
+ runs until every start is settled, and each agent then walks and shortens its
+ own route out of the same field. Twenty agents cost about one search and twenty
+ shortenings, against twenty searches through `navPath`.
+
+ `buffer` holds `limit` waypoints per agent, agent `i` from waypoint `i * limit`;
+ `counts` gets each agent's waypoint count, zero for one with no route. It
+ answers with how many agents have a route.
+*>
+fn void js_nav_paths(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
+	if (scene == null) return;
+
+	if (!scene.nav.usable())
+	{
+		*out = js.raise("three.nav.paths() needs a baked mesh — call three.nav.bake() first");
+		return;
+	}
+
+	float[] starts = float_view(&js, argc, args, 1);
+	Vec3 to        = arg_vec3(&js, argc, args, 4);
+	float[] slots  = float_view(&js, argc, args, 7);
+	int[] counts   = int_view(&js, argc, args, 10);
+	int limit      = arg_int(&js, argc, args, 13);
+
+	sz agents = starts.len / 3;
+	if (agents == 0 || limit < 1 || counts.len < agents || slots.len < agents * (sz)limit * 3)
+	{
+		*out = qjs::int_value(0);
+		return;
+	}
+	counts[:agents] = 0;
+
+	@pool()
+	{
+		Vec3[] from = mem::temp_array(Vec3, agents);
+		for (sz i = 0; i < agents; i++) from[i] = { starts[i * 3], starts[i * 3 + 1], starts[i * 3 + 2] };
+
+		float[] field = mem::temp_array(float, scene.nav.field_size());
+		Vec3[1] goals = { to };
+		if (!scene.nav.solve(&goals, field, from))
 		{
 			*out = qjs::int_value(0);
 			return;
 		}
 
+		int routed = 0;
+		for (sz i = 0; i < agents; i++)
+		{
+			sz base  = i * (sz)limit * 3;
+			counts[i] = (int)scene.route_from(&self.pass.assets, field, from[i], slots[base:(sz)limit * 3]);
+			if (counts[i] > 0) routed++;
+		}
+		*out = qjs::int_value(routed);
+	};
+}
+
+<*
+ Walks a solved field down from one start and shortens what it walked into
+ `slots`, three floats a waypoint.
+
+ @return `How many waypoints were written, including the start; zero when the walk does not reach the goal or the shortened route does not fit.`
+*>
+fn uint Scene.route_from(&self, Assets* assets, float[] field, Vec3 from, float[] slots)
+{
+	@pool()
+	{
 		// The raw walk is one point per cell. It must reach the goal before a
 		// shortened route is returned; output capacity only limits kept corners.
-		Vec3[] raw   = mem::temp_array(Vec3, scene.nav.field_size());
-		uint count   = scene.nav.walk(field, from, raw);
-		if (count == 0)
-		{
-			*out = qjs::int_value(0);
-			return;
-		}
+		Vec3[] raw   = mem::temp_array(Vec3, self.nav.field_size());
+		int[] voxels = mem::temp_array(int, self.nav.field_size());
+		uint count   = self.nav.walk(field, from, raw, voxels);
+		if (count == 0) return 0;
 
-		Vec3[] tight = mem::temp_array(Vec3, (sz)(slots.len / 3));
-		uint kept = scene.shorten_path(&self.pass.assets, &scene.nav, raw[:(sz)count], count, tight, { });
-
+		Vec3[] tight = mem::temp_array(Vec3, slots.len / 3);
+		uint kept = self.shorten_path(assets, &self.nav, raw[:(sz)count], voxels[:(sz)count], count, tight, { });
 		for (uint i = 0; i < kept; i++)
 		{
 			slots[i * 3] = tight[i].x;
 			slots[i * 3 + 1] = tight[i].y;
 			slots[i * 3 + 2] = tight[i].z;
 		}
-		*out = qjs::int_value((int)kept);
+		return kept;
 	};
 }
 
@@ -595,7 +674,7 @@ fn void js_steer(
 	float[] field = scene.nav_field_of(handle);
 
 	SteerOptions options;
-	options.goal = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
+	options.goal = arg_vec3(&js, argc, args, 8);
 	options.has_goal = handle < 0;
 	options.max_speed = arg_float(&js, argc, args, 11);
 	options.arrive_radius = arg_float(&js, argc, args, 12);

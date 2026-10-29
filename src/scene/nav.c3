@@ -20,9 +20,11 @@
  ## Two verbs
 
  `nav.path(from, to)` for one agent, `nav.field(goals)` for a handle a script
- samples per agent. A path is a solve of the whole reachable set thrown away
- after one answer, so a hundred agents heading for the same door is a hundred
- solves for one field. `field()` is that solve, kept.
+ samples per agent. A path is an A* search aimed at its start, which settles the
+ cells along the way rather than the level; a field is the whole reachable set,
+ kept, so a hundred agents heading for the same door is one solve rather than a
+ hundred searches. `nav.paths(starts, goal)` is between the two: one search aimed
+ at every start, walked once per start.
 
  ## What a cell is, and what that costs a caller
 
@@ -143,6 +145,13 @@ struct NavMesh
 	*>
 	uint components;
 	uint largest_component;
+
+	// Each walkable cell's links, one bit per (dx, dy, dz) a step may take, so
+	// the step and corner rules are worked out once per cell at bake rather than
+	// every time a search crosses it. Empty when the step reach is too tall to
+	// fit a mask, and `linked` then works them out as it goes.
+	ulong[] links;
+	int link_reach;
 }
 
 <*
@@ -180,6 +189,7 @@ fn void Scene.drop_nav(&self)
 fn void NavMesh.free(&self)
 {
 	self.grid.free();
+	if (self.links.len > 0) mem::free(self.links);
 	if (self.profile_name.len > 0) self.profile_name.free(mem);
 	if (self.source_hash.len > 0) self.source_hash.free(mem);
 	*self = { };
@@ -195,7 +205,52 @@ fn int NavMesh.max_vertical_steps(&self)
 	return math::max(0, (int)math::floor(reach + 1e-5f));
 }
 
-fn bool NavMesh.linked(&self, int voxel, int dx, int dy, int dz)
+<*
+ Whether a walker in `voxel` may step by (dx, dy, dz): within the step height,
+ onto a walkable cell, and on a diagonal not through a blocked corner.
+*>
+fn bool NavMesh.linked(&self, int voxel, int dx, int dy, int dz) @inline
+{
+	if (self.links.len > 0 && dy >= -self.link_reach && dy <= self.link_reach
+		&& voxel >= 0 && (sz)voxel < self.grid.index.len)
+	{
+		int entry = self.grid.index[voxel];
+		if (entry >= 0) return (self.links[(sz)entry] >> link_bit(self.link_reach, dx, dy, dz)) & 1 != 0;
+	}
+	return self.link_rule(voxel, dx, dy, dz);
+}
+
+// Where (dx, dy, dz) sits in a cell's link mask.
+fn int link_bit(int reach, int dx, int dy, int dz) @inline @local => (dy + reach) * 9 + (dz + 1) * 3 + dx + 1;
+
+<*
+ Works out every walkable cell's link mask, once, after a bake or a load.
+
+ Up to three cells of step reach fit in a 64-bit mask; a taller step leaves the
+ masks empty and `linked` applies the rules directly, as it always used to.
+*>
+fn void NavMesh.build_links(&self)
+{
+	if (self.links.len > 0) mem::free(self.links);
+	self.links = {};
+	self.link_reach = self.max_vertical_steps();
+	if (!self.grid.usable() || (self.link_reach * 2 + 1) * 9 > 64) return;
+
+	ulong[] links = mem::new_array(ulong, self.grid.cells.len);
+	foreach (entry, voxel : self.grid.cells)
+	{
+		ulong mask = 0;
+		for (int dz = -1; dz <= 1; dz++) for (int dy = -self.link_reach; dy <= self.link_reach; dy++) for (int dx = -1; dx <= 1; dx++)
+		{
+			if (self.link_rule(voxel, dx, dy, dz)) mask |= 1UL << link_bit(self.link_reach, dx, dy, dz);
+		}
+		links[entry] = mask;
+	}
+	self.links = links;
+}
+
+// The step and corner rules themselves, worked out from the grid.
+fn bool NavMesh.link_rule(&self, int voxel, int dx, int dy, int dz)
 {
 	if (math::abs((float)dy * self.grid.cell) > self.settings.step_height + 1e-5f) return false;
 	if (dx == 0 && dz == 0) return false;
@@ -213,10 +268,10 @@ fn bool NavMesh.linked(&self, int voxel, int dx, int dy, int dz)
 		{
 			if (y + sy < 0 || y + sy >= self.grid.ny) continue;
 			int x_side = voxel + sy * self.grid.nx + dx;
-			if (self.linked(voxel, dx, sy, 0) && self.linked(x_side, 0, dy - sy, dz)) return true;
+			if (self.link_rule(voxel, dx, sy, 0) && self.link_rule(x_side, 0, dy - sy, dz)) return true;
 
 			int z_side = voxel + dz * plane + sy * self.grid.nx;
-			if (self.linked(voxel, 0, sy, dz) && self.linked(z_side, dx, dy - sy, 0)) return true;
+			if (self.link_rule(voxel, 0, sy, dz) && self.link_rule(z_side, dx, dy - sy, 0)) return true;
 		}
 		return false;
 	}
@@ -245,6 +300,7 @@ fn bool Scene.load_nav(&self, AssetNavigationProfile* profile)
 		.floor_cells = profile.floor_cells, .walkable_cells = (uint)cells.len, .voxels = total,
 		.components = profile.components, .largest_component = profile.largest_component,
 	};
+	self.nav.build_links();
 	self.nav.measure_components();
 	return true;
 }
@@ -317,10 +373,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 			// so it is rasterized and simply never counts as floor.
 			bool standable = area > 1e-9f && normal.y / area >= cos_limit;
 
-			collision::Aabb3 box = collision::NEW_AABB3;
-			box.expand_by_point(tri[0]);
-			box.expand_by_point(tri[1]);
-			box.expand_by_point(tri[2]);
+			collision::Aabb3 box = triangle_box(tri);
 
 			int lo_x = math::clamp((int)math::floor((box.min.x - origin.x) / cell + 0.5f) - 1, 0, nx - 1);
 			int hi_x = math::clamp((int)math::floor((box.max.x - origin.x) / cell + 0.5f) + 1, 0, nx - 1);
@@ -486,6 +539,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 	out.built = true;
 	out.settings.cell = cell;
 
+	out.build_links();
 	out.measure_components();
 	// Re-stamped, so the number a caller reads is the whole bake and not the part
 	// of it that existed before the component pass did.
@@ -582,68 +636,123 @@ fn void NavMesh.measure_components(&self)
  This is the expensive call, and there is one of it per goal set rather than per
  agent. See the file header.
 
+ With `toward`, it is A* instead: the search leans towards those points and
+ stops once every one of their cells is settled, so a route across a square
+ settles the cells between its ends rather than the whole level, and a squad of
+ twenty heading for one goal is one search rather than twenty. The field is then
+ only true near the routes, and only `walk` from a `toward` point may read it:
+ every reached cell still has a neighbour nearer the goal, so the walk still ends
+ there.
+
  @param field : `Scratch the caller owns, one float per walkable cell. NavMesh.field_size is how many.`
- @return `False when no goal landed on a walkable cell, which leaves the field unusable rather than uniformly unreachable.`
+ @param toward : `The points the answer is for, or empty for the whole field.`
+ @return `False when no goal landed on a walkable cell, or when no toward point did, which leaves the field unusable rather than uniformly unreachable.`
 *>
-fn bool NavMesh.solve(&self, Vec3[] goals, float[] field)
+fn bool NavMesh.solve(&self, Vec3[] goals, float[] field, Vec3[] toward = {})
 {
 	if (!self.usable() || field.len != self.grid.cells.len) return false;
 
-	self.grid.clear_field(field);
-
-	usz seeded = 0;
-	foreach (goal : goals) seeded += self.grid.seed_segment(field, goal, goal);
-	if (seeded == 0) return false;
-
-	int plane  = self.grid.nx * self.grid.ny;
-	int max_dy = self.max_vertical_steps();
-
-	NavHeap open;
-	open.items.init(mem, 256);
-	defer open.items.free();
-	foreach (entry, distance : field)
+	@pool()
 	{
-		if (distance < collision::VOXEL_UNREACHED) open.push({ distance, (int)entry });
-	}
-
-	while (open.items.len() > 0)
-	{
-		NavHeapItem item = open.pop();
-		// A stale entry: the cell was settled nearer since this was pushed.
-		if (item.distance > field[(sz)item.entry]) continue;
-		int voxel = self.grid.cells[(sz)item.entry];
-
-		for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
+		// The cells the search is aimed at, each crossed off as it is settled.
+		int[] stops = mem::temp_array(int, toward.len);
+		sz waiting = 0;
+		foreach (point : toward)
 		{
-			if (dx == 0 && dz == 0) continue;
-			int there = voxel + dz * plane + dy * self.grid.nx + dx;
-			if (there < 0 || (sz)there >= self.grid.index.len) continue;
-			int neighbour = self.grid.index[there];
-			if (neighbour < 0) continue;
-			// The link the neighbour would walk *towards* this cell, which is
-			// the direction a cost travels: it is how far the neighbour is from
-			// the goal, through here.
-			if (!self.linked(there, -dx, -dy, -dz)) continue;
-			float distance = item.distance + self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
-			if (distance < field[(sz)neighbour])
+			int entry = self.grid.nearest_cell(point, NAV_PAD);
+			if (entry >= 0) stops[waiting++] = entry;
+		}
+		// Nothing to walk from: a whole solve would answer no one.
+		if (toward.len > 0 && waiting == 0) return false;
+		Vec3[] targets = mem::temp_array(Vec3, waiting);
+		for (sz i = 0; i < waiting; i++) targets[i] = self.grid.entry_center(stops[i]);
+
+		self.grid.clear_field(field);
+
+		usz seeded = 0;
+		foreach (goal : goals) seeded += self.grid.seed_segment(field, goal, goal);
+		if (seeded == 0) return false;
+
+		int plane  = self.grid.nx * self.grid.ny;
+		int max_dy = self.max_vertical_steps();
+
+		NavHeap open;
+		open.items.init(mem, 256);
+		defer open.items.free();
+		foreach (entry, distance : field)
+		{
+			if (distance >= collision::VOXEL_UNREACHED) continue;
+			open.push({ distance + nearest_target(targets, self.grid.entry_center((int)entry)), distance, (int)entry });
+		}
+
+		while (open.items.len() > 0)
+		{
+			NavHeapItem item = open.pop();
+			// A stale entry: the cell was settled nearer since this was pushed.
+			if (item.reached > field[(sz)item.entry]) continue;
+			if (waiting > 0)
 			{
-				field[(sz)neighbour] = distance;
-				open.push({ distance, neighbour });
+				sz left = 0;
+				for (sz i = 0; i < waiting; i++)
+				{
+					if (stops[i] != item.entry) stops[left++] = stops[i];
+				}
+				if (left == 0) break;
+				waiting = left;
+			}
+			int voxel = self.grid.cells[(sz)item.entry];
+
+			for (int dz = -1; dz <= 1; dz++) for (int dy = -max_dy; dy <= max_dy; dy++) for (int dx = -1; dx <= 1; dx++)
+			{
+				if (dx == 0 && dz == 0) continue;
+				int there = voxel + dz * plane + dy * self.grid.nx + dx;
+				if (there < 0 || (sz)there >= self.grid.index.len) continue;
+				int neighbour = self.grid.index[there];
+				if (neighbour < 0) continue;
+				// The link the neighbour would walk *towards* this cell, which is
+				// the direction a cost travels: it is how far the neighbour is from
+				// the goal, through here.
+				if (!self.linked(there, -dx, -dy, -dz)) continue;
+				float distance = item.reached + self.grid.cell * math::sqrt((float)(dx * dx + dy * dy + dz * dz));
+				if (distance < field[(sz)neighbour])
+				{
+					field[(sz)neighbour] = distance;
+					open.push({ distance + nearest_target(targets, self.grid.entry_center(neighbour)), distance, neighbour });
+				}
 			}
 		}
-	}
+	};
 	return true;
+}
+
+<*
+ The A* estimate: the straight line to the nearest point the search is for.
+
+ A straight line never overestimates a walk, and steps cost their straight
+ length, so each line is a consistent estimate and so is the least of them — a
+ cell is still settled once, at its true distance. Zero with no targets, which
+ is Dijkstra.
+*>
+fn float nearest_target(Vec3[] targets, Vec3 at) @local
+{
+	if (targets.len == 0) return 0.0f;
+	float nearest = float::max;
+	foreach (target : targets) nearest = math::min(nearest, (target - at).length_sq());
+	return math::sqrt(nearest);
 }
 
 struct NavHeapItem @local
 {
+	// The order key: `reached`, plus the A* estimate when there is one.
 	float distance;
+	// How far the goal is from this cell along the route that pushed it.
+	float reached;
 	int entry;
 }
 
 <*
  A binary min-heap on distance, with stale entries left in rather than
- decreased — `solve` skips one whose distance is no longer the cell's.
+ decreased — `solve` skips one whose `reached` is no longer the cell's.
 *>
 struct NavHeap @local
 {
@@ -781,9 +890,10 @@ fn Vec3 NavMesh.foot_of(&self, int voxel)
  The raw path, before shortening. Bounded by the slice it is given and by a step
  count, so a field with a flat spot cannot loop for ever.
 
+ @param voxels : `Where each point's cell goes, for shorten_path's grid test. Empty for none; otherwise as long as out.`
  @return `How many points were written. Zero when the goal is unreachable or the output cannot hold the complete route.`
 *>
-fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
+fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out, int[] voxels = {})
 {
 	if (!self.usable() || field.len != self.grid.cells.len || out.len == 0) return 0;
 
@@ -794,6 +904,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 	if (field[entry] >= collision::VOXEL_UNREACHED) return 0;
 
 	uint count = 0;
+	if (count < voxels.len) voxels[count] = voxel;
 	out[count++] = self.foot_of(voxel);
 
 	int plane  = self.grid.nx * self.grid.ny;
@@ -834,6 +945,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 
 		if (next < 0) break;
 		voxel = next;
+		if (count < voxels.len) voxels[count] = voxel;
 		out[count++] = self.foot_of(voxel);
 	}
 
@@ -849,6 +961,9 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
  *kept* waypoint fixes it, and there are a handful of those after shortening
  rather than one per cell.
 
+ Only what blocks counts as floor: a character standing on the waypoint is not
+ something to stand on.
+
  Falls back to the point it was given when nothing is under it, which happens at
  the lip of a ledge where the ray goes past the edge: half a cell of float is
  better than a waypoint dropped to the bottom of a pit.
@@ -856,9 +971,71 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out)
 fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
 {
 	collision::Ray down = { .origin = { point.x, point.y + cell, point.z }, .direction = { 0, -1, 0 } };
-	Hit hit             = self.raycast(assets, down);
+	Hit hit             = self.raycast(assets, down, true);
 	if (!hit.hit || hit.distance > cell * 3.0f) return point;
 	return hit.point;
+}
+
+<*
+ Whether the straight line between two cells stays on walkable cells.
+
+ The cheap half of `shorten_path`'s visibility test: the cells the line crosses
+ in the XZ plane, centre to centre, each one a link the walk itself could take —
+ the same step height and corner rules the search used, and exactly through a
+ corner is one diagonal step. Free space was eroded by the agent's radius when it
+ was baked, so a line over walkable cells is a line the agent fits along, to
+ within the half cell that erosion rounds to. No triangles are read.
+
+ Where floors overlap, the layer nearest the line's own height is followed.
+*>
+fn bool NavMesh.sees(&self, int from, int to)
+{
+	int nx     = self.grid.nx;
+	int ny     = self.grid.ny;
+	int plane  = nx * ny;
+	int max_dy = self.max_vertical_steps();
+
+	int x0 = from % nx;
+	int z0 = from / plane;
+	int x1 = to % nx;
+	int z1 = to / plane;
+	float y0 = (float)((from / nx) % ny);
+	float y1 = (float)((to / nx) % ny);
+
+	int step_x = x1 > x0 ? 1 : -1;
+	int step_z = z1 > z0 ? 1 : -1;
+	long ax = math::abs(x1 - x0);
+	long az = math::abs(z1 - z0);
+
+	int voxel = from;
+	long ix = 0;
+	long iz = 0;
+	while (ix < ax || iz < az)
+	{
+		// Which cell border the line crosses next, compared without division:
+		// the x border at (ix + ½) / ax of the way, the z one at (iz + ½) / az.
+		long cross_x = (2 * ix + 1) * az;
+		long cross_z = (2 * iz + 1) * ax;
+		int dx = cross_x <= cross_z ? step_x : 0;
+		int dz = cross_z <= cross_x ? step_z : 0;
+		if (ix >= ax) dx = 0;
+		if (iz >= az) dz = 0;
+		ix += math::abs(dx);
+		iz += math::abs(dz);
+
+		float along = ax >= az ? (float)ix / (float)ax : (float)iz / (float)az;
+		float level = y0 + (y1 - y0) * along;
+		int y       = (voxel / nx) % ny;
+		int best    = int::max;
+		for (int dy = -max_dy; dy <= max_dy; dy++)
+		{
+			if (!self.linked(voxel, dx, dy, dz)) continue;
+			if (best == int::max || math::abs((float)(y + dy) - level) < math::abs((float)(y + best) - level)) best = dy;
+		}
+		if (best == int::max) return false;
+		voxel += dz * plane + best * nx + dx;
+	}
+	return voxel == to;
 }
 
 <*
@@ -870,16 +1047,28 @@ fn Vec3 Scene.on_floor(&self, Assets* assets, Vec3 point, float cell)
  through `scene/query.c3`, at the agent's own radius and height, so a corner the
  agent cannot physically round is not cut.
 
- Greedy and forward-only: from the current anchor, advance while the sweep is
- clear and stop at the first waypoint it is not. That is one sweep per waypoint
- rather than the quadratic all-pairs version, and on a path through a room it
- collapses a hundred cells to two.
+ Greedy and forward-only: from the current anchor, reach as far ahead as is
+ clear. The reach doubles while it is clear and is then bisected back between
+ the last clear waypoint and the first blocked one, so a long open route costs a
+ handful of tests per corner rather than one per cell.
+
+ The tests are first run on the grid (`NavMesh.sees`), which reads no triangles,
+ and the segment that wins is then swept once. A sweep reads every triangle near
+ its line, so on terrain it is the expensive part; on a 60 m route the per-test
+ sweeps cost 6–11 ms and one per kept corner is a fraction of that. Only when the
+ level has changed since the bake — something placed in the way — does a sweep
+ disagree with the grid, and that stretch falls back to bisecting with sweeps.
+
+ Visibility along a route is not monotonic, so the bisection may stop short of
+ the farthest waypoint it could have seen; it never keeps a segment that was not
+ swept clear.
 
  @param path : `The raw walk, as NavMesh.walk wrote it. Foot points, not cell centres.`
+ @param voxels : `The cell of each raw point, as NavMesh.walk wrote them, or empty to sweep every test.`
  @param out : `Where the shortened path goes. May be the same slice the raw walk is in.`
  @return `How many points were written, or zero when the output cannot hold the complete shortened route.`
 *>
-fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uint count, Vec3[] out, IgnoreSet skip)
+fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, int[] voxels, uint count, Vec3[] out, IgnoreSet skip)
 {
 	if (count == 0 || out.len == 0) return 0;
 	if (count == 1 || assets == null)
@@ -888,13 +1077,27 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 		return 1;
 	}
 
+	// The capsule stands on the step height rather than the floor. What is lower
+	// than a step the agent walks over, and the ground itself is the grid's to
+	// judge; a capsule grazing the floor creeps along terrain in steps of its skin,
+	// and was most of what a long route cost.
 	float radius = math::max(nav.settings.agent_radius, 0.05f);
-	float half   = math::max((nav.settings.agent_height - 2.0f * radius) * 0.5f, 0.0f);
-	// The capsule's centre above the foot point the path carries.
-	float lift   = radius + half;
-	// A hair off the floor, so a sweep along a surface the agent is standing on is
-	// not a sweep starting in contact with it.
-	float skin   = nav.grid.cell * 0.05f;
+	float floor  = math::clamp(nav.settings.step_height, 0.0f, math::max(nav.settings.agent_height - 2.0f * radius, 0.0f));
+	float half   = math::max((nav.settings.agent_height - floor - 2.0f * radius) * 0.5f, 0.0f);
+	NavShortcut route = {
+		.scene = self, .assets = assets, .nav = nav, .path = path,
+		.voxels = voxels.len >= count ? voxels : {},
+		.radius = radius, .half = half,
+		// The capsule's centre above the foot point the path carries.
+		.lift = floor + radius + half,
+		// A hair off the floor, so a sweep along a surface the agent is standing on is
+		// not a sweep starting in contact with it.
+		.skin = nav.grid.cell * 0.05f,
+		// Long enough that a straight run is a few sweeps, short enough that each
+		// one's box holds the triangles near its line rather than a square of them.
+		.piece = nav.grid.cell * 8.0f,
+		.skip = skip,
+	};
 
 	uint written = 0;
 	out[written++] = self.on_floor(assets, path[0], nav.grid.cell);
@@ -902,24 +1105,104 @@ fn uint Scene.shorten_path(&self, Assets* assets, NavMesh* nav, Vec3[] path, uin
 	uint anchor = 0;
 	while (anchor < count - 1 && written < out.len)
 	{
-		uint reach = anchor;
-		uint candidate = anchor + 1;
 		// Even consecutive cells are swept: an embedded graph is metadata, while
 		// the collision scene is the physical authority for the path returned now.
-		while (candidate < count)
-		{
-			Vec3 a = path[anchor];
-			Vec3 b = path[candidate];
-			a.y += lift;
-			b.y += lift;
-			SweepHit hit = self.sweep_capsule(assets, a, b, radius, half, skin, skip);
-			if (hit.hit) break;
-			reach = candidate++;
-		}
+		uint reach = route.farthest(anchor, count, false);
+		if (reach > anchor && !route.clear(anchor, reach, true)) reach = route.farthest(anchor, reach, true);
 		if (reach == anchor) return 0;
 		out[written++] = self.on_floor(assets, path[reach], nav.grid.cell);
 		anchor = reach;
 	}
 
 	return anchor == count - 1 ? written : 0;
+}
+
+// One route being shortened, and what testing a shortcut along it needs.
+struct NavShortcut @local
+{
+	Scene* scene;
+	Assets* assets;
+	NavMesh* nav;
+	Vec3[] path;
+	int[] voxels;
+	float radius;
+	float half;
+	float lift;
+	float skin;
+	float piece;
+	IgnoreSet skip;
+}
+
+<*
+ The farthest waypoint before `end` that `anchor` has a clear line to, or
+ `anchor` when not even the next one is clear.
+
+ @param swept : `Test with the capsule rather than the grid.`
+*>
+fn uint NavShortcut.farthest(&self, uint anchor, uint end, bool swept)
+{
+	uint reach   = anchor;
+	uint blocked = end;
+	uint step    = 1;
+	while (reach + step < end)
+	{
+		if (!self.clear(anchor, reach + step, swept))
+		{
+			blocked = reach + step;
+			break;
+		}
+		reach += step;
+		step *= 2;
+	}
+	if (blocked == end && reach < end - 1)
+	{
+		if (self.clear(anchor, end - 1, swept))
+		{
+			reach = end - 1;
+		}
+		else
+		{
+			blocked = end - 1;
+		}
+	}
+	while (blocked - reach > 1)
+	{
+		uint middle = reach + (blocked - reach) / 2;
+		if (self.clear(anchor, middle, swept))
+		{
+			reach = middle;
+		}
+		else
+		{
+			blocked = middle;
+		}
+	}
+	return reach;
+}
+
+<*
+ Whether an agent passes straight from one waypoint to another.
+
+ Swept in pieces: the sweep gathers every triangle in the box around its motion,
+ and the box around a long diagonal over terrain is a square of it. The capsule
+ passes the whole line exactly when it passes each piece.
+
+ @param swept : `Test with the capsule; otherwise with the grid, or not at all when there are no cells to test.`
+*>
+fn bool NavShortcut.clear(&self, uint from, uint to, bool swept)
+{
+	if (!swept) return self.voxels.len == 0 || self.nav.sees(self.voxels[from], self.voxels[to]);
+
+	Vec3 start = self.path[from];
+	Vec3 end   = self.path[to];
+	start.y += self.lift;
+	end.y += self.lift;
+	int pieces = math::max(1, (int)math::ceil((end - start).length() / self.piece));
+	for (int i = 0; i < pieces; i++)
+	{
+		Vec3 a = start + (end - start) * ((float)i / (float)pieces);
+		Vec3 b = start + (end - start) * ((float)(i + 1) / (float)pieces);
+		if (self.scene.sweep_capsule(self.assets, a, b, self.radius, self.half, self.skin, self.skip).hit) return false;
+	}
+	return true;
 }

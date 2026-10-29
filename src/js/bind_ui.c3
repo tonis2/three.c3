@@ -248,11 +248,7 @@ fn bool take_handler(qjs::Context* js, qjs::Value object, ZString name, qjs::Val
 *>
 fn UiLayer*? JsRuntime.ui_layer(&self, qjs::Context* js, qjs::Value* out)
 {
-	if (self.renderer == null)
-	{
-		*out = js.raise("drawing an interface needs a GPU device and this context has none");
-		return UI_NO_DEVICE~;
-	}
+	if (!self.needs_device(js, "drawing an interface", out)) return UI_NO_DEVICE~;
 	if (catch self.renderer.ui.ensure(&self.renderer.gpu, &self.renderer.target))
 	{
 		*out = js.raise("the interface layer could not start — the font or its pipeline failed to load");
@@ -487,13 +483,9 @@ fn void js_ui_patch(
 		uint? node = layer.node_for(key);
 		if (catch node)
 		{
-			*out = js.raise(
-				string::tformat(
-					"three.ui.patch: nothing in the interface is keyed '%s'. "
-						"A key only exists between the three.ui.set that named it and the next one",
-					key
-				)
-			);
+			*out = js.raisef("three.ui.patch: nothing in the interface is keyed '%s'. "
+				"A key only exists between the three.ui.set that named it and the next one",
+				key);
 			return;
 		}
 
@@ -1376,41 +1368,17 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	self.ui_dispatching = true;
 	defer self.ui_dispatching = false;
 
+	bool kept;
 	@pool()
 	{
-		qjs::Value? answer = self.js.call(callback, qjs::undefined_value(), argv[:argc]);
-		for (int i = 0; i < argc; i++) self.js.release(argv[i]);
-
-		if (catch err = answer)
-		{
-			self.report_frame_failure(
-				self.timed_out ? self.frame_timeout_message()
-					: string::tformat(
-						"a three.ui %s handler threw and was stopped: %s",
-						what,
-						self.js.exception(tmem)
-					)
-			);
-			self.js.release(callback);
-			*alive = false;
-			return;
-		}
-
-		bool promised = self.is_thenable(answer);
-		self.js.release(answer);
-		if (promised)
-		{
-			self.report_frame_failure(
-				string::tformat(
-					"a three.ui %s handler returned a promise. It has to finish inside the frame, "
-						"so it must be synchronous — do the awaiting in a run_script instead",
-					what
-				)
-			);
-			self.js.release(callback);
-			*alive = false;
-		}
+		kept = self.call_handler(callback, argv[:argc], string::tformat("a three.ui %s handler", what));
 	};
+	for (int i = 0; i < argc; i++) self.js.release(argv[i]);
+	if (!kept)
+	{
+		self.js.release(callback);
+		*alive = false;
+	}
 }
 
 // ============================================================================
@@ -1539,12 +1507,12 @@ fn void js_ui_texture(
 	UiLayer* layer = self.ui_layer(&js, out) ?? null;
 	if (layer == null) return;
 
-	char[] bytes  = argc > 0 ? js.bytes(args[0]) : (char[]){ };
+	char[] bytes  = arg_bytes(&js, argc, args, 0);
 	int width     = arg_int(&js, argc, args, 1);
 	int height    = arg_int(&js, argc, args, 2);
 	int channels  = arg_int(&js, argc, args, 3);
 	uint handle   = (uint)math::max(arg_int(&js, argc, args, 4), 0);
-	bool linear   = argc <= 5 || js.truth(args[5]);
+	bool linear   = arg_truth_or(&js, argc, args, 5, true);
 	if (width <= 0 || height <= 0 || (channels != 1 && channels != 3 && channels != 4))
 	{
 		*out = js.raise("three.ui.texture: an image is { width, height, channels: 1, 3 or 4, pixels }");

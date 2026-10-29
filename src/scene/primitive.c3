@@ -911,20 +911,6 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 
 	GpuMesh mesh = {
 		.name = label.copy(mem),
-		.vertex_count = (uint)geometry.positions.len(),
-		.index_count = (uint)geometry.indices.len(),
-		.has_normals = geometry.normals.len() == geometry.positions.len(),
-		.has_uvs = geometry.uvs.len() == geometry.positions.len(),
-		// The same optional-by-length test as the two above. Nothing three.c3
-		// tessellates fills this — a box has no colour attribute and a hull never
-		// had one — but a mesh handed in from outside does, and the exporter's
-		// re-read path fills it for a mesh that came out of a file carrying one.
-		.has_colors = geometry.colors.len() == geometry.positions.len(),
-		// **Both or neither**, which is the one place this differs from the three
-		// tests above it — see `GeometryBuilder.joints`. The same rule
-		// `upload_primitive` applies to a file's JOINTS_0/WEIGHTS_0 pair.
-		.has_skin = geometry.joints.len() == geometry.positions.len()
-			&& geometry.weights.len() == geometry.positions.len(),
 		.base_color = srgb_to_linear_rgb(PRIMITIVE_COLOR),
 		.texture = -1,
 		.bounds = bounds_of(geometry.positions.array_view()),
@@ -938,25 +924,7 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 		if (mesh.name.len > 0) mesh.name.free(mem);
 	}
 
-	mesh.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * geometry.positions.len())!;
-	if (mesh.has_normals)
-	{
-		mesh.normals = gpu.upload_stream(geometry.normals.entries, Vec3::size * geometry.normals.len())!;
-	}
-	if (mesh.has_uvs)
-	{
-		mesh.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * geometry.uvs.len())!;
-	}
-	if (mesh.has_colors)
-	{
-		mesh.colors = gpu.upload_stream(geometry.colors.entries, Vec4::size * geometry.colors.len())!;
-	}
-	if (mesh.has_skin)
-	{
-		mesh.joints = gpu.upload_stream(geometry.joints.entries, uint[4]::size * geometry.joints.len())!;
-		mesh.weights = gpu.upload_stream(geometry.weights.entries, Vec4::size * geometry.weights.len())!;
-	}
-	mesh.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
+	mesh.upload_streams(gpu, geometry)!;
 	// Not for lines. The index buffer is pairs and `build_bvh` reads it in threes,
 	// so a line mesh would get a tree over triangles that do not exist and
 	// `scene.pick` would answer with a hit on a debug helper. Skipping it is also
@@ -983,6 +951,58 @@ fn GpuMesh? Assets.upload_geometry(&self, Gpu* gpu, String label, GeometryBuilde
 	mesh.gltf_mesh = -1;
 	mesh.gltf_primitive = -1;
 	return mesh;
+}
+
+<*
+ Puts a builder's streams and indices on the device and records which it has.
+
+ A stream that is short is a stream that is absent: the shader indexes every
+ stream with the same SV_VertexID, so one that does not cover every vertex would
+ read past its own buffer. Joints and weights are both or neither — see
+ `GeometryBuilder.joints`.
+*>
+fn void? GpuMesh.upload_streams(&self, Gpu* gpu, GeometryBuilder* geometry)
+{
+	sz vertices = geometry.positions.len();
+	self.vertex_count = (uint)vertices;
+	self.index_count = (uint)geometry.indices.len();
+	self.has_normals = geometry.normals.len() == vertices;
+	self.has_uvs = geometry.uvs.len() == vertices;
+	self.has_colors = geometry.colors.len() == vertices;
+	self.has_skin = geometry.joints.len() == vertices && geometry.weights.len() == vertices;
+
+	self.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * vertices)!;
+	if (self.has_normals) self.normals = gpu.upload_stream(geometry.normals.entries, Vec3::size * vertices)!;
+	if (self.has_uvs) self.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * vertices)!;
+	if (self.has_colors) self.colors = gpu.upload_stream(geometry.colors.entries, Vec4::size * vertices)!;
+	if (self.has_skin)
+	{
+		self.joints = gpu.upload_stream(geometry.joints.entries, uint[4]::size * vertices)!;
+		self.weights = gpu.upload_stream(geometry.weights.entries, Vec4::size * vertices)!;
+	}
+	self.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
+}
+
+<*
+ Area-weighted vertex normals: each triangle's un-normalised cross product added
+ to its three corners, so a big triangle has more say in a shared vertex than a
+ sliver does. A triangle with a corner out of range is skipped, and a vertex no
+ triangle reached — or whose triangles cancelled out — gets `fallback`.
+
+ @require out.len == positions.len
+*>
+fn void smooth_normals(Vec3[] positions, collision::Triangle[] triangles, Vec3[] out, Vec3 fallback)
+{
+	foreach (&normal : out) *normal = { 0, 0, 0 };
+	foreach (t : triangles)
+	{
+		if (t[0] >= positions.len || t[1] >= positions.len || t[2] >= positions.len) continue;
+		Vec3 face = (positions[t[1]] - positions[t[0]]).cross(positions[t[2]] - positions[t[0]]);
+		out[t[0]] += face;
+		out[t[1]] += face;
+		out[t[2]] += face;
+	}
+	foreach (&normal : out) *normal = normal.length_sq() > 1e-12f ? normal.normalize() : fallback;
 }
 
 <*

@@ -321,16 +321,8 @@ fn Texture? Gpu.create_storage_texture(&self, uint width, uint height, StorageIm
 		.storage = format.vk,
 	};
 
-	texture.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format.vk)
-		.setExtent({ .width = width, .height = height, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(usage)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(self.handle)!;
-	texture.memory = vk::create_image_buffer(texture.image, &self.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+	texture.memory = self.create_device_image(format.vk, width, height, usage)!;
+	texture.image = texture.memory.image;
 
 	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)
 	{
@@ -463,19 +455,13 @@ fn ushort float_to_half(float value)
 *>
 fn void? Texture.read_storage(&self, Compute* compute, char[] into)
 {
-	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
+	compute.flush()!;
 	Gpu* gpu = compute.gpu;
 	StorageImageFormat format = self.storage_format();
 	sz texels = (sz)self.width * (sz)self.height;
 	sz bytes = texels * (sz)format.texel_bytes();
 
-	vk::Memory stage = vk::new_buffer(
-		&gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: bytes,
-	)!;
+	vk::Memory stage = gpu.create_readback(bytes)!;
 	defer stage.free();
 
 	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
@@ -514,19 +500,13 @@ fn void? Texture.read_storage(&self, Compute* compute, char[] into)
 *>
 fn void? Texture.write_storage(&self, Compute* compute, char[] values)
 {
-	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
+	compute.flush()!;
 	Gpu* gpu = compute.gpu;
 	StorageImageFormat format = self.storage_format();
 	sz texels = (sz)self.width * (sz)self.height;
 	sz bytes = texels * (sz)format.texel_bytes();
 
-	vk::Memory stage = vk::new_buffer(
-		&gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: bytes,
-	)!;
+	vk::Memory stage = gpu.create_upload(bytes)!;
 	defer stage.free();
 
 	char* staged = (char*)stage.data();

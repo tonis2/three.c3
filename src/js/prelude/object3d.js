@@ -21,6 +21,25 @@ function sceneOf(object) {
 	return null;
 }
 
+const PLAY_OPTIONS = ['loop', 'speed', 'time', 'fade', 'sync'];
+const BLEND_OPTIONS = ['fade', 'sync', 'speed'];
+
+// A number a clip call can use, or a sentence naming the one that is not.
+function finite(value, what, verb) {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		throw new TypeError(`${verb}(): ${what} must be a finite number, not ${String(value)}`);
+	}
+}
+
+// A `sync` as the host takes it: cycles on, folded into [0, 1), or -1 for
+// none. -0.25 cycles is 0.75 of one.
+function cycles(sync, verb) {
+	if (sync === false || sync === null || sync === undefined) return -1;
+	if (sync === true) return 0;
+	finite(sync, 'sync', verb);
+	return sync - Math.floor(sync);
+}
+
 export class Object3D {
 	constructor() {
 		this._position = new Vector3(this, 0, 0, 0);
@@ -44,6 +63,7 @@ export class Object3D {
 		// accessor. Off by default; only the collision proxy an implicit shape
 		// gets from `instantiate({ physics: true })` sets it.
 		this._collisionOnly = false;
+		this._blocks = true;
 		// Something to do the moment this object is in a scene, or null — which
 		// is every object but the root of an `instantiate({ physics: true })`.
 		// A body hangs on a host node and there is no host node until an `add`.
@@ -155,6 +175,25 @@ export class Object3D {
 		if (this._i >= 0) H.setCollides(this._i, this._g, this._collides);
 	}
 
+	// **"Find me, but walk past me."** Off, the object is still raycast, picked
+	// and reported by `three.query.sphere`/`box`, but nothing sweeps against
+	// it: not `three.query.sweep`, not `moveAndSlide`, not `three.nav.bake`
+	// and not the sweep `three.nav.path` pulls its route tight with.
+	//
+	// It is what a character wants. Left on, a character is a wall across
+	// every route through where it stands, and its own path from where it
+	// stands comes back empty, because its first step starts inside itself.
+	// `collides = false` fixed that by taking it out of the picks too.
+	//
+	// NOT inherited, for `collides`' reason — set it on the meshes, which is
+	// what `traverse` is for. Free to toggle: unlike `collides`, nothing is
+	// rebuilt.
+	get blocks() { return this._blocks; }
+	set blocks(v) {
+		this._blocks = !!v;
+		if (this._i >= 0) H.setBlocks(this._i, this._g, this._blocks);
+	}
+
 	// **"This is a shape, not a picture."** On, the object is swept against,
 	// raycast and reported by every query, and drawn by nothing — no draw call,
 	// no instance, no triangles in `three.stats()`.
@@ -194,44 +233,139 @@ export class Object3D {
 	// saying which door to use, rather than returning false and leaving a
 	// script to wonder whether the clip name was wrong.
 	//
-	// **Deliberately not an AnimationMixer.** Three.js's mixer/clip/action
-	// trio earns its complexity on holding several weighted actions at once.
-	// There is a crossfade here — `play(name, { fade })` — and it is two
-	// clips and one weight, which is what a locomotion state machine asks
-	// for. The third simultaneous clip is where a mixer would have to be a
-	// mixer, and it is not here. See G3/S7.
+	// **A stack of up to four clips, not an AnimationMixer.** `play` raises
+	// one clip to the whole of the picture over `fade` seconds and lowers
+	// the rest; `blend` holds several at the weights asked for — a walk and a
+	// run mixed by speed. There are no action objects to keep: the stack is
+	// the character's, and `animation.layers` reads it back.
 
 	get animations() { return this._clips ? this._clips.slice() : []; }
 
-	// `fade` crossfades out of whatever is playing, in seconds. **Asking to
-	// fade into the clip that is already playing does nothing**, which is
-	// what makes `play(state.clip, { fade: 0.2 })` safe to call from a state
-	// machine that runs every frame. Restarting a clip outright is `play`
-	// without a fade.
-	play(name, { loop = true, speed = 1, time = 0, fade = 0 } = {}) {
+	// Where the clip that is most of the picture is: `{ name, time, duration,
+	// speed, loop, playing, weight, layers }`, `layers` the same shape for
+	// every clip on the stack — or null before anything has played. A fresh
+	// object per read, so holding one is holding a snapshot.
+	get animation() {
+		if (this._i < 0 || !this._clips) return null;
+		return H.animationState(this._i, this._g);
+	}
+
+	// `fade` crossfades out of whatever is posing the character, in seconds —
+	// a held pose included. **Asking to fade into the clip that is already
+	// playing does not restart it** but takes its `speed` and `loop`, which
+	// is what makes `play(state.clip, { fade: 0.2, speed })` safe to call from
+	// a state machine that runs every frame. Restarting a clip outright is
+	// `play` without a fade. `sync` starts the new clip at the old one's
+	// phase, `true` for the same phase or a number of cycles to add to it.
+	play(name, options = {}) {
+		this._checkAnimationOptions(options, PLAY_OPTIONS, `play("${name}")`);
+		const { loop = true, speed = 1, time = 0, fade = 0, sync = false } = options;
+		this._requireClips(`play("${name}")`);
+		this._requireClip(name);
+		finite(speed, 'speed', 'play'); finite(time, 'time', 'play'); finite(fade, 'fade', 'play');
+		// The host learns the node map on the first play and not before: a
+		// prop that never animates never sends it.
+		this._bindAnimation();
+		const played = H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time, +fade,
+			cycles(sync, 'play'));
+		if (!played) this._gone(`play("${name}")`);
+		return this;
+	}
+
+	// Several clips at once: `{ walk: 0.7, run: 0.3 }`. Each named clip's
+	// weight moves to the number given over `fade` seconds and every other
+	// clip leaves; a clip already playing is never restarted, so this is
+	// safe to call every frame with weights that drift a little each time.
+	// Weights summing past one are normalised; to less, the rest pose shows
+	// through the remainder.
+	//
+	// `sync` locks the named clips to one shared cycle so loops of different
+	// lengths keep their feet together: `true` for every clip on the same
+	// phase, or `{ run: 0.5 }` for a clip that starts half a cycle on — the
+	// walk on its left foot and the run on its right.
+	blend(weights, options = {}) {
+		this._checkAnimationOptions(options, BLEND_OPTIONS, 'blend()');
+		const { fade = 0, sync = false, speed = 1 } = options;
+		this._requireClips('blend()');
+		if (weights === null || typeof weights !== 'object' || Array.isArray(weights)) {
+			throw new TypeError('blend(weights) wants { clip: weight, ... }, e.g. { walk: 0.7, run: 0.3 }');
+		}
+		const names = Object.keys(weights);
+		if (names.length === 0 || names.length > 4) {
+			throw new TypeError(`blend() holds one to four clips at once, not ${names.length}`);
+		}
+		finite(fade, 'fade', 'blend'); finite(speed, 'speed', 'blend');
+		if (sync !== false && sync !== true && (sync === null || typeof sync !== 'object')) {
+			throw new TypeError('blend(): sync is true, false, or { clip: cyclesOn, ... }');
+		}
+		const args = [];
+		for (const name of names) {
+			this._requireClip(name);
+			const weight = weights[name];
+			finite(weight, `weight of "${name}"`, 'blend');
+			let offset = -1;
+			if (sync === true) offset = 0;
+			else if (sync && typeof sync === 'object') {
+				if (name in sync) offset = cycles(sync[name], 'blend');
+			}
+			args.push(name, +weight, offset);
+		}
+		if (sync && typeof sync === 'object') {
+			for (const key of Object.keys(sync)) {
+				if (!names.includes(key)) {
+					throw new TypeError(`blend(): sync names "${key}", which is not one of the clips being blended (${names.join(', ')})`);
+				}
+			}
+		}
+		this._bindAnimation();
+		if (!H.blendAnimation(this._i, this._g, +fade, +speed, ...args)) this._gone('blend()');
+		return this;
+	}
+
+	// Holds every clip where it is. Not in a scene yet is nothing playing,
+	// which is not an error; no clips at all is the wrong object.
+	stop() {
+		if (!this._clips) this._requireClips('stop()');
+		if (this._i >= 0) H.stopAnimation(this._i, this._g);
+		return this;
+	}
+
+	_checkAnimationOptions(options, keys, where) {
+		if (options === null || options === undefined) return;
+		if (typeof options !== 'object') {
+			throw new TypeError(`${where} wants an options object, not ${JSON.stringify(options)}`);
+		}
+		for (const key of Object.keys(options)) {
+			if (!keys.includes(key)) {
+				throw new TypeError(`${where}: '${key}' is not an option — this call takes: ${keys.join(', ')}`);
+			}
+		}
+	}
+
+	_requireClips(where) {
 		if (!this._clips) {
 			throw new Error(
-				'play() works on an object from asset.instantiate(), which is what carries a file\'s '
+				`${where} works on an object from asset.instantiate(), which is what carries a file's `
 				+ 'animation clips. This object has none.'
 			);
 		}
 		if (this._i < 0) {
-			throw new Error(`play("${name}") needs ${this._name || 'the object'} to be in a scene — add it first`);
+			throw new Error(`${where} needs ${this._name || 'the object'} to be in a scene — add it first`);
 		}
+	}
+
+	_requireClip(name) {
 		if (!this._clips.includes(name)) {
 			const have = this._clips.length ? this._clips.join(', ') : '(none)';
 			throw new Error(`no animation named "${name}" — this one has: ${have}`);
 		}
-		// The host learns the node map on the first play and not before: a
-		// prop that never animates never sends it.
-		this._bindAnimation();
-		H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time, +fade);
-		return this;
 	}
 
-	stop() {
-		if (this._i >= 0 && this._clips) H.stopAnimation(this._i, this._g);
-		return this;
+	// The clip was found and the object is in a scene, so the host saying no
+	// means the one thing left: the file it came from is gone.
+	_gone(where) {
+		this._bound = false;
+		throw new Error(`${where}: the asset ${this._name || 'this object'} came from has been unloaded, so it has no clips to play`);
 	}
 
 	// -------------------------------------------------------------------
@@ -294,8 +428,10 @@ export class Object3D {
 			for (const c of o.children) walk(c);
 		};
 		walk(this);
-		H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs, !!this._liveSkin);
-		this._bound = true;
+		// Cached only when the host took it: a bind it refused — the asset gone,
+		// or a file with neither clips nor a skin — is asked again next time
+		// rather than remembered as done.
+		this._bound = H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs, !!this._liveSkin) === true;
 	}
 
 	_flush() {
@@ -319,6 +455,7 @@ export class Object3D {
 		if (!this._visible) H.setVisible(i, g, false);
 		if (!this._collides) H.setCollides(i, g, false);
 		if (this._collisionOnly) H.setCollisionOnly(i, g, true);
+		if (!this._blocks) H.setBlocks(i, g, false);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(i, g, material);
@@ -831,6 +968,7 @@ export class Object3D {
 			visible: this._visible,
 			collides: this._collides,
 			collisionOnly: this._collisionOnly,
+			blocks: this._blocks,
 			inScene: this._i >= 0,
 			children: this.children.length,
 		};

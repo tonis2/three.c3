@@ -46,7 +46,6 @@ fn void JsRuntime.bind_shader_verbs(&self, qjs::Value host)
 	self.bind(host, "getRelief", &js_get_relief, 1);
 	self.bind(host, "setMap", &js_set_map, 2);
 	self.bind(host, "setMaterialSlot", &js_set_material_slot, 3);
-	self.bind(host, "getMaterialSlot", &js_get_material_slot, 2);
 	self.bind(host, "setMaterialUv", &js_set_material_uv, 5);
 	self.bind(host, "getMaterialUv", &js_get_material_uv, 1);
 	self.bind(host, "beginUvVariants", &js_begin_uv_variants, 1);
@@ -104,11 +103,7 @@ fn void js_create_material(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.renderer == null)
-	{
-		*out = js.raise("compiling a material needs a GPU device and this context has none");
-		return;
-	}
+	if (!self.needs_device(&js, "compiling a material", out)) return;
 
 	@pool()
 	{
@@ -149,16 +144,14 @@ fn void js_create_material(
 			int components = width_list[i].to_int() ?? 0;
 			if (components < 1 || components > 4)
 			{
-				*out = js.raise(
-					string::tformat("uniform '%s' must be a number or an array of two, three or four numbers", name)
-				);
+				*out = js.raisef("uniform '%s' must be a number or an array of two, three or four numbers", name);
 				return;
 			}
 
 			int declared_rows = row_list.len() > 0 ? (row_list[i].to_int() ?? 0) : 1;
 			if (declared_rows < 1)
 			{
-				*out = js.raise(string::tformat("uniform '%s' is a table with no rows in it", name));
+				*out = js.raisef("uniform '%s' is a table with no rows in it", name);
 				return;
 			}
 
@@ -262,7 +255,7 @@ fn void js_create_material(
 				// asking for anyway — and a panic on the failure path of a *script
 				// error* would take the process down over a typed texture name.
 				@catch(self.pass.dispose_material(&self.renderer.gpu, made));
-				*out = js.raise(material_texture_failure(err, name));
+				*out = js.raise(texture_failure(err, name, "this material's shader", "the material's"));
 				return;
 			}
 		}
@@ -272,23 +265,24 @@ fn void js_create_material(
 }
 
 <*
- Turns a sampler fault into a sentence an agent can act on.
+ Turns a sampler fault into a sentence an agent can act on, for a material or a
+ post pass.
 
  The `MATERIAL_SAMPLER_UNKNOWN` case is the one worth the words: a sampler is
- reached by the name the body declares, so a name that is not in the material's
+ reached by the name the body declares, so a name that is not in the
  declaration list has nowhere to bind. A declared texture the body never samples
  is not this case — the module keeps every declaration.
+
+ @param shader : `What has the samplers, as the sentence names it: "this material's shader".`
+ @param owner : `Whose declared textures they are: "the material's".`
 *>
-fn String material_texture_failure(fault err, String name) @local
+fn String texture_failure(fault err, String name, String shader, String owner)
 {
 	switch (err)
 	{
 		case MATERIAL_SAMPLER_UNKNOWN:
-			return string::tformat(
-				"this material's shader has no sampler called '%s' — the name is not one of the "
-					"material's declared textures",
-				name
-			);
+			return string::tformat("%s has no sampler called '%s' — the name is not one of %s declared textures",
+				shader, name, owner);
 		case MATERIAL_TEXTURE_UNKNOWN:
 			return string::tformat("the texture for '%s' was disposed, or came from another renderer", name);
 		default:
@@ -329,7 +323,7 @@ fn void js_set_material_texture(
 			*out = js.raise(
 				err
 					== MATERIAL_UNKNOWN ? "that material cannot take a texture — it is the default material or it was disposed"
-					: material_texture_failure(err, name)
+					: texture_failure(err, name, "this material's shader", "the material's")
 			);
 			return;
 		}
@@ -449,7 +443,7 @@ fn void js_set_uniform(
 		int count = arg_int(&js, argc, args, 6);
 		if (count < 1 || count > 4)
 		{
-			*out = js.raise(string::tformat("uniform '%s' wants one to four numbers", name));
+			*out = js.raisef("uniform '%s' wants one to four numbers", name);
 			return;
 		}
 
@@ -461,15 +455,8 @@ fn void js_set_uniform(
 		if (rows < 1) rows = 1;
 		if (row < 0 || row >= rows)
 		{
-			*out = js.raise(
-				string::tformat(
-					"uniform '%s' has %d row%s and row %d is not one of them",
-					name,
-					rows,
-					rows == 1 ? "" : "s",
-					row
-				)
-			);
+			*out = js.raisef("uniform '%s' has %d row%s and row %d is not one of them",
+				name, rows, rows == 1 ? "" : "s", row);
 			return;
 		}
 
@@ -1113,26 +1100,6 @@ fn void js_set_material_slot(
 		*out = js.raise("that material is not in this context, or it is a built-in one that every node shares");
 		return;
 	}
-}
-
-<*
- Which texture is in one of those three slots, or -1.
-*>
-fn void js_get_material_slot(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	uint index = (uint)arg_int(&js, argc, args, 0);
-	int slot   = arg_int(&js, argc, args, 1);
-	*out = qjs::int_value(self.pass.material_slot(index, slot));
 }
 
 <*

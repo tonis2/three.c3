@@ -96,6 +96,16 @@ fn void SampledBindings.add(&self, uint binding, vk::DescriptorImageInfo info)
 }
 
 <*
+ Adds one image at one binding, when the linked program kept that binding. The
+ compiler may drop a sampler nothing reads, and a write to a binding the layout
+ does not declare is a validation error.
+*>
+fn void SampledBindings.add_if(&self, MeshPipeline* pipeline, uint binding, vk::DescriptorImageInfo info)
+{
+	if (pipeline_declares_binding(pipeline, binding)) self.add(binding, info);
+}
+
+<*
  Adds one storage image at one binding: no sampler, and `GENERAL`, the one
  layout a shader may both read and write an image in.
 
@@ -249,4 +259,34 @@ fn void SampledBindings.push(&self, vk::CommandBuffer cmd, MeshPipeline* pipelin
 	// The pipeline's own bind point: a compute post pass pushes through the same
 	// struct, and a push against the wrong point is a set the dispatch never sees.
 	vk::cmdPushDescriptorSetKHR(cmd, pipeline.bind_point, pipeline.layout, 0, self.count, &self.writes[0]);
+}
+
+<*
+ Pushes one draw's constants: the mesh contract, the material's uniforms on top
+ of it, then the address of its spilled uniform table over the block's stale copy.
+
+ A `Material.block` is laid out *as the push block itself* rather than as a list
+ of values, so this is two copies with no per-uniform loop. The table pointer is
+ written last because the buffer it names moves every frame.
+
+ The reflected push size, not `MeshPush::size`: pushing more than the range the
+ pipeline declared is a validation error that draws pixel-identical on this
+ driver, so only the layer catches it.
+
+ @param table : `The device address of this material's uniform table, or zero for none.`
+*>
+fn void push_mesh_constants(vk::CommandBuffer cmd, MeshPipeline* pipeline, MeshPush push, Material* material, ulong table)
+{
+	char[PUSH_BUDGET] staging;
+	uint push_size = pipeline.shader.push_size;
+	mem::copy(&staging[0], (char*)&push, MeshPush::size);
+	if (material != null && push_size > MATERIAL_PUSH_START)
+	{
+		mem::copy(&staging[MATERIAL_PUSH_START], &material.block[MATERIAL_PUSH_START], (sz)(push_size - MATERIAL_PUSH_START));
+		if (material.table_pointer != NO_TABLE_POINTER && table != 0)
+		{
+			mem::copy(&staging[material.table_pointer], (char*)&table, ulong::size);
+		}
+	}
+	vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, push_size, &staging);
 }

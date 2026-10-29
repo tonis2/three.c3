@@ -20,7 +20,8 @@ topic. It is an Object3D, so moving it moves everything.
 - `name`
 - `children`
 - `parent`
-- `animations`
+- `animations` — always empty: a Scene carries no clips
+- `animation` — always null, for the same reason
 - `isActive` — whether this is the one being rendered; only one is, and only that one is stepped,
   drawn and queried
 - `id` — the host's id for this scene, what `three.sceneById(id)` takes. Read-only
@@ -45,6 +46,7 @@ topic. It is an Object3D, so moving it moves everything.
      scene that is not on screen could be lit through them. -->
 - `collides` — on the root, which draws nothing; set it on the meshes
 - `collisionOnly` — the same: a root draws nothing and is queried by nothing
+- `blocks` — the same: set it on the meshes
 
 ### Methods
 
@@ -67,9 +69,11 @@ topic. It is an Object3D, so moving it moves everything.
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, { loop, speed, time, fade })`
-- `stop()`
-- `socket(bone)`
+- `play(name, { loop, speed, time, fade, sync })` — throws: a Scene carries no clips; play the root
+  `asset.instantiate()` returned
+- `blend(weights, { fade, sync, speed })` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a Scene has no bones
 - `toJSON()`
 
 ### Details
@@ -130,7 +134,11 @@ material is one draw call.
 - `static` — this will not move again: drawn into the shadow map once and kept
 - `collides` — false takes it out of every spatial query — scenery, not a wall
 - `collisionOnly` — true puts it in every query and in no draw — a shape, not a picture
-- `animations` — empty unless this came from `asset.instantiate()`
+- `blocks` — false keeps it in raycasts, picks and `query.sphere`/`box` and out of every sweep,
+  `moveAndSlide`, `nav.bake` and `nav.path` — a character, found by a click and walked past. Free to
+  toggle, and not inherited
+- `animations` — empty unless this is the root `asset.node()` returned, for a node that is a mesh
+- `animation` — the playhead, or null — see Group
 - `morphs` — how many morph targets the geometry has, 0 for most
 - `weights` — per copy, free: how much of each morph target this one wears
 
@@ -149,6 +157,7 @@ material is one draw call.
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
+- `blend(weights, opts)`
 - `stop()`
 - `socket(bone)`
 - `toJSON()`
@@ -762,8 +771,8 @@ this copy's `mesh.color` alpha, so a body cannot make geometry invisible by acci
 deliberately. `discard` works in a body and is how a dissolve or a cutout is done.
 
 `vertex` is the other half: a function `void displace(inout Vertex v)` that runs per vertex,
-before anything is projected. `Vertex` is the varyings — write `v.position` (world space, after the
-mesh's own transform) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
+before anything is projected. `Vertex` is the varyings — write `v.position` (object space, before the
+mesh's own transform, so a displacement scales and turns with the mesh) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
 `v.variant` to change what the fragment stage receives; `v.local` (object space), `v.index` (the
 vertex number, a per-vertex seed) and `v.origin` (this copy's world origin, a per-copy one) are inputs
 only.
@@ -776,7 +785,8 @@ derivatives to pick a mip with. Like `fragment`, it may be only the statements �
 `vertex: 'v.position += v.normal * 0.1;'` — or the whole function. Either body may be left out: the
 other keeps the template's own, which is the built-in shading or a vertex stage that moves nothing.
 
-`bounds` is what a vertex body owes the renderer: how far, in world units, it can move a vertex.
+`bounds` is what a vertex body owes the renderer: how far, in the mesh's own units, it can move a
+vertex — the same units the body moves it in, so a node scaled by four is given four times the margin.
 Culling tests a mesh's own bounds, so a body that pushes geometry outside them draws something the
 frustum was never told about — and the symptom is geometry vanishing at the edge of the screen and
 coming back when the camera turns, which reads as a renderer bug. Too big costs a draw call that could
@@ -790,7 +800,7 @@ have been skipped; too small drops geometry you can see.
 - `fragment`
 - `vertex` — the displace body, or an empty string; read-only, like `fragment` — a new body is a new
   material
-- `bounds` — how far the vertex body moves a vertex, world units; read-only, and what the frustum test
+- `bounds` — how far the vertex body moves a vertex, in the mesh's own units; read-only, and what the frustum test
   is widened by
 - `map` — a `three.texture`, or null; sampled as `Surface.albedo` before your `shade()` runs
 - `side` — settable, and cheap after the first time each side is asked for
@@ -992,14 +1002,50 @@ object: parent the pieces, place them relative to the Group once, and afterwards
 transform to move rather than a convention to remember.
 
 `asset.instantiate()` answers with one of these carrying the file's own node hierarchy, and that one
-is what `animations`, `play(name, {loop, speed, time, fade})` and `stop()` work on — a glTF clip
-drives a whole subtree, so its root is where it is played. On a hand-built Group `animations` is empty
-and `play()` throws saying which door to use.
+is what `animations`, `animation`, `play(name, {loop, speed, time, fade, sync})`,
+`blend(weights, {fade, sync, speed})` and `stop()` work on — a glTF clip drives a whole subtree, so
+its root is where it is played. On a hand-built Group `animations` is empty and `play()` throws
+saying which door to use.
 
-There is no AnimationMixer: one clip at a time plus a crossfade. `fade` is seconds to blend out of
-whatever is playing, and asking to fade into the clip already playing does nothing — which is what
-makes `play(state.clip, { fade: 0.2 })` safe to call from a state machine every frame. Restarting a
-clip outright is `play()` without a fade.
+A character holds a stack of up to four clips, each with a weight. `play` raises one clip to the
+whole of the picture; `blend` holds several at once. There is no AnimationMixer and no action
+objects — the stack belongs to the character, and `animation.layers` reads it back.
+
+- `fade` is seconds to blend out of whatever is posing the character — clips that are playing, a
+  one-shot that has run out, or a `stop()`ped pose, the last two held still while they fade. The
+  clip asked for rises at a steady rate and the rest fall in proportion, so the weights sum to one the
+  whole way and no frame shows the rest pose through it.
+- Asking to fade into the clip already playing does not restart it but takes its `speed` and `loop`,
+  so `play(state.clip, { fade: 0.2, speed: groundSpeed / 1.4 })` is safe to call every frame and the
+  cadence follows the feet. Restarting a clip outright is `play()` without a fade.
+- Asking for a clip that is on its way out raises it again from the weight it still has, so a tap of
+  shift between a walk and a run never pops, and a third clip asked for mid-fade joins the other two.
+  A fifth makes room by dropping the lightest.
+- `sync` starts the new clip at the phase of the one the character was heading for rather than at
+  `time`: `true` for the same phase, or a number of cycles to add — `sync: 0.5` when the walk starts on
+  the left foot and the run on the right.
+- `blend({ walk: 0.7, run: 0.3 }, { fade, sync, speed })` sets each named clip's weight and lowers
+  every other, never restarting a clip already playing, so it is safe every frame with weights that
+  drift. Weights summing past one are normalised; to less, the rest pose shows through the remainder.
+  `sync: true` locks the named clips to one shared cycle, and `sync: { run: 0.5 }` puts a clip that
+  many cycles on: two loops of different lengths then go round together at the weighted mean of their
+  rates, feet in step whatever the mix.
+- Blending is symmetric: every node any clip drives starts from the file's rest pose and takes each
+  clip's value at its weight, the rest of the weight staying rest — so a node only a leaving clip
+  moved goes back where the file had it.
+- `animation` reads the playhead back: `{ name, time, duration, speed, loop, playing, weight,
+  layers }` for the clip the character is heading for, `layers` the same shape for every clip on the
+  stack, or null before anything has played. `time` is seconds from the clip's start and `playing`
+  goes false when a `loop: false` clip runs out, which is how a jump knows its landing has finished.
+- A baked character playing one clip reads its baked table, interpolated between frames, and costs one
+  instance's worth of numbers; while it blends several it is posed on the CPU from the clips' own
+  curves, and goes back to the table when the blend is over.
+
+```js
+const k = (speed - 1.0) / (1.9 - 1.0);
+hero.blend({ walk: 1 - k, run: k }, { fade: 0.15, sync: { run: 0.5 }, speed: rate });
+if (hero.animation.name === 'land' && !hero.animation.playing) hero.play('idle', { fade: 0.3 });
+```
 
 ### Properties
 
@@ -1013,7 +1059,9 @@ clip outright is `play()` without a fade.
 - `static` — this will not move again — see the static-casters topic
 - `collides` — per node and not inherited; set it on the meshes, not on the Group
 - `collisionOnly` — the same: set it on the meshes, not on the Group
+- `blocks` — the same: set it on the meshes, not on the Group — `traverse` does
 - `animations` — clip names, from `asset.instantiate()`
+- `animation` — the playhead, `{ name, time, duration, speed, loop, playing }`, or null
 
 ### Methods
 
@@ -1030,6 +1078,7 @@ clip outright is `play()` without a fade.
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
 - `play(name, opts)`
+- `blend(weights, opts)`
 - `stop()`
 - `socket(bone)`
 - `toJSON()`
@@ -1186,6 +1235,12 @@ rather than as an error.
 
 In a loop compare `distanceToSquared` against `r * r`: `distanceTo` is a square root per pair to answer
 a question that never needed one.
+
+### Properties
+
+- `x`
+- `y`
+- `z`
 
 ### Methods
 
@@ -2240,8 +2295,8 @@ three.nav.field(goals)
 ```
 
 A solved flow field over the current grid from `scene.nav.load()` or `scene.nav.bake()` — the solve kept, which is the whole reason there
-are two navigation verbs instead of one. `three.nav.path` solves the entire reachable set and throws it
-away after one answer, so a hundred agents heading for the same door is a hundred solves for one field.
+are two navigation verbs instead of one. `three.nav.path` searches between its two ends and throws the
+answer away, so a hundred agents heading for the same door is a hundred searches for one field.
 
 `direction(point)` is a unit XZ vector, or zero for nowhere to go — standing on the goal, off the mesh, or
 in a pocket no goal reaches — and `cost(point)` is how those are told apart. Cost is measured along the
@@ -2316,8 +2371,10 @@ the times it is inside a wall.
 - `variant` — meaningless here: the line material has no table
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
+- `animation` — always null: a helper carries no clips
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2334,9 +2391,10 @@ the times it is inside a wall.
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, opts)`
-- `stop()`
-- `socket(bone)`
+- `play(name, opts)` — throws: a helper carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a helper has no bones
 - `toJSON()`
 
 ## BoxHelper
@@ -2372,8 +2430,10 @@ moving it.
 - `variant` — meaningless here
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
+- `animation` — always null: a helper carries no clips
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2391,9 +2451,10 @@ moving it.
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, opts)`
-- `stop()`
-- `socket(bone)`
+- `play(name, opts)` — throws: a helper carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a helper has no bones
 - `toJSON()`
 
 ## AxesHelper
@@ -2422,8 +2483,10 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `parent`
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
+- `animation` — always null: a helper carries no clips
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 
 ### Methods
 
@@ -2439,9 +2502,10 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, opts)`
-- `stop()`
-- `socket(bone)`
+- `play(name, opts)` — throws: a helper carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a helper has no bones
 - `toJSON()`
 
 ## GridHelper
@@ -2475,8 +2539,10 @@ live. Divisions are capped at 256.
 - `variant` — meaningless here
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
+- `animation` — always null: a helper carries no clips
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2493,9 +2559,10 @@ live. Divisions are capped at 256.
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, opts)`
-- `stop()`
-- `socket(bone)`
+- `play(name, opts)` — throws: a helper carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a helper has no bones
 - `toJSON()`
 
 ## WireframeHelper
@@ -2534,8 +2601,10 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `variant` — meaningless here
 - `static` — meaningless here: a helper casts no shadow to cache
 - `animations` — always empty
+- `animation` — always null: a helper carries no clips
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
+- `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
 
 ### Methods
@@ -2552,7 +2621,8 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
   both pieces carry
 - `alignTo(other, axes)` — flush without touching
 - `row(axis, pieces, opts)` — N pieces edge to edge along one axis
-- `play(name, opts)`
-- `stop()`
-- `socket(bone)`
+- `play(name, opts)` — throws: a helper carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a helper has no bones
 - `toJSON()`

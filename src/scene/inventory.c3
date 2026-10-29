@@ -291,14 +291,7 @@ fn void widen(InventoryEntry* entry, gltf::Gltf* doc, gltf::Primitive primitive)
 	Vec3 low                = { accessor.min[0], accessor.min[1], accessor.min[2] };
 	Vec3 high               = { accessor.max[0], accessor.max[1], accessor.max[2] };
 
-	if (!entry.has_bounds)
-	{
-		entry.bounds = { .min = low, .max = high };
-		entry.has_bounds = true;
-		return;
-	}
-	entry.bounds.min = math::min(entry.bounds.min, low);
-	entry.bounds.max = math::max(entry.bounds.max, high);
+	union_into(&entry.bounds, &entry.has_bounds, { .min = low, .max = high });
 }
 
 <*
@@ -383,6 +376,6 @@ fn void push_marker(InventoryEntry* entry, gltf::Node* node, String piece, Matri
 	entry.markers.push({
 		.name = node.name.copy(mem),
 		.piece = piece.copy(mem),
-		.position = { local.m[12], local.m[13], local.m[14] },
+		.position = translation_of(local),
 	});
 }

@@ -149,27 +149,12 @@ const float EXTRUDE_EPS = 1e-9f;
 *>
 const float EXTRUDE_ANGLE_EPS = 1e-5f;
 
-<*
- One FNV-1a step over a single uint. Split out because `extrude_key` mixes
- outline, holes and depth through the same step, the same reason
- `ribbon_fnv` in `bind_asset.c3` exists.
-*>
-fn ulong extrude_fnv(ulong hash, uint bits) @local @inline
-{
-	for (usz byte = 0; byte < 4; byte++)
-	{
-		hash ^= (ulong)((bits >> (uint)(byte * 8)) & 0xff);
-		hash *= 0x100000001b3;
-	}
-	return hash;
-}
-
 fn ulong extrude_hash_points(ulong hash, Vec2[] points) @local
 {
 	foreach (point : points)
 	{
-		hash = extrude_fnv(hash, bitcast(point.x, uint));
-		hash = extrude_fnv(hash, bitcast(point.y, uint));
+		hash = @hash_value(hash, point.x);
+		hash = @hash_value(hash, point.y);
 	}
 	return hash;
 }
@@ -185,11 +170,11 @@ fn ulong extrude_hash_points(ulong hash, Vec2[] points) @local
 *>
 fn String extrude_key(Vec2[] outline, Vec2[] holes, uint[] hole_counts, float depth, Allocator allocator)
 {
-	ulong hash = 0xcbf29ce484222325;
+	ulong hash = KEY_SEED;
 	hash = extrude_hash_points(hash, outline);
 	hash = extrude_hash_points(hash, holes);
-	foreach (count : hole_counts) hash = extrude_fnv(hash, count);
-	hash = extrude_fnv(hash, bitcast(depth, uint));
+	foreach (count : hole_counts) hash = @hash_value(hash, count);
+	hash = @hash_value(hash, depth);
 	return string::format(allocator, "<extrude n=%d holes=%d h=%x>", outline.len, hole_counts.len, hash);
 }
 

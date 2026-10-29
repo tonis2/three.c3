@@ -4,6 +4,7 @@ import three;
 import three_tests::device;
 import std::core::test;
 import std::math::vector;
+import collision;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {
@@ -105,6 +106,75 @@ fn void a_long_turning_field_converges_completely() @test
 	vector::Vec3[COUNT] raw;
 	test::@check(scene.nav.walk(field[..], scene.nav.foot_of(far_voxel), raw[..]) > 0,
 		"a route requiring more than 64 alternating sweeps reaches its goal");
+}
+
+fn void a_route_search_settles_the_way_not_the_level() @test
+{
+	const int ROWS = 140;
+	const int WIDTH = 7;
+	const int COUNT = ROWS * WIDTH + ROWS - 1;
+	int[COUNT] cells;
+	int at = 0;
+	int nx = 11;
+	int ny = 7;
+	int plane = nx * ny;
+	for (int row = 0; row < ROWS; row++)
+	{
+		int z = 2 + row * 2;
+		for (int x = 2; x < 2 + WIDTH; x++) cells[at++] = z * plane + 3 * nx + x;
+		if (row + 1 < ROWS)
+		{
+			int connector_x = row % 2 == 0 ? 2 + WIDTH - 1 : 2;
+			cells[at++] = (z + 1) * plane + 3 * nx + connector_x;
+		}
+	}
+
+	three::AssetNavigationProfile profile = {
+		.settings = { .cell = 0.5, .agent_radius = 0.3, .agent_height = 1.66,
+			.step_height = 0.5, .slope_limit = 54 },
+		.origin = { 0, 0, 0 }, .nx = nx, .ny = ny, .nz = ROWS * 2 + 5,
+		.cells = cells[0..COUNT - 1],
+	};
+	three::Scene scene;
+	test::@check(scene.load_nav(&profile), "snake fixture loaded");
+	defer scene.drop_nav();
+
+	float[COUNT] field;
+	vector::Vec3[COUNT] raw;
+	vector::Vec3[1] goals = { scene.nav.foot_of(cells[0]) };
+
+	// Three rows from the goal: the far end of the snake is never reached.
+	vector::Vec3 near = scene.nav.foot_of(cells[3 * (WIDTH + 1)]);
+	vector::Vec3[1] nears = { near };
+	test::@check(scene.nav.solve(goals[..], field[..], nears[..]), "near search seeded");
+	test::@check(scene.nav.walk(field[..], near, raw[..]) > 0, "a near route reaches its goal");
+	test::@check(field[COUNT - 1] >= collision::VOXEL_UNREACHED,
+		"a near route leaves the far end of the level unsearched");
+
+	// The far end: the search has to follow every switchback, against its estimate.
+	vector::Vec3 far = scene.nav.foot_of(cells[COUNT - 1]);
+	vector::Vec3[1] fars = { far };
+	test::@check(scene.nav.solve(goals[..], field[..], fars[..]), "far search seeded");
+	uint aimed = scene.nav.walk(field[..], far, raw[..]);
+	test::@check(scene.nav.solve(goals[..], field[..]), "full field seeded");
+	uint whole = scene.nav.walk(field[..], far, raw[..]);
+	test::@check(aimed > 0 && aimed == whole,
+		"a search aimed at the start walks the same route the whole field does: %d against %d", aimed, whole);
+
+	// Both at once, the way a group is sent: one search, settled until the
+	// farther start is, and each walks what it would have walked alone.
+	uint near_alone = 0;
+	test::@check(scene.nav.solve(goals[..], field[..], nears[..]), "near search seeded again");
+	near_alone = scene.nav.walk(field[..], near, raw[..]);
+	vector::Vec3[2] both = { near, far };
+	test::@check(scene.nav.solve(goals[..], field[..], both[..]), "group search seeded");
+	test::@check(scene.nav.walk(field[..], near, raw[..]) == near_alone && scene.nav.walk(field[..], far, raw[..]) == whole,
+		"one search answers both starts as their own searches would");
+
+	// The grid line test: along a row is clear, across the gap between two rows
+	// of the snake is not, however near.
+	test::@check(scene.nav.sees(cells[0], cells[WIDTH - 1]), "a row sees its own far end");
+	test::@check(!scene.nav.sees(cells[0], cells[WIDTH + 1]), "a row does not see the next one through the wall");
 }
 
 fn void an_embedded_profile_replaces_the_scene_grid() @test

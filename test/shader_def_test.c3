@@ -520,8 +520,8 @@ fn void the_ported_mesh_is_lit() @test
 		"the metallic-roughness map multiplies the material's own roughness and metalness");
 	test::@check(source.contains("occlusion = map_texel(occlusion_map,"),
 		"the occlusion map reaches the crevice the ambient terms scale by");
-	test::@check(source.contains("emissive *= srgb_to_linear(map_texel(emissive_map,"),
-		"and the emissive map multiplies what the record set");
+	test::@check(source.contains("emissive *= map_texel(emissive_map,"),
+		"and the emissive map multiplies what the record set, decoded once by its sRGB format");
 	test::@check(source.contains("Sampler2DShadow shadow_atlas_compare        @set(0) @binding(18);")
 		&& source.contains("Sampler2DShadow shadow_atlas_static_compare @set(0) @binding(21);"),
 		"the shadow atlases are declared at the bindings the pass already writes");
@@ -1032,10 +1032,12 @@ fn void the_ported_skin_module_is_generated() @test
 	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
 	test::@check(source.contains("(pose * float4(normal, 0.0)).xyz"),
 		"the normal is the w = 0 multiply the original's 3x3 cast spelled out");
-	test::@check(source.contains("float4x4 mx = palette[base + joints.x];"),
+	test::@check(source.contains("float4x4 first = palette[base + joints.x];"),
 		"the palette pointer is indexed by joint");
-	test::@check(source.contains("weights.x * rx + weights.y * ry"),
+	test::@check(source.contains("real = real + weight * r;"),
 		"and a vector scales by a scalar on the left");
+	test::@check(source.contains("add_influence(palette[next + joints.w], then.w, pivot, real, dual);"),
+		"and an inout argument is a vector the callee adds into");
 
 	check_compiles(source, "the generated skin module");
 

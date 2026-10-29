@@ -73,12 +73,9 @@ fn void skin_vertices(ComputeIn input)
 	uint4 joints = push.joints[vid];
 	float4 weights = push.weights[vid];
 
-	float4x4 pose = blend_joints(palette, base, joints, weights);
-	if (instance.blend > 0.0)
-	{
-		float4x4 from = blend_joints(palette, instance.pose_from & POSE_MASK, joints, weights);
-		pose = pose + (from - pose) * instance.blend;
-	}
+	float4x4 pose = instance.pose_t > 0.0
+		? blend_frames(palette, base, instance.pose_next & POSE_MASK, instance.pose_t, joints, weights)
+		: blend_joints(palette, base, joints, weights);
 
 	SkinnedVertex skinned;
 	skinned.position = (pose * float4(position, 1.0)).xyz;

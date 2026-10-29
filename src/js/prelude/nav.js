@@ -5,9 +5,9 @@
 // `three.nav.path(from, to)` for one agent. `three.nav.field(goals)` for a
 // handle a crowd samples. §17 was explicit that an API offering only
 // `path()` guarantees somebody writes the second one badly, and the reason is a
-// cost rather than a taste: a path is a solve of the whole reachable set that
-// is thrown away after one answer, so a hundred agents heading for the same
-// door is a hundred solves for one field. `field()` is that solve, kept.
+// cost rather than a taste: a path is a search between two points thrown away
+// after one answer, so a hundred agents heading for the same door is a hundred
+// searches for what one field answers. `field()` is that solve, kept.
 //
 //     const door = three.nav.field([[10, 0, 4]]);      // once
 //     three.setAnimationLoop(() => {
@@ -255,9 +255,10 @@ export function makeSceneNav(scene) {
 
 	// One agent, one route, shortened against the geometry.
 	//
-	// **This solves a whole field and throws it away.** For a wanderer
-	// replanning every few seconds that is the right trade; for a crowd it is
-	// the thing `field()` exists to replace.
+	// An A* search aimed at the start, so it costs the cells between the two
+	// ends rather than the level: cheap enough to plan under the cursor every
+	// frame. For a crowd heading one way it is still the thing `field()`
+	// exists to replace.
 	//
 	// Answers with an array of Vector3 waypoints on the walking surface,
 	// starting at the point given, or an empty array when there is no route.
@@ -279,6 +280,46 @@ export function makeSceneNav(scene) {
 		const points = [];
 		for (let i = 0; i < count; i++) points.push(new Vector3(null, out[i * 3], out[i * 3 + 1], out[i * 3 + 2]));
 		return points;
+	},
+
+	// One route per start, all to one goal, from ONE search.
+	//
+	// What an RTS does with a selection sent across the map: the search from
+	// the goal runs until every start is settled, and each agent walks its own
+	// route out of the same answer. Twenty agents cost about one `path()`'s
+	// search, where twenty `path()` calls are twenty searches.
+	//
+	//     const routes = three.nav.paths(units.map(u => u.position), target);
+	//     routes.forEach((route, i) => units[i].follow(route));
+	//
+	// Answers with one array per start, in order, each as `path()` would
+	// answer it: Vector3 waypoints from the start, or empty for no route.
+	paths(starts, to, options = null) {
+		const where = 'three.nav.paths(starts, to)';
+		if (!Array.isArray(starts)) throw new TypeError(`${where} wants an array of points`);
+		const [tx, ty, tz] = readVector(to, where);
+		const limit = +(options?.limit ?? 64);
+		if (!(Number.isInteger(limit) && limit >= 2 && limit <= 65536)) {
+			throw new RangeError(`three.nav.paths({ limit }) wants an integer from 2 through 65536, not ${options?.limit}`);
+		}
+		const n = starts.length;
+		if (n === 0) return [];
+		const from = new Float32Array(n * 3);
+		starts.forEach((point, i) => from.set(readVector(point, `${where}: starts[${i}]`), i * 3));
+		const out = new Float32Array(n * limit * 3);
+		const counts = new Int32Array(n);
+		H.navPaths(scene._sid, from.buffer, from.byteOffset, from.length, tx, ty, tz,
+			out.buffer, out.byteOffset, out.length, counts.buffer, counts.byteOffset, counts.length, limit);
+		const routes = [];
+		for (let a = 0; a < n; a++) {
+			const points = [];
+			for (let i = 0; i < counts[a]; i++) {
+				const at = (a * limit + i) * 3;
+				points.push(new Vector3(null, out[at], out[at + 1], out[at + 2]));
+			}
+			routes.push(points);
+		}
+		return routes;
 	},
 	};
 }

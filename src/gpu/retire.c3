@@ -79,7 +79,7 @@ struct RetiredPipeline @local
  One `vk::Memory` and whatever wrapped it, waiting out the frames in flight.
 
  Held by value for `RetiredPipeline`'s reason: the struct these came out of — a
- `Texture` slot, a `GpuMesh` stream, a `ChainImage` — is overwritten or zeroed
+ `Texture` slot, a `GpuMesh` stream, a `GpuImage` — is overwritten or zeroed
  the moment it gives them back.
 *>
 struct RetiredMemory @local
@@ -186,7 +186,7 @@ fn void Gpu.retire_memory(
 {
 	// A stream a mesh never had, a view an image was created without. Cheaper to
 	// answer here than at each of the dozen call sites.
-	if (memory.buffer == null && view == null && sampler == null) return;
+	if (memory.buffer == null && memory.image == null && view == null && sampler == null) return;
 
 	if (self.handle == null)
 	{

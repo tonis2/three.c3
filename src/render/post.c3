@@ -151,7 +151,7 @@ struct PostStage (FullscreenPass)
 	// 
 	// Allocated only when something taps it, so a chain nobody taps costs the two
 	// images it always cost.
-	ChainImage keep;
+	GpuImage keep;
 	bool kept;
 
 	// A fragment body or a compute entry point - which pipeline was built, and
@@ -186,11 +186,11 @@ struct PostPass
 	// Image A: what the scene renders into, and what every pass reads as `scene`.
 	// Created lazily — a runtime that never sets a post shader never pays for a
 	// second full-size attachment.
-	ChainImage scene;
+	GpuImage scene;
 
 	// The ping-pong pair, in `POST_CHAIN_FORMAT`. `pong[1]` exists only from the
 	// second stage on. `render/chain.c3` has the two rules that index them.
-	ChainImage[2] pong;
+	GpuImage[2] pong;
 
 	// What the images were created at. Compared against `target.extent` every time
 	// a stage is built, so a target that ever *does* change size takes them with
@@ -486,7 +486,7 @@ fn uint? PostPass.add(
  a wrong picture rather than a crash, and the allocation failure was already
  reported to the script.
 *>
-fn ChainImage* PostPass.output_of(&self, sz stage)
+fn GpuImage* PostPass.output_of(&self, sz stage)
 {
 	PostStage* owner = self.stages[stage];
 	if (owner.kept && owner.keep.exists()) return &owner.keep;
@@ -500,7 +500,7 @@ fn ChainImage* PostPass.output_of(&self, sz stage)
 
  `count` for the tonemap, which reads what the whole chain left.
 *>
-fn ChainImage* PostPass.source_of(&self, sz stage)
+fn GpuImage* PostPass.source_of(&self, sz stage)
 {
 	for (sz i = stage; i > 0; i--)
 	{
@@ -521,7 +521,7 @@ fn void? PostPass.ensure_keeps(&self, Gpu* gpu)
 	foreach (stage : self.stages)
 	{
 		if (!stage.kept || stage.keep.exists()) continue;
-		stage.keep.init(gpu, POST_CHAIN_FORMAT, self.extent, self.pong_usage())!;
+		stage.keep = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, self.pong_usage())!;
 	}
 }
 
@@ -788,7 +788,7 @@ fn void PostPass.drop_stages(&self, Gpu* gpu, Assets* assets)
 		stage.release_textures(gpu, assets);
 		stage.release_images(self, gpu);
 		gpu.retire_pipeline(stage.pipeline);
-		// Retired too — `ChainImage.free` goes through the deletion queue, which
+		// Retired too — `GpuImage.free` goes through the deletion queue, which
 		// makes replacing a chain mid-frame safe for its images as well as for its
 		// pipelines.
 		if (stage.keep.exists()) stage.keep.free(gpu);
@@ -1153,30 +1153,18 @@ fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst) @dynami
 *>
 fn void PostStage.add_chain_samplers(&self, SampledBindings* samplers, PassIo io)
 {
-	if (pipeline_declares_binding(&self.pipeline, 0)) samplers.add(0, sampled_with(io.sampler, io.prev));
-	if (pipeline_declares_binding(&self.pipeline, 1)) samplers.add(1, sampled_with(io.sampler, io.scene));
+	samplers.add_if(&self.pipeline, 0, sampled_with(io.sampler, io.prev));
+	samplers.add_if(&self.pipeline, 1, sampled_with(io.sampler, io.scene));
 	// The depth buffer, in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than
 	// `SHADER_READ_ONLY_OPTIMAL` — a different layout and a different sampler from
 	// the two above, which is why it does not go through `sampled_with`.
-	if (pipeline_declares_binding(&self.pipeline, 2))
-	{
-		samplers.add(
-			2,
-			{
-				.sampler = io.depth_sampler,
-				.imageView = io.depth,
-				.imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-			}
-		);
-	}
+	samplers.add_if(&self.pipeline, 2,
+		{ .sampler = io.depth_sampler, .imageView = io.depth, .imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL });
 	// The third source. `io.tap` is the view of whatever pass this one names, and
 	// the chain has already transitioned it — a tapped stage's output goes to
 	// SHADER_READ_ONLY_OPTIMAL after it runs like every other stage's, and it is
 	// an image nothing overwrites in between.
-	if (pipeline_declares_binding(&self.pipeline, POST_TAP_BINDING))
-	{
-		samplers.add(POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
-	}
+	samplers.add_if(&self.pipeline, POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
 	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets, POST_BINDING_FIRST);
 }
 
@@ -1222,10 +1210,3 @@ fn void PostStage.push_info(&self, vk::CommandBuffer cmd, PassIo io, float width
 	vk::cmdPushConstants(cmd, self.pipeline.layout, self.pipeline.shader.stages, 0, push_size, &self.block);
 }
 
-// One of the chain's own images, as a descriptor. Always SHADER_READ_ONLY_OPTIMAL
-// — the chain put it there before the pass was called, and `FullscreenPass`'s
-// protocol is where that promise is written down.
-fn vk::DescriptorImageInfo sampled_with(vk::Sampler sampler, vk::ImageView view) @local
-{
-	return { .sampler = sampler, .imageView = view, .imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-}

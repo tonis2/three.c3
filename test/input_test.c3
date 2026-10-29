@@ -1709,6 +1709,38 @@ fn void a_pointer_a_script_moves_reads_back() @test
 }
 
 <*
+ `movePointerBy` is a movement, not a place: it reaches `dx`/`dy` for one frame.
+
+ What a mouse look is built from, and the one a headless run could not script:
+ there is no window to lock, so the only movement was a difference of placed
+ positions — which needs a place to start from and reports nothing on the first
+ frame. This needs neither. Two calls before one frame are one frame's movement,
+ the position stays where it was, and the next frame reads still.
+*>
+fn void a_pointer_moved_by_a_distance_reads_as_movement() @test
+{
+	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
+	{
+		run.tick(0.0);
+		@ok(run, `three.input.movePointerBy(5, -3); three.input.movePointerBy(2);`);
+		run.tick(16.0);
+		String moved = @answer(run, `const p = three.input.pointer; return [p.dx, p.dy, p.x, p.y].join(',');`);
+		defer moved.free(mem);
+		test::@check(moved == `"7,-3,0,0"`,
+			"two moves are one frame's movement and the cursor stays put: %s", moved);
+
+		run.tick(32.0);
+		String still = @answer(run, `const p = three.input.pointer; return [p.dx, p.dy].join(',');`);
+		defer still.free(mem);
+		test::@check(still == `"0,0"`, "the movement was spent by the frame that read it: %s", still);
+
+		three::RunResult bad = run.run(`three.input.movePointerBy(NaN, 1);`);
+		defer bad.free();
+		test::@check(!bad.ok && bad.error.contains("movePointerBy"), "a NaN distance is refused: %s", bad.error);
+	};
+}
+
+<*
  A scripted pointer adds to the real mouse, and a hand on the mouse takes the
  cursor back.
 

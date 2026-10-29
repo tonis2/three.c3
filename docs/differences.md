@@ -198,11 +198,12 @@ new three.ShaderMaterial({
 })
 ```
 
-`Vertex` is the varyings: `position` (world), `normal`, `uv`, `color` and `variant` are read back
-after your body runs; `local` (object space) and `index` (the vertex number) are inputs. The normal
-is not recomputed for you. Always pass `bounds` — the number of world units the body can displace by
-— because culling tests the mesh's undisplaced box and geometry outside it is dropped while still on
-screen.
+`Vertex` is the varyings: `position`, `normal`, `uv`, `color` and `variant` are read back after
+your body runs; `local` (the bind pose) and `index` (the vertex number) are inputs. `position` and
+`normal` are in object space — the body runs before the mesh's own transform, so what it does scales
+and turns with the mesh. The normal is not recomputed for you. Always pass `bounds` — how far the body
+can displace a vertex, in the mesh's own units — because culling tests the mesh's undisplaced box and
+geometry outside it is dropped while still on screen.
 
 ## one-module
 
@@ -439,8 +440,9 @@ the first. `scene.nav.bake({ cell, radius, height, stepHeight, slope })` voxeliz
 is built. Neither happens on the first path query. `three.nav` is the rendered scene's navigation object.
 
 Then two verbs, and the split is the design: `three.nav.path(from, to)` is one agent's route, and
-`three.nav.field(goals)` is a solve kept that a whole crowd samples. A path solves the entire reachable set
-and throws it away, so a hundred agents heading for one door is a hundred solves for one field. A field has
+`three.nav.field(goals)` is a solve kept that a whole crowd samples. A path is an A* search between its two
+ends, cheap for one agent, but a hundred agents heading for one door is a hundred searches for what one field
+answers. `three.nav.paths(starts, to)` sits between them: one search, a route for each of a group. A field has
 `direction(point)`, `cost(point)` — Infinity for unreachable — and `dispose()`.
 
 Paths come back shortened against the actual geometry with a capsule sweep at the agent's own size, so they
@@ -841,6 +843,12 @@ cache that could not be written.
 Advice, not errors: the run still succeeded. They are deduplicated and they arrive one run late when they
 happened between calls, so a warning about the frame you just rendered shows up on your next call.
 
+## reply-image
+
+A `run_script` reply carries a PNG of the frame, scaled down to 1568 pixels on its longest side when the
+render is bigger. Pass `image: false` beside `source` for a script that only reads or changes data: the reply
+is then the report alone, and no frame is drawn for it.
+
 ## animation-loop
 
 `three.setAnimationLoop(fn)` runs `fn` once per frame, with the elapsed milliseconds, until
@@ -859,6 +867,21 @@ It is not a convenience over differencing the callback's argument yourself. Ever
 downstream of it — the clips, the physics, the fixed loop, the follow camera, the argument `setAnimationLoop` is
 handed and `p.time` in a post body — so `timeScale = 0` stops the world, which no amount of a script stopping
 its own arithmetic can do.
+
+## animation-stack
+
+There is no `AnimationMixer`, `AnimationAction` or `clipAction`. Clips are played on the root that
+`asset.instantiate()` returned, by name, and a character holds a stack of up to four of them:
+
+```js
+hero.play('walk', { fade: 0.2 });                               // raise one clip, lower the rest
+hero.blend({ walk: 0.6, run: 0.4 }, { sync: { run: 0.5 } });    // hold several, feet in step
+hero.animation.layers;                                          // what is on the stack, and how much
+```
+
+The weights are the character's, not an action's: there is nothing to keep a handle to, and asking for a clip
+that is already playing re-aims it rather than starting a second copy. Weights summing past one are normalised,
+and to less the rest pose shows through the remainder — Three.js's mixer does the same with its bind pose.
 
 ## fixed-loop-for-gameplay
 
@@ -941,6 +964,10 @@ mode ends: there is no gesture that undoes it.
 
 `three.input.pointer` and the click are in the rendered image's pixels, not the window's. `scene.pick(x, y)` and
 the PNG use the same pixels the click does, whatever size the window is.
+
+An MCP reply's PNG is the exception when it was scaled down (see reply-image). Its report then has an `image`
+block, `{ width, height, renderWidth, renderHeight }`: multiply a pixel read off the PNG by
+`renderWidth / width` before handing it to `pick` or `movePointer`.
 
 ## script-can-move-the-pointer
 

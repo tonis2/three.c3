@@ -109,11 +109,7 @@ fn void js_add_pass(
 *>
 fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, bool append, qjs::Value* out)
 {
-	if (self.renderer == null)
-	{
-		*out = js.raise("compiling a post shader needs a GPU device and this context has none");
-		return;
-	}
+	if (!self.needs_device(&js, "compiling a post shader", out)) return;
 
 	@pool()
 	{
@@ -141,9 +137,7 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 			int components = width_list[i].to_int() ?? 0;
 			if (components < 1 || components > 4)
 			{
-				*out = js.raise(
-					string::tformat("uniform '%s' must be a number or an array of two, three or four numbers", name)
-				);
+				*out = js.raisef("uniform '%s' must be a number or an array of two, three or four numbers", name);
 				return;
 			}
 
@@ -303,7 +297,7 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 				stage
 			))
 			{
-				*out = js.raise(post_texture_failure(bind_err, name));
+				*out = js.raise(texture_failure(bind_err, name, "this post shader", "the pass's"));
 				return;
 			}
 		}
@@ -314,30 +308,6 @@ fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, 
 
 // A count from a script, where a negative one means none.
 fn uint whole(int value) @local => value < 0 ? 0 : (uint)value;
-
-<*
- Turns a post sampler fault into a sentence an agent can act on.
-
- `material_texture_failure`'s unknown-name case, for the same reason: a sampler
- is reached by the name the pass declares, so a name that is not in the
- declaration list has nowhere to bind.
-*>
-fn String post_texture_failure(fault err, String name) @local
-{
-	switch (err)
-	{
-		case MATERIAL_SAMPLER_UNKNOWN:
-			return string::tformat(
-				"this post shader has no sampler called '%s' — the name is not one of the pass's "
-					"declared textures",
-				name
-			);
-		case MATERIAL_TEXTURE_UNKNOWN:
-			return string::tformat("the texture for '%s' was disposed, or came from another renderer", name);
-		default:
-			return string::tformat("'%s' could not be bound: %s", name, err);
-	}
-}
 
 <*
  `post.textures.<name> = texture` — put an image in one of the samplers one
@@ -383,7 +353,7 @@ fn void js_set_post_texture(
 			*out = js.raise(
 				err
 					== MATERIAL_UNKNOWN ? "there is no post shader running — three.setPost({ fragment, textures }) first"
-					: post_texture_failure(err, name)
+					: texture_failure(err, name, "this post shader", "the pass's")
 			);
 			return;
 		}
@@ -558,7 +528,7 @@ fn void js_tone_map_set(
 	self.renderer.post.set_tonemap_exposure((float)arg_float(&js, argc, args, 1));
 	if (catch err = self.renderer.post.set_tonemap(&self.renderer.gpu, &self.renderer.target, wanted))
 	{
-		*out = js.raise(string::tformat("the tonemap could not be built: %s", err));
+		*out = js.raisef("the tonemap could not be built: %s", err);
 	}
 }
 
@@ -601,7 +571,7 @@ fn void js_set_post_uniform(
 		int count = arg_int(&js, argc, args, 5);
 		if (count < 1 || count > 4)
 		{
-			*out = js.raise(string::tformat("uniform '%s' wants one to four numbers", name));
+			*out = js.raisef("uniform '%s' wants one to four numbers", name);
 			return;
 		}
 		int stage = arg_int(&js, argc, args, 6);

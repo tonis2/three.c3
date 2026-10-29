@@ -312,62 +312,49 @@ fn void Viewer.record_blit_from(
 	uint index
 )
 {
-	vk::Image dst = self.images[index];
+	record_blit(cmd, src, src_extent, self.images[index], self.extent, {
+		...IMAGE_BARRIER,
+		.image = self.images[index],
+		.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+		.dstAccessMask = (vk::AccessFlags2)0,
+		.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_PRESENT_SRC_KHR,
+	});
+}
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				(vk::ImageMemoryBarrier2) {
-					...IMAGE_BARRIER,
-					.image = dst,
-					.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.srcAccessMask = (vk::AccessFlags2)0,
-					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-					.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-					.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				},
-			}
-		));
-
-	vk::ImageSubresourceLayers layers = {
-		.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-		.mipLevel = 0,
-		.baseArrayLayer = 0,
-		.layerCount = 1,
+<*
+ Scales `src`, in `TRANSFER_SRC_OPTIMAL`, over the whole of `dst`, which comes
+ from `UNDEFINED` because every pixel of it is written. `after` moves `dst` on
+ to wherever it goes next.
+*>
+fn void record_blit(vk::CommandBuffer cmd, vk::Image src, vk::Extent2D src_extent,
+	vk::Image dst, vk::Extent2D dst_extent, vk::ImageMemoryBarrier2 after)
+{
+	vk::ImageMemoryBarrier2 before = {
+		...IMAGE_BARRIER,
+		.image = dst,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.srcAccessMask = (vk::AccessFlags2)0,
+		.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ before }));
+
+	vk::ImageSubresourceLayers layers = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 };
 	vk::ImageBlit region = {
 		.srcSubresource = layers,
 		.srcOffsets = { { 0, 0, 0 }, { (int)src_extent.width, (int)src_extent.height, 1 } },
 		.dstSubresource = layers,
-		.dstOffsets = { { 0, 0, 0 }, { (int)self.extent.width, (int)self.extent.height, 1 } },
+		.dstOffsets = { { 0, 0, 0 }, { (int)dst_extent.width, (int)dst_extent.height, 1 } },
 	};
-	vk::cmdBlitImage(
-		cmd,
-		src,
-		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		dst,
-		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1,
-		&region,
-		FILTER_LINEAR
-	);
+	vk::cmdBlitImage(cmd, src, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1, &region, FILTER_LINEAR);
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				(vk::ImageMemoryBarrier2) {
-					...IMAGE_BARRIER,
-					.image = dst,
-					.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-					.dstStageMask = PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-					.dstAccessMask = (vk::AccessFlags2)0,
-					.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					.newLayout = IMAGE_LAYOUT_PRESENT_SRC_KHR,
-				},
-			}
-		));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ after }));
 }
 // ============================================================================
 // The composite — the frame at the window's own pixels
@@ -414,9 +401,7 @@ fn void Viewer.record_blit_from(
 struct Composite
 {
 	vk::Extent2D extent;
-	vk::Image color;
-	vk::ImageView color_view;
-	vk::Memory color_memory;
+	GpuImage color;
 }
 
 <*
@@ -432,56 +417,29 @@ struct Composite
 *>
 fn void? Composite.ensure(&self, Gpu* gpu, vk::Extent2D extent)
 {
-	if (self.color != null && self.extent.width == extent.width && self.extent.height == extent.height) return;
+	if (self.color.exists() && self.extent.width == extent.width && self.extent.height == extent.height) return;
 
-	if (self.color != null)
+	if (self.color.exists())
 	{
 		gpu.handle.waitIdle();
 		self.free(gpu);
 	}
 
-	self.extent = extent;
-
 	// TRANSFER_DST to receive the scene, COLOR_ATTACHMENT for cui to draw into
 	// it, TRANSFER_SRC to be presented. The whole of its life in three flags.
-	self.color = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(TARGET_COLOR_FORMAT)
-		.setExtent({ .width = extent.width, .height = extent.height, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.color_memory = vk::create_image_buffer(self.color, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	self.color_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(TARGET_COLOR_FORMAT)
-		.setSubresourceRange(COLOR_LEVEL)
-		.setImage(self.color)
-		.build(gpu.handle)!;
+	self.color = gpu.create_image_2d(TARGET_COLOR_FORMAT, extent,
+		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	self.extent = extent;
 }
 
-<*
- `vk::Memory.free` destroys the image it was bound to, so the view is the only
- extra — the same rule `Target.free` follows.
-*>
+// The device is already idle, so nothing needs to wait in the deletion queue.
 fn void Composite.free(&self, Gpu* gpu)
 {
-	if (self.color_view != null)
-	{
-		self.color_view.free(gpu.handle);
-		self.color_view = (vk::ImageView)null;
-	}
-	if (self.color != null)
-	{
-		self.color_memory.free();
-		self.color = (vk::Image)null;
-		self.color_memory = {};
-	}
+	self.color.destroy(gpu);
 	self.extent = {};
 }
 
-fn usz Composite.bytes(&self) => (usz)self.color_memory.size;
+fn usz Composite.bytes(&self) => (usz)self.color.memory.size;
 
 <*
  Takes the finished scene, scaled to this image's size.
@@ -493,60 +451,16 @@ fn usz Composite.bytes(&self) => (usz)self.color_memory.size;
 *>
 fn void Composite.receive(&self, vk::CommandBuffer cmd, Target* target)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				(vk::ImageMemoryBarrier2) {
-					...IMAGE_BARRIER,
-					.image = self.color,
-					.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-					.srcAccessMask = (vk::AccessFlags2)0,
-					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-					.oldLayout = IMAGE_LAYOUT_UNDEFINED,
-					.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				},
-			}
-		));
-
-	vk::ImageSubresourceLayers layers = {
-		.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-		.mipLevel = 0,
-		.baseArrayLayer = 0,
-		.layerCount = 1,
-	};
-	vk::ImageBlit region = {
-		.srcSubresource = layers,
-		.srcOffsets = { { 0, 0, 0 }, { (int)target.extent.width, (int)target.extent.height, 1 } },
-		.dstSubresource = layers,
-		.dstOffsets = { { 0, 0, 0 }, { (int)self.extent.width, (int)self.extent.height, 1 } },
-	};
-	vk::cmdBlitImage(
-		cmd,
-		target.color,
-		IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		self.color,
-		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1,
-		&region,
-		FILTER_LINEAR
-	);
-
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				(vk::ImageMemoryBarrier2) {
-					...IMAGE_BARRIER,
-					.image = self.color,
-					.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-					.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-					.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
-					.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-				},
-			}
-		));
+	record_blit(cmd, target.color, target.extent, self.color.image, self.extent, {
+		...IMAGE_BARRIER,
+		.image = self.color.image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	});
 }
 
 <*
@@ -556,16 +470,7 @@ fn void Composite.receive(&self, vk::CommandBuffer cmd, Target* target)
 *>
 fn void Composite.begin_overlay(&self, vk::CommandBuffer cmd)
 {
-	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(self.color_view)
-		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
-		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
-
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
-		.setColorAttachments({ color_attachment });
-
-	vk::cmdBeginRendering(cmd, &rendering);
-	set_full_viewport(cmd, self.extent, false);
+	begin_overlay_rendering(cmd, self.color.view, self.extent);
 }
 
 <*
@@ -574,19 +479,5 @@ fn void Composite.begin_overlay(&self, vk::CommandBuffer cmd)
 *>
 fn void Composite.close(&self, vk::CommandBuffer cmd)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
-		.setImageMemoryBarriers(
-			{
-				(vk::ImageMemoryBarrier2) {
-					...IMAGE_BARRIER,
-					.image = self.color,
-					.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-					.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-					.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-					.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
-					.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-					.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				},
-			}
-		));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ transfer_src_barrier(self.color.image) }));
 }

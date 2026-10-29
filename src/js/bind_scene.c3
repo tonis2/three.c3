@@ -85,8 +85,10 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "unbindSocket", &js_unbind_socket, 2);
 	self.bind(host, "setMorphWeights", &js_set_morph_weights, 3);
 	self.bind(host, "meshMorphs", &js_mesh_morphs, 3);
-	self.bind(host, "playAnimation", &js_play_animation, 7);
+	self.bind(host, "playAnimation", &js_play_animation, 8);
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
+	self.bind(host, "animationState", &js_animation_state, 2);
+	self.bind(host, "blendAnimation", &js_blend_animation, 16);
 	self.bind(host, "inventory", &js_inventory, 0);
 	self.bind(host, "assetText", &js_asset_text, 1);
 	self.bind(host, "assetWriteText", &js_asset_write_text, 2);
@@ -109,6 +111,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "setStatic", &js_set_static, 3);
 	self.bind(host, "setCollides", &js_set_collides, 3);
 	self.bind(host, "setCollisionOnly", &js_set_collision_only, 3);
+	self.bind(host, "setBlocks", &js_set_blocks, 3);
 	self.bind(host, "setName", &js_set_name, 3);
 	self.bind(host, "setColor", &js_set_color, 6);
 	self.bind(host, "setVariant", &js_set_variant, 3);
@@ -190,7 +193,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "lightShadowSet", &js_light_shadow_set, 3);
 	self.bind(host, "lightBakedGet", &js_light_baked_get, 1);
 	self.bind(host, "lightBakedSet", &js_light_baked_set, 2);
-	self.bind(host, "lightsBake", &js_lights_bake, 3);
+	self.bind(host, "lightsBake", &js_lights_bake, 4);
 	self.bind(host, "lightsBakeBudget", &js_lights_bake_budget, 1);
 	self.bind(host, "lightsSaveBake", &js_lights_save_bake, 1);
 	self.bind(host, "lightsLoadBake", &js_lights_load_bake, 1);
@@ -221,6 +224,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "cameraDetach", &js_camera_detach, 0);
 	self.bind(host, "cameraAttached", &js_camera_attached, 0);
 	self.bind(host, "cameraRay", &js_camera_ray, 2);
+	self.bind(host, "cameraProject", &js_camera_project, 3);
 	self.bind(host, "frameAll", &js_frame_all, 0);
 
 	self.js.set_property(global, "__three", host);
@@ -229,239 +233,6 @@ fn void JsRuntime.install_bindings(&self)
 fn void JsRuntime.bind(&self, qjs::Value host, ZString name, qjs::HostFn body, int arity)
 {
 	self.js.set_property(host, name, self.js.function(body, name, arity, self));
-}
-
-// ============================================================================
-// Reading arguments
-// ============================================================================
-
-fn double arg_number(qjs::Context* js, int argc, qjs::Value* args, int at)
-{
-	if (at >= argc) return 0;
-	return js.number(args[at]);
-}
-
-fn int arg_int(qjs::Context* js, int argc, qjs::Value* args, int at)
-{
-	return (int)arg_number(js, argc, args, at);
-}
-
-fn float arg_float(qjs::Context* js, int argc, qjs::Value* args, int at)
-{
-	return (float)arg_number(js, argc, args, at);
-}
-
-fn String arg_text(qjs::Context* js, int argc, qjs::Value* args, int at, Allocator allocator)
-{
-	if (at >= argc) return "".copy(allocator);
-	return js.text(args[at], allocator);
-}
-
-fn bool arg_truth(qjs::Context* js, int argc, qjs::Value* args, int at)
-{
-	if (at >= argc) return false;
-	return js.truth(args[at]);
-}
-
-<*
- A flag whose absence means something other than false.
-
- `arg_truth` answers false for an argument that is not there, which is right for
- a flag that switches something on and exactly wrong for one that switches
- something off. `generateMipmaps` defaults to true, so reading it with
- `arg_truth` would build no chain for every caller that did not mention it —
- which is every caller written before the argument existed, and a regression that
- looks like nothing at all until a floor is seen at a distance.
-*>
-fn bool arg_truth_or(qjs::Context* js, int argc, qjs::Value* args, int at, bool fallback)
-{
-	if (at >= argc) return fallback;
-	return js.truth(args[at]);
-}
-
-<*
- A node handle as JavaScript sees it: `[index, generation]`.
-*>
-fn qjs::Value handle_value(qjs::Context* js, NodeId id)
-{
-	qjs::Value pair = js.array();
-	js.set_index(pair, 0, qjs::int_value((int)id.index));
-	js.set_index(pair, 1, qjs::int_value((int)id.generation));
-	return pair;
-}
-
-<*
- An `AssetId` as `[index, generation]`, the same shape a `NodeId` crosses in.
-
- Two numbers rather than an object because the prelude immediately destructures
- it, and because an object would allocate a shape per load.
-*>
-fn qjs::Value asset_value(qjs::Context* js, AssetId id)
-{
-	qjs::Value pair = js.array();
-	js.set_index(pair, 0, qjs::int_value((int)id.index));
-	js.set_index(pair, 1, qjs::int_value((int)id.generation));
-	return pair;
-}
-
-<*
- Read `(index, generation)` from `args[at]` and `args[at + 1]` and resolve it.
-
- The asset half of `arg_handle`, and the sentence is the one an unloaded asset
- earns: since G2 a slot is reused, so "no such asset" and "that asset was
- unloaded and something else is there now" are different things to have done,
- and only the second one is worth a word about `unloadUnused`.
-
- @return `The handle, or NO_ASSET with a JS exception left pending, in which case the caller must write out and return immediately.`
-*>
-fn AssetId arg_asset(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
-{
-	AssetId id = {
-		.index = (uint)arg_int(js, argc, args, at),
-		.generation = (uint)arg_int(js, argc, args, at + 1),
-	};
-	if (self.pass == null || self.pass.assets.slot(id) == null)
-	{
-		*out = js.raise(
-			"that asset is no longer loaded — three.unloadUnused() or scene.unload() freed it, "
-				"and loading the file again gives a fresh handle"
-		);
-		return NO_ASSET;
-	}
-	return id;
-}
-
-fn qjs::Value vec3_value(qjs::Context* js, Vec3 v)
-{
-	qjs::Value triple = js.array();
-	js.set_index(triple, 0, qjs::number_value(v.x));
-	js.set_index(triple, 1, qjs::number_value(v.y));
-	js.set_index(triple, 2, qjs::number_value(v.z));
-	return triple;
-}
-
-<*
- A box as six numbers, `[minX, minY, minZ, maxX, maxY, maxZ]`.
-
- Flat rather than `{min, max}` because `prelude.js` derives `size` and `center`
- from it anyway, and one array of six is one allocation where a nested pair is
- three. The shape a script sees is built there.
-*>
-fn qjs::Value aabb_value(qjs::Context* js, collision::Aabb3 box)
-{
-	qjs::Value six = js.array();
-	js.set_index(six, 0, qjs::number_value(box.min.x));
-	js.set_index(six, 1, qjs::number_value(box.min.y));
-	js.set_index(six, 2, qjs::number_value(box.min.z));
-	js.set_index(six, 3, qjs::number_value(box.max.x));
-	js.set_index(six, 4, qjs::number_value(box.max.y));
-	js.set_index(six, 5, qjs::number_value(box.max.z));
-	return six;
-}
-
-<*
- A resolved handle: the node, and the scene it turned out to be in.
-
- A pair rather than a `NodeId` on purpose. There is more than one scene now, so
- "which graph does this verb operate on" is an answer a verb has to be *given*
- rather than one it can assume — and a verb that reached for `self.pass.scene`
- instead would write into whichever world happened to be on screen. Making
- `arg_handle` answer with a type that is not a `NodeId` is what turns every one
- of those into a compile error rather than into a silent wrong-scene write.
-*>
-struct NodeRef
-{
-	Scene* scene;
-	NodeId id;
-}
-
-<*
- Read `(index, generation)` from `args[at]` and `args[at + 1]` and resolve it.
-
- Searched across every scene, active one first, because a script holding an
- object from the level it is building has a perfectly good handle and the verb
- should work. The search is safe because node generations come from one
- process-wide counter — see `next_node_generation` — so a handle matches in at
- most one scene, and a handle into a disposed scene matches in none.
-
- Linear over the scene list, which is a handful of pointers and two bounds checks
- apiece. A game has one scene; a transition has two.
-
- @return `The node and its scene, or a null scene with a JS exception left pending, in which case the caller must write out and return immediately.`
-*>
-fn NodeRef arg_handle(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
-{
-	NodeId id = {
-		.index = (uint)arg_int(js, argc, args, at),
-		.generation = (uint)arg_int(js, argc, args, at + 1),
-	};
-	if (self.pass != null)
-	{
-		if (self.pass.scene != null && self.pass.scene.node(id) != null)
-		{
-			return { .scene = self.pass.scene, .id = id };
-		}
-		foreach (each : self.pass.scenes)
-		{
-			if (each.node(id) != null) return { .scene = each, .id = id };
-		}
-	}
-	*out = js.raise("that object is no longer in the scene — it was removed, or the scene it was in was disposed");
-	return { };
-}
-
-<*
- Read a scene id from `args[at]` and resolve it.
-
- For the verbs that are about a whole scene rather than about a node in one —
- gravity, the body count, a nav bake. Those have no handle to find the scene
- from, so the id crosses explicitly.
-
- @return `The scene, or null with a JS exception left pending.`
-*>
-fn Scene* arg_scene(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
-{
-	uint id      = (uint)arg_int(js, argc, args, at);
-	Scene* found = self.pass == null ? null : self.pass.scene_by_id(id);
-	if (found == null)
-	{
-		*out = js.raise("that Scene was disposed — its objects, its bodies and its nav bake are gone");
-		return null;
-	}
-	return found;
-}
-
-<*
- The same, refused unless the node is in the scene being rendered.
-
- For the verbs that are about the frame rather than about the graph — physics,
- the camera follow, the spatial index. Those reach for one world per frame, and
- a handle from a scene that is not being drawn has no answer they could give that
- would not be a lie.
-*>
-fn NodeRef arg_live_handle(
-	JsRuntime* self,
-	qjs::Context* js,
-	int argc,
-	qjs::Value* args,
-	int at,
-	qjs::Value* out,
-	String verb
-)
-{
-	NodeRef ref = arg_handle(self, js, argc, args, at, out);
-	if (ref.scene == null) return ref;
-	if (ref.scene != self.pass.scene)
-	{
-		*out = js.raise(
-			string::tformat(
-				"%s needs an object in the scene being rendered — call scene.activate() on the one it is in first",
-				verb
-			)
-		);
-		return { };
-	}
-	return ref;
 }
 
 // ============================================================================
@@ -496,10 +267,9 @@ fn void js_scene_create(
 	Scene* fresh = self.pass.claim_scene();
 	self.activate_scene(fresh);
 
-	qjs::Value triple = js.array();
-	js.set_index(triple, 0, qjs::number_value((double)fresh.id));
-	js.set_index(triple, 1, qjs::number_value((double)fresh.root.index));
-	js.set_index(triple, 2, qjs::number_value((double)fresh.root.generation));
+	qjs::Value triple = numbers_value(&js, {
+		(double)fresh.id, (double)fresh.root.index, (double)fresh.root.generation,
+	});
 	*out = triple;
 }
 
@@ -619,10 +389,9 @@ fn void js_scene_ids(
 	qjs::Value list = js.array();
 	foreach (i, each : self.pass.scenes)
 	{
-		qjs::Value triple = js.array();
-		js.set_index(triple, 0, qjs::number_value((double)each.id));
-		js.set_index(triple, 1, qjs::number_value((double)each.root.index));
-		js.set_index(triple, 2, qjs::number_value((double)each.root.generation));
+		qjs::Value triple = numbers_value(&js, {
+			(double)each.id, (double)each.root.index, (double)each.root.generation,
+		});
 		js.set_index(list, (uint)i, triple);
 	}
 	*out = list;
@@ -750,11 +519,7 @@ fn void js_occlusion_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qj
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 	AmbientOcclusionSettings s = self.pass.ambient_occlusion.settings;
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value(s.enabled ? 1 : 0));
-	js.set_index(list, 1, qjs::number_value(s.radius));
-	js.set_index(list, 2, qjs::number_value(s.intensity));
-	js.set_index(list, 3, qjs::number_value(s.bias));
+	qjs::Value list = numbers_value(&js, { s.enabled ? 1 : 0, s.radius, s.intensity, s.bias });
 	*out = list;
 }
 
@@ -903,7 +668,7 @@ fn void js_add(
 		// object with no reason attached.
 		if (self.pass.assets.mesh(asset, (uint)mesh) == null)
 		{
-			*out = js.raise(string::tformat("there is no mesh %d in asset %d", mesh, index));
+			*out = js.raisef("there is no mesh %d in asset %d", mesh, index);
 			return;
 		}
 
@@ -1004,17 +769,11 @@ fn void js_set_transform(
 	}
 
 	Node* target = ref.scene.node(ref.id);
-	target.position = {
-		arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4)
-	};
+	target.position = arg_vec3(&js, argc, args, 2);
 	// Euler in, quaternion stored — the one-way conversion `scene/node.c3`
 	// describes. A caller keeps whatever triple it sent; nothing converts back.
-	target.rotation = quat_from_euler({
-		arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6), arg_float(&js, argc, args, 7)
-	});
-	target.scale = {
-		arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10)
-	};
+	target.rotation = quat_from_euler(arg_vec3(&js, argc, args, 5));
+	target.scale = arg_vec3(&js, argc, args, 8);
 	say_nan_transform(ref.scene, ref.id, target, argc, args);
 	// Not `dirty = true`: the world-matrix walk gained the right to skip itself,
 	// so the flag alone stopped being enough. See `Scene.mark_moved`.
@@ -1161,25 +920,22 @@ fn void js_bind_animation(
 
 	for (uint i = 0; i + 2 < length; i += 3)
 	{
-		sources.push((uint)js.number(js.index(pairs, i)));
-		nodes.push(
-			{
-				.index = (uint)js.number(js.index(pairs, i + 1)),
-				.generation = (uint)js.number(js.index(pairs, i + 2)),
-			}
-		);
+		sources.push(index_uint(&js, pairs, i));
+		nodes.push({ .index = index_uint(&js, pairs, i + 1), .generation = index_uint(&js, pairs, i + 2) });
 	}
 
 	// Whether this character is posed from its bone nodes. The script asked for a
 	// skeleton, and a skeleton that drives nothing would be the read-only version
 	// of the flag rather than the useful one. See `AnimationPlayer.live_skin`.
 	bool live_skin = argc > 5 ? arg_truth(&js, argc, args, 5) : false;
-	ref.scene.bind_player(asset, ref.id, sources.array_view(), nodes.array_view(), live_skin);
+	// Whether it took, so the prelude caches only a bind that happened — see
+	// `Object3D._bindAnimation`.
+	*out = qjs::bool_value(ref.scene.bind_player(asset, ref.id, sources.array_view(), nodes.array_view(), live_skin));
 }
 
 <*
- `playAnimation(index, generation, name, loop, speed, time, fade)` — start a clip
- on an instantiated subtree.
+ `playAnimation(index, generation, name, loop, speed, time, fade, sync)` — start a
+ clip on an instantiated subtree.
 
  Answers with a boolean rather than throwing on an unknown clip: `mesh.animations`
  is the list, so naming something that is not on it is a mistake a script can see
@@ -1214,7 +970,10 @@ fn void js_play_animation(
 		// binding did for its whole life before the argument existed, which is why
 		// it is the default and not a sentinel.
 		float fade  = argc > 6 ? arg_float(&js, argc, args, 6) : 0;
-		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade));
+		// The phase offset `sync` asked for, already folded into [0, 1) by the
+		// prelude; negative is no sync.
+		float sync  = argc > 7 ? arg_float(&js, argc, args, 7) : -1;
+		*out = qjs::bool_value(ref.scene.play(ref.id, name, loop, speed, time, fade, sync));
 	};
 }
 
@@ -1258,7 +1017,7 @@ fn void js_set_morph_weights(
 	defer weights.free();
 	for (uint i = 0; i < length; i++)
 	{
-		weights.push((float)js.number(js.index(values, i)));
+		weights.push(index_float(&js, values, i));
 	}
 
 	*out = qjs::bool_value(ref.scene.set_morph_weights(ref.id, weights.array_view()));
@@ -1407,6 +1166,119 @@ fn void js_stop_animation(
 	*out = qjs::bool_value(ref.scene.stop(ref.id));
 }
 
+<*
+ `blendAnimation(index, generation, fade, speed, name, weight, offset, ...)` —
+ hold several clips at once.
+
+ Up to four `(name, weight, offset)` triples after the two numbers, positional
+ rather than an array because the prelude has already validated and flattened
+ them and four is the most there can be. An offset below zero is a clip on its
+ own clock. See `Scene.blend`.
+*>
+fn void js_blend_animation(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	@pool()
+	{
+		float fade = arg_float(&js, argc, args, 2);
+		float speed = arg_float(&js, argc, args, 3);
+		String[ANIMATION_LAYERS] names;
+		float[ANIMATION_LAYERS] weights;
+		float[ANIMATION_LAYERS] offsets;
+		usz count = 0;
+		for (int at = 4; at + 2 < argc && count < ANIMATION_LAYERS; at += 3)
+		{
+			names[count] = arg_text(&js, argc, args, at, tmem);
+			weights[count] = arg_float(&js, argc, args, at + 1);
+			offsets[count] = arg_float(&js, argc, args, at + 2);
+			count++;
+		}
+		*out = qjs::bool_value(ref.scene.blend(ref.id, names[:count], weights[:count], fade, offsets[:count], speed));
+	};
+}
+
+<*
+ `animationState(index, generation)` — where the clip on a subtree is, or null
+ before anything has played.
+
+ A state machine needs the playhead to know where a one-shot is and when it has
+ run out; without it a script keeps a second clock that drifts from this one the
+ first time the game clock is scaled or capped. `time` is seconds into the clip
+ from its own start, the same measure `play`'s `time` takes, and `playing` is
+ false on a one-shot that has finished as well as after `stop()`.
+*>
+fn void js_animation_state(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	*out = qjs::null_value();
+	if (ref.scene.assets == null) return;
+	AnimationPlayer* player = ref.scene.player(ref.id);
+	if (player == null || player.layer_count == 0) return;
+	Asset* loaded = ref.scene.assets.slot(player.asset);
+	if (loaded == null) return;
+
+	int top = player.dominant();
+	qjs::Value layers = js.array();
+	qjs::Value state = qjs::null_value();
+	uint written = 0;
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		if (layer.clip < 0 || layer.clip >= loaded.clips.len()) continue;
+		qjs::Value entry = layer_value(&js, layer, &loaded.clips[layer.clip]);
+		if ((int)i == top) state = layer_value(&js, layer, &loaded.clips[layer.clip]);
+		js.set_index(layers, written++, entry);
+	}
+	if (state.is_null())
+	{
+		js.release(layers);
+		return;
+	}
+	js.set_property(state, "layers", layers);
+	*out = state;
+}
+
+<*
+ One layer as a script reads it: `{ name, time, duration, speed, loop, playing,
+ weight }`, `time` measured from the clip's own start the way `play` takes it.
+*>
+fn qjs::Value layer_value(qjs::Context* js, AnimationLayer* layer, AnimationClip* clip) @local
+{
+	qjs::Value value = js.object();
+	js.set_property(value, "name", js.string(clip.name));
+	js.set_property(value, "time", qjs::number_value((double)layer.time - clip.start));
+	js.set_property(value, "duration", qjs::number_value(clip.duration));
+	js.set_property(value, "speed", qjs::number_value(layer.speed));
+	js.set_property(value, "loop", qjs::bool_value(layer.loop));
+	js.set_property(value, "playing", qjs::bool_value(layer.playing));
+	js.set_property(value, "weight", qjs::number_value(layer.weight));
+	return value;
+}
+
 fn void js_set_visible(
 	qjs::ContextRef ctx,
 	qjs::Value* this_val,
@@ -1447,6 +1319,29 @@ fn void js_set_collides(
 	if (ref.scene == null) return;
 
 	ref.scene.set_collides(ref.id, arg_truth(&js, argc, args, 2));
+}
+
+<*
+ `setBlocks(index, generation, on)` — whether this node stands in a mover's way.
+
+ Returns nothing, like `setCollides`. `Node.blocks` has what it is for.
+*>
+fn void js_set_blocks(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	NodeRef ref = arg_handle(self, &js, argc, args, 0, out);
+	if (ref.scene == null) return;
+
+	ref.scene.set_blocks(ref.id, arg_truth(&js, argc, args, 2));
 }
 
 <*
@@ -1675,14 +1570,24 @@ fn void js_object_bounds(
 fn qjs::Value hit_value(JsRuntime* self, qjs::Context* js, Hit hit)
 {
 	if (!hit.hit) return qjs::null_value();
+	return hit_object(self, js, hit.node, hit.distance, hit.point, hit.normal);
+}
 
+<*
+ A hit as a script reads it: the node and its name, how far along, where, and
+ the surface normal there. `fraction` is a sweep's, and left out when negative.
+*>
+fn qjs::Value hit_object(JsRuntime* self, qjs::Context* js, NodeId id, double distance, Vec3 point, Vec3 normal,
+	double fraction = -1)
+{
 	qjs::Value found = js.object();
-	js.set_property(found, "node", handle_value(js, hit.node));
-	js.set_property(found, "distance", qjs::number_value(hit.distance));
-	js.set_property(found, "point", vec3_value(js, hit.point));
-	js.set_property(found, "normal", vec3_value(js, hit.normal));
+	js.set_property(found, "node", handle_value(js, id));
+	if (fraction >= 0) js.set_property(found, "fraction", qjs::number_value(fraction));
+	js.set_property(found, "distance", qjs::number_value(distance));
+	js.set_property(found, "point", vec3_value(js, point));
+	js.set_property(found, "normal", vec3_value(js, normal));
 
-	Node* node = self.pass.scene.node(hit.node);
+	Node* node = self.pass.scene.node(id);
 	js.set_property(found, "name", js.string(node == null ? "" : node.name));
 	return found;
 }
@@ -1711,11 +1616,7 @@ fn void js_pick(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.renderer == null)
-	{
-		*out = js.raise("picking by screen position needs a GPU device and this context has none");
-		return;
-	}
+	if (!self.needs_device(&js, "picking by screen position", out)) return;
 
 	*out = self.pick_at(&js, arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1));
 }
@@ -1795,14 +1696,56 @@ fn void js_camera_ray(
 
 	// Flat, like `aabb_value`: one array of six where a nested pair would be
 	// three, and `api.js` builds the `{ origin, direction }` a script sees.
-	qjs::Value six = js.array();
-	js.set_index(six, 0, qjs::number_value(ray.origin.x));
-	js.set_index(six, 1, qjs::number_value(ray.origin.y));
-	js.set_index(six, 2, qjs::number_value(ray.origin.z));
-	js.set_index(six, 3, qjs::number_value(ray.direction.x));
-	js.set_index(six, 4, qjs::number_value(ray.direction.y));
-	js.set_index(six, 5, qjs::number_value(ray.direction.z));
+	qjs::Value six = numbers_value(&js, {
+		ray.origin.x, ray.origin.y, ray.origin.z, ray.direction.x, ray.direction.y, ray.direction.z,
+	});
 	*out = six;
+}
+
+<*
+ `cameraProject(x, y, z)` — the pixel a world point is drawn at, as
+ `[column, row, depth]`, or null for a point behind the eye.
+
+ `cameraRay` backwards, through the same `screen_point` arithmetic and the same
+ extent, so a point on the ray through a pixel comes back as that pixel. An
+ overlay that drew its labels from a second derivation — eye, forward, right
+ and field of view — would agree at the centre and drift at the edges, which is
+ a name drawn beside the character it names.
+*>
+fn void js_camera_project(
+	qjs::ContextRef ctx,
+	qjs::Value* this_val,
+	int argc,
+	qjs::Value* args,
+	void* opaque,
+	qjs::Value* out
+) @local
+{
+	JsRuntime* self = (JsRuntime*)opaque;
+	qjs::Context js = qjs::wrap(ctx);
+
+	if (self.renderer == null)
+	{
+		*out = js.raise("a pixel for a point needs a render target and this context has none");
+		return;
+	}
+
+	Vec3 point = arg_vec3(&js, argc, args, 0);
+	float[<3>] pixel;
+	if (!screen_point(
+		&self.pass.camera,
+		point,
+		self.renderer.target.extent.width,
+		self.renderer.target.extent.height,
+		&pixel,
+	))
+	{
+		*out = qjs::null_value();
+		return;
+	}
+
+	qjs::Value three = numbers_value(&js, { pixel[0], pixel[1], pixel[2] });
+	*out = three;
 }
 
 <*
@@ -1828,8 +1771,8 @@ fn void js_raycast(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	Vec3 origin = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
-	Vec3 direction = { arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5) };
+	Vec3 origin = arg_vec3(&js, argc, args, 0);
+	Vec3 direction = arg_vec3(&js, argc, args, 3);
 
 	float length = direction.length();
 	if (length < 1e-12f)
@@ -2078,15 +2021,11 @@ fn void js_render(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.renderer == null)
-	{
-		*out = js.raise("three.render needs a GPU device and this context has none");
-		return;
-	}
+	if (!self.needs_device(&js, "three.render", out)) return;
 
 	if (catch err = self.renderer.render_offscreen())
 	{
-		*out = js.raise(string::tformat("the frame could not be drawn: %s", err));
+		*out = js.raisef("the frame could not be drawn: %s", err);
 	}
 }
 
@@ -2131,11 +2070,7 @@ fn void js_screenshot(
 	JsRuntime* self = (JsRuntime*)opaque;
 	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.renderer == null)
-	{
-		*out = js.raise("three.screenshot needs a GPU device and this context has none");
-		return;
-	}
+	if (!self.needs_device(&js, "three.screenshot", out)) return;
 
 	@pool()
 	{
@@ -2151,7 +2086,7 @@ fn void js_screenshot(
 
 		if (catch err = self.renderer.screenshot(writing))
 		{
-			*out = js.raise(string::tformat("three.screenshot() could not write %s: %s", asked, err));
+			*out = js.raisef("three.screenshot() could not write %s: %s", asked, err);
 			return;
 		}
 
@@ -2250,14 +2185,8 @@ fn void js_render_resize(
 	int height = arg_int(&js, argc, args, 1);
 	if (width < 1 || height < 1 || width > RENDER_MAX_SIDE || height > RENDER_MAX_SIDE)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.setRenderSize(width, height) wants two sizes between 1 and %d pixels; got %dx%d",
-				RENDER_MAX_SIDE,
-				width,
-				height
-			)
-		);
+		*out = js.raisef("three.setRenderSize(width, height) wants two sizes between 1 and %d pixels; got %dx%d",
+			RENDER_MAX_SIDE, width, height);
 		return;
 	}
 
@@ -2287,9 +2216,7 @@ fn void js_render_resize(
 
 	if (catch err = self.renderer.resize_target((uint)width, (uint)height))
 	{
-		*out = js.raise(
-			string::tformat("three.setRenderSize could not make a %dx%d target: %s", width, height, err)
-		);
+		*out = js.raisef("three.setRenderSize could not make a %dx%d target: %s", width, height, err);
 		return;
 	}
 	*out = qjs::bool_value(true);
@@ -2388,14 +2315,8 @@ fn void js_render_scale_set(
 	double scale = arg_number(&js, argc, args, 0);
 	if (scale < RENDER_SCALE_MIN || scale > RENDER_SCALE_MAX)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.window.renderScale wants a fraction between %s and %s, or null for full resolution; got %s",
-				RENDER_SCALE_MIN,
-				RENDER_SCALE_MAX,
-				scale
-			)
-		);
+		*out = js.raisef("three.window.renderScale wants a fraction between %s and %s, or null for full resolution; got %s",
+			RENDER_SCALE_MIN, RENDER_SCALE_MAX, scale);
 		return;
 	}
 
@@ -2557,9 +2478,7 @@ fn void js_sky_get(
 	qjs::Value list = js.array();
 	js.set_index(list, 0, qjs::int_value(sky.background));
 	js.set_index(list, 1, qjs::int_value(sky.environment));
-	js.set_index(list, 2, qjs::number_value(sky.background_intensity));
-	js.set_index(list, 3, qjs::number_value(sky.environment_intensity));
-	js.set_index(list, 4, qjs::number_value(sky.rotation));
+	put_numbers(&js, list, 2, { sky.background_intensity, sky.environment_intensity, sky.rotation });
 	*out = list;
 }
 
@@ -2937,14 +2856,8 @@ fn void js_clock_rate_set(
 	double asked = arg_number(&js, argc, args, 0);
 	if (!math::is_finite(asked) || asked < CLOCK_FIXED_HZ_MIN || asked > CLOCK_FIXED_HZ_MAX)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.clock.fixedRate wants %d to %d steps a second — %g is not a rate a fixed loop can run at",
-				(int)CLOCK_FIXED_HZ_MIN,
-				(int)CLOCK_FIXED_HZ_MAX,
-				asked
-			)
-		);
+		*out = js.raisef("three.clock.fixedRate wants %d to %d steps a second — %g is not a rate a fixed loop can run at",
+			(int)CLOCK_FIXED_HZ_MIN, (int)CLOCK_FIXED_HZ_MAX, asked);
 		return;
 	}
 	clock.fixed_hz = asked;
@@ -3025,14 +2938,8 @@ fn uint arg_light(
 	int asked = arg_int(js, argc, args, at);
 	if (asked < (int)first || asked >= (int)self.pass.lighting.count)
 	{
-		*out = js.raise(
-			string::tformat(
-				"there is no light %d — this scene has %d, numbered 0 to %d",
-				asked,
-				self.pass.lighting.count,
-				self.pass.lighting.count - 1
-			)
-		);
+		*out = js.raisef("there is no light %d — this scene has %d, numbered 0 to %d",
+			asked, self.pass.lighting.count, self.pass.lighting.count - 1);
 		return MAX_LIGHTS;
 	}
 	return (uint)asked;
@@ -3187,12 +3094,8 @@ fn void js_light_add(
 
 	if (self.pass.lighting.count >= MAX_LIGHTS)
 	{
-		*out = js.raise(
-			string::tformat(
-				"three.lights holds %d lights and all of them are in use — set one you already have, or remove it first",
-				MAX_LIGHTS
-			)
-		);
+		*out = js.raisef("three.lights holds %d lights and all of them are in use — set one you already have, or remove it first",
+			MAX_LIGHTS);
 		return;
 	}
 
@@ -3273,12 +3176,10 @@ fn void js_light_shadow_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 	uint effective = size > 0 ? size : self.pass.point_shadows.size;
 	bool enabled = index > 0 && mode != LIGHT_SHADOW_OFF
 		&& (mode == LIGHT_SHADOW_ON || self.pass.point_shadows.enabled) && effective > 0;
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value((double)mode));
-	js.set_index(list, 1, qjs::number_value((double)size));
-	js.set_index(list, 2, qjs::number_value(enabled ? 1.0 : 0.0));
-	js.set_index(list, 3, qjs::number_value((double)(enabled ? effective : 0)));
-	js.set_index(list, 4, qjs::number_value(light.meta[1] != SHADOW_VIEW_NONE ? 1.0 : 0.0));
+	qjs::Value list = numbers_value(&js, {
+		(double)mode, (double)size, enabled ? 1.0 : 0.0, (double)(enabled ? effective : 0),
+		light.meta[1] != SHADOW_VIEW_NONE ? 1.0 : 0.0,
+	});
 	*out = list;
 }
 
@@ -3357,10 +3258,11 @@ fn void js_light_baked_set(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 }
 
 <*
- `lightsBake(texelsPerMetre, maxBytes)` — the bake itself, as
- `[receivers, skipped, texels, bytes, ms]`.
+ `lightsBake(texelsPerMetre, maxBytes, budgetMs, progressive)` — the bake itself,
+ as `[receivers, skipped, texels, bytes, ms, dirty]`.
 
- Synchronous, and it reads the shadow atlas as the last frame left it — a light
+ Synchronous unless `progressive`, which bakes one budget's worth and answers
+ with the rest as `dirty` — `MeshPass.bake_lightmaps`. Either way it reads the shadow atlas as the last frame left it — a light
  whose shadow was not resident bakes without one. A scene with no eligible
  receiver answers with five zeros rather than raising: nothing eligible is a
  property of the file's uvs, not a mistake in the call.
@@ -3383,15 +3285,14 @@ fn void js_lights_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 		options.budget_ms = math::clamp(budget, 0.1f, 1000.0f);
 		self.pass.lightmap.budget_ms = options.budget_ms;
 	}
+	options.progressive = arg_truth(&js, argc, args, 3);
 
 	LightmapResult answer = { };
 	if (try baked = self.pass.bake_lightmaps(options)) answer = baked;
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value((double)answer.receivers));
-	js.set_index(list, 1, qjs::number_value((double)answer.skipped));
-	js.set_index(list, 2, qjs::number_value((double)answer.texels));
-	js.set_index(list, 3, qjs::number_value((double)answer.bytes));
-	js.set_index(list, 4, qjs::number_value(answer.ms));
+	qjs::Value list = numbers_value(&js, {
+		(double)answer.receivers, (double)answer.skipped, (double)answer.texels, (double)answer.bytes, answer.ms,
+		(double)answer.dirty,
+	});
 	*out = list;
 }
 
@@ -3433,19 +3334,12 @@ fn void js_lights_save_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 		LightmapFileResult? saved = self.pass.save_lightmap(writing);
 		if (catch err = saved)
 		{
-			*out = js.raise(
-				string::tformat(
-					"three.lights.saveBake could not write %s: %s — call three.lights.bake() first",
-					self.blame(asked, writing), err
-				)
-			);
+			*out = js.raisef("three.lights.saveBake could not write %s: %s — call three.lights.bake() first",
+				self.blame(asked, writing), err);
 			return;
 		}
 		qjs::Value list = js.array();
-		js.set_index(list, 0, qjs::number_value((double)saved.tiles));
-		js.set_index(list, 1, qjs::number_value((double)saved.dirty));
-		js.set_index(list, 2, qjs::number_value((double)saved.bytes));
-		js.set_index(list, 3, qjs::number_value(saved.ms));
+		put_numbers(&js, list, 0, { (double)saved.tiles, (double)saved.dirty, (double)saved.bytes, saved.ms });
 		js.set_index(list, 4, js.string(writing));
 		*out = list;
 	};
@@ -3480,11 +3374,9 @@ fn void js_lights_load_bake(qjs::ContextRef ctx, qjs::Value* this_val, int argc,
 			*out = qjs::null_value();
 			return;
 		}
-		qjs::Value list = js.array();
-		js.set_index(list, 0, qjs::number_value((double)loaded.tiles));
-		js.set_index(list, 1, qjs::number_value((double)loaded.dirty));
-		js.set_index(list, 2, qjs::number_value((double)loaded.bytes));
-		js.set_index(list, 3, qjs::number_value(loaded.ms));
+		qjs::Value list = numbers_value(&js, {
+			(double)loaded.tiles, (double)loaded.dirty, (double)loaded.bytes, loaded.ms,
+		});
 		*out = list;
 	};
 }
@@ -3661,11 +3553,10 @@ fn void js_shadow_get(
 
 	ShadowMap* shadows = &self.pass.shadows;
 	qjs::Value list    = js.array();
-	js.set_index(list, 0, qjs::number_value(shadows.enabled ? 1.0 : 0.0));
-	js.set_index(list, 1, qjs::number_value((double)shadows.size));
-	js.set_index(list, 2, qjs::number_value((double)shadows.bias));
-	js.set_index(list, 3, qjs::number_value((double)shadows.intensity));
-	js.set_index(list, 4, qjs::number_value((double)shadows.distance));
+	put_numbers(&js, list, 0, {
+		shadows.enabled ? 1.0 : 0.0, (double)shadows.size, (double)shadows.bias, (double)shadows.intensity,
+		(double)shadows.distance,
+	});
 	// 1 or 0 for `enabled`'s reason, and last for the reason every field added to
 	// one of these arrays is last: a script destructuring the first five keeps
 	// working.
@@ -3693,10 +3584,9 @@ fn void js_point_shadow_get(
 	qjs::Context js = qjs::wrap(ctx);
 	PointShadowSettings settings = self.pass.point_shadows.settings;
 	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value(settings.enabled ? 1.0 : 0.0));
-	js.set_index(list, 1, qjs::number_value((double)settings.size));
-	js.set_index(list, 2, qjs::number_value((double)settings.bias));
-	js.set_index(list, 3, qjs::number_value((double)settings.intensity));
+	put_numbers(&js, list, 0, {
+		settings.enabled ? 1.0 : 0.0, (double)settings.size, (double)settings.bias, (double)settings.intensity,
+	});
 	js.set_index(list, 4, qjs::number_value((double)(settings.max_local > 0
 		? settings.max_local : DEFAULT_LOCAL_SHADOWS)));
 	*out = list;
@@ -3738,12 +3628,10 @@ fn void js_shadow_budget_get(qjs::ContextRef ctx, qjs::Value* this_val, int argc
 	qjs::Context js = qjs::wrap(ctx);
 	ShadowBudget budget = self.pass.shadow_view_set.budget;
 	if (budget.max_views == 0) budget = DEFAULT_SHADOW_BUDGET;
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value(budget.max_views));
-	js.set_index(list, 1, qjs::number_value((double)budget.max_texels));
-	js.set_index(list, 2, qjs::number_value((double)budget.max_bytes));
-	js.set_index(list, 3, qjs::number_value(budget.max_updates));
-	js.set_index(list, 4, qjs::number_value((double)budget.max_update_texels));
+	qjs::Value list = numbers_value(&js, {
+		budget.max_views, (double)budget.max_texels, (double)budget.max_bytes, budget.max_updates,
+		(double)budget.max_update_texels,
+	});
 	*out = list;
 }
 
@@ -3782,15 +3670,10 @@ fn void js_shadow_fit(
 	qjs::Context js = qjs::wrap(ctx);
 
 	ShadowFit fit   = self.pass.shadows.report();
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value(fit.live ? 1.0 : 0.0));
-	js.set_index(list, 1, qjs::number_value((double)fit.centre.x));
-	js.set_index(list, 2, qjs::number_value((double)fit.centre.y));
-	js.set_index(list, 3, qjs::number_value((double)fit.centre.z));
-	js.set_index(list, 4, qjs::number_value((double)fit.extent));
-	js.set_index(list, 5, qjs::number_value((double)fit.near));
-	js.set_index(list, 6, qjs::number_value((double)fit.far));
-	js.set_index(list, 7, qjs::number_value((double)fit.texel));
+	qjs::Value list = numbers_value(&js, {
+		fit.live ? 1.0 : 0.0, (double)fit.centre.x, (double)fit.centre.y, (double)fit.centre.z, (double)fit.extent,
+		(double)fit.near, (double)fit.far, (double)fit.texel,
+	});
 	*out = list;
 }
 
@@ -3963,14 +3846,9 @@ fn void js_camera_get(
 	qjs::Context js = qjs::wrap(ctx);
 
 	Camera* camera  = &self.pass.camera;
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value(camera.target.x));
-	js.set_index(list, 1, qjs::number_value(camera.target.y));
-	js.set_index(list, 2, qjs::number_value(camera.target.z));
-	js.set_index(list, 3, qjs::number_value(camera.yaw));
-	js.set_index(list, 4, qjs::number_value(camera.pitch));
-	js.set_index(list, 5, qjs::number_value(camera.distance));
-	js.set_index(list, 6, qjs::number_value(camera.fov));
+	qjs::Value list = numbers_value(&js, {
+		camera.target.x, camera.target.y, camera.target.z, camera.yaw, camera.pitch, camera.distance, camera.fov,
+	});
 	// Reported since M6, and read-only on the JS side. They are still derived
 	// rather than set — `Camera.derive_planes` argues that at length — but derived
 	// is not the same as secret, and while they were neither reported nor settable
@@ -4007,7 +3885,7 @@ fn void js_camera_set(
 	qjs::Context js = qjs::wrap(ctx);
 
 	Camera* camera = &self.pass.camera;
-	camera.target = { arg_float(&js, argc, args, 0), arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2) };
+	camera.target = arg_vec3(&js, argc, args, 0);
 	camera.yaw = arg_float(&js, argc, args, 3);
 	camera.pitch = arg_float(&js, argc, args, 4);
 	// **Zero is allowed and is what first person is** — the eye sits on the point
@@ -4101,11 +3979,7 @@ fn void js_camera_attach(
 	self.pass.follow = {
 		.active = true,
 		.node = node,
-		.offset = {
-			arg_float(&js, argc, args, 2),
-			arg_float(&js, argc, args, 3),
-			arg_float(&js, argc, args, 4),
-		},
+		.offset = arg_vec3(&js, argc, args, 2),
 		.lag_ms = lag,
 		.local_offset = arg_truth(&js, argc, args, 7),
 	};

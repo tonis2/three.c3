@@ -340,6 +340,62 @@ fn void a_non_colliding_drawable_is_drawn_and_not_queried() @test
 }
 
 <*
+ `blocks = false` keeps a drawable in the picks and out of every mover's way.
+
+ **The regression this exists for is a character that blocks its own path.**
+ A character added after the bake is not in the grid, but the sweep that pulls a
+ route tight still meets it — so a route through where it stands came back empty,
+ and so did every route it asked for from where it stood, because the first
+ sweep starts inside it. `collides = false` cured that and took it out of the
+ picks with it. The low box is the character's feet: tall enough to stop a
+ capsule, low enough that the floor snap under a waypoint would land on its top
+ rather than on the floor.
+*>
+fn void a_non_blocking_drawable_is_picked_and_walked_past() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(30, 1, 30));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
+
+			// Taller than the bake's step: the shortening sweep stands on the step
+			// height, since anything lower is walked over.
+			const feet = new three.Mesh(new three.BoxGeometry(0.8, 1, 0.8));
+			feet.position.set(0, 0.5, 0);
+			scene.add(feet);
+
+			const opts = { radius: 0.4, height: 1.7, step: 0.1, slope: 52, skin: 0.02, snap: 0.1 };
+			const answers = () => {
+				const across = three.nav.path([-6, 0, 0], [6, 0, 0]);
+				const away = three.nav.path([0, 0, 0], [6, 0, 3]);
+				return [
+					three.query.sphere([0, 0.25, 0], 0.05).length,
+					scene.raycast([0, 5, 0], [0, -1, 0])?.object === feet,
+					three.moveAndSlide([-3, 0.87, 0], [6, 0, 0], opts).position.x < 0,
+					across.length,
+					away.length,
+					away.length ? +away[0].y.toFixed(2) : null,
+				];
+			};
+			const before = answers();
+			feet.blocks = false;
+			return [before, answers(), feet.blocks, feet.collides];
+		`, "the blocks script ran");
+
+		// Before: found, picked, the walk stopped short, and both routes empty.
+		// After: still found and picked, walked straight past, a two-point
+		// route across, a route out from where it stands, and that route starting
+		// on the floor rather than on the box.
+		test::@check(value == "[[1,true,true,0,0,null],[1,true,false,2,2,0],false,true]",
+			"picked and still walked past; got %s", value);
+	};
+}
+
+<*
  `stats().colliders` is how many meshes every sweep is testing.
 
  **The regression this exists for is a level that is mostly scenery and does not
@@ -1046,6 +1102,40 @@ fn void a_path_goes_round_a_wall_and_is_pulled_tight() @test
 
 		test::@check(value == "[true,true,true,false]",
 			"a short route, longer than the straight line, and clear of the wall; got %s", value);
+	};
+}
+
+<*
+ A group sent to one goal gets the route each of its members would get alone.
+
+ `paths` is one search for all of them, so the risk is a member walking a field
+ that stopped before reaching it, or the routes landing in each other's slots.
+*>
+fn void a_group_gets_the_routes_its_members_would_get_alone() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const floor = new three.Mesh(new three.BoxGeometry(30, 1, 30));
+			floor.position.y = -0.5;
+			scene.add(floor);
+			const wall = new three.Mesh(new three.BoxGeometry(1, 4, 20));
+			wall.position.set(0, 2, -3);
+			scene.add(wall);
+			three.nav.bake({ cell: 0.5, radius: 0.3, height: 1.8 });
+
+			const starts = [[-10, 0, 0], [-8, 0, 4], [-12, 0, -6], [40, 0, 0]];
+			const goal = [10, 0, 0];
+			const group = three.nav.paths(starts, goal);
+			const alone = starts.map(start => three.nav.path(start, goal));
+			const same = group.every((route, i) => route.length === alone[i].length
+				&& route.every((p, j) => p.distanceTo(alone[i][j]) < 1e-4));
+			return [group.length, group.map(r => r.length > 1), same, three.nav.paths([], goal).length];
+		`, "the group script ran");
+
+		test::@check(value == "[4,[true,true,true,false],true,0]",
+			"three routes round the wall, none from off the level, each as it would be alone; got %s", value);
 	};
 }
 
@@ -1931,6 +2021,59 @@ fn void a_corner_ray_answers_where_a_pick_has_nothing_to_answer_about() @test
 
 		test::@check(value == "[true,true,true,true,true,4]",
 			"the corners answer, in the order the picture puts them; got %s", value);
+	};
+}
+
+<*
+ `three.camera.project` is `three.camera.ray` backwards.
+
+ **The contract is the round trip.** An overlay draws a name where `project`
+ says a character is and the player clicks it where `ray` says the click went,
+ so the two have to be one mapping read in two directions — a point anywhere on
+ the ray through a pixel has to come back as that pixel, at the corners as much
+ as at the centre, because a second derivation drifts at the edges first.
+
+ Depth is checked against the one number it can be checked against without
+ restating the projection: a point straight ahead at distance d from the eye is
+ d deep. And a point behind the eye answers null, rather than the mirrored
+ coordinate the arithmetic would otherwise produce.
+*>
+fn void a_point_projects_to_the_pixel_its_ray_went_through() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.camera.lookAt(3, 0, -2);
+			three.camera.orbit(35, 40, 18);
+			three.render(scene, three.camera);
+
+			const { width, height } = three.renderSize();
+			const pixels = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1],
+				[width / 2, height / 2], [37, 91]];
+			let worst = 0;
+			for (const [x, y] of pixels) {
+				const r = three.camera.ray(x, y);
+				for (const t of [0.5, 7, 60]) {
+					const p = r.origin.clone().addScaledVector(r.direction, t);
+					const at = three.camera.project(p);
+					worst = Math.max(worst, Math.abs(at[0] - x), Math.abs(at[1] - y));
+				}
+			}
+
+			const eye = three.camera.position();
+			const f = three.camera.forward();
+			const ahead = three.camera.project([eye.x + f.x * 9, eye.y + f.y * 9, eye.z + f.z * 9]);
+			const behind = three.camera.project([eye.x - f.x * 3, eye.y - f.y * 3, eye.z - f.z * 3]);
+
+			// Within a twentieth of a pixel: both directions go through float
+			// matrices, one of them inverted, and that is what is left.
+			return [worst < 0.05, Math.abs(ahead[2] - 9) < 1e-3, behind];
+		`, "the projection script ran");
+
+		test::@check(value == "[true,true,null]",
+			"every pixel comes back as itself, depth is distance ahead, and behind is null; got %s", value);
 	};
 }
 

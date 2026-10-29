@@ -166,6 +166,16 @@ Answers with `{ scenes, assets, meshes, textures, bytes }`. The second half is o
 right: two scenes over one kit means disposing either frees nothing, and `bytes` counts texture bytes
 alone. `stats().geometryBytes` before and after is the other half.
 
+## three.reset()
+
+Give the names back so the same file can run again: every Entity class and Widget the script defined is
+disposed (even after its scene is gone), the system registry is cleared and the post chain is dropped.
+What a script calls at its top when it is going to be run more than once — under `--mcp`, every
+`run_script` of an edited file is one more run of the same names.
+
+It does not free the scene being rendered. `new three.Scene()` then `three.disposeInactive()` is that
+half.
+
 ## three.unloadUnused()
 
 Free every asset no live mesh names, every mesh of a still-used file that nothing draws, and every
@@ -968,10 +978,36 @@ or empty when there is no route. `{ limit }` caps the waypoint count.
 
 The straight lines between them have been checked with a capsule sweep at the agent's own size, so a
 corner it cannot physically round has not been cut and the path does not look like it is walking cell
-centres.
+centres. The capsule stands on `stepHeight`, since anything lower is walked over. Shortcuts are found on
+the grid first and only the ones kept are swept, so the triangles are read once per corner.
 
-This solves a whole field and throws it away — right for a wanderer replanning every few seconds, and
-the thing `three.nav.field` exists to replace for a crowd.
+The search is A* aimed at the start, so it costs the cells between the two ends rather than the whole
+bake: a route across a town square is well under a millisecond, cheap enough to plan every frame under
+the cursor. When there is no route it searches the goal's whole region before saying so. A group sent to
+one place wants `three.nav.paths`; a crowd steering there continuously wants `three.nav.field`.
+
+**Set `blocks = false` on characters.** The sweep that pulls the route tight meets every mesh that blocks,
+including ones added after the bake — so a character standing on a route cuts it, and a character asking
+for a path from where it stands gets an empty one, because its first step starts inside itself.
+`blocks = false` leaves it clickable and raycastable and takes it out of every sweep.
+
+## three.nav.paths(starts, to, options)
+
+One route per start, all to one goal, from one search: an Array with one entry per start, in order, each
+what `three.nav.path` would answer for it alone. `{ limit }` caps each route's waypoint count.
+
+What an RTS does with a selection sent across the map. The search from the goal runs until every start is
+settled, and each unit walks and shortens its own route out of the same answer, so twenty units cost about
+one search and twenty shortenings rather than twenty searches. On a town bake, twenty units sent 60 m
+take about 1 ms in an optimised build.
+
+```js
+const routes = three.nav.paths(units.map(u => u.position), target);
+routes.forEach((route, i) => units[i].follow(route));
+```
+
+Units given separate formation spots are separate goals, so `path` each, or `paths` to the formation's
+centre and offset the last waypoint.
 
 ## three.nav.field(goals)
 
@@ -1174,7 +1210,7 @@ The same seed places the same points, which is what makes a screenshot comparabl
 
 # Systems, entities and loops
 
-## three.systems.step(name, fn, options) / frame / add / remove / enable / list / outline / report / clear / three.systemLoad(budgetMs)
+## three.systems.step(name, fn, options) / frame / late / add / remove / enable / list / outline / report / clear / three.systemLoad(budgetMs)
 
 The ordered system registry. `three.setFixedLoop` and `three.setAnimationLoop` each take one callback, so a
 game with five things to do a frame has one function with five things in it — and that is what this replaces.
@@ -1189,7 +1225,12 @@ The verb is the clock:
   when the step they integrate over does not.
 - `three.systems.frame(name, fn)` is once per drawn frame, handed what that frame was actually worth, and it
   is where the camera, the fades and the uniform writes go.
-- `add()` is the same thing with `{ phase }` left as an option, for when the phase is a variable.
+- `three.systems.late(name, fn)` is once per drawn frame too, after every frame system **and after the
+  camera `attach()` follows has moved** — for whatever has to agree with the camera this frame draws
+  with: an HP bar or a name placed over a character with `three.camera.project`. From a frame system
+  such a label trails a moving camera by one frame.
+- `add()` is the same thing with `{ phase }` left as an option (`'fixed'`, `'frame'` or `'late'`), for
+  when the phase is a variable.
 
 They run in the order you register them. For the one system in a file that has to break that, name the
 neighbour: `{ before: 'fire' }` or `{ after: 'Player.pose' }`, one name or a list, and a name registered
@@ -1198,8 +1239,10 @@ list — the engine's systems still bracket them, the rules drain ahead and the 
 loop is refused where it is made; a name that matches nothing is said once and otherwise ignored. There is
 also a numeric `{ order }`, which is what the engine's own systems use, but a game should not need it.
 
-`outline()` prints the tick — `step  spawn → player → foes` on one line and `frame autopilot → fire` on the
-next. Two lines because they are two lists: every step this frame owes runs before any frame system.
+`outline()` prints the tick — `step  spawn → player → foes` on one line, `frame autopilot → fire` on the
+next and `late  bars` after that. A line per list because they are separate lists: every step this frame
+owes runs before any frame system, and every late system runs after the camera follow that comes after
+them all.
 
 Adding a name that exists replaces it, so a re-run top level ends up with one copy of each system rather
 than two.
@@ -1475,6 +1518,68 @@ than the key map.
 ## three.input.keys()
 
 Every key name there is. The same list the host searches, so it cannot be out of date.
+
+## three.input.clicked
+
+Whether a click finished this frame — `three.input.pointer.clicked` without reading the rest of the mouse. A
+click is a press and a release close together in place and in time, so the release of a drag is not one.
+`three.onClick(fn)` is the same edge with a handler.
+
+## three.input.consume(key)
+
+`pressed(key)` that answers true once a frame. The fixed loop runs zero to eight steps a frame, so an edge
+read with `pressed` inside it is seen by every step or by none; `consume` gives it to the first step that asks
+and answers false to the rest.
+
+## three.input.press(key) / release(key)
+
+Hold a key down from a script, and let it go. A held key, not an event: it stays down until released, the edges
+come out of the same difference a real key's do, and `isDown`, `pressed`, `released`, `consume` and every
+`onKeyDown` handler see it exactly as they see a finger — so a headless test walks a character with
+`press('w')`, sixty frames, `release('w')`.
+
+It adds to the real keyboard rather than replacing it. A press and a release in the same frame still report
+both edges.
+
+## three.input.movePointer(x, y) / movePointerBy(dx, dy)
+
+Put the pointer somewhere, or move it by a distance — the mouse for a run with no hand on it.
+
+- `movePointer` places it in the rendered image's pixels, the coordinates `pointer` answers in and
+  `scene.pick` takes, so a place read off a screenshot can be pressed as it is. It stands in for the window's
+  cursor until the real one moves. The first placed frame has nothing to difference against, so its
+  `dx`/`dy` are zero.
+- `movePointerBy` is a movement and not a place: it adds to `pointer.dx`/`dy` for one frame and leaves `x`/`y`
+  alone, which is what a mouse look is built out of and the only way to turn one headless, where there is no
+  pointer lock to give. Two calls before one frame are one frame's movement.
+
+## three.input.pressButton(button) / releaseButton(button)
+
+Hold a mouse button and let it go: 0 left, 1 right, 2 middle. Held like a key, so a drag is a place, a press,
+another place a frame later and a release, and the press captures — a drag that leaves the widget it began on
+stays that widget's. Or-ed with the real buttons.
+
+## three.input.scroll(dy, dx)
+
+Turn the wheel, in notches, positive away from the user. One frame's worth, added to whatever the window turned.
+
+## three.input.releaseAll()
+
+Let go of every scripted key and button and drop the wheel nothing has spent yet — what a test calls between
+cases, so a held button does not capture the next case's first press. The pointer stays where it was put.
+
+## three.input.pointerLock
+
+Ask for the pointer, and read back whether the platform gave it. Locked, the cursor is hidden and held in the
+window and `pointer.dx`/`dy` come from the mouse itself, so a look keeps turning past the edge of the screen.
+
+```js
+three.onClick(() => { three.input.pointerLock = true; });
+three.onKeyDown('escape', () => { three.input.pointerLock = false; });
+```
+
+A headless run has no window and always reads false, as does a backend with no implementation; nothing throws,
+so a game can fall back to a drag-look. `pointer.locked` says the same thing beside the deltas it is about.
 
 ## three.onKeyDown(key, fn) / three.onKeyUp(key, fn)
 
@@ -1821,6 +1926,27 @@ It is the same ray a pick casts rather than a second derivation from `position()
 near plane and not at the eye: what sits in front of the near plane is invisible, and a ray taken from the
 picture does not hit it either.
 
+## three.camera.project(point)
+
+The pixel a world point is drawn at, as `[x, y, depth]` — or null when the point is behind the camera.
+`three.camera.ray(x, y)` backwards: a point anywhere on the ray through a pixel comes back as that pixel,
+so a name drawn at the answer sits where a click picks the thing it names.
+
+```js
+const at = three.camera.project([p.x, p.y + 2, p.z]);
+if (at) ops.push({ op: 'text', at: [at[0], at[1]], text: actor.name });
+```
+
+`x` and `y` are the rendered image's pixels from its top-left corner — what `three.input.pointer`
+answers in and what `three.ui.draw` places in at `three.ui.scale` 1. `depth` is world units in front of
+the eye along the view axis: what to sort labels by, or fade them with.
+
+It reads the camera as it stands when it is called. The follow `three.camera.attach` sets up runs after
+every frame system, so an overlay projected from a frame system trails a gliding camera by one frame —
+project from `three.systems.late` instead, which runs after the follow.
+
+Takes a Vector3, an `{x, y, z}` or an `[x, y, z]`. Needs a render target, as `ray` does.
+
 ## asset.instantiate(name, { camera: true })
 
 Aim `three.camera` from the file's own camera. `{ camera: 'Camera' }` picks one of several by name.
@@ -2082,6 +2208,19 @@ atlas is `RGBA16F`, eight bytes a texel — a lightmap is a colour attachment fi
 image second, and a shared-exponent format is not required to be renderable. `budgetMs` sets
 `three.lights.bake.budgetMs`, below.
 
+```js
+const b = three.lights.bake({ texelsPerMetre: 48, budgetMs: 4, progressive: true });
+// b.dirty tiles are still to come; save once three.stats().lightmapDirty is 0
+```
+
+A whole bake is one submission and one wait, so a large scene holds one frame for all of it —
+seconds, long enough for a desktop to call the window unresponsive. `progressive: true` packs
+the same atlas but renders only the first `budgetMs` worth of tiles, and leaves the rest dirty
+for the catch-up below to finish over the following frames. Those shade in real time until their
+tile lands, as any dirty tile does, and the finished atlas is the one a whole bake writes, texel
+for texel. `save: true` refuses a progressive bake, because there is nothing finished to write
+yet: call `three.lights.saveBake()` once `three.stats().lightmapDirty` reaches 0.
+
 `load` reads a saved atlas first and bakes only if there is none that fits this scene; `save`
 writes one afterwards. Either may be `true` for the default path or a path of its own —
 `three.lights.saveBake` and `three.lights.loadBake` are the same two verbs on their own.
@@ -2091,8 +2230,10 @@ whose shadow was not resident bakes without one — raise `three.lights.shadow.m
 a scene with more baked lights than the four that hold shadows by default.
 
 Built-in materials run through `mesh.slang`'s UV-space bake variant. Supported layered materials
-instead compile a bake variant of their generated program, so their blended normal and parallax
-inputs take part. Arbitrary shader bodies and vertex displacement are refused as receivers rather
+instead compile a bake variant of their generated program, so their blended normal takes part.
+Their parallax does not: where a texture slides to depends on where it is seen from, and a tile
+is seen from everywhere, so the bake reads every layer at its own uv and moving the camera never
+makes a tile stale. Arbitrary shader bodies and vertex displacement are refused as receivers rather
 than cached with a different surface.
 
 Area lights are integrated numerically in the bake whatever the frame is using, so the cached
@@ -2114,9 +2255,9 @@ frames:
   the receiver *shadows*, and there is no cheap exact answer to what that is;
 - **a static caster with no tile of its own moving** — the same rule. A mesh whose uvs cannot
   carry a tile still casts into the bake;
-- **a cached receiver's layered material or camera changing** — its blended normal and parallax
-  sampling can change the direct diffuse even though the geometry did not. The tile is disabled
-  immediately and rebuilt for the new material state or view;
+- **a cached receiver's layered material changing** — its blended normal can change the direct
+  diffuse even though the geometry did not. The tile is disabled immediately and rebuilt for the
+  new material state;
 - **a static receiver's shadow material changing** — because alpha testing decides whether the
   surface casts a shadow. Plain albedo, roughness and metalness are not stored in a tile;
 - **a static receiver being added, removed, re-parented, hidden, or joining or leaving
@@ -2127,8 +2268,8 @@ stops being read at all until the next `three.lights.bake()`, which is what make
 `light.baked = false` restore the real-time picture byte for byte.
 
 **A dirty tile is not displayed while it waits.** Its receiver falls back to the complete
-real-time light loop, so a moved light, changed layered normal, or changed camera never presents
-stale cached diffuse. It returns to the atlas after its tile catches up.
+real-time light loop, so a moved light or a changed layered normal never presents stale cached
+diffuse. It returns to the atlas after its tile catches up.
 
 The bake reads the static shadow atlas. Dynamic casters remain live: inside a moving caster's
 current shadow-map footprint, affected receivers bypass their cached tile per fragment and use
@@ -2178,8 +2319,8 @@ A record names its receiver by **node name, mesh index and copy index** — the 
 nodes with the same name and mesh in scene order, so two hundred crates out of one file each
 find their own tile. Beside that it holds the tile's rectangle, its texel density, and a fold
 over the node's world matrix and material state. The header holds the atlas side, the format,
-the set of baked lights the atlas is a sum over, the camera signature needed by layered
-parallax, and a hash over the whole payload. Files from older versions are declined.
+the set of baked lights the atlas is a sum over, and a hash over the whole payload. Files from
+older versions are declined.
 
 ## three.lights.loadBake
 
@@ -2197,9 +2338,9 @@ load: true })` is that whole sentence.
 
 `dirty` is how many loaded tiles have a different receiver transform or material signature.
 Those keep their rectangles but use real-time lighting while they re-bake over the following
-frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. A saved
-layered bake also records its camera signature; a different camera declines the file instead of
-loading view-dependent parallax lighting. The clean tiles are used as saved, texel for texel.
+frames under `bake.budgetMs`, so a level where one crate was nudged pays for one crate. Where the
+camera is makes no difference: a file loads the same under any view. The clean tiles are used as
+saved, texel for texel.
 
 On the Evil Forest scene, with all ten local lights baked: **about 50 ms to load, against 1.9 s
 to bake**, from a 9.0 MB file, with the frame it produces identical to the baked one pixel for

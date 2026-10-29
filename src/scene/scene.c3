@@ -82,17 +82,17 @@ struct Instance
 	// a single `vkCmdDrawIndexed`. Zero on a mesh with no skin.
 	uint pose;
 
-	// The frame this copy is crossfading *out of*, and how much of it is still
-	// showing — 1 when the fade starts and 0 when it is over. 0 and 0 on every
-	// copy that is not mid-fade, which is every copy in almost every frame, and
-	// which is why zero is the value that means "not fading".
+	// The baked frame after `pose`, and how far toward it this copy is — so a
+	// clip sampled thirty times a second plays smoothly at any rate. Zero and
+	// zero on a copy held on one frame, on a live or composed character (whose
+	// palette is exact already) and on everything unskinned.
 	// 
-	// The pair is what makes a crossfade cost a baked character nothing it was
-	// not already paying: two offsets and a weight still disagree per instance
-	// and nothing else does, so a crowd mid-fade is still one draw call. What it
-	// buys and what it costs in accuracy is `skin_matrix` in `shaders/skinning.shady`.
-	uint pose_from;
-	float blend;
+	// The pair is what keeps interpolation free of draw calls: two offsets and a
+	// fraction still disagree per instance and nothing else does, so a crowd at a
+	// hundred phases between frames is still one draw call. The mix is
+	// `blend_frames` in `shaders/skin_math.shady`.
+	uint pose_next;
+	float pose_t;
 
 	// Which slice of this frame's morph weights this copy reads, **plus one** — so
 	// zero is "this copy does not morph", which is the quiet default and what
@@ -900,29 +900,31 @@ fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 	{
 		self.query.drop();
 	}
-	if (node == null || node.static_caster) self.static_revision++;
 	if (node == null)
 	{
+		self.static_revision++;
 		self.lightmap_dirty_all = true;
 		self.lightmap_changes++;
 	}
 	else if (node.static_caster)
 	{
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 	}
 }
 
 <*
- This copy's lightmap tile is out of date, and so is whatever it shadows.
+ A static caster changed: the cached static shadow map is stale, and so are this
+ copy's lightmap tile and whatever it shadows.
 
- Beside every `static_revision++` that has a node in hand: what invalidates a
- cached shadow map invalidates a cached lightmap. The difference is the reach —
+ What invalidates a cached shadow map invalidates a cached lightmap. The
+ difference is the reach —
  a shadow map is one image and a lightmap is a tile per copy, so the node is
  remembered and `MeshPass.resolve_lightmap` spreads the change to the receivers
  the baked lights could carry it to.
 *>
-fn void Scene.dirty_lightmap(&self, Node* node)
+fn void Scene.static_changed(&self, Node* node)
 {
+	self.static_revision++;
 	node.lightmap_dirty = true;
 	node.lightmap_seed = true;
 	self.lightmap_changes++;
@@ -1201,8 +1203,8 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 
 	node.skin = -1;
 	node.pose = 0;
-	node.pose_from = 0;
-	node.blend = 0;
+	node.pose_next = 0;
+	node.pose_t = 0;
 	// A character cannot be a static caster — `set_static_caster` refuses one, and
 	// this is the other door: a node may be given a skin *after* it was marked
 	// static, and a pose offset moving is a silhouette moving with no transform to
@@ -1211,8 +1213,7 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 	{
 		node.static_caster = false;
 		self.static_nodes--;
-		self.static_revision++;
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 		node.lightmap = { 0, 0, 0, 0 };
 	}
 	if (skin < 0 || self.assets == null) return;
@@ -1306,25 +1307,22 @@ fn void Scene.start_player(
 
  @param gltf_nodes : `The glTF node index each node came from, one per entry and the same length as the node array.`
 *>
-fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes, bool live_skin = false)
+fn bool Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, NodeId[] nodes, bool live_skin = false)
 {
-	if (self.assets == null) return;
+	if (self.assets == null) return false;
 	Asset* loaded = self.assets.slot(asset);
 	// Skins count as something to play. A rigged character with no clips still
 	// needs a player, because a player is what holds the map from the file's joint
 	// nodes to this instance's — which is what the live palette is computed
 	// through. Without this a `skeleton: true` character with no animation would
 	// have bones a script could move and nothing that read them.
-	if (loaded == null || (loaded.clips.len() == 0 && loaded.skins.len() == 0)) return;
+	if (loaded == null || (loaded.clips.len() == 0 && loaded.skins.len() == 0)) return false;
 
 	self.drop_player(root);
 
 	AnimationPlayer player = {
 		.root = root,
 		.asset = asset,
-		.clip = -1,
-		.from_clip = -1,
-		.speed = 1,
 		.live_skin = live_skin && loaded.skins.len() > 0,
 	};
 	player.targets.init(mem, loaded.nodes.len());
@@ -1349,6 +1347,7 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 	self.collect_skinned(root, &player.skinned);
 
 	self.players.push(player);
+	return true;
 }
 
 <*
@@ -1364,7 +1363,8 @@ fn void Scene.bind_player(&self, AssetId asset, NodeId root, uint[] gltf_nodes, 
 
  @param speed : `A multiplier on time. Negative plays backwards, and a non-looping clip run backwards stops at its start.`
  @param time : `Seconds into the clip to start at, measured from its own start. What a crowd needs: a hundred characters playing one walk cycle at a hundred phases is a hundred different values of this and one baked clip.`
- @param fade : `Seconds to crossfade out of whatever is playing. Zero is the snap, and asking for one when the clip named is already the clip playing is a no-op — which is what makes calling this every frame from a state machine safe.`
+ @param fade : `Seconds to crossfade out of whatever is posing the character, playing or held. Zero is the snap, and asking for one when the clip named is already the clip playing only takes its speed and loop — which is what makes calling this every frame from a state machine safe.`
+ @param sync : `Where to start in cycles of the clip being left rather than in seconds: the incoming clip starts at the outgoing one's phase plus this, in [0, 1). Negative is no sync, and so is there being nothing to sync from. Overrides time.`
  @return `False if the subtree has no player or the asset has no clip by that name, which is a question rather than an error — mesh.animations is where the list lives.`
 *>
 fn bool Scene.play(
@@ -1374,7 +1374,8 @@ fn bool Scene.play(
 	bool loop = true,
 	float speed = 1.0f,
 	float time = 0,
-	float fade = 0
+	float fade = 0,
+	float sync = -1
 )
 {
 	if (self.assets == null) return false;
@@ -1384,57 +1385,204 @@ fn bool Scene.play(
 	Asset* loaded = self.assets.slot(player.asset);
 	if (loaded == null) return false;
 
-	int found = -1;
-	foreach (i, &candidate : loaded.clips)
-	{
-		if (candidate.name == clip)
-		{
-			found = (int)i;
-			break;
-		}
-	}
+	int found = loaded.find_clip(clip);
 	if (found < 0) return false;
 
 	self.assets.ensure_clip(player.asset, (uint)found);
 
-	// **Asking to fade into the clip already playing does nothing at all.** The
-	// call a locomotion state machine makes is `play(state.clip, { fade })` every
-	// time it runs, and restarting the fade on every one of those would hold the
-	// character at the start of a fade forever. Restarting a clip outright is
-	// still `play` without a fade.
-	if (fade > 0 && player.playing && player.clip == found) return true;
+	AnimationClip* incoming = &self.assets.slot(player.asset).clips[found];
 
-	// What the fade leaves behind, taken before the fields below are overwritten.
-	// Nothing playing means nothing to fade from, and fading up out of a rest pose
-	// is a pop with extra steps — so the fade is skipped rather than half-applied.
-	if (fade > 0 && player.playing && player.clip >= 0)
+	// **Asking to fade into the clip already playing does not restart it.** The
+	// call a locomotion state machine makes is `play(state.clip, { fade, speed })`
+	// every time it runs, and restarting the fade on every one of those would hold
+	// the character at the start of a fade forever. The speed and the loop flag
+	// are taken, though, because a walk whose rate follows the ground speed is the
+	// same walk asked for every frame at a slightly different rate — and the clip
+	// is raised again if it was on its way out, which is a walk, run, walk inside
+	// one fade turning round from the mix it had reached rather than popping.
+	// Restarting a clip outright is still `play` without a fade.
+	if (fade > 0)
 	{
-		player.from_clip = player.clip;
-		player.from_time = player.time;
-		player.from_speed = player.speed;
-		player.from_loop = player.loop;
-		player.fade = 0;
-		player.fade_duration = fade;
+		int running = player.playing_layer(found);
+		if (running >= 0)
+		{
+			AnimationLayer* layer = &player.layers[running];
+			layer.speed = speed;
+			layer.loop = loop;
+			player.raise((uint)running, fade);
+			return true;
+		}
+	}
+
+	// Where the clip starts: `time`, or — for `sync` — the phase of the clip the
+	// character is heading for now (`AnimationPlayer.dominant`), so a walk faded
+	// into a run lands the run on the same step rather than on its own first frame.
+	float start = incoming.start + time;
+	int top = player.dominant();
+	if (sync >= 0 && top >= 0)
+	{
+		AnimationLayer* now = &player.layers[top];
+		if (now.clip >= 0 && now.clip < loaded.clips.len())
+		{
+			AnimationClip* current = &loaded.clips[now.clip];
+			if (current.duration > 0 && incoming.duration > 0)
+			{
+				double phase = (double)(now.time - current.start) / current.duration + sync;
+				phase -= math::floor(phase);
+				start = incoming.start + (float)(phase * incoming.duration);
+			}
+		}
+	}
+	// A phase past the end wraps rather than being refused, so a crowd can be
+	// spread with `i / count * duration` and not have to know the duration.
+	if (loop) start = (float)clip_loop_time(incoming, start);
+
+	// **A fade joins the stack; a snap replaces it.** Whatever is posing the
+	// character — playing, held at the end of a one-shot, or `stop()`ped — is what
+	// the fade leaves, frozen if it was frozen. Only a character that has never
+	// played has nothing to fade from, and fading up out of a rest pose is a pop
+	// with extra steps, so that fade is a snap.
+	if (fade > 0 && player.layer_count > 0)
+	{
+		uint at = player.add_layer(found);
+		AnimationLayer* layer = &player.layers[at];
+		layer.time = start;
+		layer.speed = speed;
+		layer.loop = loop;
+		player.raise(at, fade);
 	}
 	else
 	{
-		player.from_clip = -1;
+		// The clips it replaces let go of their nodes, so one they drove and this
+		// one does not is not left in their last pose.
+		player.reset_layers(self, loaded);
+		player.layer_count = 1;
+		player.phased = false;
+		player.layers[0] = {
+			.clip = found, .time = start, .speed = speed, .loop = loop, .playing = true,
+			.weight = 1.0f, .target = 1.0f, .offset = -1,
+		};
 	}
-
-	player.clip = found;
-	player.speed = speed;
-	player.loop = loop;
-	player.playing = true;
-	player.time = self.assets.slot(player.asset).clips[found].start + time;
-	// A phase past the end wraps rather than being refused, so a crowd can be
-	// spread with `i / count * duration` and not have to know the duration.
-	if (loop) player.time = (float)clip_loop_time(&self.assets.slot(player.asset).clips[found], player.time);
 
 	// Posed at the frame it asked for rather than sitting in its bind pose until
 	// something steps the clock — nodes and skin both, which is what `repose` is.
 	player.repose(self, loaded);
 	// And anything hanging off a bone with it: a sword attached to a character
 	// that is then played should be in the played hand, not in the rest hand.
+	self.update_sockets();
+	return true;
+}
+
+<*
+ Holds several clips at once, at the weights asked for.
+
+ `play` raises one clip to the whole of the picture; this sets the target of each
+ clip named and lowers every other, over `fade` seconds — a walk and a run mixed by
+ how fast the character is going, an aim layered at a third over an idle. Called
+ every frame with weights that change a little each time, which is what it is for:
+ a clip already on the stack is never restarted, only re-aimed.
+
+ `offsets` locks a clip to the shared cycle, that many cycles on (`sync`), so two
+ loops of different lengths keep their feet together; negative leaves it on its
+ own clock. Weights summing past one are normalised; summing to less leaves the
+ rest pose showing through the remainder.
+
+ @param fade : `Seconds for the weights to arrive. Zero is the next frame.`
+ @param speed : `The rate every named clip plays at.`
+ @return `False if the subtree has no player or any name is not one of its clips — and then nothing changed.`
+*>
+fn bool Scene.blend(&self, NodeId root, String[] clips, float[] weights, float fade = 0, float[] offsets = {}, float speed = 1.0f)
+{
+	if (self.assets == null) return false;
+	AnimationPlayer* player = self.player(root);
+	if (player == null) return false;
+	Asset* loaded = self.assets.slot(player.asset);
+	if (loaded == null || clips.len != weights.len || clips.len > ANIMATION_LAYERS) return false;
+
+	int[ANIMATION_LAYERS] found;
+	foreach (k, name : clips)
+	{
+		found[k] = loaded.find_clip(name);
+		if (found[k] < 0) return false;
+	}
+	foreach (k, index : found[:clips.len]) self.assets.ensure_clip(player.asset, (uint)index);
+	loaded = self.assets.slot(player.asset);
+
+	// Everything not named leaves.
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		bool named = false;
+		foreach (index : found[:clips.len]) named = named || (layer.clip == index && layer.playing);
+		if (named) continue;
+		player.let_go(layer, fade);
+	}
+
+	bool locking = !player.phased;
+	foreach (k, index : found[:clips.len])
+	{
+		int at = player.playing_layer(index);
+		float offset = k < offsets.len ? offsets[k] : -1.0f;
+		// A clip held at nothing that is not already on the stack has nothing to
+		// show and no weight to lose. Adding it would put a layer on for a frame
+		// and drop it again, every frame a walk is blended with a run it is not
+		// running — and two layers compose the pose on the CPU where one reads the
+		// table. It joins, phase-locked, the frame its weight is more than nothing.
+		if (at < 0 && weights[k] <= 0) continue;
+		if (at < 0)
+		{
+			at = (int)player.add_layer(index);
+			AnimationClip* clip = &loaded.clips[index];
+			AnimationLayer* fresh = &player.layers[at];
+			fresh.time = clip.start;
+			if (offset >= 0 && player.phased && clip.duration > 0)
+			{
+				double cycle = player.phase + offset;
+				cycle -= math::floor(cycle);
+				fresh.time = clip.start + (float)(cycle * clip.duration);
+			}
+		}
+		AnimationLayer* layer = &player.layers[at];
+		float target = weights[k] > 0 ? weights[k] : 0;
+		if (target <= 0)
+		{
+			player.let_go(layer, fade);
+		}
+		else
+		{
+			layer.target = target;
+			float distance = target > layer.weight ? target - layer.weight : layer.weight - target;
+			layer.rate = fade > 0 ? distance / fade : 0;
+		}
+		layer.speed = speed;
+		layer.loop = true;
+		layer.offset = offset;
+	}
+
+	// A lock that starts now starts from where the heaviest locked clip already is,
+	// so taking up the lock does not jump its stride.
+	if (locking)
+	{
+		int anchor = -1;
+		for (uint i = 0; i < player.layer_count; i++)
+		{
+			AnimationLayer* layer = &player.layers[i];
+			if (layer.offset < 0) continue;
+			if (anchor < 0 || layer.weight > player.layers[anchor].weight) anchor = (int)i;
+		}
+		if (anchor >= 0)
+		{
+			AnimationLayer* layer = &player.layers[anchor];
+			AnimationClip* clip = &loaded.clips[layer.clip];
+			double cycle = clip.duration > 0 ? (double)(layer.time - clip.start) / clip.duration - layer.offset : 0;
+			player.phase = cycle - math::floor(cycle);
+			player.phased = true;
+		}
+	}
+
+	player.place_locked(loaded);
+	if (fade <= 0) player.step_weights(0);
+	player.repose(self, loaded);
 	self.update_sockets();
 	return true;
 }
@@ -1450,11 +1598,15 @@ fn bool Scene.stop(&self, NodeId root)
 {
 	AnimationPlayer* player = self.player(root);
 	if (player == null) return false;
-	player.playing = false;
-	// And the fade with it. A stopped player still steps the clip it is fading out
-	// of — that is what finishes a fade whose destination is a short one-shot — so
-	// leaving this set would make `stop()` mean "keep moving for another 200ms".
-	player.from_clip = -1;
+	// Every clock and every weight where it is: a stopped player steps nothing, and
+	// a fade frozen half way stays half way until something is played.
+	for (uint i = 0; i < player.layer_count; i++)
+	{
+		AnimationLayer* layer = &player.layers[i];
+		layer.playing = false;
+		layer.target = layer.weight;
+		layer.rate = 0;
+	}
 	return true;
 }
 
@@ -1475,7 +1627,7 @@ fn bool Scene.step_animations(&self, float dt)
 	foreach (&player : self.players)
 	{
 		player.advance(self, self.assets, dt);
-		if (player.playing) playing = true;
+		if (player.active()) playing = true;
 	}
 	// After the players, because a socket reads the pose they have just written.
 	self.update_sockets();
@@ -1493,7 +1645,7 @@ fn bool Scene.is_animating(&self)
 {
 	foreach (&player : self.players)
 	{
-		if (player.playing) return true;
+		if (player.active()) return true;
 	}
 	return false;
 }
@@ -1573,7 +1725,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// line is really for is the slot that is not: `Scene.bounds` reads the node
 	// *pool* rather than the tree, so a slot `update_branch` never reaches would
 	// answer with a stranger's box instead of with its own identity transform.
+	// And not slid from either: the fit is the stranger's mesh.
 	node.world_box_current = false;
+	node.world_box_fitted = false;
 	// Reset like everything else here, and for a sharper reason: this slot may have
 	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
 	// would draw with a stranger's shader.
@@ -1588,8 +1742,8 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// skeleton, reading joint matrices out of an asset it does not name.
 	node.skin = -1;
 	node.pose = 0;
-	node.pose_from = 0;
-	node.blend = 0;
+	node.pose_next = 0;
+	node.pose_t = 0;
 	node.morph = 0;
 	node.preskinned = false;
 	// Dynamic until a script says otherwise, and reset for `material`'s reason: a
@@ -1609,6 +1763,8 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// And the other way round: a recycled slot that stayed collision-only would
 	// be a mesh that never draws, which reads as a failed upload.
 	node.collision_only = false;
+	// A recycled slot that stayed non-blocking would be a wall walked through.
+	node.blocks = true;
 	node.dirty = true;
 	node.generation = generation;
 	node.alive = true;
@@ -1862,11 +2018,7 @@ fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
 	if (node == null) return;
 
 	bool now = parent_visible && node.visible;
-	if (node.static_caster && node.world_visible != now)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster && node.world_visible != now) self.static_changed(node);
 	node.world_visible = now;
 
 	sz count = node.children.len();
@@ -1891,6 +2043,21 @@ fn void Scene.set_collides(&self, NodeId id, bool collides)
 	if (node == null || node.collides == collides) return;
 	node.collides = collides;
 	self.query.drop();
+}
+
+<*
+ Whether this node stands in a mover's way — gathered by sweeps, the nav bake
+ and nav path shortening.
+
+ `Node.blocks` has the argument. The index is untouched, unlike `set_collides`:
+ a non-blocking node is still raycast and picked, and the flag is read where
+ triangles are gathered, so toggling it costs nothing.
+*>
+fn void Scene.set_blocks(&self, NodeId id, bool blocks)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.blocks = blocks;
 }
 
 <*
@@ -1929,11 +2096,7 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	// box is where it was. What *can* change is whether this copy casts at all —
 	// `MeshPass.casts_shadow` reads the material's blend mode — so a static caster
 	// changing material is a static map to rebuild.
-	if (node.static_caster)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster) self.static_changed(node);
 }
 
 <*
@@ -1978,8 +2141,7 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 	{
 		self.static_nodes--;
 	}
-	self.static_revision++;
-	self.dirty_lightmap(node);
+	self.static_changed(node);
 	// A node that has stopped being static has stopped being a receiver: it is
 	// about to move, and a tile it kept reading would be last position's light.
 	if (!wanted) node.lightmap = { 0, 0, 0, 0 };
@@ -2082,7 +2244,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	bool changed = parent_changed || node.dirty;
 	if (changed)
 	{
-		Vec3 before = { node.world.m[12], node.world.m[13], node.world.m[14] };
+		Vec3 before = node.world_position();
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
 		if (node.had_world)
@@ -2091,7 +2253,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		}
 		else
 		{
-			node.prev_world = { node.world.m[12], node.world.m[13], node.world.m[14] };
+			node.prev_world = node.world_position();
 			node.had_world = true;
 		}
 		node.dirty = false;
@@ -2107,11 +2269,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		// static, so nothing there would have said anything — and the wall's world
 		// matrix changed all the same. `changed` carries down the tree, so asking
 		// here catches the whole subtree of every move.
-		if (node.static_caster)
-		{
-			self.static_revision++;
-			self.dirty_lightmap(node);
-		}
+		if (node.static_caster) self.static_changed(node);
 	}
 
 	node.world_visible = parent_visible && node.visible;
@@ -2208,6 +2366,18 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
 	return true;
 }
 
+// `box` into `total`, or `total` becomes it when `found` says there is nothing yet.
+fn void union_into(collision::Aabb3* total, bool* found, collision::Aabb3 box)
+{
+	if (*found)
+	{
+		total.expand_by_aabb(box);
+		return;
+	}
+	*total = box;
+	*found = true;
+}
+
 <*
  The tight world-space box of one mesh under one transform.
 
@@ -2258,24 +2428,9 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 {
 	if (mesh.hull_positions.len == 0) return mesh.bounds.transform_matrix(m);
 
-	float[<16>] v = m.m;
-	collision::Aabb3 box;
-	foreach (i, p : mesh.hull_positions)
-	{
-		Vec3 world = {
-			v[0] * p.x + v[4] * p.y + v[8] * p.z + v[12],
-			v[1] * p.x + v[5] * p.y + v[9] * p.z + v[13],
-			v[2] * p.x + v[6] * p.y + v[10] * p.z + v[14],
-		};
-		if (i == 0)
-		{
-			box = { .min = world, .max = world };
-		}
-		else
-		{
-			box.expand_by_point(world);
-		}
-	}
+	Vec3 first = transform_point(m, mesh.hull_positions[0]);
+	collision::Aabb3 box = { .min = first, .max = first };
+	foreach (p : mesh.hull_positions[1..]) box.expand_by_point(transform_point(m, p));
 	return box;
 }
 
@@ -2299,11 +2454,42 @@ fn collision::Aabb3 Scene.node_world_box(&self, Node* node, GpuMesh* mesh)
 	{
 		return node.world_box;
 	}
-	node.world_box = world_mesh_bounds(node.world, mesh);
-	node.world_box_hull = mesh.hull_positions.len;
+	// **A node that only slid keeps its fit.** Every vertex through the matrix is
+	// exact, and for a character that walks it was every vertex of the character
+	// every frame — the walk writes his position each frame whether or not he turns.
+	// Where the rotation and scale are the ones the box was fitted under, the exact
+	// box of the moved vertices is the old one moved by the same amount.
+	if (node.world_box_fitted && node.world_box_hull == mesh.hull_positions.len
+		&& same_linear_part(node.world_box_world, node.world))
+	{
+		Vec3 by = {
+			node.world.m[12] - node.world_box_world.m[12],
+			node.world.m[13] - node.world_box_world.m[13],
+			node.world.m[14] - node.world_box_world.m[14],
+		};
+		node.world_box = { .min = node.world_box.min + by, .max = node.world_box.max + by };
+	}
+	else
+	{
+		node.world_box = world_mesh_bounds(node.world, mesh);
+		node.world_box_hull = mesh.hull_positions.len;
+		node.world_box_fitted = true;
+		self.bounds_fits++;
+	}
+	node.world_box_world = node.world;
 	node.world_box_current = true;
-	self.bounds_fits++;
 	return node.world_box;
+}
+
+// Whether two matrices rotate and scale alike, so that they differ by a
+// translation alone.
+fn bool same_linear_part(Matrix4f a, Matrix4f b) @local
+{
+	foreach (i : (uint[9]){ 0, 1, 2, 4, 5, 6, 8, 9, 10 })
+	{
+		if (a.m[i] != b.m[i]) return false;
+	}
+	return true;
 }
 
 // ============================================================================
@@ -2525,47 +2711,28 @@ fn void Scene.build_draw_list(
 			// modeller drew around the rest pose — which looks like a character that
 			// vanishes at certain camera angles during certain frames.
 			collision::Aabb3 local = mesh.bounds;
-			if (node.skin >= 0)
-			{
-				Asset* owner = assets.slot(node.asset);
-				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-				// A node posed from outside is not described by the bake at all: its
-				// asset's `skinned_bounds` is the union over frames nobody sampled,
-				// which for an asset `Assets.attach_skin` built is just the rest box.
-				// So the box this frame's palette actually reaches wins — measured by
-				// `set_palette`, which is the only moment those matrices are known.
-				//
-				// Guarded on the list being non-empty rather than searched
-				// unconditionally, so a scene that poses nothing by hand — every scene
-				// until one does — pays one compare per skinned node and no scan.
-				if (self.palettes.len() > 0)
-				{
-					NodeId here          = { (uint)slot, node.generation };
-					LivePalette* posed   = self.live_palette(here);
-					if (posed != null) local = posed.bounds;
-				}
-			}
+			if (node.skin >= 0) local = self.skinned_box(assets, id, node.asset, local);
 			// A soft body is not the shape it was modelled as, and the mesh's own
 			// bounds describe the shape it stopped being. The box the solver
 			// measured this frame is the one it is actually drawn at.
 			if (soft != null) local = soft.bounds;
-			collision::Aabb3 box = local.transform_matrix(node.world);
 
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
 			// material says how far it moves things and the box grows by that much.
-			// Grown in *world* units after the transform rather than in object units
-			// before it, because the displacement in a body is world-space too:
-			// `v.position + something` is metres of scene, whatever the node is
-			// scaled by.
-			// 
+			// Grown in *object* units before the transform rather than in world
+			// units after it, because the displacement in a body is object-space
+			// too: `displace` runs before the model matrix, so a body's
+			// `v.position + something` is scaled and turned by the node like the
+			// vertex it moved.
+			//
 			// Zero for every material that has no vertex body, so the common case
 			// adds one compare and no arithmetic.
 			if (node.material < margins.len && margins[node.material] > 0)
 			{
-				float m = margins[node.material];
-				box = { .min = box.min - { m, m, m }, .max = box.max + { m, m, m } };
+				local = local.grow(margins[node.material]);
 			}
+			collision::Aabb3 box = local.transform_matrix(node.world);
 			visible = frustum == null || frustum.contains(box);
 			if (!visible)
 			{
@@ -2743,13 +2910,13 @@ fn void Scene.build_draw_list(
 						.variant, // The whole of what a hundred characters at a hundred phases disagree
 						// about. Zero on everything that is not skinned, which the shader
 						// reads as nothing because the bucket's flags say there is no skin.
-					.pose = node
-						.pose, // Zero on everything that is not mid-crossfade. `AnimationPlayer`
-						// is the only writer of either.
-					.pose_from = node.pose_from,
-					.blend = node
-						.blend, // Written by `MeshPass.write_morph_weights` just before this walk,
-						// and zero on everything it did not touch.
+					.pose = node.pose,
+					// The next baked frame and how far toward it; zero on everything
+					// held on one frame. `AnimationPlayer` is the only writer of either.
+					.pose_next = node.pose_next,
+					.pose_t = node.pose_t,
+					// Written by `MeshPass.write_morph_weights` just before this walk,
+					// and zero on everything it did not touch.
 					.morph = node.morph,
 					.lightmap = self.lightmap_live ? node.lightmap : (float[4]) { 0, 0, 0, 0 },
 			};
@@ -2955,16 +3122,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
-		collision::Aabb3 box = self.node_world_box(node, mesh);
-		if (!found)
-		{
-			total = box;
-			found = true;
-		}
-		else
-		{
-			total.expand_by_aabb(box);
-		}
+		union_into(&total, &found, self.node_world_box(node, mesh));
 	}
 
 	// The unit box is cached like any other answer. An empty scene is asked this
@@ -3024,16 +3182,7 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 			// The same cache `Scene.bounds` fills, and filled here for the same reason:
 			// a script measuring one piece per frame while the level stands still
 			// should pay for the piece.
-			collision::Aabb3 box = self.node_world_box(node, mesh);
-			if (!*found)
-			{
-				*total = box;
-				*found = true;
-			}
-			else
-			{
-				total.expand_by_aabb(box);
-			}
+			union_into(total, found, self.node_world_box(node, mesh));
 		}
 	}
 

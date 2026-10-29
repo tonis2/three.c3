@@ -111,36 +111,6 @@ struct DriverCache
 }
 
 <*
- What the driver cache did this process.
-
- Counters rather than logging: a line saying "it loaded" would be true of a cache
- that loaded and then ignored what it read.
-*>
-struct DriverCacheStats
-{
-	// Blobs handed to `vkCreatePipelineCache`. At most one per device.
-	uint loads;
-	// Lookups with no file to read.
-	uint misses;
-	// Files read that were not this device's, or were not a file this wrote.
-	uint invalid;
-	// Blobs written back because the driver had added something.
-	uint stores;
-	// Saves that found nothing new in the blob and wrote nothing. The common
-	// case on the second and every later run.
-	uint unchanged;
-}
-
-DriverCacheStats driver_cache_counters @local;
-
-fn DriverCacheStats driver_cache_stats() => driver_cache_counters;
-
-fn void driver_cache_reset_stats()
-{
-	driver_cache_counters = { };
-}
-
-<*
  The filename: a hash of the identity, formatted like the shader cache's.
 
  A *filter*. Two devices on one machine get two files without either being asked
@@ -181,14 +151,14 @@ fn char[] driver_cache_payload(char[] bytes, DriverCache* cache) @local
 {
 	if (bytes.len < 40) return { };
 
-	uint magic   = driver_read_u32(bytes, 0);
-	uint version = driver_read_u32(bytes, 4);
+	uint magic   = cache_read_u32(bytes, 0);
+	uint version = cache_read_u32(bytes, 4);
 	if (magic != DRIVER_CACHE_MAGIC) return { };
 	if (version != DRIVER_CACHE_FORMAT_VERSION) return { };
 
-	if (driver_read_u32(bytes, 8) != cache.vendor) return { };
-	if (driver_read_u32(bytes, 12) != cache.device) return { };
-	if (driver_read_u32(bytes, 16) != cache.driver_version) return { };
+	if (cache_read_u32(bytes, 8) != cache.vendor) return { };
+	if (cache_read_u32(bytes, 12) != cache.device) return { };
+	if (cache_read_u32(bytes, 16) != cache.driver_version) return { };
 	// The one the spec actually names. Checked byte by byte rather than by
 	// comparing two slices, so a shorter file cannot reach past its end.
 	for (usz i = 0; i < vk::UUID_SIZE; i++)
@@ -196,23 +166,10 @@ fn char[] driver_cache_payload(char[] bytes, DriverCache* cache) @local
 		if (bytes[20 + i] != cache.uuid[i]) return { };
 	}
 
-	usz length = (usz)driver_read_u32(bytes, 36);
+	usz length = (usz)cache_read_u32(bytes, 36);
 	if (length == 0) return { };
 	if (40 + length > bytes.len) return { };
 	return bytes[40:length];
-}
-
-fn void driver_put_u32(DString* out, uint value) @local
-{
-	out.append_char((char)value);
-	out.append_char((char)(value >> 8));
-	out.append_char((char)(value >> 16));
-	out.append_char((char)(value >> 24));
-}
-
-fn uint driver_read_u32(char[] bytes, usz at) @local
-{
-	return (uint)bytes[at] | ((uint)bytes[at + 1] << 8) | ((uint)bytes[at + 2] << 16) | ((uint)bytes[at + 3] << 24);
 }
 
 <*
@@ -245,16 +202,11 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 		{
 			String where  = driver_cache_path(self);
 			char[]? bytes = file::load(tmem, where);
-			if (catch bytes)
-			{
-				driver_cache_counters.misses++;
-			}
-			else
+			if (try bytes)
 			{
 				payload = driver_cache_payload(bytes, self);
 				if (payload.len == 0)
 				{
-					driver_cache_counters.invalid++;
 					@debug_log("driver cache: %s is not this device's", where);
 				}
 			}
@@ -277,7 +229,6 @@ fn void DriverCache.open(&self, Gpu* gpu, vk::PhysicalDeviceProperties* properti
 		{
 			self.loaded_size = payload.len;
 			self.warmed = true;
-			driver_cache_counters.loads++;
 			@debug_log("driver cache: warmed with %d bytes", (int)payload.len);
 		}
 	};
@@ -319,7 +270,6 @@ fn void DriverCache.save(&self, Gpu* gpu)
 
 		if (self.warmed && payload.len <= self.loaded_size)
 		{
-			driver_cache_counters.unchanged++;
 			return;
 		}
 
@@ -331,13 +281,13 @@ fn void DriverCache.save(&self, Gpu* gpu)
 
 		DString out;
 		out.tinit(payload.len + 64);
-		driver_put_u32(&out, DRIVER_CACHE_MAGIC);
-		driver_put_u32(&out, DRIVER_CACHE_FORMAT_VERSION);
-		driver_put_u32(&out, self.vendor);
-		driver_put_u32(&out, self.device);
-		driver_put_u32(&out, self.driver_version);
+		cache_put_u32(&out, DRIVER_CACHE_MAGIC);
+		cache_put_u32(&out, DRIVER_CACHE_FORMAT_VERSION);
+		cache_put_u32(&out, self.vendor);
+		cache_put_u32(&out, self.device);
+		cache_put_u32(&out, self.driver_version);
 		foreach (byte : self.uuid) out.append_char(byte);
-		driver_put_u32(&out, (uint)payload.len);
+		cache_put_u32(&out, (uint)payload.len);
 		out.append_string((String)payload);
 
 		String where = driver_cache_path(self);
@@ -346,7 +296,6 @@ fn void DriverCache.save(&self, Gpu* gpu)
 			@advise("driver cache: cannot write %s (%s)", where, err);
 			return;
 		}
-		driver_cache_counters.stores++;
 		@debug_log("driver cache: wrote %d bytes to %s", (int)payload.len, where);
 	};
 }

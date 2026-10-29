@@ -50,8 +50,9 @@ struct Hit
  applied — that is a property of where the camera is, and a raycast is not.
 
  @param ray : `Origin and a unit direction, world space.`
+ @param blockers_only : `Skip nodes with Node.blocks off — the floor under a nav waypoint is not a character's foot.`
 *>
-fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
+fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray, bool blockers_only = false)
 {
 	Hit best = { .hit = false, .distance = float::max, .node = NO_NODE };
 	if (assets == null)
@@ -87,7 +88,8 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray)
 			index.stamp[(sz)i] = index.stamp_now;
 			QueryEntry entry         = index.entries[(sz)i];
 			collision::HitInfo broad = entry.box.intersect_ray(ray);
-			if (broad.collided && broad.depth <= best.distance && self.query_node(entry) != null)
+			Node* node               = broad.collided && broad.depth <= best.distance ? self.query_node(entry) : null;
+			if (node != null && (!blockers_only || node.blocks))
 			{
 				Hit hit;
 				if (self.ray_hits_node(assets, entry.node, ray, best.distance, &hit)) best = hit;
@@ -140,6 +142,41 @@ fn collision::Ray screen_ray(Camera* camera, float x, float y, uint width, uint 
 	Vec3 far_point  = unproject(inverse_view_projection, ndc_x, ndc_y, 1.0f);
 
 	return { .origin = near_point, .direction = (far_point - near_point).normalize() };
+}
+
+<*
+ Where a world point is drawn: its pixel and its depth along the view axis.
+
+ `screen_ray` backwards, through the same matrix and the same half pixel, so a
+ point anywhere on the ray through pixel (x, y) comes back as exactly (x, y).
+ That is what lets a label drawn at the answer sit on the thing a click at the
+ same place picks.
+
+ A point behind the eye has no pixel, and the answer is false rather than a
+ coordinate mirrored through the eye — which is where the arithmetic would put
+ it, and where an overlay would then draw a name for something behind the
+ camera.
+
+ @param out : `Written with the column, the row (both from the top-left, in screen_ray's convention) and the depth in world units.`
+ @return `Whether the point is in front of the eye.`
+*>
+fn bool screen_point(Camera* camera, Vec3 point, uint width, uint height, float[<3>]* out)
+{
+	float aspect     = (float)width / (float)height;
+	float[<4>] world = { point.x, point.y, point.z, 1.0f };
+	float[<4>] clip  = camera.view_projection(aspect) * world;
+	// A perspective clip w is the distance in front of the eye along the view axis.
+	if (clip[3] <= 1e-6f) return false;
+
+	float ndc_x = clip[0] / clip[3];
+	float ndc_y = clip[1] / clip[3];
+	// The two lines at the top of `screen_ray`, solved for x and y.
+	*out = {
+		(ndc_x + 1.0f) * 0.5f * (float)width - 0.5f,
+		(1.0f - ndc_y) * 0.5f * (float)height - 0.5f,
+		clip[3],
+	};
+	return true;
 }
 
 fn Vec3 unproject(Matrix4f inverse_view_projection, float x, float y, float z) @local

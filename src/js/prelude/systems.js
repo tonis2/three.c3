@@ -136,7 +136,7 @@ function neighbours(value, name, where) {
 class Registry {
 	constructor() {
 		this._all = [];
-		this._sorted = { fixed: null, frame: null };
+		this._sorted = { fixed: null, frame: null, late: null };
 		this._seq = 0;
 
 		// Names an `after` or `before` pointed at and did not find. Filled by
@@ -159,6 +159,7 @@ class Registry {
 		// entry answered with, and `undefined` when there is not one.
 		this._frameTick = (ms) => this._run('frame', H.clockDelta(), ms);
 		this._fixedTick = (dt) => this._run('fixed', dt, dt * 1000);
+		this._lateTick = (ms) => this._run('late', H.clockDelta(), ms);
 	}
 
 	// Register a system, or replace one of the same name.
@@ -210,8 +211,8 @@ class Registry {
 			throw new TypeError(`${where}: ${name} is async — a system has one frame to finish in and the frame does not wait`);
 		}
 		const phase = options?.phase ?? 'frame';
-		if (phase !== 'frame' && phase !== 'fixed') {
-			throw new RangeError(`${where}: phase is 'frame' or 'fixed', not ${JSON.stringify(phase)}`);
+		if (phase !== 'frame' && phase !== 'fixed' && phase !== 'late') {
+			throw new RangeError(`${where}: phase is 'frame', 'fixed' or 'late', not ${JSON.stringify(phase)}`);
 		}
 
 		// The two ends of the scale, said in words. The flag wins over an
@@ -280,6 +281,20 @@ class Registry {
 		return this.add(name, fn, { ...options, phase: 'frame' });
 	}
 
+	// `phase: 'late'`, said as a verb.
+	//
+	// Once per drawn frame, after every frame system AND after the camera
+	// `attach()` follows has moved. For what has to agree with the camera this
+	// frame draws with: a label or a bar placed with `three.camera.project`
+	// over a character. As a frame system it reads the camera before the
+	// follow moves it, and trails by a frame for as long as the camera glides.
+	late(name, fn, options = null) {
+		if (options?.phase !== undefined && options.phase !== 'late') {
+			throw new RangeError(`three.systems.late(name, fn, options): ${name} is a late system already — the verb is the phase`);
+		}
+		return this.add(name, fn, { ...options, phase: 'late' });
+	}
+
 	// Take one out. Answers whether there was one.
 	remove(name) {
 		const at = this._all.findIndex(s => s.name === name);
@@ -299,13 +314,14 @@ class Registry {
 		return true;
 	}
 
-	// Everything registered, in the order it runs — every fixed step first and
-	// then the frame, which is the order a tick takes them in.
+	// Everything registered, in the order it runs — every fixed step first,
+	// then the frame, then the late systems, which is the order a tick takes
+	// them in.
 	//
 	// The two sorted lists rather than a sort of its own, so that what this
 	// answers and what actually runs cannot drift apart.
 	list() {
-		return [...this._list('fixed'), ...this._list('frame')]
+		return [...this._list('fixed'), ...this._list('frame'), ...this._list('late')]
 			.map(s => ({ name: s.name, phase: s.phase, order: s.order, enabled: s.enabled }));
 	}
 
@@ -328,7 +344,7 @@ class Registry {
 			if (list.length === 0) return '';
 			return `${label} ${list.map(s => (s.enabled ? s.name : `(${s.name})`)).join(' → ')}`;
 		};
-		return [line('fixed', 'step '), line('frame', 'frame')].filter(l => l !== '').join('\n');
+		return [line('fixed', 'step '), line('frame', 'frame'), line('late', 'late ')].filter(l => l !== '').join('\n');
 	}
 
 	// What each system costs, **most expensive first**, as a rolling average of
@@ -390,8 +406,10 @@ class Registry {
 		this._skipped.clear();
 		this._sorted.fixed = null;
 		this._sorted.frame = null;
+		this._sorted.late = null;
 		H.setFrame(this._list('frame').length > 0 ? this._frameTick : null);
 		H.setFixed(this._list('fixed').length > 0 ? this._fixedTick : null);
+		H.setLate(this._list('late').length > 0 ? this._lateTick : null);
 	}
 
 	_list(phase) {
@@ -468,7 +486,7 @@ class Registry {
 	_named(name, system, phase, here) {
 		if (here.has(name)) return true;
 		const elsewhere = this._all.find(s => s.name === name);
-		const word = p => (p === 'fixed' ? 'step' : 'frame');
+		const word = p => (p === 'fixed' ? 'step' : p);
 		this._skipped.set(`${system.name} ${name}`, elsewhere !== undefined
 			? `'${system.name}' is a ${word(phase)} system and '${name}' is a ${word(elsewhere.phase)} one — `
 				+ 'the phase decides which runs first, not the order'
@@ -487,7 +505,14 @@ class Registry {
 		// reports per STEP rather than per frame. Saying so is cheaper than the
 		// alternatives: a frame slot taken to do nothing but fold would make
 		// `JsRuntime.tick` claim a stopped loop was running.
-		const boundary = phase === 'frame' || this._list('frame').length === 0;
+		//
+		// The late phase runs after the frame one, so it folds only when there is
+		// no frame phase to fold at, and a fixed phase folds only when neither runs.
+		const frames = this._list('frame').length > 0;
+		const lates = this._list('late').length > 0;
+		const boundary = phase === 'frame'
+			|| (phase === 'late' && !frames)
+			|| (phase === 'fixed' && !frames && !lates);
 		if (boundary && this.profile) this._fold();
 
 		const list = this._list(phase);

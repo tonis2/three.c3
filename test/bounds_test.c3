@@ -1519,14 +1519,15 @@ fn void the_cached_box_survives_every_kind_of_change() @test
 }
 
 <*
- Moving one node refits one box.
+ Turning one node refits one box, and sliding one refits none.
 
  The whole point, and not a thing the answer can be asked about: a box that cost
  a million vertex transforms and a box that came out of a cache are the same six
  floats. `Scene.bounds_fits` counts the fits, and it exists for this check.
 
  The reference scene is 1.2M triangles with one character walking through it, and
- before this the walk was 92% of the frame.
+ before this the walk was 92% of the frame. A walk that does not turn is a
+ translation, and the exact box of translated vertices is the old box translated.
 *>
 fn void moving_one_node_refits_one_box() @test
 {
@@ -1552,19 +1553,26 @@ fn void moving_one_node_refits_one_box() @test
 		test::@check(scene.bounds_fits == fitted,
 			"a second call with nothing moved refitted %d boxes", scene.bounds_fits - fitted);
 
-		// One leaf moved: one box, and the rest of the level is not touched.
+		// One leaf slid: its box moves with it and nothing is refitted.
 		scene.set_position(lone, { -5, 0, 0 });
 		scene.bounds(assets);
-		test::@check(scene.bounds_fits == fitted + 1,
-			"moving one childless node refitted %d boxes, expected 1", scene.bounds_fits - fitted);
+		test::@check(scene.bounds_fits == fitted,
+			"sliding one childless node refitted %d boxes, expected none", scene.bounds_fits - fitted);
+		boxes_agree(scene, assets, "after a slide");
 
-		// A group moved: its own box and its child's, because `update_branch`
-		// carries `changed` down and both world matrices really did move.
+		// One leaf turned: one box, and the rest of the level is not touched.
+		scene.set_rotation(lone, { 0, (float)math::PI / 5, 0 });
+		scene.bounds(assets);
+		test::@check(scene.bounds_fits == fitted + 1,
+			"turning one childless node refitted %d boxes, expected 1", scene.bounds_fits - fitted);
+
+		// A group turned: its own box and its child's, because `update_branch`
+		// carries `changed` down and both world matrices really did turn.
 		fitted = scene.bounds_fits;
-		scene.set_position(parent, { 0, 7, 0 });
+		scene.set_rotation(parent, { 0, (float)math::PI / 3, 0 });
 		scene.bounds(assets);
 		test::@check(scene.bounds_fits == fitted + 2,
-			"moving a parent of one refitted %d boxes, expected 2", scene.bounds_fits - fitted);
+			"turning a parent of one refitted %d boxes, expected 2", scene.bounds_fits - fitted);
 
 		// And the box is still the right one at the end of all that.
 		boxes_agree(scene, assets, "after the counted moves");

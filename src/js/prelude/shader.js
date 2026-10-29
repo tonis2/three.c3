@@ -230,7 +230,7 @@ export class ShaderMaterial extends Material {
 		// for rather than guessed, and refused when it is not one.
 		if (typeof bounds !== 'number' || !Number.isFinite(bounds) || bounds < 0) {
 			throw new TypeError(
-				'`bounds` wants how far your vertex body can move a vertex, in world units — a number of 0 or more'
+				'`bounds` wants how far your vertex body can move a vertex, in the mesh\'s own units — a number of 0 or more'
 			);
 		}
 		if (uniforms === null || typeof uniforms !== 'object') {

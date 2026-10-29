@@ -19,8 +19,13 @@ struct SceneCacheItem
 	ulong projection_state;
 	vk::Rect2D rect;
 	collision::Aabb3 world_box;
+	// Set by a frame that was redrawn whole and so skipped projecting: `rect` is
+	// then an older camera's, and `padded` is the box `settle` projects once a
+	// still frame needs the pixels this one was drawn over.
+	collision::Aabb3 padded;
 	uint seen;
 	bool occupied;
+	bool unprojected;
 }
 
 struct SceneCache
@@ -123,14 +128,33 @@ fn bool SceneCache.projected(&self, ulong identity, ulong projection_state,
 	uint slot = (uint)identity;
 	if (slot >= self.items.len()) return false;
 	SceneCacheItem* item = &self.items[slot];
-	if (!item.occupied || item.identity != identity || item.projection_state != projection_state) return false;
+	if (!item.occupied || item.unprojected || item.identity != identity
+		|| item.projection_state != projection_state) return false;
 	*rect = item.rect;
 	*world_box = item.world_box;
 	return true;
 }
 
+<*
+ Gives an item a frame redrawn whole left unprojected its rectangle, under the
+ camera of a still frame — which is that frame's camera, or this frame would be
+ a whole one too. Before `projected`, so a copy that has not changed since is a
+ hit rather than a second projection.
+*>
+fn void SceneCache.settle(&self, uint slot, Matrix4f camera)
+{
+	if (slot >= self.items.len()) return;
+	SceneCacheItem* item = &self.items[slot];
+	if (!item.occupied || !item.unprojected) return;
+	vk::Rect2D rect;
+	(void)scene_cache_project_box(item.padded, camera, self.extent, 3, &rect);
+	item.rect = scene_cache_clip(rect, self.extent);
+	item.unprojected = false;
+}
+
 fn void SceneCache.observe(&self, ulong identity, ulong state, vk::Rect2D rect,
-	ulong projection_state = 0, collision::Aabb3 world_box = {})
+	ulong projection_state = 0, collision::Aabb3 world_box = {}, bool unprojected = false,
+	collision::Aabb3 padded = {})
 {
 	rect = scene_cache_clip(rect, self.extent);
 	uint slot = (uint)identity;
@@ -148,12 +172,14 @@ fn void SceneCache.observe(&self, ulong identity, ulong state, vk::Rect2D rect,
 		}
 		item.projection_state = projection_state;
 		item.world_box = world_box;
+		item.unprojected = unprojected;
+		item.padded = padded;
 		return;
 	}
 	if (item.occupied) self.dirty = scene_cache_union(self.dirty, item.rect);
 	*item = { .identity = identity, .state = state, .projection_state = projection_state,
-		.rect = rect, .world_box = world_box,
-		.seen = self.epoch, .occupied = true };
+		.rect = rect, .world_box = world_box, .padded = padded,
+		.seen = self.epoch, .occupied = true, .unprojected = unprojected };
 	self.dirty = scene_cache_union(self.dirty, rect);
 }
 
@@ -168,6 +194,9 @@ fn vk::Rect2D SceneCache.finish(&self)
 	foreach (&item : self.items)
 	{
 		if (!item.occupied || item.seen == self.epoch) continue;
+		// Gone before a still frame gave it a rectangle: where it was drawn is not
+		// known without the box it had, so the whole frame is.
+		if (item.unprojected) self.dirty = scene_cache_full(self.extent);
 		self.dirty = scene_cache_union(self.dirty, item.rect);
 		*item = { };
 	}
@@ -780,27 +809,40 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 		if (soft != null) projection_state = @hash_value(projection_state, self.soft_content_key);
 		vk::Rect2D rect;
 		collision::Aabb3 world_box;
+		collision::Aabb3 padded;
+		// **A frame redrawn whole projects nothing.** Its own damage is the whole
+		// target whatever the rectangles say, and they only matter to the next
+		// frame — which, if the camera is still moving, is whole too. A
+		// third-person camera moves every frame, and projecting every box in the
+		// level through it was the largest part of a walking -O0 frame here.
+		bool unprojected = false;
+		if (!cache.full) cache.settle((uint)slot, self.frame_view_projection);
 		if (!cache.projected(identity, projection_state, &rect, &world_box))
 		{
 			collision::Aabb3 local = mesh.bounds;
-			if (node.skin >= 0)
-			{
-				Asset* owner = self.assets.slot(node.asset);
-				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-			}
+			if (node.skin >= 0) local = self.scene.skinned_box(&self.assets, id, node.asset, local);
 			if (soft != null) local = soft.bounds;
 			world_box = local.transform_matrix(node.world);
 			collision::Aabb3 box = world_box;
-			float margin = material.bounds;
+			// A vertex body's margin is in the mesh's units, like its displacement,
+			// so it grows the box before the transform.
+			if (material.bounds > 0)
+			{
+				collision::Aabb3 reach = local.grow(material.bounds);
+				box = reach.transform_matrix(node.world);
+			}
 			// AO can change receivers around a moving occluder, not only the pixels the
 			// occluder covers. Its world-space search radius is the conservative growth.
-			if (self.ambient_occlusion.live) margin += self.ambient_occlusion.radius;
-			if (margin > 0)
+			if (self.ambient_occlusion.live) box = box.grow(self.ambient_occlusion.radius);
+			if (cache.full)
 			{
-				float m = margin;
-				box = { .min = box.min - { m,m,m }, .max = box.max + { m,m,m } };
+				unprojected = true;
+				padded = box;
 			}
-			(void)scene_cache_project_box(box, self.frame_view_projection, target.extent, 3, &rect);
+			else
+			{
+				(void)scene_cache_project_box(box, self.frame_view_projection, target.extent, 3, &rect);
+			}
 		}
 		ulong state = world_state;
 		state = @hash_value(state, node.asset);
@@ -811,8 +853,8 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 		state = @hash_value(state, node.color);
 		state = @hash_value(state, node.variant);
 		state = @hash_value(state, node.pose);
-		state = @hash_value(state, node.pose_from);
-		state = @hash_value(state, node.blend);
+		state = @hash_value(state, node.pose_next);
+		state = @hash_value(state, node.pose_t);
 		state = @hash_value(state, node.morph);
 		state = @hash_value(state, node.lightmap);
 		state = @hash_value(state, cache.node_group_states[slot]);
@@ -827,12 +869,28 @@ fn vk::Rect2D MeshPass.scene_cache_update(&self, SceneCache* cache, Target* targ
 		{
 			state = @hash_value(state, self.clock.time);
 		}
-		cache.observe(identity, state, rect, projection_state, world_box);
+		cache.observe(identity, state, rect, projection_state, world_box, unprojected, padded);
 		if (node.static_caster)
 		{
 			static_receivers_state = @hash_value(static_receivers_state, identity);
 			static_receivers_state = @hash_value(static_receivers_state, projection_state);
 		}
+	}
+
+	// **A frame already redrawn whole has no shadow damage left to find.** The
+	// loop below projects every receiver's shadow box through every refreshed
+	// shadow view, which is the most expensive thing this function does — and a
+	// moved camera has already made `finish` answer with the whole target, so all
+	// it would produce is rectangles inside a rectangle that is everything. A
+	// third-person camera moves every frame, and with a skinned character walking
+	// through nine views this was forty milliseconds of an -O0 frame spent on
+	// nothing. The per-view reuse it would have refreshed is dropped instead, so
+	// the first still frame computes it from scratch rather than trusting a key
+	// taken under another camera.
+	if (cache.full)
+	{
+		foreach (&valid : cache.static_shadow_valid) *valid = false;
+		return cache.finish();
 	}
 
 	ShadowManager* manager = &self.shadow_manager;

@@ -619,6 +619,13 @@ struct Cursor
 	float raw_dy;
 	bool locked;
 
+	// Movement a script asked for this frame (`three.input.movePointerBy`), in
+	// image pixels, added to `dx`/`dy` on top of whatever the position difference
+	// or the lock says. Relative, because a look is: a probe turning the camera
+	// has no position to put the cursor at, only a distance to move it by.
+	float moved_x;
+	float moved_y;
+
 	// True when the window could not say where the cursor is — minimised, or
 	// before the first frame has sized anything. The position is then zero rather
 	// than unknown, and zero is a real place, so the flag is what stops
@@ -872,6 +879,11 @@ fn MouseState MouseTracker.step(&self, Cursor cursor, double now_ms)
 		dy = cursor.raw_dy;
 	}
 
+	// A script's movement on top of either, which is the one way a headless run
+	// can turn a mouse look.
+	dx += cursor.moved_x;
+	dy += cursor.moved_y;
+
 	return {
 		.inside = cursor.inside,
 		.down = cursor.down,
@@ -974,6 +986,11 @@ struct SyntheticPointer
 	float scroll;
 	float scroll_x;
 
+	// A movement waiting for a frame to spend it, in image pixels — the wheel's
+	// rule again, and `Cursor.moved_x` is where it goes.
+	float move_x;
+	float move_y;
+
 	// The window's last reading, and whether there has been one — all the state
 	// "the real pointer moved" needs.
 	bool has_real;
@@ -1028,6 +1045,21 @@ fn void SyntheticPointer.turn(&self, float dy, float dx)
 }
 
 <*
+ Moves the pointer by a distance rather than to a place.
+
+ Added rather than assigned, as the wheel is: two moves between two frames are
+ one frame's movement. The position is left alone — a look turned by a hand
+ that the platform holds still under pointer lock moves no cursor either — so
+ this reaches `pointer.dx`/`dy` and nothing that reads `x`/`y`.
+*>
+fn void SyntheticPointer.nudge(&self, float dx, float dy)
+{
+	self.active = true;
+	self.move_x += dx;
+	self.move_y += dy;
+}
+
+<*
  Lets go of every button and drops the wheel nothing has spent yet.
 
  What a test calls between cases, and it matters more here than it does for a
@@ -1046,6 +1078,8 @@ fn void SyntheticPointer.release_all(&self)
 	self.middle = false;
 	self.scroll = 0;
 	self.scroll_x = 0;
+	self.move_x = 0;
+	self.move_y = 0;
 }
 
 <*
@@ -1092,12 +1126,16 @@ fn Cursor SyntheticPointer.merge(&self, Cursor real, uint image_width = 0, uint 
 	out.middle = out.middle || self.middle;
 	out.scroll += self.scroll;
 	out.scroll_x += self.scroll_x;
+	out.moved_x += self.move_x;
+	out.moved_y += self.move_y;
 
 	// The wheel is spent here. A notch turned between two frames belongs to one of
 	// them, and a total that survived the frame would be a scroll that never
-	// stopped.
+	// stopped. A movement is the same.
 	self.scroll = 0;
 	self.scroll_x = 0;
+	self.move_x = 0;
+	self.move_y = 0;
 	return out;
 }
 

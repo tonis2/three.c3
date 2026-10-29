@@ -267,6 +267,27 @@ function lightAt(index, stable = true) {
 // mock pass has no active scene yet. Its host reads stay lazy in the getters.
 const light = lightAt(0, false);
 
+// The ambient occlusion settings a script may give, each refused by name.
+function occlusionRadius(n) {
+	if (!Number.isFinite(n) || n <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
+	return n;
+}
+function occlusionIntensity(n) {
+	if (!Number.isFinite(n) || n < 0 || n > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
+	return n;
+}
+function occlusionBias(n) {
+	if (!Number.isFinite(n) || n < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
+	return n;
+}
+
+// Sets one field of a tuple the host holds, leaving the others as they are.
+function patchHost(get, set, index, value) {
+	const values = get();
+	values[index] = value;
+	set(...values);
+}
+
 Object.defineProperties(light, {
 	// 0 leaves a face turned away from every light black; 1 removes the
 	// shading entirely and everything is its own flat colour.
@@ -328,31 +349,13 @@ Object.defineProperties(light, {
 		get() {
 			return {
 				get enabled() { return H.occlusionGet()[0] !== 0; },
-				set enabled(v) {
-					const [, radius, intensity, bias] = H.occlusionGet();
-					H.occlusionSet(v ? 1 : 0, radius, intensity, bias);
-				},
+				set enabled(v) { patchHost(H.occlusionGet, H.occlusionSet, 0, v ? 1 : 0); },
 				get radius() { return H.occlusionGet()[1]; },
-				set radius(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
-					const [enabled, , intensity, bias] = H.occlusionGet();
-					H.occlusionSet(enabled, n, intensity, bias);
-				},
+				set radius(v) { patchHost(H.occlusionGet, H.occlusionSet, 1, occlusionRadius(+v)); },
 				get intensity() { return H.occlusionGet()[2]; },
-				set intensity(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n < 0 || n > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
-					const [enabled, radius, , bias] = H.occlusionGet();
-					H.occlusionSet(enabled, radius, n, bias);
-				},
+				set intensity(v) { patchHost(H.occlusionGet, H.occlusionSet, 2, occlusionIntensity(+v)); },
 				get bias() { return H.occlusionGet()[3]; },
-				set bias(v) {
-					const n = +v;
-					if (!Number.isFinite(n) || n < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
-					const [enabled, radius, intensity] = H.occlusionGet();
-					H.occlusionSet(enabled, radius, intensity, n);
-				},
+				set bias(v) { patchHost(H.occlusionGet, H.occlusionSet, 3, occlusionBias(+v)); },
 			};
 		},
 		set(v) {
@@ -362,13 +365,12 @@ Object.defineProperties(light, {
 				return;
 			}
 			if (typeof v !== 'object') throw new TypeError('three.light.occlusion takes true, false, or an object');
-			const nextRadius = 'radius' in v ? +v.radius : radius;
-			const nextIntensity = 'intensity' in v ? +v.intensity : intensity;
-			const nextBias = 'bias' in v ? +v.bias : bias;
-			if (!Number.isFinite(nextRadius) || nextRadius <= 0) throw new RangeError('occlusion.radius must be finite and greater than zero');
-			if (!Number.isFinite(nextIntensity) || nextIntensity < 0 || nextIntensity > 1) throw new RangeError('occlusion.intensity must be finite and between zero and one');
-			if (!Number.isFinite(nextBias) || nextBias < 0) throw new RangeError('occlusion.bias must be finite and non-negative');
-			H.occlusionSet('enabled' in v ? (v.enabled ? 1 : 0) : enabled, nextRadius, nextIntensity, nextBias);
+			H.occlusionSet(
+				'enabled' in v ? (v.enabled ? 1 : 0) : enabled,
+				occlusionRadius('radius' in v ? +v.radius : radius),
+				occlusionIntensity('intensity' in v ? +v.intensity : intensity),
+				occlusionBias('bias' in v ? +v.bias : bias),
+			);
 		},
 	},
 
@@ -395,8 +397,7 @@ Object.defineProperties(light, {
 			// — a project that does not ask pays for none of it.
 			get enabled() { return H.shadowGet()[0] !== 0; },
 			set enabled(v) {
-				const [, size, bias, intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(v ? 1 : 0, size, bias, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 0, v ? 1 : 0);
 			},
 
 			// Texels per side. Clamped to 256..8192 and rounded down to a
@@ -404,8 +405,7 @@ Object.defineProperties(light, {
 			// allocated rather than as what was typed.
 			get size() { return H.shadowGet()[1]; },
 			set size(v) {
-				const [enabled, , bias, intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, +v, bias, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 1, +v);
 			},
 
 			// Extra depth offset in the light's clip space, 0 by default.
@@ -416,8 +416,7 @@ Object.defineProperties(light, {
 			// tune.
 			get bias() { return H.shadowGet()[2]; },
 			set bias(v) {
-				const [enabled, size, , intensity, distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, size, +v, intensity, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 2, +v);
 			},
 
 			// How dark a shadow is, 0 to 1. 1 takes the whole directional
@@ -425,8 +424,7 @@ Object.defineProperties(light, {
 			// shadow is never black unless the ambient floor is zero.
 			get intensity() { return H.shadowGet()[3]; },
 			set intensity(v) {
-				const [enabled, size, bias, , distance, follow] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, +v, distance, follow);
+				patchHost(H.shadowGet, H.shadowSet, 3, +v);
 			},
 
 			// How far down the view direction the map is fitted, in world
@@ -441,8 +439,7 @@ Object.defineProperties(light, {
 			// ground; too large and they are soft mush.
 			get distance() { return H.shadowGet()[4]; },
 			set distance(v) {
-				const [enabled, size, bias, intensity, , follow] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, intensity, +v, follow);
+				patchHost(H.shadowGet, H.shadowSet, 4, +v);
 			},
 
 			// Whether the map is fitted around what the camera can see,
@@ -467,8 +464,7 @@ Object.defineProperties(light, {
 			// stutter — there is no default that knows which.
 			get follow() { return H.shadowGet()[5] !== 0; },
 			set follow(v) {
-				const [enabled, size, bias, intensity, distance] = H.shadowGet();
-				H.shadowSet(enabled, size, bias, intensity, distance, v ? 1 : 0);
+				patchHost(H.shadowGet, H.shadowSet, 5, v ? 1 : 0);
 			},
 
 			// Where the map actually landed last frame, read-only.
@@ -573,8 +569,7 @@ const lights = {
 			// shadowed light has moved a few metres, so nothing blinks.
 			get maxLocal() { return H.pointShadowGet()[4]; },
 			set maxLocal(v) {
-				const [e,s,b,i] = H.pointShadowGet();
-				H.pointShadowSet(e, s, b, i, +v);
+				patchHost(H.pointShadowGet, H.pointShadowSet, 4, +v);
 			},
 		};
 	},
@@ -614,6 +609,11 @@ const lights = {
 	// static receiver afterwards marks the tiles it reaches dirty, and those
 	// are re-baked over the following frames inside `bake.budgetMs`.
 	//
+	// `progressive: true` bakes one `budgetMs` worth now and leaves the rest of
+	// the tiles dirty for the frames that follow, so a bake of seconds does not
+	// hold one frame for all of it. They shade in real time until baked, and
+	// `three.stats().lightmapDirty` reaching 0 is when it is done.
+	//
 	// `load: true` reads a saved atlas first and bakes only if there is none
 	// that fits; `save: true` writes one afterwards. Either may be a path.
 	bake(options = null) {
@@ -627,11 +627,16 @@ const lights = {
 				return { receivers, skipped: 0, texels: 0, bytes, ms, dirty, loaded: true };
 			}
 		}
-		const [receivers, skipped, texels, bytes, ms] = H.lightsBake(
+		const [receivers, skipped, texels, bytes, ms, dirty] = H.lightsBake(
 			'texelsPerMetre' in o ? +o.texelsPerMetre : 0,
 			'maxBytes' in o ? +o.maxBytes : 0,
-			'budgetMs' in o ? +o.budgetMs : 0);
-		const answer = { receivers, skipped, texels, bytes, ms, dirty: 0, loaded: false };
+			'budgetMs' in o ? +o.budgetMs : 0,
+			!!o.progressive);
+		const answer = { receivers, skipped, texels, bytes, ms, dirty, loaded: false };
+		if (o.save && receivers > 0 && dirty > 0) {
+			throw new Error('three.lights.bake: save waits for a progressive bake to finish — '
+				+ 'call three.lights.saveBake() once three.stats().lightmapDirty is 0');
+		}
 		if (o.save && receivers > 0) {
 			answer.saved = lights.saveBake(typeof o.save === 'string' ? o.save : undefined);
 		}
@@ -1074,6 +1079,28 @@ const camera = {
 			origin: new Vector3(null, r[0], r[1], r[2]),
 			direction: new Vector3(null, r[3], r[4], r[5]),
 		};
+	},
+
+	// The pixel a world point is drawn at, as `[x, y, depth]`, or null when
+	// it is behind the camera. `ray(x, y)` backwards: a point anywhere on the
+	// ray through a pixel comes back as that pixel, so a label drawn at the
+	// answer sits where a click picks the thing it names.
+	//
+	//     const at = three.camera.project([p.x, p.y + 2, p.z]);
+	//     if (at) ops.push({ op: 'text', at: [at[0], at[1]], text: name });
+	//
+	// `x` and `y` are the rendered image's pixels from its top-left corner —
+	// what `three.input.pointer` answers in and `three.ui.draw` places in at
+	// `three.ui.scale` 1. `depth` is world units in front of the eye along the
+	// view axis, which is what to sort labels by or fade them with.
+	//
+	// It reads the camera as it stands now. The follow `attach()` sets up runs
+	// last in the frame, so a `frame` system projecting from a camera that is
+	// still gliding is one frame behind it — `three.systems.late` is what
+	// runs after the follow.
+	project(point) {
+		const [x, y, z] = readVector(point, 'three.camera.project(point)');
+		return H.cameraProject(x, y, z);
 	},
 
 	// What the camera is following, or null. Also how a script finds out
@@ -1643,6 +1670,10 @@ const input = {
 	// `button` is 0 left, 1 right, 2 middle; anything else is refused by
 	// name. `scroll(dy, dx)` is in notches, positive away from the user.
 	movePointer(x, y) { H.inputMove(Number(x), Number(y)); },
+	// By a distance rather than to a place: what a mouse look is built from.
+	// It reaches `pointer.dx`/`dy` for one frame and leaves `x`/`y` alone, so
+	// a probe can turn a camera headless, where there is no lock to give.
+	movePointerBy(dx, dy) { H.inputNudge(Number(dx), dy === undefined ? 0 : Number(dy)); },
 	pressButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), true); },
 	releaseButton(button) { H.inputButtonHold(button === undefined ? 0 : Number(button), false); },
 	scroll(dy, dx) { H.inputScroll(Number(dy), dx === undefined ? 0 : Number(dx)); },
@@ -2169,11 +2200,12 @@ export const three = {
 
 	// Navigation. three.nav.bake() voxelizes the scene's standing room;
 	// three.nav.path(from, to) is one agent's route, shortened against the
-	// geometry so it does not look like it is walking cell centres; and
+	// geometry so it does not look like it is walking cell centres;
+	// three.nav.paths(starts, to) is a group's routes from one search; and
 	// three.nav.field(goals) is the solve KEPT, which is what a crowd samples.
-	// The two verbs are two because a path is a whole solve thrown away after
-	// one answer, and offering only that guarantees somebody writes the second
-	// one badly.
+	// The two verbs are two because a path is a search thrown away after one
+	// answer, and offering only that guarantees somebody writes the second one
+	// badly.
 	//
 	// `nav` itself is the getter further down: a bake belongs to a scene, so
 	// three.nav is the rendered scene's and scene.nav is any scene's.
