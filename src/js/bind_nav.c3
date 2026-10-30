@@ -72,7 +72,7 @@ fn void js_nav_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Va
 		}
 		if (profile == null)
 		{
-			*out = js.raise(string::tformat("that asset has no navigation profile named '%s'", wanted));
+			*out = js.raisef("that asset has no navigation profile named '%s'", wanted);
 			return;
 		}
 		if (!scene.load_nav(profile)) { *out = qjs::null_value(); return; }
@@ -113,8 +113,8 @@ fn void js_nav_bake(
 	if (settings.has_bounds)
 	{
 		settings.bounds = {
-			{ arg_float(&js, argc, args, 7), arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9) },
-			{ arg_float(&js, argc, args, 10), arg_float(&js, argc, args, 11), arg_float(&js, argc, args, 12) },
+			arg_vec3(&js, argc, args, 7),
+			arg_vec3(&js, argc, args, 10),
 		};
 		settings.bounds.fix();
 	}
@@ -351,7 +351,7 @@ fn void js_nav_direction(
 	if (scene == null) return;
 
 	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	Vec3 point    = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point    = arg_vec3(&js, argc, args, 2);
 
 	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 	*out = vec3_value(&js, direction);
@@ -389,7 +389,7 @@ fn void js_nav_cost(
 		return;
 	}
 
-	Vec3 point = { arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3), arg_float(&js, argc, args, 4) };
+	Vec3 point = arg_vec3(&js, argc, args, 2);
 	float cost = scene.nav.cost_at(field, point);
 	*out = qjs::number_value(cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost);
 }
@@ -510,8 +510,8 @@ fn void js_nav_path(
 		return;
 	}
 
-	Vec3[1] from = { { arg_float(&js, argc, args, 1), arg_float(&js, argc, args, 2), arg_float(&js, argc, args, 3) } };
-	Vec3 to      = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	Vec3[1] from = { arg_vec3(&js, argc, args, 1) };
+	Vec3 to      = arg_vec3(&js, argc, args, 4);
 
 	float[] slots = float_view(&js, argc, args, 7);
 	if (slots.len < 3)
@@ -569,7 +569,7 @@ fn void js_nav_paths(
 	}
 
 	float[] starts = float_view(&js, argc, args, 1);
-	Vec3 to        = { arg_float(&js, argc, args, 4), arg_float(&js, argc, args, 5), arg_float(&js, argc, args, 6) };
+	Vec3 to        = arg_vec3(&js, argc, args, 4);
 	float[] slots  = float_view(&js, argc, args, 7);
 	int[] counts   = int_view(&js, argc, args, 10);
 	int limit      = arg_int(&js, argc, args, 13);
@@ -674,7 +674,7 @@ fn void js_steer(
 	float[] field = scene.nav_field_of(handle);
 
 	SteerOptions options;
-	options.goal = { arg_float(&js, argc, args, 8), arg_float(&js, argc, args, 9), arg_float(&js, argc, args, 10) };
+	options.goal = arg_vec3(&js, argc, args, 8);
 	options.has_goal = handle < 0;
 	options.max_speed = arg_float(&js, argc, args, 11);
 	options.arrive_radius = arg_float(&js, argc, args, 12);

@@ -272,7 +272,7 @@ fn void? MeshPass.prepare_shadow_manager(&self, Gpu* gpu, float aspect)
 	uint requested_sun = sun_size;
 	uint requested_local = local_size;
 	bool want_static = self.scene.static_nodes > 0;
-	bool reuse = manager.atlas.image != null && manager.request_sun == requested_sun
+	bool reuse = manager.atlas.live.image != null && manager.request_sun == requested_sun
 		&& manager.request_local == requested_local && manager.request_views == views
 		&& manager.request_local_texels == local_texels
 		&& manager.request_texels == entries.budget.max_texels
@@ -448,16 +448,8 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 	// may do more than its declared culling margin. Keep both on the safe path.
 	if (mesh.morph_targets > 0 || material.vertex.len > 0) return true;
 	collision::Aabb3 local = mesh.bounds;
-	if (mesh.has_skin)
-	{
-		Asset* owner = self.assets.slot(bucket.asset);
-		if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-	}
-	if (bucket.node != NO_NODE)
-	{
-		SoftMesh* soft = self.scene.physics.soft_for(bucket.node);
-		if (soft != null) local = soft.bounds;
-	}
+	SoftMesh* soft = bucket.node != NO_NODE ? self.scene.physics.soft_for(bucket.node) : null;
+	if (soft != null) local = soft.bounds;
 	Vec3 centre;
 	float range2 = 0;
 	if (point != null)
@@ -467,14 +459,19 @@ fn bool MeshPass.shadow_range_reaches(&self, GpuMesh* mesh, Material* material, 
 	}
 	for (uint n = 0; n < count; n++)
 	{
-		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
-		collision::Aabb3 box = local.transform_matrix(copy.model);
-		if (material.bounds > 0)
+		uint at = bucket.first + offset + n;
+		Instance* copy = &self.shadow_instances[at];
+		collision::Aabb3 reach = local;
+		// Each copy of a skin is its own node, posed apart from the others.
+		if (mesh.has_skin && soft == null)
 		{
-			float margin = material.bounds;
-			box = { .min = box.min - { margin, margin, margin },
-				.max = box.max + { margin, margin, margin } };
+			uint slot = self.scene.draws[(sz)at].slot;
+			NodeId id = { slot, self.scene.nodes[slot].generation };
+			reach = self.scene.skinned_box(&self.assets, id, bucket.asset, local);
 		}
+		// The body's margin is in the mesh's units, like its displacement.
+		if (material.bounds > 0) reach = reach.grow(material.bounds);
+		collision::Aabb3 box = reach.transform_matrix(copy.model);
 		if (point != null)
 		{
 			Vec3 nearest = math::min(math::max(centre, box.min), box.max);
@@ -506,16 +503,12 @@ fn bool MeshPass.shadow_range_rect(&self, GpuMesh* mesh, Material* material, Buc
 {
 	if (count == 0) return true;
 	collision::Aabb3 local = mesh.bounds;
+	// The body's margin is in the mesh's units, like its displacement.
+	if (material.bounds > 0) local = local.grow(material.bounds);
 	for (uint n = 0; n < count; n++)
 	{
 		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
 		collision::Aabb3 box = local.transform_matrix(copy.model);
-		if (material.bounds > 0)
-		{
-			float margin = material.bounds;
-			box = { .min = box.min - { margin, margin, margin },
-				.max = box.max + { margin, margin, margin } };
-		}
 		float min_x = 1.0f;
 		float min_y = 1.0f;
 		float max_x = -1.0f;
@@ -753,7 +746,7 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	{
 		if (catch self.shadows.build_cutout_pipeline(gpu)) self.shadows.cutout_refused = true;
 	}
-	if (statics > 0 && !changing && manager.atlas.image != null)
+	if (statics > 0 && !changing && manager.atlas.live.image != null)
 	{
 		if (catch manager.atlas.ensure(gpu, manager.atlas.width, manager.atlas.height, true,
 			entries.budget.max_bytes))

@@ -771,8 +771,8 @@ this copy's `mesh.color` alpha, so a body cannot make geometry invisible by acci
 deliberately. `discard` works in a body and is how a dissolve or a cutout is done.
 
 `vertex` is the other half: a function `void displace(inout Vertex v)` that runs per vertex,
-before anything is projected. `Vertex` is the varyings — write `v.position` (world space, after the
-mesh's own transform) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
+before anything is projected. `Vertex` is the varyings — write `v.position` (object space, before the
+mesh's own transform, so a displacement scales and turns with the mesh) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
 `v.variant` to change what the fragment stage receives; `v.local` (object space), `v.index` (the
 vertex number, a per-vertex seed) and `v.origin` (this copy's world origin, a per-copy one) are inputs
 only.
@@ -785,7 +785,8 @@ derivatives to pick a mip with. Like `fragment`, it may be only the statements �
 `vertex: 'v.position += v.normal * 0.1;'` — or the whole function. Either body may be left out: the
 other keeps the template's own, which is the built-in shading or a vertex stage that moves nothing.
 
-`bounds` is what a vertex body owes the renderer: how far, in world units, it can move a vertex.
+`bounds` is what a vertex body owes the renderer: how far, in the mesh's own units, it can move a
+vertex — the same units the body moves it in, so a node scaled by four is given four times the margin.
 Culling tests a mesh's own bounds, so a body that pushes geometry outside them draws something the
 frustum was never told about — and the symptom is geometry vanishing at the edge of the screen and
 coming back when the camera turns, which reads as a renderer bug. Too big costs a draw call that could
@@ -799,7 +800,7 @@ have been skipped; too small drops geometry you can see.
 - `fragment`
 - `vertex` — the displace body, or an empty string; read-only, like `fragment` — a new body is a new
   material
-- `bounds` — how far the vertex body moves a vertex, world units; read-only, and what the frustum test
+- `bounds` — how far the vertex body moves a vertex, in the mesh's own units; read-only, and what the frustum test
   is widened by
 - `map` — a `three.texture`, or null; sampled as `Surface.albedo` before your `shade()` runs
 - `side` — settable, and cheap after the first time each side is asked for

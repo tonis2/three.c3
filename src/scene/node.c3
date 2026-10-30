@@ -132,6 +132,11 @@ struct Node
 	collision::Aabb3 world_box;
 	usz world_box_hull;
 	bool world_box_current;
+	// The world matrix `world_box` was last made current under, and whether it
+	// was ever fitted at all: a box fitted under the same rotation and scale is
+	// moved by the translation rather than refitted. `create_slot` clears it.
+	Matrix4f world_box_world;
+	bool world_box_fitted;
 
 	// How this node draws. Indexes `MeshPass.materials`; `DEFAULT_MATERIAL` is
 	// the built-in shader every node starts on, and it is a shared index rather
@@ -235,7 +240,7 @@ struct Node
 
 	// Whether this copy's tile still describes the world, and whether the change
 	// that made it stale has been spread to the receivers around it yet.
-	// `Scene.dirty_lightmap` sets both; `render/lightmap.c3` clears them.
+	// `Scene.static_changed` sets both; `render/lightmap.c3` clears them.
 	bool lightmap_dirty;
 	bool lightmap_seed;
 
@@ -322,9 +327,12 @@ struct Node
  then moved. Any other order makes a rotated non-uniform scale shear, which looks
  like a broken mesh rather than a wrong multiply.
 *>
-fn Matrix4f Node.local_matrix(&self)
+fn Matrix4f Node.local_matrix(&self) => trs(self.position, self.rotation, self.scale);
+
+// Translation, rotation and scale composed as T·R·S — see `Node.local_matrix`.
+fn Matrix4f trs(Vec3 position, Quaternionf rotation, Vec3 scale)
 {
-	return matrix::IDENTITY4{float}.translate(self.position).mul(self.rotation.to_matrix()).scale(self.scale);
+	return matrix::IDENTITY4{float}.translate(position).mul(rotation.to_matrix()).scale(scale);
 }
 
 <*
@@ -408,7 +416,19 @@ const float[4] NO_TINT = { 1, 1, 1, 1 };
  Where this node ended up, in world space. Valid after
  `Scene.update_world_matrices`.
 *>
-fn Vec3 Node.world_position(&self) => { self.world.m[12], self.world.m[13], self.world.m[14] };
+fn Vec3 Node.world_position(&self) => translation_of(self.world);
+
+// The translation column of a column-major 4x4.
+fn Vec3 translation_of(Matrix4f m) => { m.m[12], m.m[13], m.m[14] };
+
+// The upper-left 3x3 of a column-major 4x4: its linear part, translation left out.
+fn Matrix3f linear_part(Matrix4f m)
+{
+	return { .m = { m.m[0], m.m[1], m.m[2], m.m[4], m.m[5], m.m[6], m.m[8], m.m[9], m.m[10] } };
+}
+
+// The determinant of the linear part, whose sign says whether the matrix flips winding.
+fn float linear_determinant(Matrix4f m) => linear_part(m).determinant();
 
 <*
  The matrix a normal has to be transformed by: the inverse transpose of the
@@ -428,19 +448,7 @@ fn Vec3 Node.world_position(&self) => { self.world.m[12], self.world.m[13], self
 *>
 fn Matrix4f normal_matrix(Matrix4f world)
 {
-	Matrix3f linear = {
-		.m = {
-			world.m[0],
-			world.m[1],
-			world.m[2],
-			world.m[4],
-			world.m[5],
-			world.m[6],
-			world.m[8],
-			world.m[9],
-			world.m[10],
-		}
-	};
+	Matrix3f linear = linear_part(world);
 
 	float det = linear.determinant();
 	if (math::abs(det) < 1e-8f) return matrix::IDENTITY4{float};

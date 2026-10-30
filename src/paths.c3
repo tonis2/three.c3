@@ -128,10 +128,22 @@ fn String? executable_dir(Allocator allocator) => @pool()
 		full = ((String)buf[:(usz)written]).tcopy();
 	$endswitch
 
-	usz cut = full.len;
-	while (cut > 0 && full[cut - 1] != '/' && full[cut - 1] != '\\') cut--;
-	if (cut == 0) return NO_USER_DIR~;
-	return full[:cut - 1].copy(allocator);
+	sz cut = last_separator(full);
+	if (cut < 0) return NO_USER_DIR~;
+	return full[:(usz)cut].copy(allocator);
+}
+
+<*
+ Where the last path separator in `path` is, or -1 when there is none. Either
+ separator: Windows answers with backslashes, and a script may write either.
+*>
+fn sz last_separator(String path)
+{
+	for (sz i = (sz)path.len - 1; i >= 0; i--)
+	{
+		if (path[(usz)i] == '/' || path[(usz)i] == '\\') return i;
+	}
+	return -1;
 }
 
 <*

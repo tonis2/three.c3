@@ -464,6 +464,75 @@ fn void moving_a_baked_light_dirties_the_tiles_it_reaches() @test
 }
 
 <*
+ A progressive bake ends on the picture a whole bake makes.
+
+ Three 4 m planes at 32 texels a metre are 130 texels a side each, past the
+ catch-up's seed batch, so the first frame can only take one of them and the
+ other two are left dirty — which is the claim, made a number. The frames after
+ finish them, and the atlas they leave behind is compared with a whole bake's
+ byte for byte, the way the catch-up after a moved light is.
+*>
+fn void a_progressive_bake_finishes_over_frames_as_a_whole_bake() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		three::RunResult more = run.run(
+			`const white = new three.MeshLambertMaterial({ color: 0xffffff });
+			 for (const x of [-6, 6]) {
+				 const extra = new three.Mesh(new three.PlaneGeometry(4, 4), white);
+				 extra.rotation.x = -Math.PI / 2;
+				 extra.position.set(x, 0, 0);
+				 three.scene.add(extra);
+				 extra.static = true;
+			 }
+			 return 1;`
+		);
+		defer more.free();
+		test::@check(more.ok, "two more receivers: %s", more.error);
+
+		image::Image warm = renderer.capture()!!;
+		warm.free();
+
+		three::RunResult started = run.run(
+			`point.baked = true; disk.baked = true;
+			 const b = three.lights.bake({ texelsPerMetre: 32, progressive: true });
+			 return [b.receivers, b.dirty, three.stats().lightmapDirty].join(' ');`
+		);
+		defer started.free();
+		test::@check(started.value == `"3 2 2"`, "three receivers, two left for later: %s", started.value);
+
+		for (uint i = 0; i < 12; i++)
+		{
+			image::Image tick = renderer.capture()!!;
+			tick.free();
+		}
+		three::RunResult settled = run.run(`return three.stats().lightmapDirty;`);
+		defer settled.free();
+		test::@check(settled.value == "0", "the frames after finished them: %s", settled.value);
+
+		image::Image caught = renderer.capture()!!;
+		defer caught.free();
+
+		three::RunResult whole = run.run(
+			`const b = three.lights.bake({ texelsPerMetre: 32 }); return [b.receivers, b.dirty].join(' ');`
+		);
+		defer whole.free();
+		test::@check(whole.value == `"3 0"`, "the control bake ran whole: %s", whole.value);
+		image::Image fresh = renderer.capture()!!;
+		defer fresh.free();
+
+		test::@check(
+			worst_channel(&caught, &fresh) == 0,
+			"the finished progressive picture is the whole bake's, byte for byte — worst channel %d",
+			worst_channel(&caught, &fresh)
+		);
+	};
+}
+
+<*
  A light remains part of the atlas while its baked flag is temporarily off.
  Moving it during that interval must still stale the old tile when it returns.
 *>
@@ -905,6 +974,60 @@ fn void a_receiver_that_moved_since_the_save_is_the_only_dirty_tile() @test
 				"and the loaded-plus-caught-up picture is the freshly baked one — worst channel %d",
 				worst_channel(&caught, &fresh)
 			);
+		};
+	};
+}
+
+<*
+ A texture nobody's material names dirties no tile, live or loaded.
+
+ A tile's signature used to fold the assets' revision, which every texture
+ install and release anywhere in the process bumps — so a level that loaded one
+ more image after its bake re-baked every tile it had, and a cache file matched
+ only a launch that happened to load its images in the same count. The same file
+ loading back clean after an unrelated texture came is the launch-to-launch half
+ of that.
+*>
+fn void an_unrelated_texture_dirties_no_tile() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		@with_assets(run)
+		{
+			three::RunResult built = run.run(TWO_PLANES);
+			defer built.free();
+			test::@check(built.ok, "the scene built: %s", built.error);
+			image::Image warm = renderer.capture()!!;
+			warm.free();
+
+			three::RunResult saved = run.run(
+				`point.baked = true;
+				 const b = three.lights.bake({ texelsPerMetre: 32 });
+				 return [b.receivers, three.lights.saveBake('pair.lightmap').tiles].join(' ');`
+			);
+			defer saved.free();
+			test::@check(saved.value == `"2 2"`, "two receivers, two tiles saved: %s", saved.value);
+
+			three::RunResult added = run.run(
+				`globalThis.unrelated = new three.DataTexture(new Uint8Array([9, 8, 7, 255]), 1, 1); return 1;`
+			);
+			defer added.free();
+			test::@check(added.ok, "the texture was made: %s", added.error);
+			for (uint i = 0; i < 4; i++)
+			{
+				image::Image tick = renderer.capture()!!;
+				tick.free();
+			}
+			three::RunResult live = run.run(`return three.stats().lightmapDirty;`);
+			defer live.free();
+			test::@check(live.value == "0", "an unrelated texture dirtied %s live tiles", live.value);
+
+			three::RunResult loaded = run.run(
+				`const l = three.lights.loadBake('pair.lightmap'); return [l.tiles, l.dirty].join(' ');`
+			);
+			defer loaded.free();
+			test::@check(loaded.value == `"2 0"`,
+				"the bake loads back clean after an unrelated texture: %s", loaded.value);
 		};
 	};
 }

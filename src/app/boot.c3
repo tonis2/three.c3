@@ -501,11 +501,7 @@ fn void? boot_world(JsRuntime* runtime, String assets, String script, bool boot 
 			RunResult booted = runtime.run_module(ENTRY_MODULE);
 			defer booted.free();
 
-			if (booted.log.len > 0) io::printn(booted.log);
-			if (!booted.ok)
-			{
-				io::printfn("three: %s/%s did not run: %s", assets, ENTRY_MODULE, booted.error);
-			}
+			report_run(booted, string::tformat("%s/%s", assets, ENTRY_MODULE));
 		}
 	}
 
@@ -588,13 +584,7 @@ fn void? boot_script(JsRuntime* runtime, String path)
 		RunResult ran = runtime.run((String)source, path);
 		defer ran.free();
 
-		if (ran.log.len > 0) io::printn(ran.log);
-		// `value` is not printed and this is, which is the difference between them
-		// here: a returned value is an answer to whoever CALLED, and over MCP there
-		// is one. A `--script` run has no caller, so what the script wanted said out
-		// loud is the only half of the pair that has a reader on this path.
-		if (ran.debug.len > 0) io::printfn("debug: %s", ran.debug);
-		if (!ran.ok) io::printfn("three: %s did not run: %s", path, ran.error);
+		report_run(ran, path);
 	};
 }
 
@@ -636,13 +626,8 @@ fn void? boot_module(JsRuntime* runtime, String path)
 			// The file's own directory, which is the only root a lone module has. "."
 			// when the path names a file in the working directory, because a root has
 			// to be a directory and the empty string already means "there is none".
-			usz cut = 0;
-			bool nested = false;
-			foreach (i, c : file)
-			{
-				if (c == '/') { cut = (usz)i; nested = true; }
-			}
-			runtime.set_assets_root(nested ? file[:cut] : ".");
+			sz cut = last_separator(file);
+			runtime.set_assets_root(cut >= 0 ? file[:(usz)cut] : ".");
 			root = runtime.modules.root;
 		}
 
@@ -670,10 +655,23 @@ fn void? boot_module(JsRuntime* runtime, String path)
 		RunResult ran = runtime.run_module(specifier);
 		defer ran.free();
 
-		if (ran.log.len > 0) io::printn(ran.log);
-		if (ran.debug.len > 0) io::printfn("debug: %s", ran.debug);
-		if (!ran.ok) io::printfn("three: %s did not run: %s", path, ran.error);
+		report_run(ran, path);
 	};
+}
+
+<*
+ Prints what a run logged, what it asked to have said, and why it failed.
+
+ `value` is not printed and `debug` is, which is the difference between them
+ here: a returned value is an answer to whoever CALLED, and over MCP there is
+ one. A run from the command line has no caller, so what the script wanted said
+ out loud is the only half of the pair that has a reader on this path.
+*>
+fn void report_run(RunResult ran, String what)
+{
+	if (ran.log.len > 0) io::printn(ran.log);
+	if (ran.debug.len > 0) io::printfn("debug: %s", ran.debug);
+	if (!ran.ok) io::printfn("three: %s did not run: %s", what, ran.error);
 }
 
 // A path with its `./` taken off, so that `--assets game` and `--module

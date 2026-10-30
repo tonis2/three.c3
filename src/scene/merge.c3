@@ -133,25 +133,6 @@ fn bool color_is_white(float[4] color) @local
 }
 
 <*
- The determinant of `m`'s upper-left 3x3 — the linear part, translation left
- out — whose sign is all a winding flip needs. `normal_matrix` computes the
- same 3x3 on the way to inverting it; this is the other thing the codebase
- already had a use for that 3x3 for, `scene/node.c3`'s determinant a script
- never sees.
-*>
-fn float linear_determinant(Matrix4f m) @local
-{
-	Matrix3f linear = {
-		.m = {
-			m.m[0], m.m[1], m.m[2],
-			m.m[4], m.m[5], m.m[6],
-			m.m[8], m.m[9], m.m[10],
-		}
-	};
-	return linear.determinant();
-}
-
-<*
  The identity of a merge: equal keys mean the same meshes, at the same
  matrices and colours, out of the same asset generations.
 
@@ -166,37 +147,14 @@ fn float linear_determinant(Matrix4f m) @local
 *>
 fn String merge_key(MergeInput[] inputs, Allocator allocator) @local
 {
-	ulong hash = 0xcbf29ce484222325;
+	ulong hash = KEY_SEED;
 	foreach (input : inputs)
 	{
-		uint[3] ids = { input.asset.index, input.asset.generation, input.mesh };
-		for (usz slot = 0; slot < 3; slot++)
-		{
-			uint id = ids[slot];
-			for (usz byte = 0; byte < 4; byte++)
-			{
-				hash ^= (ulong)((id >> (uint)(byte * 8)) & 0xff);
-				hash *= 0x100000001b3;
-			}
-		}
-		for (usz k = 0; k < 16; k++)
-		{
-			uint bits = bitcast(input.matrix.m[k], uint);
-			for (usz byte = 0; byte < 4; byte++)
-			{
-				hash ^= (ulong)((bits >> (uint)(byte * 8)) & 0xff);
-				hash *= 0x100000001b3;
-			}
-		}
-		for (usz k = 0; k < 4; k++)
-		{
-			uint bits = bitcast(input.color[k], uint);
-			for (usz byte = 0; byte < 4; byte++)
-			{
-				hash ^= (ulong)((bits >> (uint)(byte * 8)) & 0xff);
-				hash *= 0x100000001b3;
-			}
-		}
+		hash = @hash_value(hash, input.asset.index);
+		hash = @hash_value(hash, input.asset.generation);
+		hash = @hash_value(hash, input.mesh);
+		for (usz k = 0; k < 16; k++) hash = @hash_value(hash, input.matrix.m[k]);
+		for (usz k = 0; k < 4; k++) hash = @hash_value(hash, input.color[k]);
 	}
 	return string::format(allocator, "<merge n=%d h=%x>", inputs.len, hash);
 }

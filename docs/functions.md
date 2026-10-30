@@ -2208,6 +2208,19 @@ atlas is `RGBA16F`, eight bytes a texel — a lightmap is a colour attachment fi
 image second, and a shared-exponent format is not required to be renderable. `budgetMs` sets
 `three.lights.bake.budgetMs`, below.
 
+```js
+const b = three.lights.bake({ texelsPerMetre: 48, budgetMs: 4, progressive: true });
+// b.dirty tiles are still to come; save once three.stats().lightmapDirty is 0
+```
+
+A whole bake is one submission and one wait, so a large scene holds one frame for all of it —
+seconds, long enough for a desktop to call the window unresponsive. `progressive: true` packs
+the same atlas but renders only the first `budgetMs` worth of tiles, and leaves the rest dirty
+for the catch-up below to finish over the following frames. Those shade in real time until their
+tile lands, as any dirty tile does, and the finished atlas is the one a whole bake writes, texel
+for texel. `save: true` refuses a progressive bake, because there is nothing finished to write
+yet: call `three.lights.saveBake()` once `three.stats().lightmapDirty` reaches 0.
+
 `load` reads a saved atlas first and bakes only if there is none that fits this scene; `save`
 writes one afterwards. Either may be `true` for the default path or a path of its own —
 `three.lights.saveBake` and `three.lights.loadBake` are the same two verbs on their own.
@@ -3269,7 +3282,8 @@ The interface, as one description: a tree of plain objects, each with a `type`.
 - Layout — `column`, `row`, `stack`, `padding`, `grid`, `clip`, `anchored`, `scroll`.
 - Painted — `rect`, `label`, `draw`.
 - Interactive — `button`, `checkbox`, `slider`, `select`, `tree`, `textfield`, `menu`, `dialog`, `confirmDialog`,
-  `fileBrowser`.
+  `fileBrowser`, `contextMenu`.
+- Node editor — `nodeGraph`, with `nodeCard` and `portRow` inside it.
 
 Children go in `children: [...]` or `child: {...}`, and a falsy child is skipped, so `cond && {...}` is how a row
 is conditional.
@@ -3376,6 +3390,66 @@ three.ui.set({
   onChoose: path => three.load(path),
 });
 ```
+
+## nodeGraph
+
+A node editor: cards on a pannable, zoomable plane, ports on their edges and wires between them. The data is the
+script's, by index, and the graph reports what the user did; the script changes its data and renders again, and a
+move, a new wire or a selection arrives as a patch rather than a rebuild.
+
+- `nodes` — `{ pos, title, tag, width, header, selected, error, running, muted, progress }` each. `pos` is the
+  card's top-left on the plane.
+- `ports` — `{ node, output, label, color, square, hollow }` each, `node` an index into `nodes`. Inputs sit on the
+  left edge, outputs on the right.
+- `wires` — `{ from, to, color, selected }` each, port indices from an output to an input.
+- `view` — `{ pan: [x, y], zoom }`: the plane point at the top-left and the zoom. Carried across a rebuild when
+  left out, like a scroll offset.
+- `children` — one `nodeCard` per node: `{ type: 'nodeCard', node: i, child }`, its child the node's body — any
+  widgets. A `{ type: 'portRow', port: p, child }` in a body puts that port level with the row, which is how a
+  setting that can also be wired is drawn.
+- Colours — `planeColor`, `gridColor`, `cardColor`, `headerColor`, `cardBorder`, `textColor`, `accent` (the
+  selection).
+
+The editors on the cards are ordinary widgets drawn through the plane's transform, so they are clicked and typed
+into where they are drawn at any zoom. A left drag on a card moves it with everything selected; from an output it
+draws a wire, and from a wired input it picks that wire up; on empty space it is a selection box. A right or middle
+drag pans and the wheel zooms about the pointer (a trackpad pans, and zooms with Ctrl). Delete, Ctrl+C/X/V/D/A/Z/Y,
+Space/Tab and F work while the graph has the keyboard — a click on it gives it — and keys it does nothing with
+still reach the script.
+
+Handlers: `onSelect(node, mode)` (node -1 is empty space; mode `'replace'`, `'add'` with Shift, `'toggle'` with
+Ctrl), `onBox(nodes, mode)`, `onMove(dx, dy, done)` — plane units, and one last call with `done` that is the move's
+single undo step — `canConnect(from, to)` (answered synchronously while a wire is dragged; only acceptable ports
+light up), `onConnect(from, to)`, `onDisconnect(wire)`, `onWireSelect(wire, mode)`, `onWireDropped(port, plane,
+screen)`, `onContext(target, index, plane, screen)` (`'background'`, `'node'`, `'port'` or `'wire'`),
+`onCommand(name)` (`'delete'`, `'copy'`, `'cut'`, `'paste'`, `'duplicate'`, `'selectAll'`, `'undo'`, `'redo'`),
+`onAddRequest(plane, screen)` (double-click on empty space, or Space) and `onView(pan, zoom)`. `screen` points are
+the interface's own coordinates — where a `contextMenu` opens.
+
+`three.ui.patch` can write `nodes`, `ports`, `wires` (each replaced wholesale, the others kept) and `view`.
+
+```js
+three.ui.set({ type: 'nodeGraph', key: 'graph', nodes, ports, wires,
+  onMove: (dx, dy) => { for (const n of selected) { n.pos[0] += dx; n.pos[1] += dy; } redraw(); },
+  onConnect: (from, to) => { wires.push({ from, to }); redraw(); },
+  children: nodes.map((n, i) => ({ type: 'nodeCard', node: i, child: bodyOf(n) })),
+});
+```
+
+## contextMenu
+
+A menu that opens at a point: the right-click menu, and a node editor's "add a node" search.
+
+- `items` — strings, or `{ label, category, hint, disabled }`. Consecutive items with the same `category` are
+  grouped under it.
+- `open`, `at` — whether it is open and its top-left on screen; it is kept on screen. A patch of `open` (with `at`)
+  opens it without a rebuild.
+- `searchable` — a field at the top that takes the keyboard and narrows the list by label or category;
+  `placeholder` is its prompt.
+- `width`, `maxHeight` — taller lists scroll.
+
+Up and Down move the highlight, Return chooses, Esc and a click outside dismiss. `onChoose(index)` and
+`onDismiss()`. Put it after what it serves, so it paints over it.
 
 ## dialog
 

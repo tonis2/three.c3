@@ -900,29 +900,31 @@ fn void Scene.invalidate(&self, Node* node = null, NodeId moved = NO_NODE)
 	{
 		self.query.drop();
 	}
-	if (node == null || node.static_caster) self.static_revision++;
 	if (node == null)
 	{
+		self.static_revision++;
 		self.lightmap_dirty_all = true;
 		self.lightmap_changes++;
 	}
 	else if (node.static_caster)
 	{
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 	}
 }
 
 <*
- This copy's lightmap tile is out of date, and so is whatever it shadows.
+ A static caster changed: the cached static shadow map is stale, and so are this
+ copy's lightmap tile and whatever it shadows.
 
- Beside every `static_revision++` that has a node in hand: what invalidates a
- cached shadow map invalidates a cached lightmap. The difference is the reach —
+ What invalidates a cached shadow map invalidates a cached lightmap. The
+ difference is the reach —
  a shadow map is one image and a lightmap is a tile per copy, so the node is
  remembered and `MeshPass.resolve_lightmap` spreads the change to the receivers
  the baked lights could carry it to.
 *>
-fn void Scene.dirty_lightmap(&self, Node* node)
+fn void Scene.static_changed(&self, Node* node)
 {
+	self.static_revision++;
 	node.lightmap_dirty = true;
 	node.lightmap_seed = true;
 	self.lightmap_changes++;
@@ -1211,8 +1213,7 @@ fn void Scene.set_skin(&self, NodeId id, int skin)
 	{
 		node.static_caster = false;
 		self.static_nodes--;
-		self.static_revision++;
-		self.dirty_lightmap(node);
+		self.static_changed(node);
 		node.lightmap = { 0, 0, 0, 0 };
 	}
 	if (skin < 0 || self.assets == null) return;
@@ -1384,15 +1385,7 @@ fn bool Scene.play(
 	Asset* loaded = self.assets.slot(player.asset);
 	if (loaded == null) return false;
 
-	int found = -1;
-	foreach (i, &candidate : loaded.clips)
-	{
-		if (candidate.name == clip)
-		{
-			found = (int)i;
-			break;
-		}
-	}
+	int found = loaded.find_clip(clip);
 	if (found < 0) return false;
 
 	self.assets.ensure_clip(player.asset, (uint)found);
@@ -1509,11 +1502,7 @@ fn bool Scene.blend(&self, NodeId root, String[] clips, float[] weights, float f
 	int[ANIMATION_LAYERS] found;
 	foreach (k, name : clips)
 	{
-		found[k] = -1;
-		foreach (i, &candidate : loaded.clips)
-		{
-			if (candidate.name == name) { found[k] = (int)i; break; }
-		}
+		found[k] = loaded.find_clip(name);
 		if (found[k] < 0) return false;
 	}
 	foreach (k, index : found[:clips.len]) self.assets.ensure_clip(player.asset, (uint)index);
@@ -1736,7 +1725,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	// line is really for is the slot that is not: `Scene.bounds` reads the node
 	// *pool* rather than the tree, so a slot `update_branch` never reaches would
 	// answer with a stranger's box instead of with its own identity transform.
+	// And not slid from either: the fit is the stranger's mesh.
 	node.world_box_current = false;
+	node.world_box_fitted = false;
 	// Reset like everything else here, and for a sharper reason: this slot may have
 	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
 	// would draw with a stranger's shader.
@@ -2027,11 +2018,7 @@ fn void Scene.propagate_visible(&self, NodeId id, bool parent_visible)
 	if (node == null) return;
 
 	bool now = parent_visible && node.visible;
-	if (node.static_caster && node.world_visible != now)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster && node.world_visible != now) self.static_changed(node);
 	node.world_visible = now;
 
 	sz count = node.children.len();
@@ -2109,11 +2096,7 @@ fn void Scene.set_material(&self, NodeId id, uint material)
 	// box is where it was. What *can* change is whether this copy casts at all —
 	// `MeshPass.casts_shadow` reads the material's blend mode — so a static caster
 	// changing material is a static map to rebuild.
-	if (node.static_caster)
-	{
-		self.static_revision++;
-		self.dirty_lightmap(node);
-	}
+	if (node.static_caster) self.static_changed(node);
 }
 
 <*
@@ -2158,8 +2141,7 @@ fn bool Scene.set_static_caster(&self, NodeId id, bool value)
 	{
 		self.static_nodes--;
 	}
-	self.static_revision++;
-	self.dirty_lightmap(node);
+	self.static_changed(node);
 	// A node that has stopped being static has stopped being a receiver: it is
 	// about to move, and a tile it kept reading would be last position's light.
 	if (!wanted) node.lightmap = { 0, 0, 0, 0 };
@@ -2262,7 +2244,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	bool changed = parent_changed || node.dirty;
 	if (changed)
 	{
-		Vec3 before = { node.world.m[12], node.world.m[13], node.world.m[14] };
+		Vec3 before = node.world_position();
 		node.world = parent_world * node.local_matrix();
 		node.normal = normal_matrix(node.world);
 		if (node.had_world)
@@ -2271,7 +2253,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		}
 		else
 		{
-			node.prev_world = { node.world.m[12], node.world.m[13], node.world.m[14] };
+			node.prev_world = node.world_position();
 			node.had_world = true;
 		}
 		node.dirty = false;
@@ -2287,11 +2269,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 		// static, so nothing there would have said anything — and the wall's world
 		// matrix changed all the same. `changed` carries down the tree, so asking
 		// here catches the whole subtree of every move.
-		if (node.static_caster)
-		{
-			self.static_revision++;
-			self.dirty_lightmap(node);
-		}
+		if (node.static_caster) self.static_changed(node);
 	}
 
 	node.world_visible = parent_visible && node.visible;
@@ -2388,6 +2366,18 @@ fn bool Frustum.contains(&self, collision::Aabb3 box)
 	return true;
 }
 
+// `box` into `total`, or `total` becomes it when `found` says there is nothing yet.
+fn void union_into(collision::Aabb3* total, bool* found, collision::Aabb3 box)
+{
+	if (*found)
+	{
+		total.expand_by_aabb(box);
+		return;
+	}
+	*total = box;
+	*found = true;
+}
+
 <*
  The tight world-space box of one mesh under one transform.
 
@@ -2438,24 +2428,9 @@ fn collision::Aabb3 world_mesh_bounds(Matrix4f m, GpuMesh* mesh)
 {
 	if (mesh.hull_positions.len == 0) return mesh.bounds.transform_matrix(m);
 
-	float[<16>] v = m.m;
-	collision::Aabb3 box;
-	foreach (i, p : mesh.hull_positions)
-	{
-		Vec3 world = {
-			v[0] * p.x + v[4] * p.y + v[8] * p.z + v[12],
-			v[1] * p.x + v[5] * p.y + v[9] * p.z + v[13],
-			v[2] * p.x + v[6] * p.y + v[10] * p.z + v[14],
-		};
-		if (i == 0)
-		{
-			box = { .min = world, .max = world };
-		}
-		else
-		{
-			box.expand_by_point(world);
-		}
-	}
+	Vec3 first = transform_point(m, mesh.hull_positions[0]);
+	collision::Aabb3 box = { .min = first, .max = first };
+	foreach (p : mesh.hull_positions[1..]) box.expand_by_point(transform_point(m, p));
 	return box;
 }
 
@@ -2479,11 +2454,42 @@ fn collision::Aabb3 Scene.node_world_box(&self, Node* node, GpuMesh* mesh)
 	{
 		return node.world_box;
 	}
-	node.world_box = world_mesh_bounds(node.world, mesh);
-	node.world_box_hull = mesh.hull_positions.len;
+	// **A node that only slid keeps its fit.** Every vertex through the matrix is
+	// exact, and for a character that walks it was every vertex of the character
+	// every frame — the walk writes his position each frame whether or not he turns.
+	// Where the rotation and scale are the ones the box was fitted under, the exact
+	// box of the moved vertices is the old one moved by the same amount.
+	if (node.world_box_fitted && node.world_box_hull == mesh.hull_positions.len
+		&& same_linear_part(node.world_box_world, node.world))
+	{
+		Vec3 by = {
+			node.world.m[12] - node.world_box_world.m[12],
+			node.world.m[13] - node.world_box_world.m[13],
+			node.world.m[14] - node.world_box_world.m[14],
+		};
+		node.world_box = { .min = node.world_box.min + by, .max = node.world_box.max + by };
+	}
+	else
+	{
+		node.world_box = world_mesh_bounds(node.world, mesh);
+		node.world_box_hull = mesh.hull_positions.len;
+		node.world_box_fitted = true;
+		self.bounds_fits++;
+	}
+	node.world_box_world = node.world;
 	node.world_box_current = true;
-	self.bounds_fits++;
 	return node.world_box;
+}
+
+// Whether two matrices rotate and scale alike, so that they differ by a
+// translation alone.
+fn bool same_linear_part(Matrix4f a, Matrix4f b) @local
+{
+	foreach (i : (uint[9]){ 0, 1, 2, 4, 5, 6, 8, 9, 10 })
+	{
+		if (a.m[i] != b.m[i]) return false;
+	}
+	return true;
 }
 
 // ============================================================================
@@ -2705,47 +2711,28 @@ fn void Scene.build_draw_list(
 			// modeller drew around the rest pose — which looks like a character that
 			// vanishes at certain camera angles during certain frames.
 			collision::Aabb3 local = mesh.bounds;
-			if (node.skin >= 0)
-			{
-				Asset* owner = assets.slot(node.asset);
-				if (owner != null && owner.pose_matrices > 0) local = owner.skinned_bounds;
-				// A node posed from outside is not described by the bake at all: its
-				// asset's `skinned_bounds` is the union over frames nobody sampled,
-				// which for an asset `Assets.attach_skin` built is just the rest box.
-				// So the box this frame's palette actually reaches wins — measured by
-				// `set_palette`, which is the only moment those matrices are known.
-				//
-				// Guarded on the list being non-empty rather than searched
-				// unconditionally, so a scene that poses nothing by hand — every scene
-				// until one does — pays one compare per skinned node and no scan.
-				if (self.palettes.len() > 0)
-				{
-					NodeId here          = { (uint)slot, node.generation };
-					LivePalette* posed   = self.live_palette(here);
-					if (posed != null) local = posed.bounds;
-				}
-			}
+			if (node.skin >= 0) local = self.skinned_box(assets, id, node.asset, local);
 			// A soft body is not the shape it was modelled as, and the mesh's own
 			// bounds describe the shape it stopped being. The box the solver
 			// measured this frame is the one it is actually drawn at.
 			if (soft != null) local = soft.bounds;
-			collision::Aabb3 box = local.transform_matrix(node.world);
 
 			// A material with a vertex body draws geometry its own bounds do not
 			// contain, and the box is what the frustum is asked about — so the
 			// material says how far it moves things and the box grows by that much.
-			// Grown in *world* units after the transform rather than in object units
-			// before it, because the displacement in a body is world-space too:
-			// `v.position + something` is metres of scene, whatever the node is
-			// scaled by.
-			// 
+			// Grown in *object* units before the transform rather than in world
+			// units after it, because the displacement in a body is object-space
+			// too: `displace` runs before the model matrix, so a body's
+			// `v.position + something` is scaled and turned by the node like the
+			// vertex it moved.
+			//
 			// Zero for every material that has no vertex body, so the common case
 			// adds one compare and no arithmetic.
 			if (node.material < margins.len && margins[node.material] > 0)
 			{
-				float m = margins[node.material];
-				box = { .min = box.min - { m, m, m }, .max = box.max + { m, m, m } };
+				local = local.grow(margins[node.material]);
 			}
+			collision::Aabb3 box = local.transform_matrix(node.world);
 			visible = frustum == null || frustum.contains(box);
 			if (!visible)
 			{
@@ -3135,16 +3122,7 @@ fn collision::Aabb3 Scene.bounds(&self, Assets* assets)
 		GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
 		if (mesh == null) continue;
 
-		collision::Aabb3 box = self.node_world_box(node, mesh);
-		if (!found)
-		{
-			total = box;
-			found = true;
-		}
-		else
-		{
-			total.expand_by_aabb(box);
-		}
+		union_into(&total, &found, self.node_world_box(node, mesh));
 	}
 
 	// The unit box is cached like any other answer. An empty scene is asked this
@@ -3204,16 +3182,7 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 			// The same cache `Scene.bounds` fills, and filled here for the same reason:
 			// a script measuring one piece per frame while the level stands still
 			// should pay for the piece.
-			collision::Aabb3 box = self.node_world_box(node, mesh);
-			if (!*found)
-			{
-				*total = box;
-				*found = true;
-			}
-			else
-			{
-				total.expand_by_aabb(box);
-			}
+			union_into(total, found, self.node_world_box(node, mesh));
 		}
 	}
 

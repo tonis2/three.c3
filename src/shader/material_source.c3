@@ -202,24 +202,6 @@ const uint MATERIAL_TEXTURE_LIMIT = DRAW_TEXTURE_INDICES - MATERIAL_BINDING_FIRS
 *>
 const String MATERIAL_BODY_NAME = "material";
 
-<*
- What the agent's *vertex* lines are called in a diagnostic.
-
- A second name rather than a second file: both bodies are spliced into one module
- under one compiler, so `vertex:3:12` against `material:3:12` is the only thing
- that says which of the two an error is in.
-*>
-const String MATERIAL_VERTEX_NAME = "vertex";
-
-<*
- What everything three.c3 generated is called in a diagnostic.
-
- Deliberately self-describing rather than short. A note from inside the generated
- module names this file whatever the body did, and an agent that sees
- `three.material:141` can tell at a glance that the line is not one of its own.
-*>
-const String MATERIAL_PREAMBLE_NAME = "three.material";
-
 const usz MATERIAL_DIAGNOSTIC_MAX @local = 512;
 
 // The message the last refusal carried. See `material_diagnostic`.

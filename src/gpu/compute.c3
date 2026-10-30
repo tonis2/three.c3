@@ -278,18 +278,12 @@ fn void? StorageBuffer.write(&self, Compute* compute, usz offset, void* data, us
 	// The copy below goes out on its own submission, so anything recorded before
 	// it has to reach the GPU first: a dispatch that reads this buffer, recorded
 	// and not yet submitted, would otherwise run after the new bytes landed.
-	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
+	compute.flush()!;
 
 	// In pieces, through one staging buffer: a weights upload is gigabytes, and a
 	// host-visible copy of all of it at once is a second copy of the model.
 	usz chunk = size < COMPUTE_STAGING_CHUNK ? size : COMPUTE_STAGING_CHUNK;
-	vk::Memory stage = vk::new_buffer(
-		&compute.gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: (sz)chunk,
-	)!;
+	vk::Memory stage = compute.gpu.create_upload((sz)chunk)!;
 	defer stage.free();
 
 	for (usz done = 0; done < size; done += chunk)
@@ -439,27 +433,8 @@ fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, Str
 	// A kernel written for a subgroup size (`@subgroup_size(n)`) gets exactly
 	// that one; a device that cannot promise it cannot run the kernel.
 	uint lanes = shader.subgroup_size;
-	if (lanes != 0)
-	{
-		if (!limits.subgroup_size_control || lanes < limits.min_subgroup_size || lanes > limits.max_subgroup_size)
-		{
-			return COMPUTE_UNSUPPORTED_SUBGROUP_SIZE~;
-		}
-	}
-	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
-		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
-		.requiredSubgroupSize = lanes,
-	};
-	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(vk::pipelineShaderStageCreateInfo()
-			.setNext(lanes != 0 ? (void*)&required_lanes : null)
-			.setStage(SHADER_STAGE_COMPUTE_BIT)
-			.setMod(shader_module)
-			.setName(entry))
-		.setLayout(self.layout);
-
-	vk::createComputePipelines(gpu.handle, gpu.driver_cache.handle, 1, &info, null, &self.pipeline)!;
-	return;
+	if (!limits.offers_subgroup(lanes)) return COMPUTE_UNSUPPORTED_SUBGROUP_SIZE~;
+	self.pipeline = gpu.create_compute_pipeline(shader_module, entry, self.layout, lanes)!;
 }
 
 // --- Dispatch ----------------------------------------------------------------
@@ -699,6 +674,15 @@ fn void? Compute.fill(&self, StorageBuffer* buffer, usz offset, usz size, uint w
 }
 
 <*
+ Finishes everything recorded or still running, so a copy on a submission of
+ its own sees the buffers as that work leaves them. Nothing to do when idle.
+*>
+fn void? Compute.flush(&self)
+{
+	if (self.pending > 0 || self.in_flight) self.submit()!;
+}
+
+<*
  Submit everything recorded since the last submit and wait for it.
 
  The wait is what makes the next `read` mean anything, and it is why this is a
@@ -796,16 +780,10 @@ fn void? StorageBuffer.read(&self, Compute* compute, usz offset, char[] into)
 
 	// A read of work that is recorded and not submitted would copy the buffer as
 	// it was before that work.
-	if (compute.pending > 0 || compute.in_flight) compute.submit()!;
+	compute.flush()!;
 
 	usz chunk = into.len < COMPUTE_STAGING_CHUNK ? into.len : COMPUTE_STAGING_CHUNK;
-	vk::Memory stage = vk::new_buffer(
-		&compute.gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data: null,
-		data_size: (sz)chunk,
-	)!;
+	vk::Memory stage = compute.gpu.create_readback((sz)chunk)!;
 	defer stage.free();
 
 	for (usz done = 0; done < into.len; done += chunk)

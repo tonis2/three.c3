@@ -84,81 +84,6 @@ import vk;
 const vk::Format POST_CHAIN_FORMAT = FORMAT_R16G16B16A16_SFLOAT;
 
 <*
- An owned colour image that a pass writes and a later pass samples.
-
- Image A and the two ping-pong images are the same three objects with the same
- three lifetimes, so they are one struct rather than nine fields on the chain.
- `Target` does not use it: its colour image carries `TRANSFER_SRC` for the
- readback and its depth image is not colour at all.
-*>
-struct ChainImage
-{
-	vk::Image image;
-	vk::ImageView view;
-	vk::Memory memory;
-}
-
-<*
- What a chain image is created for by default: a fragment pass writes it as an
- attachment and the next pass samples it.
-*>
-const vk::ImageUsageFlags CHAIN_IMAGE_USAGE = IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT;
-
-<*
- Creates the image, its memory and its view.
-
- `COLOR_ATTACHMENT` because a pass writes it and `SAMPLED` because the next one
- reads it, and nothing else: none of these is ever blitted or copied out. A
- chain with a compute pass in it adds `STORAGE`, because that pass writes its
- destination as a storage image - and only then, since a usage bit an image
- never needs can cost it its colour compression on some hardware. A pass's own
- images are storage and nothing else.
-
- @require self.image == null : `already created; free it first`
-*>
-fn void? ChainImage.init(&self, Gpu* gpu, vk::Format format, vk::Extent2D extent,
-	vk::ImageUsageFlags usage = CHAIN_IMAGE_USAGE)
-{
-	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format)
-		.setExtent({ .width = extent.width, .height = extent.height, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(usage)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		)
-		.setImage(self.image)
-		.build(gpu.handle)!;
-}
-
-<*
- `vk::Memory.free` destroys the image it was bound to, so the image must not be
- destroyed again here — the view is the only extra.
-
- Idempotent, because the chain frees images it may never have created.
-*>
-fn void ChainImage.free(&self, Gpu* gpu)
-{
-	gpu.retire_memory(self.memory, self.view);
-	*self = { };
-}
-
-fn bool ChainImage.exists(&self) => self.image != null;
-
-<*
  Everything one full-screen pass is handed, and nothing else.
 
  Each field is something a pass genuinely cannot get anywhere else:
@@ -298,7 +223,7 @@ interface FullscreenPass
  returns. P1 is allocated only from the second pass on, which is the difference
  between a script that set one post shader and one that built a chain.
 
- Nothing waits for the device before destroying anything: `ChainImage.free`
+ Nothing waits for the device before destroying anything: `GpuImage.free`
  retires its handles through `gpu/retire.c3` and they go two frames later. A
  stall here would be redundant as well as expensive — a resize has already
  recreated the swapchain, which waits idle because the images it replaces belong
@@ -330,7 +255,7 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 
 	// The scene stays linear and unclamped until the final display encode. Mesh
 	// pipelines declare this same format in `MeshPipeline.init`.
-	if (!self.scene.exists()) self.scene.init(gpu, POST_CHAIN_FORMAT, self.extent)!;
+	if (!self.scene.exists()) self.scene = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, CHAIN_IMAGE_USAGE)!;
 
 	// P0 from the first script pass on, because the tonemap reads a pong image
 	// rather than A once there is one; P1 only from the second. A chain that is
@@ -338,8 +263,8 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	// allocates neither, which is what keeps a tone curve one image rather than
 	// two.
 	vk::ImageUsageFlags usage = self.pong_usage();
-	if (stages >= 1 && !self.pong[0].exists()) self.pong[0].init(gpu, POST_CHAIN_FORMAT, self.extent, usage)!;
-	if (stages >= 2 && !self.pong[1].exists()) self.pong[1].init(gpu, POST_CHAIN_FORMAT, self.extent, usage)!;
+	if (stages >= 1 && !self.pong[0].exists()) self.pong[0] = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, usage)!;
+	if (stages >= 2 && !self.pong[1].exists()) self.pong[1] = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, usage)!;
 
 	self.ensure_post_images(gpu)!;
 	self.ensure_sampler(gpu)!;
@@ -398,26 +323,10 @@ fn void? PostPass.ensure_sampler(&self, Gpu* gpu)
 		// it would matter, because the two texels either side of a silhouette are
 		// metres apart and their average is a surface that does not exist.
 		// CLAMP_TO_EDGE for the colour sampler's reason.
-		self.depth_sampler = vk::samplerCreateInfo().setMagFilter(FILTER_NEAREST).setMinFilter(FILTER_NEAREST)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-			.setMinLod(0.0)
-			.setMaxLod(0.0)
-			.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
-			.build(gpu.handle)!;
+		self.depth_sampler = gpu.clamp_sampler(FILTER_NEAREST, BORDER_COLOR_INT_OPAQUE_BLACK)!;
 	}
 	if (self.sampler != null) return;
-	self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-		.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-		.setMipmapMode(SAMPLER_MIPMAP_MODE_LINEAR)
-		.setMinLod(0.0)
-		.setMaxLod(0.0)
-		.setBorderColor(BORDER_COLOR_INT_OPAQUE_BLACK)
-		.build(gpu.handle)!;
+	self.sampler = gpu.clamp_sampler(FILTER_LINEAR, BORDER_COLOR_INT_OPAQUE_BLACK)!;
 }
 
 fn void PostPass.destroy_images(&self, Gpu* gpu)
@@ -458,7 +367,7 @@ struct PostImage
 	uint width;
 	uint height;
 	bool per_frame;
-	ChainImage image;
+	GpuImage image;
 	vk::Extent2D extent;
 	bool fresh;
 	uint users;
@@ -576,7 +485,7 @@ fn void? PostImage.ensure(&self, Gpu* gpu, vk::Extent2D frame)
 	if (wanted.width == 0 || wanted.height == 0) return;
 	if (self.image.exists() && self.extent.width == wanted.width && self.extent.height == wanted.height) return;
 	self.image.free(gpu);
-	self.image.init(gpu, self.format.vk, wanted, IMAGE_USAGE_STORAGE_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
+	self.image = gpu.create_image_2d(self.format.vk, wanted, IMAGE_USAGE_STORAGE_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
 	self.extent = wanted;
 	self.fresh = true;
 }
@@ -1157,7 +1066,7 @@ fn void? PostPass.record_chain(
 		// own, and the whole difference between the two kinds lives in that one
 		// function. A side pass has no destination at all.
 		PostStage* stage   = self.stages[i];
-		ChainImage* dst    = stage.writes_output ? self.output_of(i) : null;
+		GpuImage* dst    = stage.writes_output ? self.output_of(i) : null;
 		// The first pass's `prev` is A, which makes a chain of one identical to the
 		// single pass this replaced: both bindings point at the same image, so
 		// `p.color == p.scene` and a shader written before the chain existed reads

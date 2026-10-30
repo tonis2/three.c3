@@ -299,6 +299,27 @@ fn int QueryIndex.key(&self, int x, int y, int z) @inline
 }
 
 <*
+ Runs the body once for each grid cell `box` covers, with the cell's key.
+ Nothing runs, and the answer is false, for a box over more than
+ `QUERY_MAX_CELLS` cells: that entry is kept out of the grid.
+*>
+macro bool QueryIndex.@each_cell(&self, collision::Aabb3 box; @body(sz key))
+{
+	int[<3>] lo  = self.clamp_cell(self.cell_of(box.min));
+	int[<3>] hi  = self.clamp_cell(self.cell_of(box.max));
+	long covered = (long)(hi.x - lo.x + 1) * (long)(hi.y - lo.y + 1) * (long)(hi.z - lo.z + 1);
+	if (covered > (long)QUERY_MAX_CELLS) return false;
+	for (int z = lo.z; z <= hi.z; z++)
+	{
+		for (int y = lo.y; y <= hi.y; y++)
+		{
+			for (int x = lo.x; x <= hi.x; x++) @body((sz)self.key(x, y, z));
+		}
+	}
+	return true;
+}
+
+<*
  `count` zeroes in a list that already exists, without freeing its storage.
 
  `List` has `reserve` and `push` and no `resize`, and a rebuild wants a slot per
@@ -469,8 +490,7 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 		collision::Aabb3 box = mesh.bounds.transform_matrix(node.world);
 		index.slot_entry[slot] = (int)index.entries.len();
 		index.entries.push({ .node = { .index = (uint)slot, .generation = node.generation }, .box = box });
-		world.expand_by_point(box.min);
-		world.expand_by_point(box.max);
+		world.expand_by_aabb(box);
 		extent_total += box.size();
 	}
 
@@ -529,21 +549,11 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	// counted nowhere, which keeps it out of `items` in pass four.
 	foreach (i, entry : index.entries)
 	{
-		int[<3>] lo  = index.clamp_cell(index.cell_of(entry.box.min));
-		int[<3>] hi  = index.clamp_cell(index.cell_of(entry.box.max));
-		long covered = (long)(hi.x - lo.x + 1) * (long)(hi.y - lo.y + 1) * (long)(hi.z - lo.z + 1);
-		if (covered > (long)QUERY_MAX_CELLS)
+		bool fits = index.@each_cell(entry.box; sz k)
 		{
-			index.oversized.push((uint)i);
-			continue;
-		}
-		for (int z = lo.z; z <= hi.z; z++)
-		{
-			for (int y = lo.y; y <= hi.y; y++)
-			{
-				for (int x = lo.x; x <= hi.x; x++) index.starts[(sz)index.key(x, y, z) + 1]++;
-			}
-		}
+			index.starts[k + 1]++;
+		};
+		if (!fits) index.oversized.push((uint)i);
 	}
 
 	// Pass three: the prefix sum, which turns the counts into where each cell's run
@@ -562,22 +572,11 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 
 	foreach (i, entry : index.entries)
 	{
-		int[<3>] lo  = index.clamp_cell(index.cell_of(entry.box.min));
-		int[<3>] hi  = index.clamp_cell(index.cell_of(entry.box.max));
-		long covered = (long)(hi.x - lo.x + 1) * (long)(hi.y - lo.y + 1) * (long)(hi.z - lo.z + 1);
-		if (covered > (long)QUERY_MAX_CELLS) continue;
-		for (int z = lo.z; z <= hi.z; z++)
+		index.@each_cell(entry.box; sz k)
 		{
-			for (int y = lo.y; y <= hi.y; y++)
-			{
-				for (int x = lo.x; x <= hi.x; x++)
-				{
-					sz k = (sz)index.key(x, y, z);
-					index.items[(sz)cursor[k]] = (uint)i;
-					cursor[k]++;
-				}
-			}
-		}
+			index.items[(sz)cursor[k]] = (uint)i;
+			cursor[k]++;
+		};
 	}
 }
 

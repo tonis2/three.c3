@@ -58,6 +58,8 @@ import three_tests::device;
 import vk;
 import std::core::test;
 import std::io::file;
+import gltf;
+import std::collections::list;
 import image;
 
 const String FIXTURE = "test/fixtures/textured.glb";
@@ -1827,6 +1829,62 @@ fn void a_vertex_colour_mask_takes_its_attribute_with_it() @test
 		test::@check(occurrences(json, `"COLOR_0":`) == 1,
 			"only the mesh that had one: %s", json);
 	};
+}
+
+<*
+ A colour stored as normalised bytes is exported as the colour it was.
+
+ `terrain` stores COLOR_0 as normalised unsigned bytes. Read as four floats, a
+ record of four bytes is a denormal or a NaN, so the exported stream has to come
+ out of the same reader the renderer uploads from.
+*>
+fn void a_byte_stored_colour_is_exported_as_its_value() @test
+{
+	String path = "build/export_byte_colour.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(three.load("test/fixtures/layered.glb").mesh("terrain")));
+			return scene.export("build/export_byte_colour.glb");
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+	};
+
+	List{float[<4>]} source = mesh_colours("test/fixtures/layered.glb", "terrain");
+	defer source.free();
+	List{float[<4>]} written = mesh_colours(path, "terrain");
+	defer written.free();
+	test::@check(source.len() > 0, "the fixture's terrain carries COLOR_0");
+	test::@check(written.len() == source.len(), "every vertex kept its colour: %d of %d", written.len(), source.len());
+	if (written.len() != source.len()) return;
+	foreach (i, colour : source)
+	{
+		float[<4>] gap = written[i] - colour;
+		test::@check(gap.length() < 1e-3, "vertex %d came back as %s rather than %s", i, written[i], colour);
+	}
+}
+
+// COLOR_0 of the first primitive of the mesh called `name`, through the importer's reader.
+fn List{float[<4>]} mesh_colours(String path, String name)
+{
+	List{float[<4>]} colours;
+	colours.init(mem, 16);
+	gltf::GltfStream? opened = gltf::open(path, mem);
+	if (catch opened) return colours;
+	gltf::GltfStream stream = opened;
+	defer stream.close();
+	if (catch stream.load_all_buffers()) return colours;
+	foreach (mesh : stream.gltf.meshes)
+	{
+		if (mesh.name != name || mesh.primitives.len() == 0) continue;
+		three::read_colors(&stream, mesh.primitives[0], &colours);
+		break;
+	}
+	return colours;
 }
 
 <*

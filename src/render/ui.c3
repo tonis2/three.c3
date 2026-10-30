@@ -494,6 +494,19 @@ enum UiNodeKind : char
 	MENU,
 	FILE_BROWSER,
 	DIALOG,
+	// A node editor: cards on a pannable plane, ports and wires between them.
+	// Its nodes, ports and wires are three lists like a Tree's rows; its
+	// children are `NODE_CARD`s.
+	NODE_GRAPH,
+	// One node's card in a graph, naming the node by index (`selected`), and
+	// holding that node's body.
+	NODE_CARD,
+	// A row of a card's body that a port sits level with, naming the port by
+	// index (`selected`).
+	PORT_ROW,
+	// A menu that opens at a point: the right-click menu, and a node editor's
+	// "add a node" search.
+	CONTEXT_MENU,
 }
 
 <*
@@ -525,6 +538,8 @@ fn bool UiNodeKind.interactive(self)
 		case MENU:
 		case FILE_BROWSER:
 		case DIALOG:
+		case NODE_GRAPH:
+		case CONTEXT_MENU:
 			return true;
 		default:
 			return false;
@@ -651,6 +666,23 @@ struct UiNodeSpec
 	String root;
 	String scheme;
 
+	// A `nodeGraph`'s view: which plane point is at its top-left, and the zoom.
+	// Stateful like a scroll offset — the user pans it — so a snapshot that does
+	// not name it (`has_view`) keeps where the user left it.
+	Vec2 pan;
+	float zoom;
+	bool has_view;
+	// A `contextMenu` with a search field. Its opening point rides on `margin`
+	// and whether it is open on `checked`.
+	bool searchable;
+	// A `nodeGraph`'s colours; zero alpha keeps cui's own. The plane and its
+	// grid, the cards, their headers and borders, the text, and the selection.
+	Vec4 graph_plane;
+	Vec4 graph_grid;
+	Vec4 graph_card;
+	Vec4 graph_header;
+	Vec4 graph_border;
+
 	// Which of the five stateful fields the snapshot actually named.
 	bool has_text;
 	bool has_value;
@@ -672,6 +704,11 @@ struct UiNodeSpec
 	bool on_dismiss;
 	bool on_choose;
 	bool on_pointer;
+	// A `nodeGraph`'s two: one handler for everything it reports, and the
+	// question it asks while a wire is dragged — see `UiGraphEvent`.
+	bool on_graph;
+	bool on_query;
+	bool on_view;
 }
 
 <*
@@ -705,6 +742,30 @@ enum UiEventKind : char
 	// `patch({ open: false })`, which is a thing the script already knows about;
 	// see `ui_dialog_close`.
 	DIALOG_DISMISS,
+	// Anything a `nodeGraph` reports; `UiEvent.graph` says what.
+	GRAPH,
+	// A `contextMenu` item chosen; `index` is which.
+	MENU_CHOOSE,
+}
+
+<*
+ What a GRAPH event is about. One event kind with a sub-kind rather than eleven
+ kinds, because the far side hands them all to one handler that fans out by
+ name — see `UiEvent` for which fields each one fills.
+*>
+enum UiGraphEvent : char
+{
+	SELECT, // target = node or -1, item = SelectMode
+	BOX, // list = nodes, item = SelectMode
+	MOVE, // at = delta in plane units, flag = done
+	CONNECT, // index = output port, item = input port; also the query
+	DISCONNECT, // index = wire
+	WIRE_SELECT, // index = wire, item = SelectMode
+	WIRE_DROPPED, // index = port, at = plane, screen
+	CONTEXT, // index = GraphTarget, target = its index or -1, at = plane, screen
+	COMMAND, // index = GraphCommand
+	ADD, // at = plane, screen
+	VIEW, // at = pan, value = zoom
 }
 
 <*
@@ -755,6 +816,13 @@ struct UiEvent
 	// only — it is the widget's own buffer and the next keystroke rewrites it,
 	// or a temporary that the frame's pool takes back.
 	String text;
+	// GRAPH: what about, and the fields only it needs — a signed index (a
+	// click on empty space is node -1), a point on screen beside `at` on the
+	// plane, and a box's nodes, borrowed for the call.
+	UiGraphEvent graph;
+	sz target;
+	Vec2 screen;
+	usz[] list;
 }
 
 <*
@@ -762,6 +830,55 @@ struct UiEvent
  every callback, which is what the tests without a script want.
 *>
 alias UiListener = fn void(void* host, uint node, UiEvent event);
+
+<*
+ One node of a `nodeGraph` as the binding hands it over — this project's own
+ vocabulary, converted to cui's in `push_graph_node`. `flags` are bits:
+ selected 1, error 2, running 4, muted 8.
+*>
+struct UiGraphNode
+{
+	Vec2 pos;
+	float width;
+	String title;
+	String tag;
+	Vec4 header;
+	uint flags;
+	float progress;
+}
+
+struct UiGraphPort
+{
+	usz node;
+	bool output;
+	String label;
+	Vec4 color;
+	bool square;
+	bool hollow;
+}
+
+struct UiGraphWire
+{
+	usz from;
+	usz to;
+	Vec4 color;
+	bool selected;
+}
+
+struct UiMenuEntry
+{
+	String label;
+	String category;
+	String hint;
+	bool disabled;
+}
+
+<*
+ A question a widget asks and waits on: a `nodeGraph` asking whether a wire may
+ run between two ports, while it is being dragged. A layer with none answers
+ yes.
+*>
+alias UiQuery = fn bool(void* host, uint node, UiEvent event);
 
 <*
  One live node: its element, its key, and everything the widget borrows.
@@ -799,6 +916,12 @@ struct UiNode
 	// pushes are happening; `repoint` is where the pointers are filled in.
 	List{cui::widgets::Menu} menus;
 	List{cui::widgets::MenuItem} items;
+	// A `nodeGraph`'s three lists and a `contextMenu`'s entries, borrowed the
+	// same way; their strings are in `listed`.
+	List{cui::widgets::GraphNode} graph_nodes;
+	List{cui::widgets::GraphPort} graph_ports;
+	List{cui::widgets::GraphWire} graph_wires;
+	List{cui::widgets::ContextMenuItem} entries;
 
 	// A `fileBrowser`'s confinement, copied off the spec and pointing into
 	// `owned` — the directory it may not climb out of and the prefix its paths
@@ -835,6 +958,10 @@ fn void UiNode.free(&self)
 	self.ops.free();
 	self.menus.free();
 	self.items.free();
+	self.graph_nodes.free();
+	self.graph_ports.free();
+	self.graph_wires.free();
+	self.entries.free();
 	if (self.key) self.key.free();
 	*self = { };
 }
@@ -855,6 +982,10 @@ fn void UiNode.drop_list(&self)
 	self.ops.clear();
 	self.menus.clear();
 	self.items.clear();
+	self.graph_nodes.clear();
+	self.graph_ports.clear();
+	self.graph_wires.clear();
+	self.entries.clear();
 }
 
 <*
@@ -968,6 +1099,7 @@ struct UiLayer
 	// tests build trees with no script behind them.
 	UiListener listener;
 	void* host;
+	UiQuery query;
 	// True only while `process_input` is on the stack. A handler that calls
 	// `three.ui.set` would otherwise restructure the tree cui is mid-dispatch on,
 	// which is the one thing cui's own docs say a handler must not do.
@@ -1008,6 +1140,9 @@ struct UiLayer
 	// not also orbit the camera or reach a script.
 	bool wants_pointer;
 	bool wants_keys;
+	// The held keys a widget consumed the press of: not the script's until
+	// they are let go, though the rest of the keyboard is. See `Ui.key_taken`.
+	KeyBits taken;
 
 	// Held keys, rebuilt each `feed` from the window's bitset. A field so the
 	// list's storage is reused instead of reallocated sixty times a second.
@@ -1218,6 +1353,17 @@ fn void UiLayer.on_event(&self, UiListener listener, void* host)
 	self.host = host;
 }
 
+<*
+ Installs the answerer for the questions widgets ask (see `UiQuery`), handed
+ the same host as the listener.
+
+ @param query : `Called from inside feed. Null answers every question yes.`
+*>
+fn void UiLayer.on_query(&self, UiQuery query)
+{
+	self.query = query;
+}
+
 // ============================================================================
 // The one-line overlay
 // ============================================================================
@@ -1419,6 +1565,13 @@ fn void repoint_node(UiNode* node) @local
 			node.element.widget_as(cui::widgets::MenuBar).menus = node.menus.array_view();
 		case FILE_BROWSER:
 			node.element.widget_as(cui::widgets::FileBrowser).mask = node.options.array_view();
+		case NODE_GRAPH:
+			cui::widgets::NodeGraph* graph = node.element.widget_as(cui::widgets::NodeGraph);
+			graph.nodes = node.graph_nodes.array_view();
+			graph.ports = node.graph_ports.array_view();
+			graph.wires = node.graph_wires.array_view();
+		case CONTEXT_MENU:
+			node.element.widget_as(cui::widgets::ContextMenu).items = node.entries.array_view();
 		default:
 			break;
 	}
@@ -1805,6 +1958,22 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				// every rebuild snaps a moved panel back into the middle.
 				dragged_to = shown.at;
 				dragged = shown.placed;
+			case NODE_GRAPH:
+				// Where the user panned and zoomed to, unless the snapshot says.
+				if (!spec.has_view)
+				{
+					cui::View2D was = prior.element.widget_as(cui::widgets::NodeGraph).view;
+					spec.pan = was.pan;
+					spec.zoom = was.zoom;
+				}
+			case CONTEXT_MENU:
+				// An open menu stays open, where it was, across a rebuild.
+				cui::widgets::ContextMenu* menu = prior.element.widget_as(cui::widgets::ContextMenu);
+				if (!spec.has_checked)
+				{
+					spec.checked = menu.open;
+					spec.margin = menu.at;
+				}
 			default:
 				break;
 		}
@@ -1819,6 +1988,10 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	node.ops.init(mem, 0);
 	node.menus.init(mem, 0);
 	node.items.init(mem, 0);
+	node.graph_nodes.init(mem, 0);
+	node.graph_ports.init(mem, 0);
+	node.graph_wires.init(mem, 0);
+	node.entries.init(mem, 0);
 	if (spec.key.len > 0)
 	{
 		node.key.init(mem, spec.key.len);
@@ -2244,6 +2417,42 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 					},
 				}
 			);
+		case NODE_GRAPH:
+			element = self.ui.@node(
+				(cui::widgets::NodeGraph){
+					.size = spec.size,
+					.view = { .pan = spec.pan, .zoom = spec.zoom },
+					.style = ui_graph_style(spec),
+					.on_select = spec.on_graph ? &ui_graph_select : null,
+					.on_box = spec.on_graph ? &ui_graph_box : null,
+					.on_move = spec.on_graph ? &ui_graph_move : null,
+					.can_connect = spec.on_query ? &ui_graph_can_connect : null,
+					.on_connect = spec.on_graph ? &ui_graph_connect : null,
+					.on_disconnect = spec.on_graph ? &ui_graph_disconnect : null,
+					.on_wire_select = spec.on_graph ? &ui_graph_wire_select : null,
+					.on_wire_dropped = spec.on_graph ? &ui_graph_wire_dropped : null,
+					.on_context = spec.on_graph ? &ui_graph_context : null,
+					.on_command = spec.on_graph ? &ui_graph_command : null,
+					.on_add_request = spec.on_graph ? &ui_graph_add : null,
+					.on_view = spec.on_view ? &ui_graph_view : null,
+				}
+			);
+		case NODE_CARD:
+			element = self.ui.@node((cui::widgets::NodeCard){ .node = spec.selected });
+		case PORT_ROW:
+			element = self.ui.@node((cui::widgets::PortRow){ .port = spec.selected });
+		case CONTEXT_MENU:
+			element = self.ui.@node(
+				(cui::widgets::ContextMenu){
+					.searchable = spec.searchable,
+					.placeholder = suffix,
+					.width = spec.size.x,
+					.max_height = spec.size.y,
+					.style = ui_select_style(spec.text_size),
+					.on_choose = spec.on_choose ? &ui_menu_choose : null,
+					.on_dismiss = spec.on_dismiss ? &ui_menu_dismiss : null,
+				}
+			);
 	}
 
 	// Decoration is transparent to the pointer, and it has to be opt-out rather
@@ -2295,6 +2504,13 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	if (spec.kind == UiNodeKind.DIALOG && spec.checked)
 	{
 		element.widget_as(cui::widgets::Dialog).set_open(element, true);
+	}
+
+	// Opened through `open_at`, which is where the highlight and the search
+	// are reset and the keyboard is taken.
+	if (spec.kind == UiNodeKind.CONTEXT_MENU && spec.checked)
+	{
+		element.widget_as(cui::widgets::ContextMenu).open_at(element, spec.margin);
 	}
 
 	self.building[index].element = element;
@@ -2450,6 +2666,127 @@ fn void UiLayer.push_op(&self, uint node, UiOp op)
 	held.ops.push(op);
 }
 
+<*
+ One node of a `nodeGraph`, in index order — the index wires and cards name it
+ by. Its strings are copied like a row's.
+
+ @param node : `The index push_node answered with.`
+*>
+fn void UiLayer.push_graph_node(&self, uint node, UiGraphNode entry)
+{
+	UiNode* held = self.at(node);
+	if (held == null) return;
+	held.graph_nodes.push({
+		.pos = entry.pos,
+		.width = entry.width,
+		.title = entry.title.len > 0 ? held.keep_listed(entry.title) : "",
+		.tag = entry.tag.len > 0 ? held.keep_listed(entry.tag) : "",
+		.header = (cui::Color)entry.header,
+		.flags = {
+			.selected = (entry.flags & 1) != 0,
+			.error = (entry.flags & 2) != 0,
+			.running = (entry.flags & 4) != 0,
+			.muted = (entry.flags & 8) != 0,
+		},
+		.progress = entry.progress,
+	});
+}
+
+<*
+ One port of a `nodeGraph`, in index order. A port naming a node that is not
+ there is dropped by the widget, not refused here.
+
+ @param node : `The index push_node answered with.`
+*>
+fn void UiLayer.push_graph_port(&self, uint node, UiGraphPort entry)
+{
+	UiNode* held = self.at(node);
+	if (held == null) return;
+	held.graph_ports.push({
+		.node = entry.node,
+		.output = entry.output,
+		.label = entry.label.len > 0 ? held.keep_listed(entry.label) : "",
+		.color = (cui::Color)entry.color,
+		.shape = entry.square ? cui::widgets::PortShape.SQUARE : cui::widgets::PortShape.CIRCLE,
+		.hollow = entry.hollow,
+	});
+}
+
+<*
+ One wire of a `nodeGraph`.
+
+ @param node : `The index push_node answered with.`
+*>
+fn void UiLayer.push_graph_wire(&self, uint node, UiGraphWire entry)
+{
+	UiNode* held = self.at(node);
+	if (held == null) return;
+	held.graph_wires.push({ .from = entry.from, .to = entry.to, .color = (cui::Color)entry.color, .selected = entry.selected });
+}
+
+<*
+ Empties the lists of a `nodeGraph` a patch is about to replace, and keeps the
+ others: the three share the node's strings and a reset frees them together,
+ so a list that stays is copied aside — its strings into the frame's temp
+ memory — and pushed back.
+
+ @param node : `The index node_for answered with.`
+*>
+fn void UiLayer.reset_graph(&self, uint node, bool nodes, bool ports, bool wires)
+{
+	UiNode* live = self.at(node);
+	if (live == null) return;
+	cui::widgets::GraphNode[] kept_nodes;
+	cui::widgets::GraphPort[] kept_ports;
+	cui::widgets::GraphWire[] kept_wires;
+	if (!nodes)
+	{
+		kept_nodes = @tclone_slice(live.graph_nodes.array_view());
+		foreach (&n : kept_nodes)
+		{
+			n.title = n.title.copy(tmem);
+			n.tag = n.tag.copy(tmem);
+		}
+	}
+	if (!ports)
+	{
+		kept_ports = @tclone_slice(live.graph_ports.array_view());
+		foreach (&p : kept_ports) p.label = p.label.copy(tmem);
+	}
+	if (!wires) kept_wires = @tclone_slice(live.graph_wires.array_view());
+
+	live.drop_list();
+	foreach (n : kept_nodes)
+	{
+		n.title = n.title.len > 0 ? live.keep_listed(n.title) : "";
+		n.tag = n.tag.len > 0 ? live.keep_listed(n.tag) : "";
+		live.graph_nodes.push(n);
+	}
+	foreach (p : kept_ports)
+	{
+		p.label = p.label.len > 0 ? live.keep_listed(p.label) : "";
+		live.graph_ports.push(p);
+	}
+	foreach (w : kept_wires) live.graph_wires.push(w);
+}
+
+<*
+ One entry of a `contextMenu`, in display order.
+
+ @param node : `The index push_node answered with.`
+*>
+fn void UiLayer.push_context_item(&self, uint node, UiMenuEntry entry)
+{
+	UiNode* held = self.at(node);
+	if (held == null) return;
+	held.entries.push({
+		.label = entry.label.len > 0 ? held.keep_listed(entry.label) : "",
+		.category = entry.category.len > 0 ? held.keep_listed(entry.category) : "",
+		.hint = entry.hint.len > 0 ? held.keep_listed(entry.hint) : "",
+		.disabled = entry.disabled,
+	});
+}
+
 // ============================================================================
 // Patching one node
 // ============================================================================
@@ -2485,6 +2822,12 @@ struct UiPatch
 	float max;
 	bool has_size;
 	Vec2 size;
+	// A `nodeGraph`'s view, and where a `contextMenu` opens.
+	bool has_view;
+	Vec2 pan;
+	float zoom;
+	bool has_at;
+	Vec2 at;
 }
 
 <*
@@ -2672,6 +3015,31 @@ fn void UiLayer.patch(&self, uint node, UiPatch fields)
 			// neither field wants no invalidation at all — the fall-through below
 			// would repaint the backdrop and leave the panel exactly as it was.
 			return;
+		case NODE_GRAPH:
+			// A pan or zoom from the script: one matrix write, the cheap path.
+			if (fields.has_view)
+			{
+				cui::widgets::NodeGraph* graph = elem.widget_as(cui::widgets::NodeGraph);
+				graph.set_view(elem, { .pan = fields.pan, .zoom = fields.zoom, .zoom_min = graph.view.zoom_min, .zoom_max = graph.view.zoom_max });
+			}
+			return;
+		case CONTEXT_MENU:
+			// Open and closed are a patch, like a dialog's: a menu opened by a
+			// right-click is a value change, and a rebuild would lose what has
+			// been typed into its search.
+			cui::widgets::ContextMenu* menu = elem.widget_as(cui::widgets::ContextMenu);
+			if (fields.has_checked)
+			{
+				if (fields.checked)
+				{
+					menu.open_at(elem, fields.has_at ? fields.at : menu.at);
+				}
+				else
+				{
+					menu.close(elem);
+				}
+			}
+			return;
 		default:
 			break;
 	}
@@ -2733,6 +3101,13 @@ fn void UiLayer.relist(&self, uint node)
 	{
 		cui::widgets::FileBrowser* browser = live.element.widget_as(cui::widgets::FileBrowser);
 		if (browser.directory.data() != null) browser.rescan();
+	}
+
+	// A graph re-measures its cards: a list that changed length is new data
+	// their cached answers were not for.
+	if (live.kind == UiNodeKind.NODE_GRAPH)
+	{
+		live.element.widget_as(cui::widgets::NodeGraph).refresh(live.element);
 	}
 
 	live.element.request_layout();
@@ -2898,6 +3273,128 @@ fn void ui_typed(cui::Ui* ui, String text) @local
 fn void ui_submit(cui::Ui* ui, String text) @local
 {
 	ui_signal(ui, UiNodeKind.TEXTFIELD, { .kind = UiEventKind.TEXT_SUBMIT, .text = text });
+}
+
+// ----------------------------------------------------------------------------
+// A node graph and a context menu, on their way out
+
+<*
+ A `nodeGraph`'s look for a `textSize`: the default, with the card's rows and
+ header scaled to the text. Zero is the default whole.
+*>
+fn cui::widgets::NodeGraphStyle ui_graph_style(UiNodeSpec spec) @local
+{
+	cui::widgets::NodeGraphStyle s = cui::widgets::DEFAULT_NODE_GRAPH_STYLE;
+	if (spec.text_size > 0)
+	{
+		float k = spec.text_size / s.text_size;
+		s.text_size = spec.text_size;
+		s.header_height *= k;
+		s.row_height *= k;
+		s.pad *= k;
+		s.port_radius *= k;
+	}
+	s.plane.background = ui_color(spec.graph_plane, s.plane.background);
+	if (spec.graph_grid.w > 0)
+	{
+		s.plane.grid = (cui::Color)spec.graph_grid;
+		// The major lines a step brighter than the minor ones, as cui's own are.
+		s.plane.grid_major = (cui::Color)(Vec4){ spec.graph_grid.x, spec.graph_grid.y, spec.graph_grid.z, math::min(spec.graph_grid.w * 2, 1.0f) };
+	}
+	s.card = ui_color(spec.graph_card, s.card);
+	s.header = ui_color(spec.graph_header, s.header);
+	s.card_border = ui_color(spec.graph_border, s.card_border);
+	s.title = ui_color(spec.text_color, s.title);
+	s.label = ui_color(spec.text_color, s.label);
+	s.selected = ui_color(spec.accent, s.selected);
+	s.box_border = ui_color(spec.accent, s.box_border);
+	if (spec.accent.w > 0) s.box_fill = (cui::Color)(Vec4){ spec.accent.x, spec.accent.y, spec.accent.z, 0.12 };
+	return s;
+}
+
+fn void ui_graph(cui::Ui* ui, UiEvent event) @local
+{
+	event.kind = UiEventKind.GRAPH;
+	ui_signal(ui, UiNodeKind.NODE_GRAPH, event);
+}
+
+fn void ui_graph_select(cui::Ui* ui, sz node, cui::SelectMode mode) @local
+{
+	ui_graph(ui, { .graph = SELECT, .target = node, .item = (usz)mode.ordinal });
+}
+
+fn void ui_graph_box(cui::Ui* ui, usz[] nodes, cui::SelectMode mode) @local
+{
+	ui_graph(ui, { .graph = BOX, .list = nodes, .item = (usz)mode.ordinal });
+}
+
+fn void ui_graph_move(cui::Ui* ui, Vec2 delta, bool done) @local
+{
+	ui_graph(ui, { .graph = MOVE, .at = delta, .flag = done });
+}
+
+fn void ui_graph_connect(cui::Ui* ui, usz from, usz to) @local
+{
+	ui_graph(ui, { .graph = CONNECT, .index = from, .item = to });
+}
+
+fn void ui_graph_disconnect(cui::Ui* ui, usz wire) @local
+{
+	ui_graph(ui, { .graph = DISCONNECT, .index = wire });
+}
+
+fn void ui_graph_wire_select(cui::Ui* ui, usz wire, cui::SelectMode mode) @local
+{
+	ui_graph(ui, { .graph = WIRE_SELECT, .index = wire, .item = (usz)mode.ordinal });
+}
+
+fn void ui_graph_wire_dropped(cui::Ui* ui, usz port, Vec2 plane, Vec2 screen) @local
+{
+	ui_graph(ui, { .graph = WIRE_DROPPED, .index = port, .at = plane, .screen = screen });
+}
+
+fn void ui_graph_context(cui::Ui* ui, cui::widgets::GraphTarget target, sz index, Vec2 plane, Vec2 screen) @local
+{
+	ui_graph(ui, { .graph = CONTEXT, .index = (usz)target.ordinal, .target = index, .at = plane, .screen = screen });
+}
+
+fn void ui_graph_command(cui::Ui* ui, cui::widgets::GraphCommand command) @local
+{
+	ui_graph(ui, { .graph = COMMAND, .index = (usz)command.ordinal });
+}
+
+fn void ui_graph_add(cui::Ui* ui, Vec2 plane, Vec2 screen) @local
+{
+	ui_graph(ui, { .graph = ADD, .at = plane, .screen = screen });
+}
+
+fn void ui_graph_view(cui::Ui* ui, cui::View2D view) @local
+{
+	ui_graph(ui, { .graph = VIEW, .at = view.pan, .value = view.scale() });
+}
+
+<*
+ Whether a wire may run from `from` to `to`, asked of the script while one is
+ dragged. Yes when nobody is answering, which is the graph's own default too.
+*>
+fn bool ui_graph_can_connect(cui::Ui* ui, usz from, usz to) @local
+{
+	UiLayer* layer = ui.inherit(UiLayer) ?? null;
+	if (layer == null || layer.query == null) return true;
+	int at = layer.locate(ui.captured, UiNodeKind.NODE_GRAPH);
+	if (at < 0) at = layer.locate(ui.hovered, UiNodeKind.NODE_GRAPH);
+	if (at < 0) return true;
+	return layer.query(layer.host, (uint)at, { .kind = UiEventKind.GRAPH, .graph = CONNECT, .index = from, .item = to });
+}
+
+fn void ui_menu_choose(cui::Ui* ui, usz index) @local
+{
+	ui_signal(ui, UiNodeKind.CONTEXT_MENU, { .kind = UiEventKind.MENU_CHOOSE, .index = index });
+}
+
+fn void ui_menu_dismiss(cui::Ui* ui) @local
+{
+	ui_signal(ui, UiNodeKind.CONTEXT_MENU, { .kind = UiEventKind.DISMISS });
 }
 
 fn void ui_confirm(cui::Ui* ui) @local
@@ -3198,7 +3695,17 @@ fn void UiLayer.feed(&self, Cursor cursor, KeyBits keys, String text, float dt_m
 	self.dispatching = false;
 
 	self.wants_pointer = self.ui.hovered != null || self.ui.captured != null;
-	self.wants_keys    = self.ui.focused != null;
+	// The whole keyboard only while a text field has it: typing is every key,
+	// and WASD under a name being typed is the case this exists for. Anything
+	// else that is focused — a node editor, a menu — takes the keys it uses and
+	// no others, so a shortcut it does nothing with still reaches the script.
+	cui::Element* focused = self.ui.focused;
+	self.wants_keys = focused != null && focused.is_widget(cui::widgets::TextField);
+	self.taken = { };
+	foreach (key : c3w::EventKey::values)
+	{
+		if (keys.has(key) && self.ui.key_taken((cui::Key)key.code)) self.taken.set(key);
+	}
 }
 
 <*

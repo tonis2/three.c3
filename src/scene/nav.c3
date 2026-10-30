@@ -373,10 +373,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 			// so it is rasterized and simply never counts as floor.
 			bool standable = area > 1e-9f && normal.y / area >= cos_limit;
 
-			collision::Aabb3 box = collision::NEW_AABB3;
-			box.expand_by_point(tri[0]);
-			box.expand_by_point(tri[1]);
-			box.expand_by_point(tri[2]);
+			collision::Aabb3 box = triangle_box(tri);
 
 			int lo_x = math::clamp((int)math::floor((box.min.x - origin.x) / cell + 0.5f) - 1, 0, nx - 1);
 			int hi_x = math::clamp((int)math::floor((box.max.x - origin.x) / cell + 0.5f) + 1, 0, nx - 1);

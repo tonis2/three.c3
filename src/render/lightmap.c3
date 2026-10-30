@@ -49,7 +49,7 @@
  ## Invalidation
 
  A tile is a fact about a light and a surface, so it goes stale when either
- moves. `Scene.dirty_lightmap` marks the copy beside every bump of
+ moves. `Scene.static_changed` marks the copy with every bump of
  `Scene.static_revision` — the same events the cached shadow map is invalidated
  by — and `JsRuntime.set_lighting` marks what a baked light's own change reaches.
  `MeshPass.resolve_lightmap` spreads a moved receiver's change to the receivers
@@ -189,7 +189,19 @@ fn bool LightmapMaterialKey.equals(self, LightmapMaterialKey other) @operator(==
 
 alias LightmapMaterialSignatures = HashMap{LightmapMaterialKey, ulong};
 
-fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
+<*
+ What a tile's texels depend on besides geometry and lights, folded.
+
+ Two answers to two questions. In a session, a texture is its slot and the
+ install that filled it — so a texture loaded or freed anywhere else changes
+ nothing here, where a process-wide counter used to re-bake every tile. `lasting`
+ is the one written to a file and compared on the next launch, where slots are
+ handed out again in whatever order that run loads in: a texture is then its
+ pixels, by the content hash the loader already keeps.
+
+ @param lasting : `The signature a cache file stores, rather than this session's.`
+*>
+fn ulong MeshPass.lightmap_material_signature(&self, Node* node, bool lasting = false)
 {
 	Material* material = self.material(node.material);
 	GpuMesh* mesh = self.assets.mesh(node.asset, node.mesh);
@@ -211,9 +223,33 @@ fn ulong MeshPass.lightmap_material_signature(&self, Node* node)
 	signature = hash_bytes(signature, &mesh.base_color, float[4]::size);
 	signature = hash_bytes(signature, &node.color, float[4]::size);
 	uint[DRAW_TEXTURE_INDICES] textures = texture_index_row(&self.assets, material, mesh);
-	signature = hash_bytes(signature, &textures, uint[DRAW_TEXTURE_INDICES]::size);
-	// A decoded image may replace its contents without changing its bindless slot.
-	return hash_bytes(signature, &self.assets.revision, uint::size);
+	uint fallback = self.assets.texture_fallback_slot();
+	foreach (slot : textures)
+	{
+		if (slot == fallback || !self.assets.texture_alive((int)slot))
+		{
+			signature = @hash_value(signature, uint::max);
+			continue;
+		}
+		SharedTexture* shared = &self.assets.textures[slot];
+		if (!lasting)
+		{
+			signature = @hash_value(signature, slot);
+			signature = @hash_value(signature, shared.installed);
+			continue;
+		}
+		// A computed image has no hash and no fixed contents; it is the same image
+		// to a file only in that it is computed at this binding.
+		Texture* texture = &shared.texture;
+		signature = @hash_value(signature, texture.storage != FORMAT_UNDEFINED);
+		signature = @hash_value(signature, texture.hash);
+		signature = @hash_value(signature, texture.width);
+		signature = @hash_value(signature, texture.height);
+		signature = @hash_value(signature, texture.levels);
+		signature = @hash_value(signature, texture.nearest);
+		signature = hash_bytes(signature, &texture.format, TextureFormat::size);
+	}
+	return signature;
 }
 
 struct LightmapMaterialPipeline
@@ -280,6 +316,9 @@ struct LightmapOptions
 	usz max_bytes;
 	// How much bake work a frame may do to catch up with the dirty tiles.
 	float budget_ms;
+	// Bake one budget's worth now and leave the rest dirty, for the catch-up to
+	// finish over the frames after — see `MeshPass.bake_lightmaps`.
+	bool progressive;
 }
 
 const LightmapOptions DEFAULT_LIGHTMAP_OPTIONS = {
@@ -296,6 +335,8 @@ struct LightmapResult
 	usz texels;
 	usz bytes;
 	double ms;
+	// Tiles a progressive bake left for the catch-up. Zero after a whole one.
+	uint dirty;
 }
 
 struct Lightmap
@@ -566,7 +607,7 @@ fn collision::Aabb3 MeshPass.node_lightmap_box(&self, Node* node)
 		? self.assets.mesh(node.asset, node.mesh) : null;
 	if (mesh == null)
 	{
-		Vec3 at = { node.world.m[12], node.world.m[13], node.world.m[14] };
+		Vec3 at = node.world_position();
 		return { at, at };
 	}
 	return self.scene.node_world_box(node, mesh);
@@ -733,9 +774,7 @@ fn void MeshPass.bake_dirty_tiles(&self, Gpu* gpu)
 
 fn usz Lightmap.bytes(&self) => self.image != null ? (usz)self.memory.size : 0;
 
-fn vk::DescriptorImageInfo Lightmap.descriptor(&self) => {
-	.sampler = self.sampler, .imageView = self.view, .imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-};
+fn vk::DescriptorImageInfo Lightmap.descriptor(&self) => sampled_with(self.sampler, self.view);
 
 fn void Lightmap.free_buffers(&self)
 {
@@ -855,35 +894,18 @@ fn void? Lightmap.ensure_image(&self, Gpu* gpu, uint side)
 	if (self.image != null && self.side == side) return;
 	self.free_image(gpu);
 
-	defer catch
-	{
-		if (self.view != null) vk::destroyImageView(gpu.handle, self.view, null);
-		if (self.memory.image != null) { self.memory.free(); }
-		else if (self.image != null) { vk::destroyImage(gpu.handle, self.image, null); }
-		self.image = (vk::Image)null;
-		self.view = (vk::ImageView)null;
-		self.memory = { };
-	}
-
-	self.image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(LIGHTMAP_FORMAT)
-		.setExtent({ .width = side, .height = side, .depth = 1 })
-		.setMipLevels(1).setArrayLayers(1).setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT
-			| IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED).build(gpu.handle)!;
-	self.memory = vk::create_image_buffer(self.image, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-	self.view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(LIGHTMAP_FORMAT)
-		.setSubresourceRange(COLOR_LEVEL).setImage(self.image).build(gpu.handle)!;
+	GpuImage atlas = gpu.create_image_2d(LIGHTMAP_FORMAT, { side, side }, IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+		| IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
+	defer catch atlas.destroy(gpu);
 	if (self.sampler == null)
 	{
 		// Linear and clamped: the tile is a picture of a surface, so it wants
 		// filtering, and the margin is what keeps a tap inside its own tile.
-		self.sampler = vk::samplerCreateInfo().setMagFilter(FILTER_LINEAR).setMinFilter(FILTER_LINEAR)
-			.setAddressModeU(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setAddressModeV(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-			.setAddressModeW(SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).setMipmapMode(SAMPLER_MIPMAP_MODE_NEAREST)
-			.setMinLod(0).setMaxLod(0).setBorderColor(BORDER_COLOR_FLOAT_TRANSPARENT_BLACK).build(gpu.handle)!;
+		self.sampler = gpu.clamp_sampler(FILTER_LINEAR, BORDER_COLOR_FLOAT_TRANSPARENT_BLACK)!;
 	}
+	self.image = atlas.image;
+	self.view = atlas.view;
+	self.memory = atlas.memory;
 	self.side = side;
 }
 
@@ -892,11 +914,7 @@ fn void? Lightmap.ensure_image(&self, Gpu* gpu, uint side)
 // anything else.
 fn float lightmap_area_scale(Matrix4f world) @local
 {
-	Matrix3f linear = {
-		.m = { world.m[0], world.m[1], world.m[2], world.m[4], world.m[5], world.m[6],
-			world.m[8], world.m[9], world.m[10] }
-	};
-	float det = math::abs(linear.determinant());
+	float det = math::abs(linear_determinant(world));
 	if (det <= 1e-12f) return 0;
 	float side = (float)math::pow((double)det, 1.0 / 3.0);
 	return side * side;
@@ -1074,6 +1092,14 @@ fn uint MeshPass.lightmap_receivers(&self, uint[] slots, float[] wanted, float d
  Every node's tile is cleared first, so a second call replaces the first rather
  than leaving copies pointing into an atlas that has been repacked.
 
+ `options.progressive` packs the same atlas but renders only the first batch the
+ catch-up's budget pays for, and marks every other tile dirty. Those are
+ `bake_dirty_tiles`' work over the frames that follow, into the rectangles the
+ packing gave them, and until then they shade in real time, as any dirty tile
+ does. A scene whose whole bake takes seconds keeps drawing while it fills in,
+ rather than holding one frame for all of it; `stats().lightmapDirty` reaching
+ zero is when it is done, and what a save has to wait for.
+
  @return ? LIGHTMAP_NO_DEVICE : `No GPU. Nothing to run the bake on.`
  @return ? LIGHTMAP_NO_ATLAS : `Nothing eligible, or nothing that fits the byte budget.`
 *>
@@ -1156,23 +1182,50 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 	if (side == 0) return LIGHTMAP_NO_ATLAS~;
 
 	map.ensure_image(gpu, side)!;
-	self.record_lightmap(gpu, tiles.array_view(), side, whole: true)!;
+	// A progressive bake's first batch is sized the way the catch-up sizes one, so
+	// this frame pays what each of the following frames will. Still a whole
+	// submission: it is what clears the atlas the rest are drawn into.
+	sz first = tiles.len();
+	if (options.progressive)
+	{
+		// From the seed rather than what the last atlas's catch-up learned: that
+		// was a different packing, and a number grown on a few small tiles would
+		// take this whole bake into the first frame.
+		map.batch_texels = LIGHTMAP_BATCH_TEXELS;
+		usz texels = 0;
+		first = 0;
+		while (first < tiles.len())
+		{
+			usz one = (usz)tiles[first].size * (usz)tiles[first].size;
+			if (first > 0 && texels + one > map.batch_texels) break;
+			texels += one;
+			first++;
+		}
+	}
+	self.record_lightmap(gpu, tiles.array_view()[0:first], side, whole: true)!;
 
 	// The tiles the copies read, written back only once the bake has landed — a
 	// node pointing into an atlas the submission did not fill would draw whatever
-	// was there before.
+	// was there before. The ones it did not fill wait dirty for the catch-up.
 	float inv = 1.0f / (float)side;
-	foreach (&tile : tiles)
+	foreach (i, &tile : tiles)
 	{
+		Node* node = &self.scene.nodes[tile.node];
+		tile.material_signature = self.lightmap_material_signature(node);
+		if ((sz)i >= first)
+		{
+			node.lightmap_dirty = true;
+			continue;
+		}
 		uint inner = tile.size - 2 * LIGHTMAP_TILE_PAD;
-		self.scene.nodes[tile.node].lightmap = {
+		node.lightmap = {
 			(float)(tile.x + LIGHTMAP_TILE_PAD) * inv,
 			(float)(tile.y + LIGHTMAP_TILE_PAD) * inv,
 			(float)inner * inv,
 			(float)inner * inv,
 		};
-		tile.material_signature = self.lightmap_material_signature(&self.scene.nodes[tile.node]);
 	}
+	map.dirty = (uint)(tiles.len() - first);
 	map.adopt(tiles.array_view(), self.scene.id, density * scale);
 	map.live = true;
 	map.signature = self.baked_light_signature();
@@ -1191,6 +1244,7 @@ fn LightmapResult? MeshPass.bake_lightmaps(&self, LightmapOptions options)
 		.texels = texels,
 		.bytes = map.bytes(),
 		.ms = ms,
+		.dirty = map.dirty,
 	};
 	return map.last;
 }
@@ -1229,6 +1283,29 @@ fn void lightmap_sort_tiles(LightmapTile[] tiles) @local
 		}
 		tiles[j] = value;
 	}
+}
+
+<*
+ Whatever the linked program kept. Under the bake defines almost every sampler
+ is dropped — nothing reads a colour — and pushing a write for a binding the
+ layout does not declare is a validation error. The compare bindings read the
+ static atlas, which is what lights a bake.
+*>
+fn void MeshPass.push_lightmap_samplers(&self, vk::CommandBuffer cmd, MeshPipeline* pipeline)
+{
+	SampledBindings samplers;
+	foreach (declared : pipeline.shader.bindings)
+	{
+		if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+		if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
+			|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
+		samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
+	}
+	ShadowAtlas* atlas = &self.shadow_manager.atlas;
+	vk::DescriptorImageInfo statics = atlas.compare_descriptor(true, atlas.static_initialized);
+	samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, statics);
+	samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, statics);
+	samplers.push(cmd, pipeline);
 }
 
 <*
@@ -1379,20 +1456,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 	// and the seam sweep works on it as if it were an image of its own.
 	vk::BufferImageCopy[] regions = mem::new_array(vk::BufferImageCopy, tiles.len);
 	defer mem::free(regions);
-	sz packed = 0;
-	foreach (i, tile : tiles)
-	{
-		regions[i] = {
-			.bufferOffset = (vk::DeviceSize)packed,
-			.bufferRowLength = tile.size,
-			.bufferImageHeight = tile.size,
-			.imageSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0,
-				.layerCount = 1 },
-			.imageOffset = { (int)tile.x, (int)tile.y, 0 },
-			.imageExtent = { tile.size, tile.size, 1 },
-		};
-		packed += (sz)tile.size * (sz)tile.size * (sz)LIGHTMAP_TEXEL_BYTES;
-	}
+	sz packed = (sz)lightmap_regions(tiles, regions);
 
 	map.staging = vk::new_buffer(
 		&gpu.allocator,
@@ -1433,30 +1497,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
 		gpu.texture_table.bind(cmd, pipeline.layout);
 
-		SampledBindings samplers;
-		// Whatever the linked program kept. Under the bake defines almost every
-		// sampler is dropped — nothing reads a colour — and pushing a write for a
-		// binding the layout does not declare is a validation error.
-		foreach (declared : pipeline.shader.bindings)
-		{
-			if (declared.set != 0) continue;
-			if (declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-			if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
-				|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
-			samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_COMPARE_BINDING, self.shadow_manager.atlas.compare_descriptor(
-				true, self.shadow_manager.atlas.static_initialized));
-		}
-		if (pipeline_declares_binding(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-		{
-			samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-				self.shadow_manager.atlas.compare_descriptor(
-					true, self.shadow_manager.atlas.static_initialized));
-		}
-		samplers.push(cmd, pipeline);
+		self.push_lightmap_samplers(cmd, pipeline);
 
 		// A tile the rendering loaded rather than cleared holds the last bake, margin
 		// and all, and the sweep below reads the alpha to decide which texels a
@@ -1500,47 +1541,16 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			MeshPipeline* selected = tile_pipelines[i];
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, selected.handle);
 			gpu.texture_table.bind(cmd, selected.layout);
-			SampledBindings selected_samplers;
-			foreach (declared : selected.shader.bindings)
-			{
-				if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-				if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
-					|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
-				selected_samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
-			}
-			if (pipeline_declares_binding(selected, SHADOW_ATLAS_COMPARE_BINDING))
-			{
-				selected_samplers.add(SHADOW_ATLAS_COMPARE_BINDING,
-					self.shadow_manager.atlas.compare_descriptor(
-						true, self.shadow_manager.atlas.static_initialized));
-			}
-			if (pipeline_declares_binding(selected, SHADOW_ATLAS_STATIC_COMPARE_BINDING))
-			{
-				selected_samplers.add(SHADOW_ATLAS_STATIC_COMPARE_BINDING,
-					self.shadow_manager.atlas.compare_descriptor(
-						true, self.shadow_manager.atlas.static_initialized));
-			}
-			selected_samplers.push(cmd, selected);
+			self.push_lightmap_samplers(cmd, selected);
 			MeshPush push = {
 				.frame = (FrameBlock*)map.frame.address,
 				.instances = (Instance*)(map.instances.address + (ulong)i * Instance::size),
 				.draw = (DrawRecord*)(map.draws.address + (ulong)i * DrawRecord::size),
 			};
-			char[PUSH_BUDGET] pushed = {};
-			mem::copy(&pushed, &push, MeshPush::size);
 			Material* material = self.material(node.material);
-			uint push_size = selected.shader.push_size;
-			if (material != null && push_size > MATERIAL_PUSH_START)
-			{
-				mem::copy(&pushed[MATERIAL_PUSH_START], &material.block[MATERIAL_PUSH_START],
-					(sz)(push_size - MATERIAL_PUSH_START));
-				if (material.table_pointer != NO_TABLE_POINTER && self.table_address != 0)
-				{
-					ulong table = self.table_address + (ulong)material.table_offset;
-					mem::copy(&pushed[material.table_pointer], &table, ulong::size);
-				}
-			}
-			vk::cmdPushConstants(cmd, selected.layout, selected.shader.stages, 0, push_size, &pushed);
+			ulong table = material != null && self.table_address != 0
+				? self.table_address + (ulong)material.table_offset : 0;
+			push_mesh_constants(cmd, selected, push, material, table);
 			vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 			vk::cmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);
 		}
@@ -1579,30 +1589,10 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 
 	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
 	{
-		vk::ImageMemoryBarrier2 to_destination = {
-			...IMAGE_BARRIER, .image = map.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.srcAccessMask = ACCESS_2_TRANSFER_READ_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_destination }));
+		map.transition(cmd, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		vk::cmdCopyBufferToImage(cmd, map.staging.buffer, map.image, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			(uint)regions.len, regions.ptr);
-		vk::ImageMemoryBarrier2 to_shader = {
-			...IMAGE_BARRIER, .image = map.image,
-			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-			.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-			.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
-			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.subresourceRange = COLOR_LEVEL,
-		};
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ to_shader }));
+		map.transition(cmd, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}!;
 	map.revision++;
 }
@@ -1633,7 +1623,10 @@ const char[8] LIGHTMAP_MAGIC = { '3', 'L', 'I', 'G', 'H', 'T', 'M' , 'P' };
 // 7: no camera in the header, because a layered tile no longer depends on one —
 // and a 6 holds layered tiles baked through the parallax of the view it was
 // saved from, so it is declined rather than loaded as view-free.
-const uint LIGHTMAP_FILE_VERSION = 7;
+// 8: a tile's material signature names its textures by content rather than by
+// slot and a process-wide counter, which no two launches agreed on — a 7's
+// signatures mismatch everywhere, and declining it is a bake instead of a re-bake.
+const uint LIGHTMAP_FILE_VERSION = 8;
 
 // Laid out so that nothing is padded: eight bytes, then six fours, then two
 // eights. A file is written and read by the same struct, and a hole in the
@@ -1744,12 +1737,7 @@ fn void? Lightmap.read_tiles(&self, Gpu* gpu, LightmapTile[] tiles, char[] into)
 		usz packed = lightmap_regions(tiles, regions);
 		if (packed > into.len) return LIGHTMAP_NO_ATLAS~;
 
-		vk::Memory staging = vk::new_buffer(
-			&gpu.allocator,
-			usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-			properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			data_size: (sz)packed,
-		)!;
+		vk::Memory staging = gpu.create_readback((sz)packed)!;
 		defer staging.free();
 
 		gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
@@ -1772,12 +1760,7 @@ fn void? Lightmap.write_tiles(&self, Gpu* gpu, LightmapTile[] tiles, char[] from
 		usz packed = lightmap_regions(tiles, regions);
 		if (packed > from.len) return LIGHTMAP_BAD_FILE~;
 
-		vk::Memory staging = vk::new_buffer(
-			&gpu.allocator,
-			usage: BUFFER_USAGE_TRANSFER_SRC_BIT,
-			properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			data_size: (sz)packed,
-		)!;
+		vk::Memory staging = gpu.create_upload((sz)packed)!;
 		defer staging.free();
 		mem::copy(staging.data(), from.ptr, (sz)packed);
 
@@ -1855,7 +1838,9 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 				.y = tile.y,
 				.size = tile.size,
 				.density = map.density,
-				.material_signature = tile.material_signature,
+				// Zero for a tile still waiting to be re-baked, which no live material
+				// folds to, so the next load re-bakes it rather than trusting its texels.
+				.material_signature = node.lightmap_dirty ? 0 : self.lightmap_material_signature(node, lasting: true),
 			};
 		}
 	};
@@ -1968,7 +1953,7 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 				.material_signature = self.lightmap_material_signature(node),
 			};
 			moved[i] = saved[found].world != lightmap_world_hash(node.world)
-				|| saved[found].material_signature != tiles[i].material_signature;
+				|| saved[found].material_signature != self.lightmap_material_signature(node, lasting: true);
 			if (moved[i]) dirty++;
 		}
 

@@ -198,11 +198,12 @@ new three.ShaderMaterial({
 })
 ```
 
-`Vertex` is the varyings: `position` (world), `normal`, `uv`, `color` and `variant` are read back
-after your body runs; `local` (object space) and `index` (the vertex number) are inputs. The normal
-is not recomputed for you. Always pass `bounds` — the number of world units the body can displace by
-— because culling tests the mesh's undisplaced box and geometry outside it is dropped while still on
-screen.
+`Vertex` is the varyings: `position`, `normal`, `uv`, `color` and `variant` are read back after
+your body runs; `local` (the bind pose) and `index` (the vertex number) are inputs. `position` and
+`normal` are in object space — the body runs before the mesh's own transform, so what it does scales
+and turns with the mesh. The normal is not recomputed for you. Always pass `bounds` — how far the body
+can displace a vertex, in the mesh's own units — because culling tests the mesh's undisplaced box and
+geometry outside it is dropped while still on screen.
 
 ## one-module
 
@@ -842,6 +843,12 @@ cache that could not be written.
 Advice, not errors: the run still succeeded. They are deduplicated and they arrive one run late when they
 happened between calls, so a warning about the frame you just rendered shows up on your next call.
 
+## reply-image
+
+A `run_script` reply carries a PNG of the frame, scaled down to 1568 pixels on its longest side when the
+render is bigger. Pass `image: false` beside `source` for a script that only reads or changes data: the reply
+is then the report alone, and no frame is drawn for it.
+
 ## animation-loop
 
 `three.setAnimationLoop(fn)` runs `fn` once per frame, with the elapsed milliseconds, until
@@ -957,6 +964,10 @@ mode ends: there is no gesture that undoes it.
 
 `three.input.pointer` and the click are in the rendered image's pixels, not the window's. `scene.pick(x, y)` and
 the PNG use the same pixels the click does, whatever size the window is.
+
+An MCP reply's PNG is the exception when it was scaled down (see reply-image). Its report then has an `image`
+block, `{ width, height, renderWidth, renderHeight }`: multiply a pixel read off the PNG by
+`renderWidth / width` before handing it to `pick` or `movePointer`.
 
 ## script-can-move-the-pointer
 

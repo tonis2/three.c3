@@ -144,6 +144,15 @@ struct FrameKeys
 }
 
 <*
+ The same frame with some keys taken out of all three sets — the keys the
+ interface used, which the script does not also get.
+*>
+fn FrameKeys FrameKeys.without(self, KeyBits taken)
+{
+	return { .down = self.down.without(taken), .fired_down = self.fired_down.without(taken), .fired_up = self.fired_up.without(taken) };
+}
+
+<*
  One frame of keyboard, as the two questions and the text.
 
  `text` is borrowed from the window and is only valid for the frame it was

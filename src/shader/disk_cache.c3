@@ -291,12 +291,18 @@ fn void shader_cache_reset_stats()
 // Writing
 // ============================================================================
 
-fn void cache_put_u32(DString* out, uint value) @local
+// Little-endian, whatever the host is: the shader and pipeline caches share it.
+fn void cache_put_u32(DString* out, uint value)
 {
 	out.append_char((char)value);
 	out.append_char((char)(value >> 8));
 	out.append_char((char)(value >> 16));
 	out.append_char((char)(value >> 24));
+}
+
+fn uint cache_read_u32(char[] bytes, usz at)
+{
+	return (uint)bytes[at] | ((uint)bytes[at + 1] << 8) | ((uint)bytes[at + 2] << 16) | ((uint)bytes[at + 3] << 24);
 }
 
 fn void cache_put_blob(DString* out, String bytes) @local
@@ -515,9 +521,7 @@ fn uint CacheReader.u32(&self)
 		self.bad = true;
 		return 0;
 	}
-	uint value = (uint)self.bytes[self.at] | ((uint)self.bytes[self.at + 1] << 8)
-		| ((uint)self.bytes[self.at + 2] << 16)
-		| ((uint)self.bytes[self.at + 3] << 24);
+	uint value = cache_read_u32(self.bytes, self.at);
 	self.at += 4;
 	return value;
 }

@@ -766,6 +766,11 @@ struct SharedTexture
 	Texture texture;
 	uint refs;
 	bool alive;
+	// `Assets.revision` as this slot's texture went in: different for every
+	// install, and the same for as long as that texture stays. What a cache keyed
+	// on one slot compares, so another slot's texture coming or going is not a
+	// change to it.
+	uint installed;
 }
 
 <*
@@ -1056,6 +1061,16 @@ fn GpuMesh* Assets.mesh(&self, AssetId asset, uint mesh)
 	return &owner.meshes[mesh];
 }
 
+// The index of the clip called `name`, or -1.
+fn int Asset.find_clip(&self, String name)
+{
+	foreach (i, &clip : self.clips)
+	{
+		if (clip.name == name) return (int)i;
+	}
+	return -1;
+}
+
 <*
  Finds a mesh inside an asset by its glTF name — `kit.mesh("wall_corner_02")`.
 
@@ -1188,20 +1203,7 @@ fn usz Assets.texture_bytes(&self)
 	usz total = 0;
 	foreach (&shared : self.textures)
 	{
-		if (!shared.alive) continue;
-		TextureFormat format = shared.texture.format;
-		for (uint level = 0; level < shared.texture.levels; level++)
-		{
-			// Through the format rather than as `width * height * 4`, which was
-			// right while RGBA8 was the only possibility and over-reports a BC7
-			// texture fourfold. `image_size` also rounds up to whole blocks, so
-			// the small levels — where a block costs the same 16 bytes however
-			// few texels are left in it — are counted as the device holds them.
-			total += (usz)format.image_size(
-				level_extent(shared.texture.width, level),
-				level_extent(shared.texture.height, level)
-			);
-		}
+		if (shared.alive) total += shared.texture.device_bytes();
 	}
 	return total;
 }
@@ -1223,16 +1225,7 @@ fn usz Assets.texture_compressed_bytes(&self)
 	usz total = 0;
 	foreach (&shared : self.textures)
 	{
-		if (!shared.alive) continue;
-		TextureFormat format = shared.texture.format;
-		if (!format.is_block()) continue;
-		for (uint level = 0; level < shared.texture.levels; level++)
-		{
-			total += (usz)format.image_size(
-				level_extent(shared.texture.width, level),
-				level_extent(shared.texture.height, level)
-			);
-		}
+		if (shared.alive && shared.texture.format.is_block()) total += shared.texture.device_bytes();
 	}
 	return total;
 }
@@ -1376,6 +1369,24 @@ fn AssetId Assets.claim_slot(&self, Asset asset)
 }
 
 <*
+ Everything an asset owns outright: its meshes' buffers, its node tree, bodies,
+ navigation, file stream, terrain grid, merged copy and path. Leaves the fields
+ dangling; the caller zeroes or discards the slot.
+*>
+fn void free_asset_memory(Gpu* gpu, Asset* asset) @local
+{
+	foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
+	asset.meshes.free();
+	free_navigation(asset);
+	free_nodes(asset);
+	free_physics(asset);
+	free_stream(asset);
+	if (asset.has_terrain) asset.terrain.heights.free();
+	if (asset.has_merged) asset.merged.free();
+	if (asset.path.len > 0) asset.path.free(mem);
+}
+
+<*
  Give a slot's memory back, host and device, and mark every handle to it stale.
 
  Called only from `unload_unused`, and only for a slot at zero references — the
@@ -1401,26 +1412,16 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 		self.release_texture(gpu, mesh.texture);
 		mesh.release_layers(self, gpu);
 		mesh.release_material(self, gpu);
-		mesh.free_buffers(gpu);
 	}
-	asset.meshes.free();
-	free_navigation(asset);
-	free_nodes(asset);
-	free_physics(asset);
-	free_stream(asset);
-	// Before the zeroing below, for `free_nodes`' reason: after it the slot no
-	// longer says it had one.
-	if (asset.has_terrain) asset.terrain.heights.free();
-	asset.terrain = { };
-	asset.has_terrain = false;
-	if (asset.has_merged) asset.merged.free();
-	asset.merged = { };
-	asset.has_merged = false;
+	free_asset_memory(gpu, asset);
 	// Zeroed rather than left dangling: `claim_slot` overwrites the whole struct
 	// and `Assets.free` walks every slot, so a freed `List` must not look
 	// initialised to either of them.
 	asset.meshes = { };
-	if (asset.path.len > 0) asset.path.free(mem);
+	asset.terrain = { };
+	asset.has_terrain = false;
+	asset.merged = { };
+	asset.has_merged = false;
 	asset.path = "";
 	asset.bounds = { };
 	asset.refs = 0;
@@ -1655,27 +1656,16 @@ fn void Assets.flatten_node(
 		{
 			for (uint i = 0; i < source.mesh_count; i++)
 			{
-				out.push(
-					{
-						.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
-						.parent = here,
-						.mesh = (int)(source.first_mesh + i),
-						.gltf_node = -1,
-						.position = copy.position,
-						.rotation = copy.rotation,
-						.scale = copy.scale,
-						.color = copy
-							.color, // A copy placed by transform is the one thing a skin cannot be:
-							// the extension positions each copy and a skin ignores the
-							// position. A file doing both is malformed and gets the copies.
-						.skin = -1,
-						// Every copy is its own node, so the file's statement about the
-						// node it was placed from applies to each of them separately —
-						// which is what keeps a thousand instanced weeds out of the index
-						// rather than merely rejected a thousand times.
-						.collides = draws_collide,
-					}
-				);
+				PlacedNode child = primitive_child(loaded, source, i, here, draws_collide);
+				child.position = copy.position;
+				child.rotation = copy.rotation;
+				child.scale = copy.scale;
+				child.color = copy.color;
+				// A copy placed by transform is the one thing a skin cannot be: the
+				// extension positions each copy and a skin ignores the position. A
+				// file doing both is malformed and gets the copies.
+				child.skin = -1;
+				out.push(child);
 			}
 			// One proxy per copy, carrying the copy's own transform. The copies are
 			// siblings under the node group, so the proxy is too.
@@ -1684,25 +1674,7 @@ fn void Assets.flatten_node(
 	}
 	else if (!draws_itself)
 	{
-		for (uint i = 0; i < source.mesh_count; i++)
-		{
-			out.push(
-				{
-					.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
-					.parent = here,
-					.mesh = (int)(source.first_mesh + i),
-					.gltf_node = -1,
-					.position = { 0, 0, 0 },
-					.rotation = NO_ROTATION,
-					.scale = { 1, 1, 1 },
-					.color = NO_TINT, // The primitives of a skinned mesh are each skinned. Their parent
-					// is the entry above, which is already sitting at the root with an
-					// identity transform, so they inherit the right space.
-					.skin = source.skin,
-					.collides = draws_collide,
-				}
-			);
-		}
+		for (uint i = 0; i < source.mesh_count; i++) out.push(primitive_child(loaded, source, i, here, draws_collide));
 	}
 
 	// Re-read: `out.push` cannot move the asset pool, but the recursion below
@@ -1712,6 +1684,31 @@ fn void Assets.flatten_node(
 	{
 		self.flatten_node(asset, self.slot(asset).nodes[index].children[i], here, out, prunable, physics);
 	}
+}
+
+<*
+ One primitive of a group node, at identity under it.
+
+ The primitives of a skinned mesh are each skinned. Their parent is already
+ sitting at the root with an identity transform, so they inherit the right space.
+ Every child is its own node, so the file's statement about what collides applies
+ to each separately — which keeps a thousand instanced weeds out of the index
+ rather than merely rejected a thousand times.
+*>
+fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int parent, bool collides) @local
+{
+	return {
+		.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
+		.parent = parent,
+		.mesh = (int)(source.first_mesh + i),
+		.gltf_node = -1,
+		.position = { 0, 0, 0 },
+		.rotation = NO_ROTATION,
+		.scale = { 1, 1, 1 },
+		.color = NO_TINT,
+		.skin = source.skin,
+		.collides = collides,
+	};
 }
 
 <*
@@ -2699,7 +2696,7 @@ fn void record_lights(Asset* asset, gltf::GltfStream* stream) @local
 		if (!has_light && !has_area_light && !has_camera) continue;
 
 		Matrix4f world = source.global_matrix();
-		Vec3 place = { world.m[12], world.m[13], world.m[14] };
+		Vec3 place = translation_of(world);
 		// The node's own axes, scale divided out. A light or a camera on a scaled
 		// node is a heading, not a size.
 		Vec3 forward = unit((Vec3) { -world.m[8], -world.m[9], -world.m[10] }, (Vec3) { 0, 0, -1 });
@@ -3106,7 +3103,7 @@ fn void free_stream(Asset* asset) @local
 *>
 fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale)
 {
-	*position = { m.m[12], m.m[13], m.m[14] };
+	*position = translation_of(m);
 
 	Vec3 axis_x = { m.m[0], m.m[1], m.m[2] };
 	Vec3 axis_y = { m.m[4], m.m[5], m.m[6] };
@@ -3116,19 +3113,7 @@ fn void decompose(Matrix4f m, Vec3* position, Quaternionf* rotation, Vec3* scale
 	float sy  = axis_y.length();
 	float sz_ = axis_z.length();
 
-	Matrix3f linear = {
-		.m = {
-			m.m[0],
-			m.m[1],
-			m.m[2],
-			m.m[4],
-			m.m[5],
-			m.m[6],
-			m.m[8],
-			m.m[9],
-			m.m[10],
-		}
-	};
+	Matrix3f linear = linear_part(m);
 	if (linear.determinant() < 0) sx = -sx;
 
 	*scale = { sx, sy, sz_ };
@@ -3329,105 +3314,18 @@ fn GpuMesh? Assets.upload_primitive(
 	// from the cause.
 	defer catch out.free_buffers(gpu);
 
-	// Heap-backed for the same reason as `Assets.init`, even though these are
-	// freed in this scope: `@each_texcoord` formats an attribute name through
-	// the temp arena, so this function already touches it.
-	List{Vec3} positions;
-	List{Vec3} normals;
-	List{Vec2} uvs;
-	List{Vec4} colors;
-	List{uint[4]} joints;
-	List{Vec4} weights;
-	List{uint} indices;
-	positions.init(mem, 256);
-	normals.init(mem, 256);
-	uvs.init(mem, 256);
-	// Unlike the three above, most files never fill these — the initial capacity
-	// is the smallest a `List` will take rather than 256, so a scene of meshes
-	// without the attribute pays a pointer per primitive and nothing else.
-	colors.init(mem, 1);
-	joints.init(mem, 1);
-	weights.init(mem, 1);
-	indices.init(mem, 512);
-	defer
-	{
-		positions.free();
-		normals.free();
-		uvs.free();
-		colors.free();
-		joints.free();
-		weights.free();
-		indices.free();
-	}
-
-	stream.@each_position(primitive ; Vec3 position, sz i)
-	{
-		positions.push(position);
-	};
-	if (positions.len() == 0) return out;
-
-	stream.@each_normal(primitive ; Vec3 normal, sz i)
-	{
-		normals.push(normal);
-	};
-	stream.@each_texcoord(primitive, 0 ; Vec2 uv, sz i)
-	{
-		uvs.push(uv);
-	};
-	read_colors(stream, primitive, &colors);
-
-	// Widened from whatever the file stored — `@each_joint` already folds the
-	// ubyte and ushort encodings into one — because the shader reads `uint4` under
-	// scalar layout and 16-bit storage is a device feature this project does not
-	// require. Only JOINTS_0/WEIGHTS_0: a second set is 8 influences a vertex, and
-	// nothing here blends more than four.
-	stream.@each_joint(primitive, 0 ; ushort[<4>] j, sz i)
-	{
-		joints.push({ (uint)j[0], (uint)j[1], (uint)j[2], (uint)j[3] });
-	};
-	read_weights(stream, primitive, &weights);
-	normalize_weights(&weights);
-
-	read_indices(stream, primitive, &indices);
-	// A primitive with no index accessor is a plain vertex list; give it the
-	// trivial index buffer rather than carrying a second draw path for it.
-	if (indices.len() == 0)
-	{
-		for (uint i = 0; i < positions.len(); i++) indices.push(i);
-	}
+	GeometryBuilder geometry;
+	geometry.init();
+	defer geometry.free();
+	if (!read_primitive_streams(stream, primitive, &geometry)) return out;
+	List{Vec3}* positions = &geometry.positions;
+	List{Vec2}* uvs = &geometry.uvs;
+	List{uint}* indices = &geometry.indices;
 
 	out.name = mesh.name.copy(mem);
-	out.vertex_count = (uint)positions.len();
-	out.index_count = (uint)indices.len();
-
 	gltf::Aabb box = stream.gltf.primitive_aabb(primitive);
 	out.bounds = { .min = box.min, .max = box.max };
-
-	out.positions = gpu.upload_stream(positions.entries, Vec3::size * positions.len())!;
-	out.indices = gpu.upload_indices(indices.entries, uint::size * indices.len())!;
-
-	// A stream that is short is a stream that is absent: the shader indexes
-	// every stream with the same SV_VertexID, so a normals array that does not
-	// cover every vertex would read past its own buffer.
-	out.has_normals = normals.len() == positions.len();
-	if (out.has_normals) out.normals = gpu.upload_stream(normals.entries, Vec3::size * normals.len())!;
-
-	out.has_uvs = uvs.len() == positions.len();
-	if (out.has_uvs) out.uvs = gpu.upload_stream(uvs.entries, Vec2::size * uvs.len())!;
-
-	out.has_colors = colors.len() == positions.len();
-	if (out.has_colors) out.colors = gpu.upload_stream(colors.entries, Vec4::size * colors.len())!;
-
-	// **Both or neither**, unlike the streams above, which stand alone. Joints
-	// without weights is four joint indices with no say in how much each pulls,
-	// and weights without joints is four numbers naming nothing; either one on its
-	// own would be a pose read out of whichever buffer happened to be there.
-	out.has_skin = joints.len() == positions.len() && weights.len() == positions.len();
-	if (out.has_skin)
-	{
-		out.joints = gpu.upload_stream(joints.entries, uint[4]::size * joints.len())!;
-		out.weights = gpu.upload_stream(weights.entries, Vec4::size * weights.len())!;
-	}
+	out.upload_streams(gpu, &geometry)!;
 
 	read_morph_targets(gpu, stream, primitive, &out)!;
 
@@ -3687,6 +3585,51 @@ fn void GpuMesh.measure_lightmap(&self, Vec2[] uvs, Vec3[] positions, uint[] ind
 }
 
 <*
+ One primitive's vertex streams and indices, read at whatever width the file
+ stored them and widened to what the shader reads.
+
+ Only JOINTS_0/WEIGHTS_0: a second set is 8 influences a vertex, and nothing here
+ blends more than four. `@each_joint` already folds the ubyte and ushort
+ encodings into one; the weights and colours go through readers of their own.
+
+ A primitive with no index accessor is a plain vertex list, and gets the trivial
+ index list rather than a second draw path.
+
+ @return `False for a primitive with no positions.`
+*>
+fn bool read_primitive_streams(gltf::GltfStream* stream, gltf::Primitive primitive, GeometryBuilder* out)
+{
+	stream.@each_position(primitive ; Vec3 position, sz i)
+	{
+		out.positions.push(position);
+	};
+	if (out.positions.len() == 0) return false;
+
+	stream.@each_normal(primitive ; Vec3 normal, sz i)
+	{
+		out.normals.push(normal);
+	};
+	stream.@each_texcoord(primitive, 0 ; Vec2 uv, sz i)
+	{
+		out.uvs.push(uv);
+	};
+	read_colors(stream, primitive, &out.colors);
+	stream.@each_joint(primitive, 0 ; ushort[<4>] j, sz i)
+	{
+		out.joints.push({ (uint)j[0], (uint)j[1], (uint)j[2], (uint)j[3] });
+	};
+	read_weights(stream, primitive, &out.weights);
+	normalize_weights(&out.weights);
+
+	read_indices(stream, primitive, &out.indices);
+	if (out.indices.len() == 0)
+	{
+		for (uint i = 0; i < out.positions.len(); i++) out.indices.push(i);
+	}
+	return true;
+}
+
+<*
  Indices, read at whatever width the file stored them.
 
  glTF allows unsigned byte, short or int, and a chooser that assumes one width
@@ -3729,7 +3672,7 @@ fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{u
  Normalisation is the caller's, not this function's: it needs every set read
  first, and there is only ever one set here.
 *>
-fn void read_weights(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out) @local
+fn void read_weights(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out)
 {
 	sz? attr = primitive.attributes.get("WEIGHTS_0");
 	if (catch attr) return;
@@ -3766,7 +3709,7 @@ fn void read_weights(gltf::GltfStream* stream, gltf::Primitive primitive, List{V
  is wrong in a way that is visible and fixable where a vertex at the origin looks
  like broken geometry.
 *>
-fn void normalize_weights(List{Vec4}* weights) @local
+fn void normalize_weights(List{Vec4}* weights)
 {
 	foreach (&w : *weights)
 	{
@@ -4613,6 +4556,30 @@ fn uint Assets.asset_image_count(&self, AssetId id)
 }
 
 <*
+ The slot already holding this exact image, with one more reference taken, or
+ -1. Every field is part of the key: the same picture with another chain, filter
+ or format is a different texture on the device.
+*>
+fn int Assets.share_texture(&self, ulong hash, uint width, uint height, TextureFormat format, uint levels, bool nearest)
+{
+	foreach (i, &existing : self.textures)
+	{
+		if (!existing.alive) continue;
+		// A computed image is never the same texture as an uploaded one, whatever
+		// its fields happen to say: a kernel can rewrite it at any time.
+		if (existing.texture.storage != FORMAT_UNDEFINED) continue;
+		Texture* t = &existing.texture;
+		if (t.hash == hash && t.width == width && t.height == height && t.format.equals(format)
+			&& t.levels == levels && t.nearest == nearest)
+		{
+			existing.refs++;
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+<*
  A decoded image to a texture slot, deduplicated by content hash.
 
  The tail `decode_material_texture` used to own, lifted out when
@@ -4660,22 +4627,8 @@ fn int? Assets.claim_texture(
 	// picture uploaded as blocks is a different image on the device.
 	TextureFormat layout = rgba8(space);
 	uint levels = gpu.levels_for(decoded.width, decoded.height, layout, mips);
-	foreach (i, &existing : self.textures)
-	{
-		if (!existing.alive) continue;
-		// A computed image is never the same texture as an uploaded one, whatever
-		// its fields happen to say: a kernel can rewrite it at any time.
-		if (existing.texture.storage != FORMAT_UNDEFINED) continue;
-		if (existing.texture.hash == hash && existing.texture.width == decoded.width
-			&& existing.texture.height == decoded.height
-			&& existing.texture.format.equals(layout)
-			&& existing.texture.levels == levels
-			&& existing.texture.nearest == nearest)
-		{
-			existing.refs++;
-			return (int)i;
-		}
-	}
+	int shared = self.share_texture(hash, decoded.width, decoded.height, layout, levels, nearest);
+	if (shared >= 0) return shared;
 
 	Texture uploaded = gpu.create_texture(rgba, decoded.width, decoded.height, space, mips, nearest)!;
 	return self.install_texture(gpu, uploaded);
@@ -4696,11 +4649,11 @@ fn int Assets.install_texture(&self, Gpu* gpu, Texture uploaded, bool write_tabl
 	if (self.free_textures.len() > 0)
 	{
 		index = self.free_textures.pop()!!;
-		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true };
+		self.textures[index] = { .texture = uploaded, .refs = 1, .alive = true, .installed = self.revision };
 	}
 	else
 	{
-		self.textures.push({ .texture = uploaded, .refs = 1, .alive = true });
+		self.textures.push({ .texture = uploaded, .refs = 1, .alive = true, .installed = self.revision });
 		index = (uint)self.textures.len() - 1;
 	}
 
@@ -4745,20 +4698,8 @@ fn int? Assets.claim_texture_levels(&self, Gpu* gpu, BlockImage blocks, bool nea
 	ulong hash  = content_hash_levels(blocks.levels);
 	uint levels = (uint)blocks.levels.len;
 
-	foreach (i, &existing : self.textures)
-	{
-		if (!existing.alive) continue;
-		if (existing.texture.storage != FORMAT_UNDEFINED) continue;
-		if (existing.texture.hash == hash && existing.texture.width == blocks.width
-			&& existing.texture.height == blocks.height
-			&& existing.texture.format.equals(blocks.format)
-			&& existing.texture.levels == levels
-			&& existing.texture.nearest == nearest)
-		{
-			existing.refs++;
-			return (int)i;
-		}
-	}
+	int shared = self.share_texture(hash, blocks.width, blocks.height, blocks.format, levels, nearest);
+	if (shared >= 0) return shared;
 
 	Texture uploaded = gpu.create_texture_levels(
 		blocks.levels,
@@ -5201,22 +5142,8 @@ fn void Assets.free(&self, Gpu* gpu)
 		// A slot already swept by `unload_unused` gave everything back and left
 		// its lists zeroed; walking it again would free them twice.
 		if (!asset.alive) continue;
-		foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
-		asset.meshes.free();
-		// In `free_slot`'s order, and for its reason: a baked navigation profile is
-		// plain heap the same way the nodes and the bodies are, so the wholesale
-		// teardown owes it too.
-		free_navigation(asset);
-		free_nodes(asset);
-		free_physics(asset);
-		free_stream(asset);
-		// The one owned allocation a generated shape can carry — a terrain's
-		// grid. `free_slot` frees it on the unload path and this is the other
-		// one; they are separate because this walk deliberately skips the
-		// reference counting and the texture releases that path does.
-		if (asset.has_terrain) asset.terrain.heights.free();
-		if (asset.has_merged) asset.merged.free();
-		if (asset.path.len > 0) asset.path.free(mem);
+		// No texture releases: the shared textures go wholesale below.
+		free_asset_memory(gpu, asset);
 	}
 	self.assets.free();
 	self.free_slots.free();

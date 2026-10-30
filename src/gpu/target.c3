@@ -101,55 +101,20 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 	// TRANSFER_SRC is unconditional, and that is the point: three.c3 created this
 	// image, so there is no supportedUsageFlags to mask against and no
 	// screenshot_supported flag to carry around.
-	self.color = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.color_format)
-		.setExtent({ .width = width, .height = height, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(IMAGE_TILING_OPTIMAL)
-		.setUsage(IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.color_memory = vk::create_image_buffer(self.color, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
+	GpuImage color = gpu.create_image_2d(self.color_format, self.extent,
+		IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	defer catch color.destroy(gpu);
+	// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
+	// this image to every pass so a body can read `p.depth`.
+	GpuImage depth = gpu.create_image_2d(self.depth_format, self.extent,
+		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT, IMAGE_ASPECT_DEPTH_BIT)!;
 
-	self.color_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.color_format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		)
-		.setImage(self.color)
-		.build(gpu.handle)!;
-
-	self.depth = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(self.depth_format)
-		.setExtent({ .width = width, .height = height, .depth = 1 })
-		.setMipLevels(1)
-		.setArrayLayers(1)
-		.setSamples(SAMPLE_COUNT_1_BIT)
-		.setTiling(
-			IMAGE_TILING_OPTIMAL
-		)/* SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds *//* this image to every pass so a body can read `p.depth`. Costs nothing on *//* a device where the format supports both, which is every conformant one. */
-		.setUsage(IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)
-		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
-		.build(gpu.handle)!;
-	self.depth_memory = vk::create_image_buffer(self.depth, &gpu.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT)!;
-
-	self.depth_view = vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(self.depth_format)
-		.setSubresourceRange(
-			{
-				.aspectMask = IMAGE_ASPECT_DEPTH_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		)
-		.setImage(self.depth)
-		.build(gpu.handle)!;
+	self.color = color.image;
+	self.color_view = color.view;
+	self.color_memory = color.memory;
+	self.depth = depth.image;
+	self.depth_view = depth.view;
+	self.depth_memory = depth.memory;
 
 	return *self;
 }
@@ -228,11 +193,14 @@ fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 	};
 }
 
-fn vk::ImageMemoryBarrier2 Target.to_transfer_src(&self)
+<*
+ A colour attachment, finished, about to be the source of a copy or a blit.
+*>
+fn vk::ImageMemoryBarrier2 transfer_src_barrier(vk::Image image)
 {
 	return {
 		...IMAGE_BARRIER,
-		.image = self.color,
+		.image = image,
 		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
@@ -342,6 +310,22 @@ fn vk::MemoryBarrier2 storage_memory_barrier()
 }
 
 <*
+ Makes what a compute pass wrote to storage buffers visible to the stage that
+ reads it next.
+*>
+fn void compute_to_stage_barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 reader)
+{
+	vk::MemoryBarrier2 barrier = {
+		.sType = STRUCTURE_TYPE_MEMORY_BARRIER_2,
+		.srcStageMask = PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		.srcAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		.dstStageMask = reader,
+		.dstAccessMask = ACCESS_2_SHADER_STORAGE_READ_BIT,
+	};
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setMemoryBarriers({ barrier }));
+}
+
+<*
  The depth attachment, finished being written and about to be sampled.
 
  `shader_read_barrier`'s shape over the depth aspect. Both differences are
@@ -372,6 +356,83 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 }
 
 <*
+ A depth image a shader samples, opened again as an attachment. `discard` opens
+ it from `UNDEFINED`, for a pass that clears it on load.
+*>
+fn vk::ImageMemoryBarrier2 depth_open_barrier(vk::Image image, bool discard)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = discard ? IMAGE_LAYOUT_UNDEFINED : IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+}
+
+<*
+ A depth attachment, finished being written and about to be sampled by a
+ fragment shader in `SHADER_READ_ONLY_OPTIMAL`.
+*>
+fn vk::ImageMemoryBarrier2 depth_sample_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+}
+
+<*
+ The frame's depth buffer reopened as an attachment, contents kept. `sampled`
+ when the post chain last read it in `DEPTH_STENCIL_READ_ONLY_OPTIMAL`.
+*>
+fn vk::ImageMemoryBarrier2 depth_reopen_barrier(vk::Image image, bool sampled)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = sampled ? CHAIN_READERS
+			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT
+			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = sampled ? IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+			: IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+}
+
+<*
+ Begins a depth-only rendering over `extent`, cleared to the far plane.
+*>
+fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent)
+{
+	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(view)
+		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
+		.setClearValue({ .depthStencil = { 1.0, 0 } });
+
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
+		.setDepthAttachment(&depth_attachment);
+
+	vk::cmdBeginRendering(cmd, &rendering);
+	set_full_viewport(cmd, extent, true);
+}
+
+<*
  Opens the depth buffer on its own, cleared, for the depth prepass.
 
  A rendering of its own rather than the first draws of the scene's, because the
@@ -385,18 +446,7 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 fn void Target.begin_depth(&self, vk::CommandBuffer cmd)
 {
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ vk::depthBarrier(self.depth) }));
-
-	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
-		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
-		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
-		.setClearValue({ .depthStencil = { 1.0, 0 } });
-
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
-		.setDepthAttachment(&depth_attachment);
-
-	vk::cmdBeginRendering(cmd, &rendering);
-	set_full_viewport(cmd, self.extent, true);
+	begin_depth_rendering(cmd, self.depth_view, self.extent);
 }
 
 <*
@@ -512,20 +562,7 @@ fn void Target.begin_cached_render_to(
 		.oldLayout = sampled ? IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 	};
-	vk::ImageMemoryBarrier2 depth = {
-		...IMAGE_BARRIER,
-		.image = self.depth,
-		.srcStageMask = sampled && !keep_depth ? CHAIN_READERS
-			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = sampled && !keep_depth ? ACCESS_2_SHADER_SAMPLED_READ_BIT
-			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.oldLayout = sampled && !keep_depth ? IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-			: IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
+	vk::ImageMemoryBarrier2 depth = depth_reopen_barrier(self.depth, sampled && !keep_depth);
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color, depth }));
 
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
@@ -554,21 +591,7 @@ fn void Target.begin_cached_render_to(
 // Rebuilds depth only inside a cached scene's dirty region.
 fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty, bool sampled)
 {
-	vk::ImageMemoryBarrier2 depth = {
-		...IMAGE_BARRIER,
-		.image = self.depth,
-		.srcStageMask = sampled ? CHAIN_READERS
-			: PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = sampled ? ACCESS_2_SHADER_SAMPLED_READ_BIT
-			: ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-		.oldLayout = sampled ? IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-			: IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		.subresourceRange = DEPTH_LEVEL,
-	};
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_reopen_barrier(self.depth, sampled) }));
 	vk::RenderingAttachmentInfo attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD).setStoreOp(ATTACHMENT_STORE_OP_STORE);
@@ -621,18 +644,24 @@ fn void Target.begin_overlay(&self, vk::CommandBuffer cmd)
 		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ keep }));
+	begin_overlay_rendering(cmd, self.color_view, self.extent);
+}
 
-	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(self.color_view)
+<*
+ A colour-only rendering that loads what is there: no clear, no depth, no Y flip.
+*>
+fn void begin_overlay_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent)
+{
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
 
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
 		.setColorAttachments({ color_attachment });
 
 	vk::cmdBeginRendering(cmd, &rendering);
-
-	set_full_viewport(cmd, self.extent, false);
+	set_full_viewport(cmd, extent, false);
 }
 
 <*
@@ -700,7 +729,7 @@ fn void set_viewport_rect(vk::CommandBuffer cmd, vk::Rect2D rect, bool flip_y)
 *>
 fn void Target.close(&self, vk::CommandBuffer cmd)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ self.to_transfer_src() }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ transfer_src_barrier(self.color) }));
 }
 
 // ============================================================================
@@ -727,12 +756,7 @@ fn sz Target.readback_size(&self) => (sz)self.extent.width * (sz)self.extent.hei
 *>
 fn vk::Memory? Target.create_readback(&self, Gpu* gpu)
 {
-	return vk::new_buffer(
-		&gpu.allocator,
-		usage: BUFFER_USAGE_TRANSFER_DST_BIT,
-		properties: MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		data_size: self.readback_size(),
-	);
+	return gpu.create_readback(self.readback_size());
 }
 
 <*

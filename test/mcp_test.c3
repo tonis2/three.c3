@@ -34,9 +34,9 @@ const String FIXTURE = "test/fixtures/textured.glb";
  `ToolHost` is addressed by pointer and handed to every tool, so it — and the
  renderer and runtime it names — must not move for as long as the server lives.
 *>
-macro @with_server(; @body(mcp::Server* server))
+macro @with_server(uint width = 160, uint height = 120; @body(mcp::Server* server))
 {
-	three::Renderer* renderer = device::borrow(160, 120);
+	three::Renderer* renderer = device::borrow(width, height);
 	defer device::release();
 
 	three::JsRuntime runtime;
@@ -768,9 +768,58 @@ fn void screenshot_returns_a_png_of_the_scene() @test
 		defer response.free(mem);
 
 		test::@check(response.contains(`\"width\":160`), "the frame is the target's size: %s", response);
+		test::@check(!response.contains(`\"image\":{`), "and small enough to send as it is: %s", response);
 
 		String payload = image_payload(response);
 		defer payload.free(mem);
 		test::@check(payload.len > 0, "and there is an image");
+	};
+}
+
+fn void image_false_leaves_the_frame_out() @test
+{
+	@with_server(; mcp::Server* server)
+	{
+		String response = call(server, "run_script", `{"source":"console.log('ran')","image":false}`);
+		defer response.free(mem);
+
+		test::@check(response.contains(`\"ok\":true`), "the script ran: %s", response);
+		test::@check(response.contains("ran"), "and its log came back");
+		test::@check(!response.contains(`"type":"image"`), "with no image block: %s", response);
+	};
+}
+
+<*
+ A frame wider than the cap comes back scaled to it, and the report says so,
+ because a pixel read off the picture is no longer a pixel of the render.
+*>
+fn void a_wide_frame_comes_back_scaled_and_says_from_what() @test
+{
+	@with_server(2000, 100; mcp::Server* server)
+	{
+		String response = call(server, "run_script", `{"source":"1+1"}`);
+		defer response.free(mem);
+
+		test::@check(
+			response.contains(`\"image\":{\"width\":1568,\"height\":79,\"renderWidth\":2000,\"renderHeight\":100}`),
+			"both sizes are in the report: %s", response
+		);
+
+		String payload = image_payload(response);
+		defer payload.free(mem);
+		char[]? bytes = base64::decode(mem, (char[])payload);
+		if (try png = bytes)
+		{
+			defer alloc::free(mem, png);
+			// IHDR's width and height, big-endian, right after the signature.
+			test::@check(png.len > 24, "the PNG has a header");
+			uint width = (uint)png[16] << 24 | (uint)png[17] << 16 | (uint)png[18] << 8 | (uint)png[19];
+			uint height = (uint)png[20] << 24 | (uint)png[21] << 16 | (uint)png[22] << 8 | (uint)png[23];
+			test::@check(width == 1568 && height == 79, "and the PNG is the scaled size: %d x %d", width, height);
+		}
+		else
+		{
+			test::@check(false, "the image block decodes as base64");
+		}
 	};
 }

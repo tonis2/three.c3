@@ -1009,11 +1009,13 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		// The map multiplies the factor, which is glTF's rule and the same one
 		// the metallic-roughness pair follows: a material with a map and no
 		// `emissive` colour set glows black, because the factor it is
-		// multiplied by is zero.
+		// multiplied by is zero. The map is uploaded `SRGB` like the base colour
+		// map, so the sampler hands back linear already; decoding it again here
+		// squared every glow down to a fraction of what Blender shows.
 		if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
 		{
 			Map emissive_map = map_at(SLOT_EMISSIVE);
-			emissive *= srgb_to_linear(map_texel(emissive_map, s.uv, uv_dx, uv_dy, scattered).rgb);
+			emissive *= map_texel(emissive_map, s.uv, uv_dx, uv_dy, scattered).rgb;
 		}
 	}
 
