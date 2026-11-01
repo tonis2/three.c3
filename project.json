@@ -7,7 +7,6 @@
 	"dependencies": ["vk", "c3w", "gltf", "image", "collision", "quickjs", "mcp", "ktx", "font", "cui", "shady"],
 	"features": [],
 	"macos-min-version": "26.0",
-
 	"wincrt": "dynamic",
 	"script-dir": "./",
 	"test-sources": ["test/**"],
