@@ -225,14 +225,11 @@ fn void the_server_introduces_itself() @test
 }
 
 <*
- Two tools, and the count is asserted rather than the names alone.
-
- Every scene verb is already a JavaScript call, so a third tool would be a second
- spelling of something `run_script` can do and one more thing to keep in step.
- The docs are not a tool either: they are the Markdown in `docs/`, which
- `run_script`'s description points at.
+ Four tools: `run_script` and `screenshot` for the scene, `ui_tree` and
+ `ui_input` for the interface. Every scene verb is already a JavaScript call, so
+ another scene tool would be a second spelling of something `run_script` does.
 *>
-fn void there_are_exactly_two_tools() @test
+fn void there_are_exactly_four_tools() @test
 {
 	@with_server(; mcp::Server* server)
 	{
@@ -241,7 +238,8 @@ fn void there_are_exactly_two_tools() @test
 
 		test::@check(response.contains(`"run_script"`), "run_script is listed");
 		test::@check(response.contains(`"screenshot"`), "screenshot is listed");
-		test::@check(count_of(response, `"inputSchema"`) == 2, "and nothing else is: %s", response);
+		test::@check(response.contains(`"ui_tree"`) && response.contains(`"ui_input"`), "the interface tools are listed");
+		test::@check(count_of(response, `"inputSchema"`) == 4, "and nothing else is: %s", response);
 	};
 }
 

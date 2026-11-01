@@ -482,10 +482,8 @@ fn bool click_id(three::Renderer* renderer, String id)
 <*
  The last element of a subtree, walking down the last child each time.
 
- `ConfirmDialog` paints its two buttons with one widget, and that widget is
- `@local` to cui — there is no type to name and no id stamped on it. It is
- always the last thing built under the panel, though, which is the same fact
- the layout relies on: the answers are what a dialog ends with.
+ A `ConfirmDialog`'s confirming button is always the last thing built under
+ the panel: the answers are what a dialog ends with.
 *>
 fn cui::Element* last_leaf(cui::Element* from)
 {
@@ -1636,12 +1634,10 @@ fn void a_confirmations_two_answers_are_two_events() @test
 
 		uint at = renderer.ui.node_for("ask")!!;
 
-		// The two buttons are one widget and the last thing under the panel. The
-		// confirming one is the right-hand half of it — the answer that does
-		// something sits where the pointer ends up — and fifteen pixels in from
-		// that edge is inside it whatever "OK" measures, since a button is its
-		// label plus fourteen pixels of padding at each end.
-		cui::Element* answers = last_leaf(renderer.ui.ui.find_id("cui-confirm-panel")!!);
+		// The confirming button is the last thing under the panel — the answer
+		// that does something sits where the pointer ends up — and fifteen pixels
+		// in from its right edge is inside it whatever "OK" measures.
+		cui::Element* answers = last_leaf(renderer.ui.ui.find_id(cui::widgets::QUESTION_PANEL_ID)!!);
 		float y = answers.absolute.y + answers.size.y * 0.5f;
 		float x = answers.absolute.x + answers.size.x - 15.0f;
 
