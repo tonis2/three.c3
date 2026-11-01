@@ -1041,7 +1041,7 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 		{
 			float t       = da / (da - db);
 			Vec3 crossing = a + (b - a) * t;
-			Vec3 inside   = collision::closest_point_on_triangle(crossing, v0, v1, v2);
+			Vec3 inside   = ((collision::TriangleVerts){ v0, v1, v2 }).closest_point(crossing);
 			// The plane crossing is inside the triangle exactly when the triangle's
 			// own closest point to it is itself. The tolerance is squared and
 			// generous: a crossing a micron outside an edge is caught by the edge
@@ -1058,7 +1058,7 @@ fn SegmentTriangle segment_triangle_closest(Vec3 a, Vec3 b, collision::TriangleV
 	Vec3[2] ends = { a, b };
 	foreach (end : ends)
 	{
-		Vec3 on_tri = collision::closest_point_on_triangle(end, v0, v1, v2);
+		Vec3 on_tri = ((collision::TriangleVerts){ v0, v1, v2 }).closest_point(end);
 		float d     = (end - on_tri).length();
 		if (d < best.distance) best = { .distance = d, .on_segment = end, .on_triangle = on_tri };
 	}
@@ -1307,7 +1307,7 @@ fn void Scene.gather_triangles(
 					collision::Aabb3 local = box.transform_matrix(inverse_world);
 
 					sz before = out.len();
-					mesh.bvh.query_all_triangles(local, out);
+					mesh.bvh.@foreach_triangle(local; collision::TriangleVerts found) { out.push(found); };
 					for (sz i = before; i < out.len(); i++)
 					{
 						collision::TriangleVerts tri = out.get(i);
