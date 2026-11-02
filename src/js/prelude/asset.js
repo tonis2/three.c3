@@ -137,16 +137,18 @@ function layerTexture(handle) {
 	return new Texture(handle, null, handle[4] === 1 ? LinearSRGBColorSpace : SRGBColorSpace);
 }
 
-// A plain object would do for the handle — `Mesh` only checks that `asset`,
-// `mesh` and `assetGeneration` are numbers, and a generated `Geometry`
-// satisfies the same check. This is a class so that `bounds` can be a getter
-// rather than a field: measuring is a crossing into the host, and paying for
-// it on every `asset.mesh(...)` when most callers only want to place the
-// piece would tax the common path to serve the rarer one.
+// The asset's handle and a mesh index, which is the same shape of thing a
+// generated `Geometry` is — what lets `Mesh` take either. `asset` and
+// `assetGeneration` are the handle's id as two numbers, for a script that prints
+// one. This is a class so that `bounds` can be a getter rather than a field:
+// measuring asks the host, and paying for it on every `asset.mesh(...)` when most
+// callers only want to place the piece would tax the common path to serve the
+// rarer one.
 export class MeshRef {
-	constructor(asset, assetGeneration, mesh, name) {
-		this.asset = asset;
-		this.assetGeneration = assetGeneration;
+	constructor(handle, mesh, name) {
+		this._asset = handle;
+		this.asset = handle.index;
+		this.assetGeneration = handle.generation;
 		this.mesh = mesh;
 		this.name = name;
 	}
@@ -228,27 +230,22 @@ export class MeshRef {
 	// `null` for a primitive that names no material at all, which is a real glTF
 	// and means the default one.
 	get material() {
-		const row = H.meshMaterial(this.asset, this.assetGeneration, this.mesh);
-		if (row === null) return null;
-		const [
-			alphaMode, alphaCutoff, doubleSided, emissiveIntensity,
-			er, eg, eb, aoMap, metalness, roughness, normalMap, mrMap, emissiveMap,
-			repeatU, repeatV, offsetU, offsetV,
-		] = row;
+		const said = H.meshMaterial(this._asset, this.mesh);
+		if (said === null) return null;
 		return {
-			alphaMode: ALPHA_MODE_BY_ORDINAL[alphaMode] ?? 'OPAQUE',
-			alphaCutoff,
-			doubleSided,
-			normalMap: layerTexture(normalMap),
-			emissive: [er, eg, eb],
-			emissiveMap: layerTexture(emissiveMap),
-			emissiveIntensity,
-			aoMap: layerTexture(aoMap),
-			metalness,
-			roughness,
-			metalnessRoughnessMap: layerTexture(mrMap),
-			repeat: [repeatU, repeatV],
-			offset: [offsetU, offsetV],
+			alphaMode: ALPHA_MODE_BY_ORDINAL[said.alphaMode] ?? 'OPAQUE',
+			alphaCutoff: said.alphaCutoff,
+			doubleSided: said.doubleSided,
+			normalMap: layerTexture(said.normalTexture),
+			emissive: said.emissiveFactor,
+			emissiveMap: layerTexture(said.emissiveTexture),
+			emissiveIntensity: said.emissiveStrength,
+			aoMap: layerTexture(said.occlusionTexture),
+			metalness: said.metallic,
+			roughness: said.roughness,
+			metalnessRoughnessMap: layerTexture(said.metallicRoughnessTexture),
+			repeat: said.uvScale,
+			offset: said.uvOffset,
 		};
 	}
 
@@ -274,9 +271,9 @@ export class MeshRef {
 	// means the file was not authored with the extension, the second means it was
 	// and every layer in it is off.
 	get layers() {
-		const stack = H.meshLayers(this.asset, this.assetGeneration, this.mesh);
+		const stack = H.meshLayers(this._asset, this.mesh);
 		if (stack === null) return null;
-		const [mask, rows, height, bumpStrength, bumpDistance] = stack;
+		const { maskTexture: mask, layers: rows, heightTexture: height, bumpStrength, bumpDistance } = stack;
 		return {
 			// Masks are weights rather than colours, so `load_material_layers`
 			// uploaded this linear. What comes back says which space it really
@@ -294,13 +291,14 @@ export class MeshRef {
 				height: layerTexture(height),
 				bump: { strength: bumpStrength, distance: bumpDistance },
 			}),
-			layers: rows.map(([
-				name, enabled, blend, maskSource, channel, invert, opacity,
-				r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture,
-				metalness, roughness, metallicRoughness, layerHeight,
-				layerBumpStrength, layerBumpDistance,
-				uvScaleU, uvScaleV, uvOffsetU, uvOffsetV,
-			]) => ({
+			layers: rows.map(({
+				name, enabled, blendMode: blend, maskSource, maskChannel: channel, invert, opacity,
+				baseColor: [r, g, b, a], emissiveFactor: [er, eg, eb],
+				texture: map, normalTexture: normal, emissiveTexture: emissive, maskTexture,
+				metallic: metalness, roughness, metallicRoughnessTexture: metallicRoughness,
+				heightTexture: layerHeight, bumpStrength: layerBumpStrength, bumpDistance: layerBumpDistance,
+				uvScale: [uvScaleU, uvScaleV], uvOffset: [uvOffsetU, uvOffsetV],
+			}) => ({
 				name,
 				enabled,
 				blend: BLEND_BY_ORDINAL[blend] ?? 'mix',
@@ -393,13 +391,13 @@ export class MeshRef {
 	// same mesh twice answers with the same assets rather than uploading a
 	// second copy.
 	split() {
-		const pieces = H.splitMesh(this.asset, this.assetGeneration, this.mesh);
-		return pieces.map(([index, generation, mesh], i) => {
+		const pieces = H.splitMesh(this._asset, this.mesh);
+		return pieces.map(({ asset, mesh }, i) => {
 			const piece = new Geometry(
 				'SplitGeometry',
 				`${this.name} piece ${i}`,
 				{ of: this.name, piece: i, pieces: pieces.length },
-				[index, generation]
+				asset
 			);
 			// A generated shape is always mesh 0 and a piece usually is, but the
 			// one-component answer is this mesh's own handle — see splitMesh.
@@ -552,34 +550,35 @@ function rollOf(forward, up) {
 }
 
 export class Asset {
-	constructor([index, generation]) {
-		this._a = index;
-		this._g = generation;
-		this.path = H.assetPath(index, generation);
+	// `handle` is the host's Asset handle for the load: one object per loaded
+	// asset, which every asset verb takes back.
+	constructor(handle) {
+		this._h = handle;
+		this.path = H.assetPath(handle);
 		// In load order, which is the order `mesh(name)` resolves in and the
 		// order the host's own `find_mesh` walks.
-		this.meshes = H.meshNames(index, generation);
+		this.meshes = H.meshNames(handle);
 		// Names and durations are read out of the JSON chunk at load, so
 		// this costs nothing and "does this character have a walk cycle" is
 		// a question worth asking before deciding to place it.
-		this.animations = H.assetClips(index, generation);
+		this.animations = H.assetClips(handle);
 		// The rig's joint names, for `character.socket(name)`. Out of the
 		// JSON like the two above, and empty for the vast majority of files
 		// that carry no skin. Worth having on the Asset rather than only on
 		// an instantiation, because a baked character drops its bone nodes
 		// and this is then the only place the names exist.
-		this.bones = H.assetBones(index, generation);
+		this.bones = H.assetBones(handle);
 		// How many pictures the file holds, for `imageAt`. Out of the JSON as
 		// well, so a file whose meshes have never been drawn still answers.
-		this.images = H.assetImages(index, generation);
+		this.images = H.assetImages(handle);
 	}
 
 	// The host's flattened node table, kept after the first walk.
 	//
 	// The three doors that read it — `instantiate`, `node` and `nodes` — asked
 	// the host for a fresh array every time, and a kit is where that bites:
-	// placing 1,557 pieces out of a 39-node file rebuilt 39 rows of 22 values
-	// per placement to read eight of them. The rows depend on the asset and the
+	// placing 1,557 pieces out of a 39-node file rebuilt 39 rows per placement to
+	// read eight fields of each. The rows depend on the asset and the
 	// skeleton flag and on nothing else, and an asset does not change under its
 	// handle, so the second ask is the first ask's answer. `_nodeNames` already
 	// caches on this object for the same reason; `three.load` of a reloaded path
@@ -599,13 +598,13 @@ export class Asset {
 	// The array never leaves this object: `_build` and `node` read it and nothing
 	// hands it to a caller, so there is nobody to mutate the cache from.
 	_rows(skeleton, physics = false) {
-		H.checkAsset(this._a, this._g);
+		H.checkAsset(this._h);
 		// Four entries, because the walk depends on two flags and on nothing
 		// else: keeping the bone nodes or dropping them, and letting the file's
 		// colliders decide the index or leaving every mesh in it.
 		const at = (skeleton ? 1 : 0) + (physics ? 2 : 0);
 		if (!this._nodeRows) this._nodeRows = [null, null, null, null];
-		if (!this._nodeRows[at]) this._nodeRows[at] = H.assetNodes(this._a, this._g, skeleton, physics);
+		if (!this._nodeRows[at]) this._nodeRows[at] = H.assetNodes(this._h, skeleton, physics);
 		return this._nodeRows[at];
 	}
 
@@ -625,7 +624,7 @@ export class Asset {
 			// name here is still one `node()` takes; a repeat would not have
 			// resolved to anything new, since the first in the walk is the answer.
 			const seen = new Set();
-			for (const row of this._rows(false)) seen.add(row[0]);
+			for (const row of this._rows(false)) seen.add(row.name);
 			this._nodeNames = [...seen];
 		}
 		return this._nodeNames;
@@ -654,10 +653,13 @@ export class Asset {
 	// `nodes`' reason.
 	get lights() {
 		if (!this._lights) {
-			H.checkAsset(this._a, this._g);
-			this._lights = H.assetLights(this._a, this._g).map((row) => {
-				const [name, kind, r, g, b, intensity, range, inner, outer, px, py, pz, dx, dy, dz, node,
-					areaShape, width, height, spread, rx, ry, rz, ux, uy, uz] = row;
+			H.checkAsset(this._h);
+			this._lights = H.assetLights(this._h).map((row) => {
+				const {
+					name, kind, color: [r, g, b], intensity, range, innerCone: inner, outerCone: outer,
+					position: [px, py, pz], direction: [dx, dy, dz], gltfNode: node,
+					areaShape, width, height, spread, right: [rx, ry, rz], up: [ux, uy, uz],
+				} = row;
 				const light = {
 					name,
 					type: kind >= 3 ? ['square', 'rectangle', 'disk', 'ellipse'][areaShape] : (LIGHT_BY_ORDINAL[kind] || 'point'),
@@ -697,9 +699,12 @@ export class Asset {
 	// there is no orthographic projection here to describe.
 	get cameras() {
 		if (!this._cameras) {
-			H.checkAsset(this._a, this._g);
-			this._cameras = H.assetCameras(this._a, this._g).map((row) => {
-				const [name, px, py, pz, fx, fy, fz, ux, uy, uz, distance, yfov, znear, zfar, aspect, node] = row;
+			H.checkAsset(this._h);
+			this._cameras = H.assetCameras(this._h).map((row) => {
+				const {
+					name, position: [px, py, pz], forward: [fx, fy, fz], up: [ux, uy, uz],
+					distance, yfov, znear, zfar, aspect, gltfNode: node,
+				} = row;
 				return {
 					name,
 					position: [px, py, pz],
@@ -740,14 +745,14 @@ export class Asset {
 	// `nodes`' reason.
 	get colliders() {
 		if (!this._colliders) {
-			H.checkAsset(this._a, this._g);
-			this._colliders = H.assetBodies(this._a, this._g).map((row) => {
-				const [
-					node, name, shape, collider, trigger, motion, kinematic, mass,
-					gravityFactor, linearDamping, angularDamping,
-					lvx, lvy, lvz, avx, avy, avz,
-					material, friction, restitution, proxy, filtered,
-				] = row;
+			H.checkAsset(this._h);
+			this._colliders = H.assetBodies(this._h).map((row) => {
+				const {
+					gltfNode: node, name, shape, hasCollider: collider, trigger, hasMotion: motion, kinematic,
+					mass, gravityFactor, linearDamping, angularDamping,
+					linearVelocity: [lvx, lvy, lvz], angularVelocity: [avx, avy, avz],
+					hasMaterial: material, friction, restitution, hasProxy: proxy, filtered,
+				} = row;
 				return {
 					node, name,
 					shape: COLLIDER_BY_ORDINAL[shape] || 'mesh',
@@ -770,12 +775,12 @@ export class Asset {
 	// description and this one are the same object.
 	get physicsJoints() {
 		if (!this._physicsJoints) {
-			H.checkAsset(this._a, this._g);
-			this._physicsJoints = H.assetJoints(this._a, this._g).map((row) => {
-				const [a, b, px, py, pz, collide, limits] = row;
+			H.checkAsset(this._h);
+			this._physicsJoints = H.assetJoints(this._h).map((row) => {
+				const { bodyA: a, bodyB: b, pivot, collide, limits } = row;
 				return {
-					a, b, pivot: [px, py, pz], collide,
-					limits: limits.map(([kind, axes, min, max, stiffness, damping]) => {
+					a, b, pivot, collide,
+					limits: limits.map(({ kind, axes, min, max, stiffness, damping }) => {
 						const list = [];
 						for (let i = 0; i < 3; i++) if (axes & (1 << i)) list.push(i);
 						const out = { min, max, stiffness, damping };
@@ -794,14 +799,14 @@ export class Asset {
 			const have = this.meshes.length ? this.meshes.join(', ') : '(none)';
 			throw new Error(`no mesh named "${name}" in ${this.path} — it has: ${have}`);
 		}
-		return new MeshRef(this._a, this._g, at, name);
+		return new MeshRef(this._h, at, name);
 	}
 
 	meshAt(i) {
 		if (!(i >= 0 && i < this.meshes.length)) {
 			throw new RangeError(`mesh index ${i} is outside 0..${this.meshes.length - 1}`);
 		}
-		return new MeshRef(this._a, this._g, i, this.meshes[i]);
+		return new MeshRef(this._h, i, this.meshes[i]);
 	}
 
 	// One of the file's own images, as an ordinary Texture.
@@ -846,7 +851,7 @@ export class Asset {
 			throw new RangeError(`image index ${i} is outside ${have} in ${this.path}`);
 		}
 		const chosen = uploadOptions(options, 'asset.imageAt(i, options)');
-		const handle = H.assetImage(this._a, this._g, i, chosen.code, chosen.mips);
+		const handle = H.assetImage(this._h, i, chosen.code, chosen.mips);
 		// Null rather than a throw: an image that will not decode is the same
 		// thing the importer already survives by drawing the mesh untextured,
 		// and a script walking every image in a kit should not be stopped by one
@@ -884,7 +889,7 @@ export class Asset {
 	meshAsync(name) {
 		const ref = this.mesh(name);
 		return new Promise((ok, no) => {
-			H.uploadMesh(this._a, this._g, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
+			H.uploadMesh(this._h, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
 		});
 	}
 
@@ -892,7 +897,7 @@ export class Asset {
 	meshAtAsync(i) {
 		const ref = this.meshAt(i);
 		return new Promise((ok, no) => {
-			H.uploadMesh(this._a, this._g, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
+			H.uploadMesh(this._h, ref.mesh, () => ok(ref), (why) => no(new Error(why)));
 		});
 	}
 
@@ -922,12 +927,12 @@ export class Asset {
 			const ref = node.geometry;
 			// A Group has no geometry, and a Mesh over a generated shape has one
 			// that belongs to a different asset — neither is ours to upload.
-			if (ref && ref.asset === this._a && ref.assetGeneration === this._g) {
+			if (ref && ref._asset === this._h) {
 				wanted.add(ref.mesh);
 			}
 		});
 		await Promise.all([...wanted].map((mesh) => new Promise((ok, no) => {
-			H.uploadMesh(this._a, this._g, mesh, () => ok(mesh), (why) => no(new Error(why)));
+			H.uploadMesh(this._h, mesh, () => ok(mesh), (why) => no(new Error(why)));
 		})));
 		return root;
 	}
@@ -1010,7 +1015,7 @@ export class Asset {
 	node(name, options = undefined) {
 		const opt = this._instanceOptions(options);
 		const rows = this._rows(opt.skeleton, opt.physics);
-		const at = rows.findIndex((row) => row[0] === name);
+		const at = rows.findIndex((row) => row.name === name);
 		if (at < 0) {
 			throw new Error(`no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`);
 		}
@@ -1363,7 +1368,7 @@ export class Asset {
 		// The root is what carries the animations: a clip drives the whole
 		// subtree, so root.play('Walk') is the only sensible place to say it.
 		root._clips = this.animations;
-		root._asset = [this._a, this._g];
+		root._asset = this._h;
 		// Carried on the root because `_bindAnimation` is what tells the host, and
 		// that runs on the root.
 		root._liveSkin = opt.skeleton;
@@ -1394,7 +1399,10 @@ export class Asset {
 		const built = new Array(rows.length);
 		let root = into;
 		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
-			const [label, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin, collides, collisionOnly] = rows[i];
+			const {
+				name: label, parent, mesh, position: [px, py, pz], euler: [ex, ey, ez], scale: [sx, sy, sz],
+				quaternion: [qx, qy, qz, qw], gltfNode, color: [r, g, b, a], skin, collides, collisionOnly,
+			} = rows[i];
 			if (from >= 0 && i !== from && !(parent >= 0 && built[parent])) continue;
 			// **A `MeshRef` rather than the bare `{ asset, mesh }` this used to
 			// build.** A Mesh only needs the three numbers, so the plain object drew
@@ -1405,7 +1413,7 @@ export class Asset {
 			// The reference costs the same and answers all three.
 			const node = mesh < 0
 				? new Object3D()
-				: new Mesh(new MeshRef(this._a, this._g, mesh, label));
+				: new Mesh(new MeshRef(this._h, mesh, label));
 			if (label) node.name = label;
 			node.position.set(px, py, pz);
 			// The Euler triple is what `node.rotation` reads back as; the

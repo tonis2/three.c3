@@ -246,8 +246,7 @@ export class GridHelper extends LineMesh {
 export class WireframeHelper extends LineMesh {
 	constructor(target, color = 0xffffff) {
 		const ref = target instanceof Object3D ? target._ref() : target;
-		if (!ref || typeof ref.asset !== 'number' || typeof ref.mesh !== 'number'
-			|| typeof ref.assetGeneration !== 'number') {
+		if (!ref || !ref._asset || typeof ref.mesh !== 'number') {
 			throw new TypeError(
 				'new three.WireframeHelper(target) wants a Mesh that is in the scene, or the '
 				+ 'asset.mesh(name) / geometry it draws. A Group has no triangles of its own — '
@@ -258,7 +257,7 @@ export class WireframeHelper extends LineMesh {
 		super(
 			new Geometry(
 				'WireframeLines', 'wireframe', { of: ref.name || '' },
-				H.wireframe(ref.asset, ref.assetGeneration, ref.mesh),
+				H.wireframe(ref._asset, ref.mesh),
 			),
 			color,
 		);

@@ -221,7 +221,7 @@ export function boxFromSix(six) {
 // use rather than trusting a copy. The host reads it out of the glTF JSON,
 // so this costs no upload.
 export function refBounds(ref, where) {
-	const six = H.meshBounds(ref.asset, ref.assetGeneration, ref.mesh);
+	const six = H.meshBounds(ref._asset, ref.mesh);
 	if (six === null) throw new Error(`${where}: that mesh reference names nothing`);
 	return boxFromSix(six);
 }

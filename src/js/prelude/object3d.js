@@ -432,7 +432,8 @@ export class Object3D {
 		// Cached only when the host took it: a bind it refused — the asset gone,
 		// or a file with neither clips nor a skin — is asked again next time
 		// rather than remembered as done.
-		this._bound = H.bindAnimation(this._i, this._g, this._asset[0], this._asset[1], pairs, !!this._liveSkin) === true;
+		this._bound = H.bindAnimation(
+			this._i, this._g, this._asset.index, this._asset.generation, pairs, !!this._liveSkin) === true;
 	}
 
 	_flush() {

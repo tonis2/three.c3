@@ -222,7 +222,7 @@ function safe(fn) {
 // The kit's own node hierarchy — read straight off `asset._rows(false)` (the
 // same flattened, parent-indexed table `instantiate()` builds objects from;
 // see `js_asset_nodes` in src/js/bind_asset.c3 and `Asset._rows` in
-// src/js/prelude/asset.js for the row shape: `[name, parent, mesh, ...]`,
+// src/js/prelude/asset.js for the row shape: `{ name, parent, mesh, ... }`,
 // parents always before children).
 // ---------------------------------------------------------------------------
 
@@ -234,8 +234,8 @@ function buildAssetTree(asset) {
 	const depth = new Array(n).fill(0);
 	const childCount = new Array(n).fill(0);
 	for (let i = 0; i < n; i++) {
-		const parent = rows[i][1];
-		if (rows[i][2] !== -1) hasMesh[i] = true;
+		const parent = rows[i].parent;
+		if (rows[i].mesh !== -1) hasMesh[i] = true;
 		if (parent >= 0) childCount[parent]++;
 		depth[i] = parent >= 0 ? depth[parent] + 1 : 0; // parent < i always
 	}
@@ -243,7 +243,7 @@ function buildAssetTree(asset) {
 	// before its parent's own turn, so one pass propagates "a mesh sits
 	// somewhere in this subtree" all the way up to every ancestor.
 	for (let i = n - 1; i >= 0; i--) {
-		const parent = rows[i][1];
+		const parent = rows[i].parent;
 		if (hasMesh[i] && parent >= 0) hasMesh[parent] = true;
 	}
 	return { rows, hasMesh, depth, childCount };
@@ -272,19 +272,19 @@ function buildPieceList(tree) {
 	const { rows, hasMesh } = tree;
 	const childrenOf = new Map();
 	for (let i = 0; i < rows.length; i++) {
-		const parent = rows[i][1];
+		const parent = rows[i].parent;
 		if (parent < 0) continue;
 		if (!childrenOf.has(parent)) childrenOf.set(parent, []);
 		childrenOf.get(parent).push(i);
 	}
 	let candidates = [];
-	for (let i = 0; i < rows.length; i++) if (rows[i][1] < 0 && hasMesh[i]) candidates.push(i);
-	while (candidates.length === 1 && rows[candidates[0]][2] === -1) {
+	for (let i = 0; i < rows.length; i++) if (rows[i].parent < 0 && hasMesh[i]) candidates.push(i);
+	while (candidates.length === 1 && rows[candidates[0]].mesh === -1) {
 		const kids = (childrenOf.get(candidates[0]) ?? []).filter(i => hasMesh[i]);
 		if (kids.length === 0) break;
 		candidates = kids;
 	}
-	return candidates.map(i => rows[i][0]);
+	return candidates.map(i => rows[i].name);
 }
 
 // Swaps in a freshly loaded kit and rebuilds the browser's models with it —

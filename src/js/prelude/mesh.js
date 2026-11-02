@@ -19,8 +19,7 @@ const H = globalThis.__three;
 export class Mesh extends Object3D {
 	constructor(geometry, material = null) {
 		super();
-		if (!geometry || typeof geometry.asset !== 'number' || typeof geometry.mesh !== 'number'
-			|| typeof geometry.assetGeneration !== 'number') {
+		if (!geometry || !geometry._asset || typeof geometry.mesh !== 'number') {
 			throw new TypeError(
 				'new three.Mesh(geometry) wants a shape like new three.BoxGeometry(1, 1, 1), '
 				+ 'or a mesh reference from asset.mesh(name). An asset reference carries '
@@ -43,7 +42,7 @@ export class Mesh extends Object3D {
 		// It costs one crossing per Mesh. That is the same order as the `add()`
 		// which is the only useful thing to do with one, and it buys the throw at
 		// the line an agent has to edit.
-		H.checkAsset(geometry.asset, geometry.assetGeneration);
+		H.checkAsset(geometry._asset);
 		this._mesh = geometry;
 		this._name = geometry.name ?? '';
 		this._material = null;

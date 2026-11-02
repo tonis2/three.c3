@@ -5,81 +5,126 @@
  `mesh(name)` lookup happens in JavaScript: the load itself, the path back, the
  mesh names in order, one shape builder for all five parametric kinds, and the
  hull of a point cloud. Resolving a name to an index on this side would be a
- crossing per lookup and a second implementation of a search the host already
- has; handing the names over once also means `asset.meshes` is something a script
- can print when it has guessed a name wrong.
+ second implementation of a search the host already has; handing the names over
+ once also means `asset.meshes` is something a script can print when it has
+ guessed a name wrong.
 
  Loading the same path twice returns the same asset, because `Assets.load` does —
  the coarse half of "linked, not duplicated" — so a script that loads a kit in a
  loop pays once. `primitive` obeys the same rule against a key made of its
  parameters, which is what makes a thousand `new three.BoxGeometry(1, 1, 1)` one
  upload and one draw call.
+
+ Every verb that makes an asset answers with its `AssetId`, which reaches a script
+ as the one `Asset` handle object for that id, and every verb that reads one takes
+ that handle back.
 *>
 module three;
 
 import std::math;
 import std::math::vector;
-import qjs;
 import fastjs::js;
+import fastjs::js::opt;
 import image;
 import image::png;
 import std::collections::list;
 import std::io::file;
 import std::io::path;
 
+fn void? JsRuntime.bind_asset_verbs(&self, js::Value host)
+{
+	self.js.@bind(host, "load", &js_load, self)!;
+	self.js.@bind(host, "texture", &js_texture, self)!;
+	self.js.@bind(host, "dataTexture", &js_data_texture, self)!;
+	self.js.@bind(host, "textureDispose", &js_texture_dispose, self)!;
+	self.js.@bind(host, "textureRead", &js_texture_read, self)!;
+	self.js.@bind(host, "textureSave", &js_texture_save, self)!;
+	self.js.@bind(host, "primitive", &js_primitive, self)!;
+	self.js.@bind(host, "convex", &js_convex, self)!;
+	self.js.@bind(host, "extrude", &js_extrude, self)!;
+	self.js.@bind(host, "ribbon", &js_ribbon, self)!;
+	self.js.@bind(host, "terrain", &js_terrain, self)!;
+	self.js.@bind(host, "terrainAt", &js_terrain_at, self)!;
+	self.js.@bind(host, "lines", &js_lines, self)!;
+	self.js.@bind(host, "wireframe", &js_wireframe, self)!;
+	self.js.@bind(host, "checkAsset", &js_check_asset, self)!;
+	self.js.@bind(host, "assetPath", &js_asset_path, self)!;
+	self.js.@bind(host, "meshNames", &js_mesh_names, self)!;
+	self.js.@bind(host, "meshBounds", &js_mesh_bounds, self)!;
+	self.js.@bind(host, "assetImages", &js_asset_images, self)!;
+	self.js.@bind(host, "assetImage", &js_asset_image, self)!;
+	self.js.@bind(host, "uploadMesh", &js_upload_mesh, self)!;
+	self.js.@bind(host, "meshLayers", &js_mesh_layers, self)!;
+	self.js.@bind(host, "meshMaterial", &js_mesh_material, self)!;
+	self.js.@bind(host, "splitMesh", &js_split_mesh, self)!;
+	self.js.@bind(host, "merge", &js_merge, self)!;
+	self.js.@bind(host, "assetNodes", &js_asset_nodes, self)!;
+	self.js.@bind(host, "assetLights", &js_asset_lights, self)!;
+	self.js.@bind(host, "assetCameras", &js_asset_cameras, self)!;
+	self.js.@bind(host, "assetBodies", &js_asset_bodies, self)!;
+	self.js.@bind(host, "assetJoints", &js_asset_joints, self)!;
+	self.js.@bind(host, "assetClips", &js_asset_clips, self)!;
+	self.js.@bind(host, "assetBones", &js_asset_bones, self)!;
+	self.js.@bind(host, "inventory", &js_inventory, self)!;
+	self.js.@bind(host, "assetText", &js_asset_text, self)!;
+	self.js.@bind(host, "assetWriteText", &js_asset_write_text, self)!;
+	self.js.@bind(host, "exportScene", &js_export, self)!;
+}
+
 <*
- `load(path)` — the asset's index, for `add`.
+ Throws `what needs a GPU device` when the context has none.
+
+ @return? js::THREW
+*>
+fn void? need_device(JsRuntime* self, String what) @local
+{
+	if (self.renderer == null) return self.js.fail("%s needs a GPU device and this context has none", what)~;
+}
+
+// A number out of a flat argument, with a finite backstop: the prelude refuses a
+// non-finite component by name, and this is what a forged call gets instead of a
+// NaN spreading into its neighbours.
+fn float finite(float number, float fallback = 0) @local @inline => math::is_finite(number) ? number : fallback;
+
+<*
+ `load(path)` — the asset, for `add`.
 
  The device is required, and the message says so rather than throwing something
  about a null pointer: a runtime built for the scene-math tests has no GPU, and a
  script that reaches for a file in one should be told which of the two it is
  missing.
+
+ @return? js::THREW
 *>
-fn void js_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_load(JsRuntime* self, String path)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "three.load")!;
+	if (path.len == 0) return self.js.fail("three.load(path) wants a path to a .glb or .gltf")~;
 
-	if (!self.needs_device(&js, "three.load", out)) return;
-
-	@pool()
+	// Relative to the assets directory in a `--assets` boot, and to the working
+	// directory otherwise. Resolved before the load so a path reaching out of
+	// the game is refused by name rather than opening whatever it found.
+	String? opening = self.resolve_asset(path, tmem);
+	if (catch err = opening)
 	{
-		String path = arg_text(&js, argc, args, 0, tmem);
-		if (path.len == 0)
+		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			*out = js.raise("three.load(path) wants a path to a .glb or .gltf");
-			return;
+			return self.js.fail("cannot load '%s': it climbs out of the assets directory, and a game may only read "
+				"what is inside its own",
+				path)~;
 		}
+		return self.js.fail("cannot load '%s': %s", path, err)~;
+	}
 
-		// Relative to the assets directory in a `--assets` boot, and to the working
-		// directory otherwise. Resolved before the load so a path reaching out of
-		// the game is refused by name rather than opening whatever it found.
-		String? opening = self.resolve_asset(path, tmem);
-		if (catch err = opening)
-		{
-			if (err == qjs::MODULE_ESCAPES_ROOT)
-			{
-				*out = js.raisef("cannot load '%s': it climbs out of the assets directory, and a game may only read "
-					"what is inside its own",
-					path);
-				return;
-			}
-			*out = js.raisef("cannot load '%s': %s", path, err);
-			return;
-		}
-
-		AssetId? asset = self.pass.assets.load(&self.renderer.gpu, opening);
-		if (catch err = asset)
-		{
-			// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
-			// each a different thing to do about it, and flattening them into
-			// "could not load" would cost the agent the one word that says which.
-			*out = js.raisef("could not load %s: %s", self.blame(path, opening), err);
-			return;
-		}
-
-		*out = asset_value(&js, asset);
-	};
+	AssetId? asset = self.pass.assets.load(&self.renderer.gpu, opening);
+	if (catch err = asset)
+	{
+		// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
+		// each a different thing to do about it, and flattening them into
+		// "could not load" would cost the agent the one word that says which.
+		return self.js.fail("could not load %s: %s", self.blame(path, opening), err)~;
+	}
+	return asset;
 }
 
 <*
@@ -142,76 +187,48 @@ fn bool is_utf8_text(char[] bytes) @local
  in step. And bytes that are not UTF-8 are refused rather than handed over: a
  `String` crossing into JavaScript has to be text, and a `.glb` read by mistake
  should say what it is instead of arriving as a page of replacement characters.
+
+ @return? js::THREW
 *>
-fn void js_asset_text(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_text(JsRuntime* self, String asked)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	if (asked.len == 0) return self.js.fail("three.readText(path) wants a path to a file in the assets directory")~;
 
-	@pool()
+	String? opening = self.resolve_asset(asked, tmem);
+	if (catch err = opening)
 	{
-		String asked = arg_text(&js, argc, args, 0, tmem);
-		if (asked.len == 0)
+		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			*out = js.raise("three.readText(path) wants a path to a file in the assets directory");
-			return;
+			return self.js.fail("cannot read '%s': it climbs out of the assets directory, and a game may only read "
+				"what is inside its own",
+				asked)~;
 		}
+		return self.js.fail("cannot read '%s': %s", asked, err)~;
+	}
 
-		String? opening = self.resolve_asset(asked, tmem);
-		if (catch err = opening)
-		{
-			if (err == qjs::MODULE_ESCAPES_ROOT)
-			{
-				*out = js.raisef("cannot read '%s': it climbs out of the assets directory, and a game may only read "
-					"what is inside its own",
-					asked);
-				return;
-			}
-			*out = js.raisef("cannot read '%s': %s", asked, err);
-			return;
-		}
+	if (!file::is_file(opening)) return js::NULL;
 
-		if (!file::is_file(opening))
-		{
-			*out = qjs::null_value();
-			return;
-		}
+	// Asked before the read, so a file nobody meant to open costs a stat and
+	// not its own size in the host's heap.
+	long? size = path::file_size((Path)opening);
+	if (try size && (usz)size > js::MAX_MODULE_BYTES)
+	{
+		return self.js.fail("'%s' is %d bytes, and three.readText stops at %d — that is a level list or a table, "
+			"and a file this big is a mistake or a binary",
+			asked, size, js::MAX_MODULE_BYTES)~;
+	}
 
-		// Asked before the read, so a file nobody meant to open costs a stat and
-		// not its own size in the host's heap.
-		long? size = path::file_size((Path)opening);
-		if (try size && (usz)size > qjs::MAX_MODULE_BYTES)
-		{
-			*out = js.raisef("'%s' is %d bytes, and three.readText stops at %d — that is a level list or a table, "
-				"and a file this big is a mistake or a binary",
-				asked, size, qjs::MAX_MODULE_BYTES);
-			return;
-		}
+	char[]? bytes = file::load(tmem, opening);
+	if (catch err = bytes) return self.js.fail("could not read %s: %s", self.blame(asked, opening), err)~;
 
-		char[]? bytes = file::load(tmem, opening);
-		if (catch err = bytes)
-		{
-			*out = js.raisef("could not read %s: %s", self.blame(asked, opening), err);
-			return;
-		}
+	if (!is_utf8_text(bytes))
+	{
+		return self.js.fail("'%s' is not UTF-8 text — three.readText reads text, and a .glb goes through three.load "
+			"and an image through three.texture",
+			asked)~;
+	}
 
-		if (!is_utf8_text(bytes))
-		{
-			*out = js.raisef("'%s' is not UTF-8 text — three.readText reads text, and a .glb goes through three.load "
-				"and an image through three.texture",
-				asked);
-			return;
-		}
-
-		*out = js.string((String)bytes);
-	};
+	return self.js.string((String)bytes);
 }
 
 <*
@@ -248,8 +265,7 @@ fn void? make_way_for(String writing) @private
  was a typo. `three.writeText` and `scene.export` predate this and keep their
  own wording, which names the file kind each of them writes.
 
- The exception is raised here and `out` carries it, so a caller has only to
- return — the shape every verb in this file already has for a bad argument.
+ The exception is thrown here, so a caller has only to pass the fault on.
 
  A method, and so module-visible rather than `@private`: `resolve_write` next
  door is one for the same reason, and `bind_scene.c3` is the other caller.
@@ -257,34 +273,25 @@ fn void? make_way_for(String writing) @private
  @param asked : `The path as the script wrote it, for the sentence.`
  @param verb : `How the script spelled the call — "three.screenshot".`
  @return `The path to open, allocated in the caller's allocator.`
+ @return? js::THREW
 *>
-fn String? JsRuntime.open_for_write(
-	&self,
-	qjs::Context* js,
-	String asked,
-	String verb,
-	Allocator allocator,
-	qjs::Value* out
-)
+fn String? JsRuntime.writable_path(&self, String asked, String verb, Allocator allocator)
 {
 	String? writing = self.resolve_write(asked, allocator);
 	if (catch err = writing)
 	{
-		if (err == qjs::MODULE_ESCAPES_ROOT)
+		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			*out = js.raisef("%s cannot write to '%s': it climbs out of the assets directory, and a game may "
+			return self.js.fail("%s cannot write to '%s': it climbs out of the assets directory, and a game may "
 				"only write inside its own",
-				verb, asked);
-			return err~;
+				verb, asked)~;
 		}
-		*out = js.raisef("%s cannot write to '%s': %s", verb, asked, err);
-		return err~;
+		return self.js.fail("%s cannot write to '%s': %s", verb, asked, err)~;
 	}
 
 	if (catch err = make_way_for(writing))
 	{
-		*out = js.raisef("%s cannot write to '%s': could not make its folder: %s", verb, asked, err);
-		return err~;
+		return self.js.fail("%s cannot write to '%s': could not make its folder: %s", verb, asked, err)~;
 	}
 
 	return writing;
@@ -299,21 +306,24 @@ fn String? JsRuntime.open_for_write(
  `size` has been given a second thing to get wrong. `bytes` is the file rather
  than the pixels — a PNG of a flat colour is a few hundred bytes and one of a
  noise field is megabytes, which is the number that says an encode happened.
-
- A file that cannot be stat'd reads 0 rather than throwing: the write itself
- already succeeded, and failing the call over the size afterwards would report a
- file that is on disk as one that is not.
 *>
-fn qjs::Value wrote_image(qjs::Context* js, String path, uint width, uint height) @private
+struct WrittenImage
 {
-	qjs::Value described = js.object();
-	js.set_property(described, "path", js.string(path));
-	js.set_property(described, "width", qjs::int_value((int)width));
-	js.set_property(described, "height", qjs::int_value((int)height));
+	String path;
+	uint width;
+	uint height;
+	double bytes;
+}
 
-	double bytes = 0;
-	if (try size = path::file_size((Path)path)) bytes = (double)size;
-	js.set_property(described, "bytes", qjs::number_value(bytes));
+<*
+ The answer for a file just written. A file that cannot be stat'd reads 0 bytes
+ rather than throwing: the write itself already succeeded, and failing the call
+ over the size afterwards would report a file that is on disk as one that is not.
+*>
+fn WrittenImage written_image(String path, uint width, uint height) @private
+{
+	WrittenImage described = { .path = path, .width = width, .height = height };
+	if (try size = path::file_size((Path)path)) described.bytes = (double)size;
 	return described;
 }
 
@@ -344,65 +354,46 @@ fn qjs::Value wrote_image(qjs::Context* js, String path, uint width, uint height
  checked before the write rather than after: a file this writes is a file
  `three.readText` can read back, and a second, larger limit would make that
  false.
+
+ @return? js::THREW
 *>
-fn void js_asset_write_text(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn String? js_asset_write_text(JsRuntime* self, String asked, String text)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	if (asked.len == 0)
 	{
-		String asked = arg_text(&js, argc, args, 0, tmem);
-		if (asked.len == 0)
-		{
-			*out = js.raise("three.writeText(path, text) wants a path to a file in the assets directory");
-			return;
-		}
+		return self.js.fail("three.writeText(path, text) wants a path to a file in the assets directory")~;
+	}
 
-		String text = arg_text(&js, argc, args, 1, tmem);
-		if (text.len > qjs::MAX_MODULE_BYTES)
-		{
-			*out = js.raisef("'%s' is %d bytes, and three.writeText stops at %d — that is a level list or a table, "
-				"and a file this big is a mistake or a binary",
-				asked, text.len, qjs::MAX_MODULE_BYTES);
-			return;
-		}
+	if (text.len > js::MAX_MODULE_BYTES)
+	{
+		return self.js.fail("'%s' is %d bytes, and three.writeText stops at %d — that is a level list or a table, "
+			"and a file this big is a mistake or a binary",
+			asked, text.len, js::MAX_MODULE_BYTES)~;
+	}
 
-		String? writing = self.resolve_write(asked, tmem);
-		if (catch err = writing)
+	String? writing = self.resolve_write(asked, tmem);
+	if (catch err = writing)
+	{
+		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			if (err == qjs::MODULE_ESCAPES_ROOT)
-			{
-				*out = js.raisef("cannot write to '%s': it climbs out of the assets directory, and a game may only "
-					"write inside its own",
-					asked);
-				return;
-			}
-			*out = js.raisef("cannot write to '%s': %s", asked, err);
-			return;
+			return self.js.fail("cannot write to '%s': it climbs out of the assets directory, and a game may only "
+				"write inside its own",
+				asked)~;
 		}
+		return self.js.fail("cannot write to '%s': %s", asked, err)~;
+	}
 
-		if (catch err = make_way_for(writing))
-		{
-			*out = js.raisef("could not make the folder for %s: %s", self.blame(asked, writing), err);
-			return;
-		}
+	if (catch err = make_way_for(writing))
+	{
+		return self.js.fail("could not make the folder for %s: %s", self.blame(asked, writing), err)~;
+	}
 
-		if (catch err = file::save(writing, (char[])text))
-		{
-			*out = js.raisef("could not write %s: %s", self.blame(asked, writing), err);
-			return;
-		}
+	if (catch err = file::save(writing, (char[])text))
+	{
+		return self.js.fail("could not write %s: %s", self.blame(asked, writing), err)~;
+	}
 
-		*out = js.string(writing);
-	};
+	return writing;
 }
 
 <*
@@ -429,28 +420,23 @@ fn ColorSpace color_space_of(int code) @local
  cannot blit the format gives one level whatever `generateMipmaps` said, and a
  handle reporting the request rather than the result would make `tex.levels` a
  restatement of the caller's own argument.
-*>
-fn qjs::Value texture_value(JsRuntime* self, qjs::Context* js, int index, Texture* uploaded)
-{
-	// Counted here because this is the only door. Every one of the four verbs
-	// that hands a texture to a script takes a reference on the way through, and
-	// they all come here to build the array — so a fifth one cannot be written
-	// that forgets, which is the property a tally kept at the call sites would
-	// not have.
-	self.hold_texture(index);
 
-	qjs::Value fields = js.array();
-	js.set_index(fields, 0, qjs::int_value(index));
-	js.set_index(fields, 1, qjs::int_value((int)uploaded.width));
-	js.set_index(fields, 2, qjs::int_value((int)uploaded.height));
-	js.set_index(fields, 3, qjs::int_value((int)uploaded.levels));
-	return fields;
+ @return? js::THREW
+*>
+fn js::Value? JsRuntime.texture_handle(&self, int index, Texture* uploaded)
+{
+	// Counted here because this is the only door. Every verb that hands a texture
+	// to a script takes a reference on the way through, and they all come here to
+	// build the array — so another one cannot be written that forgets, which is
+	// the property a tally kept at the call sites would not have.
+	self.hold_texture(index);
+	return self.js.numbers({ (double)index, (double)uploaded.width, (double)uploaded.height, (double)uploaded.levels });
 }
 
 <*
  One more reference handed to a script, counted against its slot.
 
- Called by `texture_value` and nowhere else. The slot index is an ordinary
+ Called by `texture_handle` and nowhere else. The slot index is an ordinary
  position in `Assets.textures`, so the tally is a parallel array that grows to
  whatever the largest live slot is — a table of at most one `uint` per resident
  image, which is smaller than the image's own name.
@@ -517,7 +503,7 @@ fn void JsRuntime.release_script_textures(&self)
 }
 
 <*
- `texture(path, space, mips)` — decode a PNG or JPEG and upload it.
+ `texture(path, space, mips, nearest)` — decode a PNG or JPEG and upload it.
 
  The path goes through `resolve_asset`, the same door `three.load` uses, so under
  `--assets` a texture may only come from inside the game.
@@ -527,61 +513,45 @@ fn void JsRuntime.release_script_textures(&self)
  in, that object marks itself dead on `dispose()`, and a second `three.texture()`
  of the same file returns a second object holding a reference of its own. So a
  stale index cannot be presented.
+
+ @return? js::THREW
 *>
-fn void js_texture(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn js::Value? js_texture(JsRuntime* self, String path, int space, Opt {bool} mips, Opt {bool} nearest)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "three.texture")!;
+	if (path.len == 0) return self.js.fail("three.texture(path) wants a path to a .png or .jpg")~;
 
-	if (!self.needs_device(&js, "three.texture", out)) return;
-
-	@pool()
+	String? opening = self.resolve_asset(path, tmem);
+	if (catch err = opening)
 	{
-		String path = arg_text(&js, argc, args, 0, tmem);
-		if (path.len == 0)
+		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			*out = js.raise("three.texture(path) wants a path to a .png or .jpg");
-			return;
+			return self.js.fail("cannot load '%s': it climbs out of the assets directory, and a game may only read "
+				"what is inside its own",
+				path)~;
 		}
+		return self.js.fail("cannot load '%s': %s", path, err)~;
+	}
 
-		String? opening = self.resolve_asset(path, tmem);
-		if (catch err = opening)
-		{
-			if (err == qjs::MODULE_ESCAPES_ROOT)
-			{
-				*out = js.raisef("cannot load '%s': it climbs out of the assets directory, and a game may only read "
-					"what is inside its own",
-					path);
-				return;
-			}
-			*out = js.raisef("cannot load '%s': %s", path, err);
-			return;
-		}
+	int? index = self.pass.assets.load_texture_file(
+		&self.renderer.gpu,
+		opening,
+		color_space_of(space),
+		mips.or(true),
+		nearest.or(false)
+	);
+	if (catch err = index) return self.js.fail("%s", self.texture_failure(err, path, opening))~;
 
-		ColorSpace space = color_space_of(arg_int(&js, argc, args, 1));
-		bool mips        = arg_truth_or(&js, argc, args, 2, true);
-		bool nearest     = arg_truth_or(&js, argc, args, 3, false);
-
-		int? index = self.pass.assets.load_texture_file(&self.renderer.gpu, opening, space, mips, nearest);
-		if (catch err = index)
-		{
-			*out = js.raise(self.texture_failure(err, path, opening));
-			return;
-		}
-
-		*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
-	};
+	return self.texture_handle(index, self.pass.assets.texture_at(index));
 }
 
 <*
- `dataTexture(bytes, width, height, space, mips)` — pixels a script built.
+ `dataTexture(bytes, width, height, space, mips, nearest)` — pixels a script
+ built.
 
- The bytes are borrowed and are copied before this returns. `js.bytes` points
- into the engine's own storage for the `Uint8Array` the script is holding, which
- moves if the array is resized and is gone when it is collected — so the only
- safe thing to do with it is read it inside the call. `claim_texture` hashes it,
- copies it into a staging buffer and uploads, all before control goes back to
- JavaScript.
+ The bytes are the script's own array, valid for this call and copied before it
+ returns: `claim_texture` hashes them, copies them into a staging buffer and
+ uploads, all before control goes back to JavaScript.
 
  Deduplicated against every other texture, which is the interesting part: pixels
  generated in a script and the identical image loaded from a `.png` are one
@@ -592,58 +562,50 @@ fn void js_texture(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
  Deriving one from the other cannot tell a 64x64 from a 128x32, so a script that
  had its dimensions the wrong way round would get a skewed picture and no
  complaint.
+
+ @return? js::THREW
 *>
-fn void js_data_texture(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
+fn js::Value? js_data_texture(
+	JsRuntime* self,
+	char[] pixels,
+	int width,
+	int height,
+	int space,
+	Opt {bool} mips,
+	Opt {bool} nearest
 )
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "three.DataTexture")!;
 
-	if (!self.needs_device(&js, "three.DataTexture", out)) return;
-
-	int width  = arg_int(&js, argc, args, 1);
-	int height = arg_int(&js, argc, args, 2);
 	if (width <= 0 || height <= 0)
 	{
-		*out = js.raisef("new three.DataTexture(data, width, height) wants positive dimensions, got %dx%d",
-			width, height);
-		return;
+		return self.js.fail("new three.DataTexture(data, width, height) wants positive dimensions, got %dx%d",
+			width, height)~;
 	}
 	if (width > MAX_TEXTURE_SIDE || height > MAX_TEXTURE_SIDE)
 	{
-		*out = js.raisef("%dx%d is past the %d-pixel limit three.DataTexture accepts on a side",
-			width, height, MAX_TEXTURE_SIDE);
-		return;
+		return self.js.fail("%dx%d is past the %d-pixel limit three.DataTexture accepts on a side",
+			width, height, MAX_TEXTURE_SIDE)~;
 	}
 
-	char[] pixels = arg_bytes(&js, argc, args, 0);
 	if (pixels.len == 0)
 	{
-		// An empty slice means "not a Uint8Array" *and* "an empty one", and the
-		// message covers both because the fix is the same either way: the prelude
-		// has already widened a plain Array into a Uint8Array before this.
-		*out = js.raise("new three.DataTexture(data, ...) wants a Uint8Array of RGBA bytes, and this one is empty");
-		return;
+		// The prelude has already widened a plain Array into a Uint8Array before
+		// this, so an empty one is the only way to get here.
+		return self.js.fail("new three.DataTexture(data, ...) wants a Uint8Array of RGBA bytes, and this one is empty")~;
 	}
 
 	usz wanted = (usz)width * (usz)height * 4;
 	if (pixels.len != wanted)
 	{
-		*out = js.raisef("%dx%d is %d RGBA bytes and %d were given — four per pixel, in r, g, b, a order",
-			width, height, wanted, pixels.len);
-		return;
+		return self.js.fail("%dx%d is %d RGBA bytes and %d were given — four per pixel, in r, g, b, a order",
+			width, height, wanted, pixels.len)~;
 	}
 
-	// An `Image` over the borrowed bytes rather than a copy. `to_rgba` inside
+	// An `Image` over the script's bytes rather than a copy. `to_rgba` inside
 	// `claim_texture` makes the one copy this path needs; a second one here would
 	// be 1 MB memcpy'd for nothing on a 512x512.
-	// 
+	//
 	// The null allocator is what makes borrowing safe: `Image.free` frees nothing
 	// without one, so this struct owning bytes it did not allocate can never free
 	// the engine's storage.
@@ -656,23 +618,21 @@ fn void js_data_texture(
 		.allocator = (Allocator)null,
 	};
 
-	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
-	// `generateMipmaps` is worth reaching for here more than on a file. Pixels a
-	// script generated are as often a table as a picture — a palette, a ramp, a
-	// noise field indexed exactly — and a blurred level of a table is not a cheaper
-	// approximation of anything.
-	bool mips        = arg_truth_or(&js, argc, args, 4, true);
-	// The other half of "a table rather than a picture": a table wants its texels
-	// read as squares, and one bright texel under linear magnification is a soft
-	// square the size of everything beside it.
-	bool nearest     = arg_truth_or(&js, argc, args, 5, false);
-
-	int? index = self.pass.assets.claim_texture(&self.renderer.gpu, borrowed, space, mips, nearest);
-	if (catch err = index)
-	{
-		*out = js.raisef("could not upload the texture: %s", err);
-		return;
-	}
+	int? index = self.pass.assets.claim_texture(
+		&self.renderer.gpu,
+		borrowed,
+		color_space_of(space),
+		// `generateMipmaps` is worth reaching for here more than on a file. Pixels a
+		// script generated are as often a table as a picture — a palette, a ramp, a
+		// noise field indexed exactly — and a blurred level of a table is not a
+		// cheaper approximation of anything.
+		mips.or(true),
+		// The other half of "a table rather than a picture": a table wants its
+		// texels read as squares, and one bright texel under linear magnification
+		// is a soft square the size of everything beside it.
+		nearest.or(false)
+	);
+	if (catch err = index) return self.js.fail("could not upload the texture: %s", err)~;
 
 	// Read back off the upload, not echoed from the arguments. The two agree when
 	// everything is right, which is why echoing is tempting and wrong: it makes
@@ -681,7 +641,7 @@ fn void js_data_texture(
 	// here and the device is invisible from JavaScript. Written as an echo first,
 	// and a `.width`/`.height` swap injected into the `Image` above passed the
 	// whole suite.
-	*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
+	return self.texture_handle(index, self.pass.assets.texture_at(index));
 }
 
 <*
@@ -736,19 +696,8 @@ fn String JsRuntime.texture_failure(&self, fault err, String path, String openin
  `MeshPass.set_material_map`'s reason: the image is destroyed inside
  `release_texture` and a frame in flight may still be sampling it.
 *>
-fn void js_texture_dispose(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void js_texture_dispose(JsRuntime* self, int index)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	int index = arg_int(&js, argc, args, 0);
 	if (!self.pass.assets.texture_alive(index)) return;
 
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
@@ -762,17 +711,13 @@ fn void js_texture_dispose(
  `textureRead(index, into)` — copy a texture's pixels into a caller's
  `Uint8Array`.
 
- The destination is an argument, and that is the design. Building a plain `Array`
- costs one host crossing per element — 65,536 of them for a 128x128 texture.
- Handing out an `ArrayBuffer` over host memory means the host owns an allocation
- whose lifetime is decided by the script, and the only safe end to that is a
- detach the script has to be trusted to trigger.
-
- So the script supplies the memory and the host writes into it. `js.bytes` gives
- a mutable slice of the engine's own storage for the array — no copy, no
- ownership question, and the same function `dataTexture` already reads *from*. It
- also puts the allocation at the call site, where a caller reading a texture
- every frame can see what it costs.
+ The destination is an argument, and that is the design. Handing out an
+ `ArrayBuffer` over host memory means the host owns an allocation whose lifetime
+ is decided by the script, and the only safe end to that is a detach the script
+ has to be trusted to trigger. So the script supplies the memory and the host
+ writes into it — no copy, no ownership question. It also puts the allocation at
+ the call site, where a caller reading a texture every frame can see what it
+ costs.
 
  The bytes are the uploaded ones, not the sampled ones. The copy performs no
  format conversion, so an sRGB texture reads back as the sRGB bytes it was made
@@ -780,26 +725,14 @@ fn void js_texture_dispose(
  and what `png::save_file` wants.
 
  @return `The number of bytes written, so a caller can assert on it rather than trusting the length it passed.`
+ @return? js::THREW
 *>
-fn void js_texture_read(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn int? js_texture_read(JsRuntime* self, int index, char[] dst)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (!self.needs_device(&js, "texture.read()", out)) return;
-
-	int index = arg_int(&js, argc, args, 0);
+	need_device(self, "texture.read()")!;
 	if (!self.pass.assets.texture_alive(index))
 	{
-		*out = js.raise("texture.read() was given a texture that has been disposed");
-		return;
+		return self.js.fail("texture.read() was given a texture that has been disposed")~;
 	}
 
 	Texture* texture = self.pass.assets.texture_at(index);
@@ -810,29 +743,23 @@ fn void js_texture_read(
 	// rather than leaving a script to infer it from a wrong-looking image.
 	if (texture.format.is_block())
 	{
-		*out = js.raisef("texture.read() cannot read a %s texture: it holds compressed blocks, not pixels. "
+		return self.js.fail("texture.read() cannot read a %s texture: it holds compressed blocks, not pixels. "
 			"Load it from a .png or .jpg if the pixels are what you need",
-			block_family_name(texture.format.family));
-		return;
+			block_family_name(texture.format.family))~;
 	}
 
 	sz need = (sz)texture.width * (sz)texture.height * 4;
-
-	char[] dst = arg_bytes(&js, argc, args, 1);
 	if (dst.len < need)
 	{
-		*out = js.raisef("texture.read() wants a Uint8Array of at least %d bytes for a %dx%d image, and was given %d",
-			need, texture.width, texture.height, dst.len);
-		return;
+		return self.js.fail("texture.read() wants a Uint8Array of at least %d bytes for a %dx%d image, and was given %d",
+			need, texture.width, texture.height, dst.len)~;
 	}
 
 	if (catch err = texture.read_pixels(&self.renderer.gpu, dst))
 	{
-		*out = js.raisef("texture.read() could not copy the image back: %s", err);
-		return;
+		return self.js.fail("texture.read() could not copy the image back: %s", err)~;
 	}
-
-	*out = qjs::int_value((int)need);
+	return (int)need;
 }
 
 <*
@@ -860,71 +787,48 @@ fn void js_texture_read(
  The path is `resolve_write`'s, so under `--assets` this writes inside the game
  directory and nowhere else — the same door `scene.export` and `three.screenshot`
  go through.
+
+ @return? js::THREW
 *>
-fn void js_texture_save(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn WrittenImage? js_texture_save(JsRuntime* self, int index, String asked)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (!self.needs_device(&js, "texture.save()", out)) return;
-
-	int index = arg_int(&js, argc, args, 0);
+	need_device(self, "texture.save()")!;
 	if (!self.pass.assets.texture_alive(index))
 	{
-		*out = js.raise("texture.save() was given a texture that has been disposed");
-		return;
+		return self.js.fail("texture.save() was given a texture that has been disposed")~;
 	}
 
 	Texture* texture = self.pass.assets.texture_at(index);
 	if (texture.format.is_block())
 	{
-		*out = js.raisef("texture.save() cannot write a %s texture: it holds compressed blocks, not pixels. "
+		return self.js.fail("texture.save() cannot write a %s texture: it holds compressed blocks, not pixels. "
 			"Load it from a .png or .jpg if the pixels are what you need",
-			block_family_name(texture.format.family));
-		return;
+			block_family_name(texture.format.family))~;
 	}
 
-	@pool()
+	if (asked.len == 0) return self.js.fail("texture.save(path) wants a path to write a .png to")~;
+
+	String writing = self.writable_path(asked, "texture.save()", tmem)!;
+
+	char[] pixels = alloc::new_array(tmem, char, (sz)texture.width * (sz)texture.height * 4);
+	if (catch err = texture.read_pixels(&self.renderer.gpu, pixels))
 	{
-		String asked = arg_text(&js, argc, args, 1, tmem);
-		if (asked.len == 0)
-		{
-			*out = js.raise("texture.save(path) wants a path to write a .png to");
-			return;
-		}
+		return self.js.fail("texture.save() could not copy the image back: %s", err)~;
+	}
 
-		String? writing = self.open_for_write(&js, asked, "texture.save()", tmem, out);
-		if (catch writing) return;
-
-		char[] pixels = alloc::new_array(tmem, char, (sz)texture.width * (sz)texture.height * 4);
-		if (catch err = texture.read_pixels(&self.renderer.gpu, pixels))
-		{
-			*out = js.raisef("texture.save() could not copy the image back: %s", err);
-			return;
-		}
-
-		image::Image shot = {
-			.width = texture.width,
-			.height = texture.height,
-			.bit_depth = 8,
-			.format = image::PixelFormat.RGBA,
-			.pixels = pixels,
-		};
-		if (catch err = png::save_file(&shot, writing, tmem))
-		{
-			*out = js.raisef("texture.save() could not write %s: %s", asked, err);
-			return;
-		}
-
-		*out = wrote_image(&js, writing, texture.width, texture.height);
+	image::Image shot = {
+		.width = texture.width,
+		.height = texture.height,
+		.bit_depth = 8,
+		.format = image::PixelFormat.RGBA,
+		.pixels = pixels,
 	};
+	if (catch err = png::save_file(&shot, writing, tmem))
+	{
+		return self.js.fail("texture.save() could not write %s: %s", asked, err)~;
+	}
+
+	return written_image(writing, texture.width, texture.height);
 }
 
 <*
@@ -944,116 +848,99 @@ fn void js_texture_save(
  this argument existed still builds Three.js's own layout.
 
  The device is required and says so: a shape has to be uploaded to be drawn.
+
+ @return? js::THREW
 *>
-fn void js_primitive(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
+fn AssetId? js_primitive(
+	JsRuntime* self,
+	String name,
+	float a,
+	float b,
+	float c,
+	int u,
+	int v,
+	int w,
+	bool capped,
+	int uv
 )
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a shape")!;
 
-	if (!self.needs_device(&js, "building a shape", out)) return;
-
-	@pool()
+	PrimitiveKind? kind = primitive_kind(name);
+	if (catch kind)
 	{
-		String name         = arg_text(&js, argc, args, 0, tmem);
-		PrimitiveKind? kind = primitive_kind(name);
-		if (catch kind)
-		{
-			*out = js.raisef("there is no shape called '%s' — three.c3 builds: box, sphere, plane, cylinder, torus",
-				name);
-			return;
-		}
+		return self.js.fail("there is no shape called '%s' — three.c3 builds: box, sphere, plane, cylinder, torus",
+			name)~;
+	}
 
-		// Clamped rather than trusted: the prelude has already refused anything out
-		// of range with a better sentence, and this is what a script that called
-		// `__three.primitive` itself gets instead of an allocation the size of the
-		// device.
-		//
-		// `uv` likewise: the prelude has already refused any string but 'face' and
-		// 'local' before it ever became an ordinal, so anything but exactly 1 here
-		// reads as `FACE` — a script driving `__three.primitive` directly gets
-		// Three.js's own layout rather than a fault over a stray number.
-		Primitive shape = {
-			.kind = kind,
-			.a = arg_float(&js, argc, args, 1),
-			.b = arg_float(&js, argc, args, 2),
-			.c = arg_float(&js, argc, args, 3),
-			.u = primitive_segments((uint)math::max(arg_int(&js, argc, args, 4), 0), 1),
-			.v = primitive_segments((uint)math::max(arg_int(&js, argc, args, 5), 0), 1),
-			.w = primitive_segments((uint)math::max(arg_int(&js, argc, args, 6), 0), 1),
-			.capped = arg_truth(&js, argc, args, 7),
-			.uv = arg_int(&js, argc, args, 8) == UvMode.LOCAL.ordinal ? UvMode.LOCAL : UvMode.FACE,
-		};
-
-		AssetId? asset = self.pass.assets.primitive(&self.renderer.gpu, shape);
-		if (catch err = asset)
-		{
-			*out = js.raisef("could not build a %s: %s", name, err);
-			return;
-		}
-
-		*out = asset_value(&js, asset);
+	// Clamped rather than trusted: the prelude has already refused anything out
+	// of range with a better sentence, and this is what a script that called
+	// `__three.primitive` itself gets instead of an allocation the size of the
+	// device.
+	//
+	// `uv` likewise: the prelude has already refused any string but 'face' and
+	// 'local' before it ever became an ordinal, so anything but exactly 1 here
+	// reads as `FACE` — a script driving `__three.primitive` directly gets
+	// Three.js's own layout rather than a fault over a stray number.
+	Primitive shape = {
+		.kind = kind,
+		.a = a,
+		.b = b,
+		.c = c,
+		.u = primitive_segments((uint)math::max(u, 0), 1),
+		.v = primitive_segments((uint)math::max(v, 0), 1),
+		.w = primitive_segments((uint)math::max(w, 0), 1),
+		.capped = capped,
+		.uv = uv == UvMode.LOCAL.ordinal ? UvMode.LOCAL : UvMode.FACE,
 	};
+
+	AssetId? asset = self.pass.assets.primitive(&self.renderer.gpu, shape);
+	if (catch err = asset) return self.js.fail("could not build a %s: %s", name, err)~;
+	return asset;
 }
 
 <*
  `convex(points)` — the convex hull of a point cloud, as an asset.
 
- `points` is a flat JavaScript array of numbers, `x, y, z` per point, because
- that is the one shape the crossing can read in a single pass: an array of
- `Vector3`s would be three property lookups and a released value per point, and
- `prelude.js` has to walk the caller's input anyway to validate it.
+ `points` is a `Float32Array`, `x, y, z` per point: `prelude.js` has to walk the
+ caller's input anyway to validate it, and builds this as it goes.
 
  Refused rather than clamped at both ends, unlike `primitive`'s segment counts:
  there is no nearest sensible cloud to substitute for a bad one, and a hull
  quietly built from the first 65536 of a script's points would be a shape nobody
  asked for.
+
+ @return? js::THREW
 *>
-fn void js_convex(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_convex(JsRuntime* self, float[] flat)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a shape")!;
 
-	if (!self.needs_device(&js, "building a shape", out)) return;
-
-	long length = arg_length(&js, argc, args, 0);
-	if (length < 0 || length % 3 != 0)
+	if (flat.len % 3 != 0)
 	{
-		*out = js.raise(
+		return self.js.fail(
 			"three.ConvexGeometry wants a flat array of x, y, z numbers — its length must be a multiple of three"
-		);
-		return;
+		)~;
 	}
 
-	usz count = (usz)(length / 3);
+	usz count = flat.len / 3;
 	if (count < MIN_CONVEX_POINTS)
 	{
-		*out = js.raisef("a convex hull needs at least %d points, got %d", MIN_CONVEX_POINTS, count);
-		return;
+		return self.js.fail("a convex hull needs at least %d points, got %d", MIN_CONVEX_POINTS, count)~;
 	}
 	if (count > MAX_CONVEX_POINTS)
 	{
-		*out = js.raisef("a convex hull is capped at %d points, got %d", MAX_CONVEX_POINTS, count);
-		return;
+		return self.js.fail("a convex hull is capped at %d points, got %d", MAX_CONVEX_POINTS, count)~;
 	}
 
 	@pool()
 	{
 		Vec3[] points = alloc::new_array(tmem, Vec3, (sz)count);
-		for (usz i = 0; i < count; i++)
+		foreach (i, &point : points)
 		{
-			for (usz axis = 0; axis < 3; axis++)
-			{
-				// Zero for a forged non-finite component is the only substitution
-				// that cannot turn the hull inside out or send quickhull off to infinity.
-				points[i][axis] = index_float(&js, args[0], (uint)(i * 3 + axis));
-			}
+			// Zero for a forged non-finite component is the only substitution
+			// that cannot turn the hull inside out or send quickhull off to infinity.
+			*point = { finite(flat[i * 3]), finite(flat[i * 3 + 1]), finite(flat[i * 3 + 2]) };
 		}
 
 		AssetId? asset = self.pass.assets.convex(&self.renderer.gpu, points);
@@ -1065,16 +952,13 @@ fn void js_convex(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 			// generated cloud which of the three ways it collapsed.
 			if (err == CONVEX_HULL_IS_DEGENERATE)
 			{
-				*out = js.raisef("those %d points enclose no volume — they are all equal, all on one line or all on one "
-					"plane, and a convex hull needs four that are none of those",
-					count);
-				return;
+				return self.js.fail("those %d points enclose no volume — they are all equal, all on one line or all on "
+					"one plane, and a convex hull needs four that are none of those",
+					count)~;
 			}
-			*out = js.raisef("could not build a convex hull from %d points: %s", count, err);
-			return;
+			return self.js.fail("could not build a convex hull from %d points: %s", count, err)~;
 		}
-
-		*out = asset_value(&js, asset);
+		return asset;
 	};
 }
 
@@ -1082,83 +966,51 @@ fn void js_convex(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
  `extrude(outline, holes, holeCounts, depth)` — a 2D outline, with holes cut out
  of it, swept along +z, as an asset. Three.js's `ExtrudeGeometry` over a `Shape`.
 
- `outline` and `holes` are flat JavaScript arrays of numbers, `x, y` per point —
- the 2D analogue of `convex`'s flat `x, y, z`. `holes` concatenates every hole's
- points end to end; `holeCounts` says how many of them belong to each hole, in
- order, so the host can re-slice the one array back into however many rings
+ `outline` and `holes` are `Float32Array`s, `x, y` per point — the 2D analogue of
+ `convex`'s `x, y, z`. `holes` concatenates every hole's points end to end; the
+ `Uint32Array` `holeCounts` says how many of them belong to each hole, in order,
+ so the host can re-slice the one array back into however many rings
  `prelude.js` was handed. `scene/extrude.c3` carries the triangulation; this is
- only the crossing and the same finite-component backstop `convex` uses.
+ only the boundary and the same finite-component backstop `convex` uses.
+
+ @return? js::THREW
 *>
-fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_extrude(JsRuntime* self, float[] outline_flat, float[] holes_flat, uint[] hole_counts, Opt {double} depth_arg)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a shape")!;
 
-	if (!self.needs_device(&js, "building a shape", out)) return;
-
-	long outline_len = arg_length(&js, argc, args, 0);
-	if (outline_len < 0 || outline_len % 2 != 0)
+	if (outline_flat.len % 2 != 0)
 	{
-		*out = js.raise(
+		return self.js.fail(
 			"three.ExtrudeGeometry wants its outline as a flat array of x, y numbers — its length must be a multiple of two"
-		);
-		return;
+		)~;
 	}
-	long holes_len = arg_length(&js, argc, args, 1);
-	if (holes_len < 0 || holes_len % 2 != 0)
+	if (holes_flat.len % 2 != 0)
 	{
-		*out = js.raise(
+		return self.js.fail(
 			"three.ExtrudeGeometry wants its holes as a flat array of x, y numbers — its length must be a multiple of two"
-		);
-		return;
-	}
-	long hole_ring_count = arg_length(&js, argc, args, 2);
-	if (hole_ring_count < 0)
-	{
-		*out = js.raise("three.ExtrudeGeometry wants a holeCounts array, one entry per hole");
-		return;
+		)~;
 	}
 
-	usz outline_points = (usz)(outline_len / 2);
-	usz hole_points     = (usz)(holes_len / 2);
+	usz hole_points = holes_flat.len / 2;
+	usz counted = 0;
+	foreach (n : hole_counts) counted += n;
+	if (counted != hole_points)
+	{
+		return self.js.fail("three.ExtrudeGeometry: holeCounts adds up to %d points but holes has %d",
+			counted, hole_points)~;
+	}
+
+	double depth_asked = depth_arg.or(1.0);
+	float depth        = math::is_finite(depth_asked) && depth_asked > 0 ? (float)depth_asked : 0.001f;
 
 	@pool()
 	{
-		Vec2[] outline = alloc::new_array(tmem, Vec2, (sz)outline_points);
-		for (usz i = 0; i < outline_points; i++)
-		{
-			for (usz axis = 0; axis < 2; axis++)
-			{
-				outline[i][axis] = index_float(&js, args[0], (uint)(i * 2 + axis));
-			}
-		}
+		Vec2[] outline = alloc::new_array(tmem, Vec2, (sz)(outline_flat.len / 2));
+		foreach (i, &point : outline) *point = { finite(outline_flat[i * 2]), finite(outline_flat[i * 2 + 1]) };
 
 		Vec2[] holes = alloc::new_array(tmem, Vec2, (sz)hole_points);
-		for (usz i = 0; i < hole_points; i++)
-		{
-			for (usz axis = 0; axis < 2; axis++)
-			{
-				holes[i][axis] = index_float(&js, args[1], (uint)(i * 2 + axis));
-			}
-		}
-
-		uint[] hole_counts = alloc::new_array(tmem, uint, (sz)hole_ring_count);
-		usz counted = 0;
-		for (usz i = 0; i < (usz)hole_ring_count; i++)
-		{
-			uint n = index_uint(&js, args[2], (uint)i);
-			hole_counts[i] = n;
-			counted += n;
-		}
-		if (counted != hole_points)
-		{
-			*out = js.raisef("three.ExtrudeGeometry: holeCounts adds up to %d points but holes has %d",
-				counted, hole_points);
-			return;
-		}
-
-		double depth_arg = argc > 3 ? js.number(args[3]) : 1.0;
-		float depth       = math::is_finite(depth_arg) && depth_arg > 0 ? (float)depth_arg : 0.001f;
+		foreach (i, &point : holes) *point = { finite(holes_flat[i * 2]), finite(holes_flat[i * 2 + 1]) };
 
 		AssetId? asset = self.pass.assets.extrude(&self.renderer.gpu, outline, holes, hole_counts, depth);
 		if (catch err = asset)
@@ -1168,17 +1020,14 @@ fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
 			// exactly one thing here that is about the caller's shape.
 			if (err == EXTRUDE_SHAPE_IS_DEGENERATE)
 			{
-				*out = js.raise(
+				return self.js.fail(
 					"that outline has no area to extrude — it needs at least 3 points that are not all on one "
 						"line, and every hole needs at least 3 points of its own"
-				);
-				return;
+				)~;
 			}
-			*out = js.raisef("could not extrude that shape: %s", err);
-			return;
+			return self.js.fail("could not extrude that shape: %s", err)~;
 		}
-
-		*out = asset_value(&js, asset);
+		return asset;
 	};
 }
 
@@ -1186,11 +1035,11 @@ fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
  `ribbon(positions, normals, uvs, columns, rows)` — a strip geometry as an asset,
  built from a grid of vertices rather than from a parametric shape.
 
- Flat `positions`, `normals` and `uvs` arrays, row-major over `columns` x `rows`:
- one cross-section of `columns` vertices, one per row, in the order `row` walked
- down the path then `column` walked across the width. The host does the only
- thing it can know — emit the triangles between adjacent cells of the grid — and
- nothing about the shape of the curve, which is the prelude's domain.
+ `Float32Array`s `positions`, `normals` and `uvs`, row-major over `columns` x
+ `rows`: one cross-section of `columns` vertices, one per row, in the order `row`
+ walked down the path then `column` walked across the width. The host does the
+ only thing it can know — emit the triangles between adjacent cells of the grid —
+ and nothing about the shape of the curve, which is the prelude's domain.
 
  The index pattern is a grid like `Heightfield.build`'s, but wound the other way.
  A ribbon's across axis is 90 degrees counter-clockwise from its tangent (in the
@@ -1202,46 +1051,34 @@ fn void js_extrude(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
  call per unique ribbon, deduplicated by a hash of the vertices, filling the
  bounds and BVH through the same tail a built primitive uses. None of the data is
  retained on the slot: unlike a terrain, a ribbon answers no questions.
+
+ @return? js::THREW
 *>
-fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_ribbon(JsRuntime* self, float[] positions, float[] normals, float[] uvs, int columns, int rows)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a shape")!;
 
-	if (!self.needs_device(&js, "building a shape", out)) return;
-
-	long npos  = arg_length(&js, argc, args, 0);
-	long nnorm = arg_length(&js, argc, args, 1);
-	long nuv   = arg_length(&js, argc, args, 2);
-	if (npos < 3 || npos % 3 != 0)
+	if (positions.len < 3 || positions.len % 3 != 0)
 	{
-		*out = js.raise(
+		return self.js.fail(
 			"three.RibbonGeometry wants the vertex positions as a flat x, y, z array — its length must be a multiple of three"
-		);
-		return;
+		)~;
 	}
-	usz count = (usz)(npos / 3);
-	if (nnorm != npos)
+	usz count = positions.len / 3;
+	if (normals.len != positions.len)
 	{
-		*out = js.raise("ribbon normals must be the same length as positions — one x, y, z per vertex");
-		return;
+		return self.js.fail("ribbon normals must be the same length as positions — one x, y, z per vertex")~;
 	}
-	if (nuv != (long)(count * 2))
+	if (uvs.len != count * 2)
 	{
-		*out = js.raise("ribbon uvs must be u, v per vertex — twice as many numbers as vertices");
-		return;
+		return self.js.fail("ribbon uvs must be u, v per vertex — twice as many numbers as vertices")~;
 	}
-	int columns = (int)math::max(arg_int(&js, argc, args, 3), 0);
-	int rows    = (int)math::max(arg_int(&js, argc, args, 4), 0);
-	if (columns < 2 || rows < 2)
-	{
-		*out = js.raise("a ribbon needs at least 2 columns across and 2 rows along");
-		return;
-	}
+	columns = math::max(columns, 0);
+	rows    = math::max(rows, 0);
+	if (columns < 2 || rows < 2) return self.js.fail("a ribbon needs at least 2 columns across and 2 rows along")~;
 	if ((usz)columns * (usz)rows != count)
 	{
-		*out = js.raisef("columns x rows (%d x %d) must equal the number of vertices (%d)", columns, rows, count);
-		return;
+		return self.js.fail("columns x rows (%d x %d) must equal the number of vertices (%d)", columns, rows, count)~;
 	}
 
 	@pool()
@@ -1257,13 +1094,13 @@ fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 			Vec3 normal   = { 0, 1, 0 };
 			for (usz axis = 0; axis < 3; axis++)
 			{
-				position[axis] = index_float(&js, args[0], (uint)(i * 3 + axis));
-				normal[axis] = index_float(&js, args[1], (uint)(i * 3 + axis));
+				position[axis] = finite(positions[i * 3 + axis]);
+				normal[axis] = finite(normals[i * 3 + axis]);
 				hash = @hash_value(hash, position[axis]);
 				hash = @hash_value(hash, normal[axis]);
 			}
-			float ux = index_float(&js, args[2], (uint)(i * 2));
-			float uy = index_float(&js, args[2], (uint)(i * 2 + 1));
+			float ux = finite(uvs[i * 2]);
+			float uy = finite(uvs[i * 2 + 1]);
 			hash = @hash_value(hash, ux);
 			hash = @hash_value(hash, uy);
 			geometry.vertex(position, normal, { ux, uy });
@@ -1284,24 +1121,15 @@ fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
 
 		if (geometry.indices.len() < 3 || geometry.positions.len() == 0)
 		{
-			*out = js.raise("the ribbon produced no triangles — check the path and the width");
-			return;
+			return self.js.fail("the ribbon produced no triangles — check the path and the width")~;
 		}
 
 		String key = string::tformat("ribbon:%d:%d:%x", columns, rows, hash);
-		if (try hit = self.pass.assets.built(key))
-		{
-			*out = asset_value(&js, hit);
-			return;
-		}
+		if (try hit = self.pass.assets.built(key)) return hit;
 
 		AssetId? asset = self.pass.assets.upload_built(&self.renderer.gpu, key, "ribbon", &geometry);
-		if (catch err = asset)
-		{
-			*out = js.raisef("could not build a ribbon: %s", err);
-			return;
-		}
-		*out = asset_value(&js, asset);
+		if (catch err = asset) return self.js.fail("could not build a ribbon: %s", err)~;
+		return asset;
 	};
 }
 
@@ -1316,93 +1144,65 @@ fn void js_ribbon(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Valu
  `divisions` is the grid's and is ignored by the other two — `LineShape.key`
  leaves it out of their keys, so a box asked for with a stray division count is
  still the one box asset.
+
+ @return? js::THREW
 *>
-fn void js_lines(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_lines(JsRuntime* self, String name, int divisions)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a helper")!;
 
-	if (!self.needs_device(&js, "building a helper", out)) return;
-
-	@pool()
+	LineKind? kind = line_kind(name);
+	if (catch kind)
 	{
-		String name    = arg_text(&js, argc, args, 0, tmem);
-		LineKind? kind = line_kind(name);
-		if (catch kind)
-		{
-			*out = js.raisef("there is no line shape called '%s' — three.c3 builds: box, segment, grid", name);
-			return;
-		}
+		return self.js.fail("there is no line shape called '%s' — three.c3 builds: box, segment, grid", name)~;
+	}
 
-		// Clamped rather than trusted, for `primitive`'s reason: the prelude has
-		// already refused anything out of range with a better sentence.
-		int asked = arg_int(&js, argc, args, 1);
-		LineShape shape = {
-			.kind = kind,
-			.divisions = (uint)math::clamp(asked, 1, (int)MAX_GRID_DIVISIONS),
-		};
-
-		AssetId? asset = self.pass.assets.lines(&self.renderer.gpu, shape);
-		if (catch err = asset)
-		{
-			*out = js.raisef("could not build a %s helper: %s", name, err);
-			return;
-		}
-
-		*out = asset_value(&js, asset);
+	// Clamped rather than trusted, for `primitive`'s reason: the prelude has
+	// already refused anything out of range with a better sentence.
+	LineShape shape = {
+		.kind = kind,
+		.divisions = (uint)math::clamp(divisions, 1, (int)MAX_GRID_DIVISIONS),
 	};
+
+	AssetId? asset = self.pass.assets.lines(&self.renderer.gpu, shape);
+	if (catch err = asset) return self.js.fail("could not build a %s helper: %s", name, err)~;
+	return asset;
 }
 
 <*
- `wireframe(index, generation, mesh)` — one mesh's triangles as the edges between
- them.
+ `wireframe(asset, mesh)` — one mesh's triangles as the edges between them.
 
  The mesh has to be resident, and that is a sentence rather than an empty asset.
  The edges are read off `hull_positions`/`hull_triangles`, which are filled at
  upload, and a mesh reaches the device only when something drawing it is added to
  a scene. An empty wireframe would draw nothing and read as a helper that does
  not work.
+
+ @return? js::THREW
 *>
-fn void js_wireframe(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn AssetId? js_wireframe(JsRuntime* self, AssetId id, int mesh_asked)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a helper")!;
 
-	if (!self.needs_device(&js, "building a helper", out)) return;
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	uint mesh      = (uint)math::max(arg_int(&js, argc, args, 2), 0);
+	uint mesh      = (uint)math::max(mesh_asked, 0);
 	AssetId? asset = self.pass.assets.wireframe(&self.renderer.gpu, id, mesh);
 	if (catch err = asset)
 	{
 		if (err == LINE_MESH_NOT_RESIDENT)
 		{
-			*out = js.raise(
+			return self.js.fail(
 				"a wireframe is built from the mesh's own triangles, and those reach this side when the "
 					"mesh is uploaded — which happens when something drawing it is added to a scene. "
 					"scene.add(mesh) first, then make the helper"
-			);
-			return;
+			)~;
 		}
 		if (err == NO_SUCH_LINE_MESH)
 		{
-			*out = js.raisef("that asset has no mesh %d — asset.meshes lists the ones it has", mesh);
-			return;
+			return self.js.fail("that asset has no mesh %d — asset.meshes lists the ones it has", mesh)~;
 		}
-		*out = js.raisef("could not build a wireframe of mesh %d: %s", mesh, err);
-		return;
+		return self.js.fail("could not build a wireframe of mesh %d: %s", mesh, err)~;
 	}
-
-	*out = asset_value(&js, asset);
+	return asset;
 }
 
 <*
@@ -1425,7 +1225,53 @@ fn ExportTextureFormat export_textures(int asked) @local
 }
 
 <*
- `exportScene(path)` — write the scene to a `.glb`, and say what went into it.
+ What `scene.export` answers with. Every number in it answers a different question
+ about whether the file is the scene: `meshes` against `stats().uniqueMeshes`,
+ `instances` against `stats().instances`, and `skipped` and `shaded` for the two
+ things that deliberately did not survive the crossing.
+
+ `batches` is how many of `nodes` were written as instanced nodes — the one number
+ with no counterpart in `stats()`, saying how much of the scene the file managed to
+ keep as repetition rather than as a thousand named copies.
+
+ `compressed_images` sits beside `images` and is not folded into it: a script that
+ asked for a compressed texture wants to know how many it actually got, because an
+ encode that refused falls back to PNG rather than failing the export.
+
+ `layers` is `CUSTOM_materials_layers` records written, from a stack a file brought
+ and from one a script built alike. It exists because `shaded` cannot answer for
+ them: a layered material reaches the frame as a generated `ShaderMaterial` either
+ way, so it is counted as a lost shader whether or not its stack survived.
+
+ `baked_images` and `baked_colors` are what the bake did — both of them copies that
+ would have been counted in `shaded` without it.
+*>
+struct ExportAnswer
+{
+	String path;
+	uint meshes;
+	uint entries;
+	uint materials;
+	uint images;
+	uint compressed_images;
+	uint nodes;
+	uint instances;
+	uint batches;
+	uint skipped;
+	uint shaded;
+	uint baked_images;
+	uint baked_colors;
+	uint layers;
+	uint skins;
+	uint bones;
+	uint clips;
+	uint morphed;
+	double bytes;
+}
+
+<*
+ `exportScene(path, flatten, bake, textures)` — write the scene to a `.glb`, and
+ say what went into it.
 
  `js_load`'s other half, through a narrower door: the path is resolved by
  `resolve_write`, so under `--assets` a script may write inside the game
@@ -1435,175 +1281,103 @@ fn ExportTextureFormat export_textures(int asked) @local
  file it came from or tessellates it again from its description, so an export is
  the one heavy verb here that works on a runtime with no GPU.
 
- The report is an object rather than a count because every number in it answers a
- different question about whether the file is the scene: `meshes` against
- `stats().uniqueMeshes`, `instances` against `stats().instances`, and `skipped`
- and `shaded` for the two things that deliberately did not survive the crossing.
+ `flatten` gives up the hierarchy to batch copies that are not siblings — the
+ ones `asset.instantiate()` produces, each in a group of its own.
 
- `batches` is how many of `nodes` were written as instanced nodes — the one
- number with no counterpart in `stats()`, saying how much of the scene the file
- managed to keep as repetition rather than as a thousand named copies.
-
- `layers` is `CUSTOM_materials_layers` records written, from a stack a file
- brought and from one a script built alike. It exists because `shaded` cannot
- answer for them: a layered material reaches the frame as a generated
- `ShaderMaterial` either way, so it is counted as a lost shader whether or not
- its stack survived.
-
- The second argument is `flatten`, which gives up the hierarchy to batch copies
- that are not siblings — the ones `asset.instantiate()` produces, each in a group
- of its own.
-
- The third is the bake resolution, or 0 for none. It is the one part of an export
+ `bake` is the bake resolution, or 0 for none. It is the one part of an export
  that needs a device: each `ShaderMaterial` is run over its mesh's uv layout and
  read back, so a body's answer reaches the file as a `baseColorTexture` or a
- `baseColorFactor` instead of being lost. `render/bake.c3` is the whole of it, and
- `bakedImages` and `bakedColors` are what it did — both of them copies that would
- have been counted in `shaded` without it.
+ `baseColorFactor` instead of being lost. `render/bake.c3` is the whole of it.
+ The prelude has turned `bake: true` into a resolution and refused anything
+ outside the range by name, so this is a number and nothing else.
 
- The fourth is what generated textures are encoded as, as the number
+ `textures` is what generated textures are encoded as, as the number
  `export_textures` names. A source file's images are copied unchanged whatever it
  says.
-*>
-fn void js_export(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	if (self.pass == null)
+ @return? js::THREW
+*>
+fn ExportAnswer? js_export(JsRuntime* self, String path, bool flatten, int bake, int textures)
+{
+	if (self.pass == null) return self.js.fail("there is no scene to export in this context")~;
+	if (path.len == 0) return self.js.fail("scene.export(path) wants a path to write a .glb to")~;
+
+	String? writing = self.resolve_write(path, tmem);
+	if (catch err = writing)
 	{
-		*out = js.raise("there is no scene to export in this context");
-		return;
+		if (err == js::MODULE_ESCAPES_ROOT)
+		{
+			return self.js.fail("cannot export to '%s': it climbs out of the assets directory, and a game may only "
+				"write inside its own",
+				path)~;
+		}
+		return self.js.fail("cannot export to '%s': %s", path, err)~;
 	}
 
-	@pool()
+	if (catch err = make_way_for(writing))
 	{
-		String path = arg_text(&js, argc, args, 0, tmem);
-		if (path.len == 0)
-		{
-			*out = js.raise("scene.export(path) wants a path to write a .glb to");
-			return;
-		}
+		return self.js.fail("cannot export to '%s': could not make its folder: %s", path, err)~;
+	}
 
-		String? writing = self.resolve_write(path, tmem);
-		if (catch err = writing)
+	ExportReport? report = self.pass.export_scene(
+		writing,
+		flatten,
+		bake > 0 ? (uint)bake : 0,
+		export_textures(textures)
+	);
+	if (catch err = report)
+	{
+		if (err == EXPORT_HAS_NOTHING_TO_WRITE)
 		{
-			if (err == qjs::MODULE_ESCAPES_ROOT)
-			{
-				*out = js.raisef("cannot export to '%s': it climbs out of the assets directory, and a game may only "
-					"write inside its own",
-					path);
-				return;
-			}
-			*out = js.raisef("cannot export to '%s': %s", path, err);
-			return;
+			return self.js.fail(
+				"there is nothing in this scene to draw, so there is nothing to export — it is empty, "
+					"or everything in it is a helper or a hidden subtree, neither of which goes into a file"
+			)~;
 		}
+		return self.js.fail("could not export to %s: %s", path, err)~;
+	}
 
-		if (catch err = make_way_for(writing))
-		{
-			*out = js.raisef("cannot export to '%s': could not make its folder: %s", path, err);
-			return;
-		}
-
-		// The prelude has already reduced the options object to these scalars, so
-		// nothing here reads a property off a JavaScript value — an argument list
-		// this side stays a list of scalars, which keeps the two sides from
-		// disagreeing about defaults.
-		// The prelude has turned `bake: true` into a resolution and refused anything
-		// outside the range by name, so this is a number and nothing else.
-		int bake = arg_int(&js, argc, args, 2);
-		ExportReport? report = self.pass.export_scene(
-			writing,
-			arg_truth(&js, argc, args, 1),
-			bake > 0 ? (uint)bake : 0,
-			export_textures(arg_int(&js, argc, args, 3))
-		);
-		if (catch err = report)
-		{
-			if (err == EXPORT_HAS_NOTHING_TO_WRITE)
-			{
-				*out = js.raise(
-					"there is nothing in this scene to draw, so there is nothing to export — it is empty, "
-						"or everything in it is a helper or a hidden subtree, neither of which goes into a file"
-				);
-				return;
-			}
-			*out = js.raisef("could not export to %s: %s", path, err);
-			return;
-		}
-
-		qjs::Value described = js.object();
-		js.set_property(described, "path", js.string(writing));
-		js.set_property(described, "meshes", qjs::int_value((int)report.meshes));
-		js.set_property(described, "entries", qjs::int_value((int)report.entries));
-		js.set_property(described, "materials", qjs::int_value((int)report.materials));
-		js.set_property(described, "images", qjs::int_value((int)report.images));
-		// Beside `images` and not folded into it: a script that asked for a
-		// compressed texture wants to know how many it actually got, because an
-		// encode that refused falls back to PNG rather than failing the export.
-		js.set_property(described, "compressedImages", qjs::int_value((int)report.compressed_images));
-		js.set_property(described, "nodes", qjs::int_value((int)report.nodes));
-		js.set_property(described, "instances", qjs::int_value((int)report.instances));
-		js.set_property(described, "batches", qjs::int_value((int)report.batches));
-		js.set_property(described, "skipped", qjs::int_value((int)report.skipped));
-		js.set_property(described, "shaded", qjs::int_value((int)report.shaded));
-		js.set_property(described, "bakedImages", qjs::int_value((int)report.baked_images));
-		js.set_property(described, "bakedColors", qjs::int_value((int)report.baked_colors));
-		js.set_property(described, "layers", qjs::int_value((int)report.layers));
-		js.set_property(described, "skins", qjs::int_value((int)report.skins));
-		js.set_property(described, "bones", qjs::int_value((int)report.bones));
-		js.set_property(described, "clips", qjs::int_value((int)report.clips));
-		js.set_property(described, "morphed", qjs::int_value((int)report.morphed));
-		js.set_property(described, "bytes", qjs::number_value((double)report.bytes));
-		*out = described;
+	return {
+		.path = writing,
+		.meshes = report.meshes,
+		.entries = report.entries,
+		.materials = report.materials,
+		.images = report.images,
+		.compressed_images = report.compressed_images,
+		.nodes = report.nodes,
+		.instances = report.instances,
+		.batches = report.batches,
+		.skipped = report.skipped,
+		.shaded = report.shaded,
+		.baked_images = report.baked_images,
+		.baked_colors = report.baked_colors,
+		.layers = report.layers,
+		.skins = report.skins,
+		.bones = report.bones,
+		.clips = report.clips,
+		.morphed = report.morphed,
+		.bytes = (double)report.bytes,
 	};
 }
 
 <*
- `checkAsset(index, generation)` — raise if that handle no longer names an asset.
+ `checkAsset(asset)` — throw if that handle no longer names an asset.
 
- `arg_asset`'s staleness check with nothing else attached to it, so that
+ `AssetId`'s staleness check with nothing else attached to it, so that
  `new three.Mesh(ref)` can make it at the line naming the handle instead of
  leaving it to the `scene.add()` two lines later. It answers with nothing: the
  only thing a caller wants from it is the throw.
 
- The sentence is `arg_asset`'s own rather than a second one written beside it.
+ The sentence is the handle's own rather than a second one written beside it.
  One message means one place to keep it right, and an agent that hits it at the
  constructor reads exactly what it would have read at the add — including the
  recovery, which is the half that matters.
 *>
-fn void js_check_asset(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void js_check_asset(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	// The handle itself is discarded: the pending throw is the whole answer.
-	if (!arg_asset(self, &js, argc, args, 0, out).is_set()) return;
 }
 
-fn void js_asset_path(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-	*out = js.string(self.pass.assets.slot(id).path);
-}
+fn String js_asset_path(JsRuntime* self, AssetId id) => self.pass.assets.slot(id).path;
 
 <*
  Every mesh in an asset, by name, in load order.
@@ -1611,33 +1385,19 @@ fn void js_asset_path(
  A glTF mesh with several primitives produced several `GpuMesh` entries sharing
  one name, so this list can repeat — and `Asset.mesh(name)` in the prelude takes
  the first, which is what `Assets.find_mesh` does.
+
+ @return? js::THREW
 *>
-fn void js_mesh_names(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_mesh_names(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value names = js.array();
-	foreach (i, &mesh : self.pass.assets.slot(id).meshes)
-	{
-		js.set_index(names, (uint)i, js.string(mesh.name));
-	}
-	*out = names;
+	js::Value names = self.js.array()!;
+	foreach (&mesh : self.pass.assets.slot(id).meshes) self.js.push(names, self.js.string(mesh.name)!);
+	return names;
 }
 
 <*
- `meshBounds(index, generation, mesh)` — one mesh's box in its own local space,
- as `[minX, minY, minZ, maxX, maxY, maxZ]`, or `null` if the index names nothing.
+ `meshBounds(asset, mesh)` — one mesh's box in its own local space, as
+ `[minX, minY, minZ, maxX, maxY, maxZ]`, or `null` if the index names nothing.
 
  This costs nothing and is available before the mesh is on the device. A
  `GpuMesh` exists from the moment the JSON is parsed, and `bounds` is one of the
@@ -1647,36 +1407,27 @@ fn void js_mesh_names(
 
  Per mesh index, not per name: a glTF mesh with several primitives produced
  several entries sharing a name, and a `Mesh` node draws exactly one of them.
+
+ @return? js::THREW
 *>
-fn void js_mesh_bounds(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_mesh_bounds(JsRuntime* self, AssetId id, uint index)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	GpuMesh* mesh = self.pass.assets.mesh(id, (uint)arg_int(&js, argc, args, 2));
-	*out = mesh == null ? qjs::null_value() : aabb_value(&js, mesh.bounds);
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null) return js::NULL;
+	Vec3 min = mesh.bounds.min;
+	Vec3 max = mesh.bounds.max;
+	return self.js.numbers({ min.x, min.y, min.z, max.x, max.y, max.z });
 }
 
 <*
- `uploadMesh(index, generation, mesh, onDone, onFail)` — queue one mesh's upload
- and settle a promise when it lands.
+ `uploadMesh(asset, mesh, onDone, onFail)` — queue one mesh's upload and settle a
+ promise when it lands.
 
  **The promise is JavaScript's and the queue is the engine's.** What crosses is
  the two settlement functions of a `new Promise(...)` the prelude built, which
- the runtime retains and calls later — so there is no promise-capability call in
- the shim and no second definition of what a promise is. Settling one queues a
- microtask, and `drain_frame_jobs` already drains those; that is the whole of the
- machinery.
+ the runtime holds and calls later — so there is no second definition of what a
+ promise is. Settling one queues a microtask, and `drain_frame_jobs` already
+ drains those; that is the whole of the machinery.
 
  One mesh a frame comes out of `step_upload` rather than from anything here, and
  it is what separates this from `scene.add`: adding a kit of ninety pieces
@@ -1686,68 +1437,37 @@ fn void js_mesh_bounds(
  Nothing is uploaded during this call. A script that wants the mesh *now* should
  place it and let `add` do it, which is still the shorter path and always will
  be.
+
+ @return? js::THREW
 *>
-fn void js_upload_mesh(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void? js_upload_mesh(JsRuntime* self, AssetId id, uint mesh, js::Value resolve, js::Value reject)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	if (argc < 5 || !js.is_function(args[3]) || !js.is_function(args[4]))
+	if (!resolve.is_function() || !reject.is_function())
 	{
-		*out = js.raise("uploadMesh wants the two settlement functions of a promise");
-		return;
+		return self.js.fail("uploadMesh wants the two settlement functions of a promise")~;
 	}
 
-	self.uploads.push(
-		{
-			.asset = id,
-			.mesh = (uint)arg_int(&js, argc, args, 2),
-			.resolve = self.js.hold((js::Value)args[3]),
-			.reject = self.js.hold((js::Value)args[4]),
-		}
-	);
-	*out = qjs::undefined_value();
+	self.uploads.push({
+		.asset = id,
+		.mesh = mesh,
+		.resolve = self.js.hold(resolve),
+		.reject = self.js.hold(reject),
+	});
 }
 
 <*
- `assetImages(index, generation)` — how many images the file carries.
+ `assetImages(asset)` — how many images the file carries.
 
  Out of the JSON chunk, so it costs nothing and answers before any mesh has been
  placed. `asset.imageAt(i)` range-checks against it, which is what keeps an
  out-of-range index a `RangeError` naming the count rather than a `null` that
  could equally mean "the picture would not decode".
 *>
-fn void js_asset_images(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	*out = qjs::int_value((int)self.pass.assets.asset_image_count(id));
-}
+fn uint js_asset_images(JsRuntime* self, AssetId id) => self.pass.assets.asset_image_count(id);
 
 <*
- `assetImage(index, generation, image, space, mips)` — one of the file's own
- images as a texture handle.
+ `assetImage(asset, image, space, mips)` — one of the file's own images as a
+ texture handle.
 
  The verb `texture.read()` had nothing to be called on for a `.glb`. A picture
  inside a file reached the device as an `int` on a `GpuMesh` and stopped there,
@@ -1765,425 +1485,22 @@ fn void js_asset_images(
  from under a mesh still drawing it.
 
  @return `[index, width, height, levels], or null when the image would not decode.`
+ @return? js::THREW
 *>
-fn void js_asset_image(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_image(JsRuntime* self, AssetId id, int image, int space, Opt {bool} mips)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "asset.imageAt")!;
 
-	if (!self.needs_device(&js, "asset.imageAt", out)) return;
+	int? index = self.pass.assets.load_asset_image(&self.renderer.gpu, id, image, color_space_of(space), mips.or(true));
+	if (catch err = index) return self.js.fail("could not read image %d: %s", image, err)~;
+	if (index < 0) return js::NULL;
 
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	int image        = arg_int(&js, argc, args, 2);
-	ColorSpace space = color_space_of(arg_int(&js, argc, args, 3));
-	bool mips        = arg_truth_or(&js, argc, args, 4, true);
-
-	int? index = self.pass.assets.load_asset_image(&self.renderer.gpu, id, image, space, mips);
-	if (catch err = index)
-	{
-		*out = js.raisef("could not read image %d: %s", image, err);
-		return;
-	}
-	if (index < 0)
-	{
-		*out = qjs::null_value();
-		return;
-	}
-
-	*out = texture_value(self, &js, index, self.pass.assets.texture_at(index));
+	return self.texture_handle(index, self.pass.assets.texture_at(index));
 }
 
 <*
- `meshMaterial(index, generation, mesh)` — what the primitive's glTF material
- said, beyond the base colour that is already on the mesh.
-
- `scene/asset.c3`'s `GpuMaterial` has what is in it. What crosses is one flat
- array, `js_mesh_layers`'s shape and for its reason — the QuickJS shim has no
- property enumeration, so a positional row is cheaper on both sides.
-
- 0  alphaMode ordinal      4  emissiveFactor r     8  metallic
- 1  alphaCutoff           5  emissiveFactor g     9  roughness
- 2  doubleSided           6  emissiveFactor b    10  normal texture
- 3  emissiveStrength      7  occlusion texture   11  metallicRoughness texture
- 12  emissive texture     13  repeat u            15  offset u
-                          14  repeat v            16  offset v
-
- The last four are the material's `KHR_texture_transform`, one for every map it
- has — `texture_transform` in `scene/asset.c3` says why one and not five — and
- they cross under the names of the two properties they go on.
-
- Reading this uploads the mesh, and every read holds new references, exactly as
- `meshLayers` does: the images exist only once the primitive is on the device,
- and each texture handed back is a handle of its own.
-
- `null` for a primitive that names no material, which is a real glTF and means
- the default one.
-*>
-fn void js_mesh_material(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	uint index = (uint)arg_int(&js, argc, args, 2);
-	self.pass.assets.ensure_uploaded(id, index);
-
-	GpuMesh* mesh = self.pass.assets.mesh(id, index);
-	if (mesh == null || !mesh.material.present)
-	{
-		*out = qjs::null_value();
-		return;
-	}
-
-	GpuMaterial* material = &mesh.material;
-	qjs::Value row        = js.array();
-	js.set_index(row, 0, qjs::int_value((int)material.alpha_mode));
-	js.set_index(row, 1, qjs::number_value(material.alpha_cutoff));
-	js.set_index(row, 2, qjs::bool_value(material.double_sided));
-	put_numbers(&js, row, 3, {
-		material.emissive_strength, material.emissive_factor[0], material.emissive_factor[1],
-		material.emissive_factor[2],
-	});
-	js.set_index(row, 7, layer_texture_value(self, &js, material.occlusion_texture));
-	js.set_index(row, 8, qjs::number_value(material.metallic));
-	js.set_index(row, 9, qjs::number_value(material.roughness));
-	js.set_index(row, 10, layer_texture_value(self, &js, material.normal_texture));
-	js.set_index(row, 11, layer_texture_value(self, &js, material.metallic_roughness_texture));
-	js.set_index(row, 12, layer_texture_value(self, &js, material.emissive_texture));
-	put_numbers(&js, row, 13, {
-		material.uv_scale[0], material.uv_scale[1], material.uv_offset[0], material.uv_offset[1],
-	});
-	*out = row;
-}
-
-<*
- `splitMesh(index, generation, mesh)` — one mesh, cut into its connected
- components, as an array of `[index, generation]` asset handles.
-
- `scene/split.c3` has the algorithm and what a piece does and does not inherit.
- What is here is the boundary: the three refusals it can produce become three
- sentences an agent can act on, because "MESH_HAS_LAYERS" says nothing about what
- to do next.
-
- A mesh that is already one piece answers with an array of one holding *this*
- mesh's own handle — nothing is uploaded. That is not an error and is deliberately
- not reported as one: "this kit was already cut" is something a script finds out
- by looking at the length.
-*>
-fn void js_split_mesh(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (self.renderer == null)
-	{
-		*out = js.raise("splitting a mesh uploads its pieces, and this context has no GPU device");
-		return;
-	}
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	uint index = (uint)arg_int(&js, argc, args, 2);
-
-	@pool()
-	{
-		List{MeshPiece} pieces;
-		pieces.tinit(8);
-
-		uint? count = self.pass.assets.split_mesh(&self.renderer.gpu, id, index, &pieces);
-		if (catch err = count)
-		{
-			switch (err)
-			{
-				case MESH_HAS_LAYERS:
-					*out = js.raise(
-						"that mesh carries a layer stack, and a piece cut out of it cannot inherit one — "
-							"read the stack with ref.layers, build a LayeredMaterial from it, and put that on "
-							"the pieces yourself"
-					);
-				case MESH_CANNOT_BE_SPLIT:
-					*out = js.raise(
-						"there are no triangles to cut there — that mesh index does not exist, or it is a "
-							"line mesh, whose indices are pairs"
-					);
-				case TOO_MANY_SPLIT_PIECES:
-					*out = js.raisef("that mesh comes apart into more than %d pieces, which is not a kit — it is "
-						"geometry whose triangles do not touch each other",
-						MAX_SPLIT_PIECES);
-				default:
-					*out = js.raisef("that mesh could not be split: %s", err);
-			}
-			return;
-		}
-
-		// `[index, generation, mesh]` rather than `asset_value`'s pair: a piece
-		// carries which mesh of its asset it is, because the one-component answer is
-		// the source's own handle and that mesh need not be zero.
-		qjs::Value list = js.array();
-		foreach (i, piece : pieces)
-		{
-			qjs::Value triple = js.array();
-			js.set_index(triple, 0, qjs::int_value((int)piece.asset.index));
-			js.set_index(triple, 1, qjs::int_value((int)piece.asset.generation));
-			js.set_index(triple, 2, qjs::int_value((int)piece.mesh));
-			js.set_index(list, (uint)i, triple);
-		}
-		*out = list;
-	};
-}
-
-<*
- `merge(assetIndices, generations, meshes, matrices, colors)` — every named
- mesh concatenated into one asset, each one's vertices baked through its own
- matrix — `splitMesh` in reverse.
-
- Five flat arrays rather than an array of objects, `js_terrain`'s reason:
- `prelude.js` has already walked the subtree and built every one of these, so
- crossing five typed arrays is one length check apiece instead of one property
- read per mesh per field. `assetIndices`, `generations` and `meshes` are one
- integer per input mesh; `matrices` is sixteen floats per mesh, column-major —
- `Matrix4f.m`'s own layout, translation in `m[12..14]`; `colors` is four,
- `mesh.color` exactly as JavaScript last wrote it, not yet srgb-decoded.
- `scene/merge.c3` decodes it there, the way the shader decodes `mesh.color`,
- and folds it into the merged mesh's vertex colours rather than its own
- instance colour, because a merge only has one instance afterwards.
-
- Every length disagreeing with `assetIndices`' is a forged call — `prelude.js`
- built these five together — and is refused as one rather than trusted to mean
- something.
-
- @return `[index, generation, triangles] — the third number is what MergedGeometry.parameters.triangles reads.`
-*>
-fn void js_merge(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (self.renderer == null)
-	{
-		*out = js.raise("merging meshes uploads the result, and this context has no GPU device");
-		return;
-	}
-
-	long count = arg_length(&js, argc, args, 0);
-	if (count <= 0)
-	{
-		*out = js.raise("three.merge(...) wants at least one mesh");
-		return;
-	}
-
-	long generations_len = arg_length(&js, argc, args, 1);
-	long meshes_len       = arg_length(&js, argc, args, 2);
-	long matrices_len     = arg_length(&js, argc, args, 3);
-	long colors_len       = arg_length(&js, argc, args, 4);
-	if (generations_len != count || meshes_len != count || matrices_len != count * 16 || colors_len != count * 4)
-	{
-		*out = js.raise("three.merge(...): the crossing arrays do not agree on how many meshes there are");
-		return;
-	}
-
-	@pool()
-	{
-		MergeInput[] inputs = alloc::new_array(tmem, MergeInput, (sz)count);
-		for (long i = 0; i < count; i++)
-		{
-			uint asset_index      = index_uint(&js, args[0], (uint)i);
-			uint asset_generation = index_uint(&js, args[1], (uint)i);
-			uint mesh_index       = index_uint(&js, args[2], (uint)i);
-
-			AssetId asset_id = { .index = asset_index, .generation = asset_generation };
-			if (self.pass.assets.slot(asset_id) == null)
-			{
-				*out = js.raise(
-					"three.merge(...): one of the meshes named there is no longer loaded — "
-						"three.unloadUnused() or scene.unload() freed it since the subtree was walked"
-				);
-				return;
-			}
-
-			Matrix4f matrix;
-			for (long k = 0; k < 16; k++)
-			{
-				matrix.m[(usz)k] = index_float(&js, args[3], (uint)(i * 16 + k));
-			}
-
-			float[4] color;
-			for (long k = 0; k < 4; k++)
-			{
-				color[(usz)k] = index_float(&js, args[4], (uint)(i * 4 + k), 1.0f);
-			}
-
-			inputs[i] = { .asset = asset_id, .mesh = mesh_index, .matrix = matrix, .color = color };
-		}
-
-		uint failed_at = 0;
-		AssetId? asset = self.pass.assets.merge(&self.renderer.gpu, inputs, &failed_at);
-		if (catch err = asset)
-		{
-			String named = "that mesh";
-			if (failed_at < inputs.len)
-			{
-				GpuMesh* mesh = self.pass.assets.mesh(inputs[failed_at].asset, inputs[failed_at].mesh);
-				named = mesh != null && mesh.name.len > 0
-					? string::tformat("'%s'", mesh.name)
-					: string::tformat("mesh %d of the subtree", failed_at);
-			}
-			switch (err)
-			{
-				case MESH_HAS_LAYERS:
-					*out = js.raisef("%s carries a layer stack, and a merged mesh cannot inherit one — read it with "
-						"ref.layers, build a LayeredMaterial from it, and put that on the merged mesh "
-						"yourself",
-						named);
-				case MESH_CANNOT_BE_MERGED:
-					*out = js.raisef("%s has no triangles to merge — its asset is no longer loaded, or it is a line "
-						"mesh, whose indices are pairs",
-						named);
-				case NOTHING_TO_MERGE:
-					*out = js.raise("three.merge(...) wants at least one mesh");
-				case TOO_MANY_MERGE_MESHES:
-					*out = js.raisef("that merges %d meshes, more than the %d this refuses as a mistake rather than a "
-						"kit — a wide scatter of identical instances wants to stay instanced",
-						inputs.len, MAX_MERGE_MESHES);
-				default:
-					*out = js.raisef("%s could not be merged: %s", named, err);
-			}
-			return;
-		}
-
-		GpuMesh* built = self.pass.assets.mesh(asset, 0);
-		uint triangles = built != null ? built.index_count / 3 : 0;
-
-		qjs::Value triple = js.array();
-		js.set_index(triple, 0, qjs::int_value((int)asset.index));
-		js.set_index(triple, 1, qjs::int_value((int)asset.generation));
-		js.set_index(triple, 2, qjs::int_value((int)triangles));
-		*out = triple;
-	};
-}
-
-<*
- `meshLayers(index, generation, mesh)` — one mesh's `CUSTOM_materials_layers`
- stack, or `null` when its material never carried the extension.
-
- This uploads the mesh, unlike `meshBounds` beside it. A stack is texture slots,
- and texture slots exist only once the primitive has been through
- `upload_primitive` — so a verb that answered without uploading would answer
- `null` for a mesh that has layers and has simply not been drawn yet, which is a
- wrong answer that looks like a file without the extension. A script asking this
- is about to build a material for the mesh anyway.
-
- What crosses is a *description* rather than a material: the JS side turns it
- into an ordinary `LayeredMaterial` through the ordinary constructor, so an
- imported stack and a hand-written one are the same object and there is one
- generator rather than two.
-
- The blend mode and the mask channel cross as the extension's own ordinals and
- are named on the far side, which keeps `gltf.c3l`'s enum the single authority
- for what the ordinals mean.
-
- A layer's four uv numbers are its `KHR_texture_transform` **relative to the base
- material's**, which is what `LayeredMaterial` means by `uvScale` and `uvOffset`:
- the base's own transform is already on `s.uv` by the time a layer's uv is
- computed. `relative_uv` in `scene/asset.c3` has the arithmetic.
-
- @return `[maskTexture, [layer...], height, bumpStrength, bumpDistance] where each layer is [name, enabled, blendMode, maskSource, maskChannel, invert, opacity, r, g, b, a, er, eg, eb, map, normal, emissive, maskTexture, metallic, roughness, metallicRoughness, height, bumpStrength, bumpDistance, uvScaleU, uvScaleV, uvOffsetU, uvOffsetV], or null.`
-*>
-fn void js_mesh_layers(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	uint index = (uint)arg_int(&js, argc, args, 2);
-	self.pass.assets.ensure_uploaded(id, index);
-
-	GpuMesh* mesh = self.pass.assets.mesh(id, index);
-	if (mesh == null || !mesh.layers.present)
-	{
-		*out = qjs::null_value();
-		return;
-	}
-
-	qjs::Value layers = js.array();
-	foreach (i, &layer : mesh.layers.layers)
-	{
-		qjs::Value row = js.array();
-		js.set_index(row, 0, js.string(layer.name));
-		js.set_index(row, 1, qjs::bool_value(layer.enabled));
-		js.set_index(row, 2, qjs::int_value((int)layer.blend_mode));
-		js.set_index(row, 3, qjs::int_value((int)layer.mask_source));
-		js.set_index(row, 4, qjs::int_value((int)layer.mask_channel));
-		js.set_index(row, 5, qjs::bool_value(layer.invert));
-		put_numbers(&js, row, 6, {
-			layer.opacity, layer.base_color[0], layer.base_color[1], layer.base_color[2], layer.base_color[3],
-			layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2],
-		});
-		js.set_index(row, 14, layer_texture_value(self, &js, layer.texture));
-		js.set_index(row, 15, layer_texture_value(self, &js, layer.normal_texture));
-		js.set_index(row, 16, layer_texture_value(self, &js, layer.emissive_texture));
-		js.set_index(row, 17, layer_texture_value(self, &js, layer.mask_texture));
-		js.set_index(row, 18, qjs::number_value(layer.metallic));
-		js.set_index(row, 19, qjs::number_value(layer.roughness));
-		js.set_index(row, 20, layer_texture_value(self, &js, layer.metallic_roughness_texture));
-		js.set_index(row, 21, layer_texture_value(self, &js, layer.height_texture));
-		put_numbers(&js, row, 22, {
-			layer.bump_strength, layer.bump_distance, layer.uv_scale[0], layer.uv_scale[1], layer.uv_offset[0],
-			layer.uv_offset[1],
-		});
-		js.set_index(layers, (uint)i, row);
-	}
-
-	qjs::Value stack = js.array();
-	js.set_index(stack, 0, layer_texture_value(self, &js, mesh.layers.mask_texture));
-	js.set_index(stack, 1, layers);
-	// The base material's own relief, which hangs off the stack rather than off any
-	// layer — the extension's `base` object, and the only place core glTF leaves
-	// for a height map.
-	js.set_index(stack, 2, layer_texture_value(self, &js, mesh.layers.height_texture));
-	js.set_index(stack, 3, qjs::number_value(mesh.layers.bump_strength));
-	js.set_index(stack, 4, qjs::number_value(mesh.layers.bump_distance));
-	*out = stack;
-}
-
-<*
- One of a layer's texture slots, as `[index, width, height, levels, colourspace]`
- — or `null` for a slot the layer does not use.
+ One of a material's texture slots, as `[index, width, height, levels, colourspace]`
+ — or `null` for a slot it does not use.
 
  It retains. The `GpuMesh` holds one reference per slot and the `Texture` the
  prelude wraps this in holds another, exactly as `three.texture()` of a file
@@ -2202,34 +1519,364 @@ fn void js_mesh_layers(
  rather than a fact about the image — so an importer that uploaded a mask as sRGB
  by mistake would still *report* linear, and the one test aimed at that class of
  bug would pass.
+
+ @return? js::THREW
 *>
-fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) @local
+fn js::Value? layer_texture(JsRuntime* self, int index) @local
 {
-	if (index < 0) return qjs::null_value();
+	if (index < 0) return js::NULL;
 	Assets* assets    = &self.pass.assets;
 	Texture* uploaded = assets.texture_at(index);
-	if (uploaded == null) return qjs::null_value();
+	if (uploaded == null) return js::NULL;
 	assets.retain_texture(index);
-	qjs::Value fields = texture_value(self, js, index, uploaded);
-	js.set_index(fields, 4, qjs::int_value(uploaded.format.space == ColorSpace.LINEAR ? 1 : 0));
+	js::Value fields = self.texture_handle(index, uploaded)!;
+	self.js.push(fields, js::integer(uploaded.format.space == ColorSpace.LINEAR ? 1 : 0));
 	return fields;
 }
 
 <*
- `assetNodes(index, generation)` — the asset's node tree, flattened into the
- objects `asset.instantiate()` builds.
+ What a primitive's glTF material said, beyond the base colour that is already on
+ the mesh — `scene/asset.c3`'s `GpuMaterial` with its texture slots as handles.
 
- One entry per node that should exist, each naming its parent by position in the
- same array. Parents always come before their children, so `instantiate()` can
- walk it once and never look forward.
+ `uv_scale` and `uv_offset` are the material's `KHR_texture_transform`, one for
+ every map it has — `texture_transform` in `scene/asset.c3` says why one and not
+ five.
+*>
+struct MeshMaterialRecord
+{
+	uint alpha_mode;
+	float alpha_cutoff;
+	bool double_sided;
+	float emissive_strength;
+	float[<3>] emissive_factor;
+	float metallic;
+	float roughness;
+	js::Value normal_texture;
+	js::Value occlusion_texture;
+	js::Value metallic_roughness_texture;
+	js::Value emissive_texture;
+	float[<2>] uv_scale;
+	float[<2>] uv_offset;
+}
 
- The tree is not built here and its shape is not decided here. `Assets.flatten`
- decides — the same walk `Scene.instantiate` uses on the host — so a file placed
- by the CLI and a file placed by a script produce the same hierarchy. What
- crosses the boundary is a description, and JavaScript builds ordinary
- `Object3D`s from it that materialize through the normal `add` path. That is
- deliberate: an object handed back from here is one a script can move, hide,
- recolour and re-parent before it ever reaches a scene.
+<*
+ `meshMaterial(asset, mesh)` — a `MeshMaterialRecord`, or `null` for a primitive
+ that names no material, which is a real glTF and means the default one.
+
+ Reading this uploads the mesh, and every read holds new references, exactly as
+ `meshLayers` does: the images exist only once the primitive is on the device,
+ and each texture handed back is a handle of its own.
+
+ @return? js::THREW
+*>
+fn js::Value? js_mesh_material(JsRuntime* self, AssetId id, uint index)
+{
+	self.pass.assets.ensure_uploaded(id, index);
+
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null || !mesh.material.present) return js::NULL;
+
+	GpuMaterial* material = &mesh.material;
+	MeshMaterialRecord record = {
+		.alpha_mode = material.alpha_mode,
+		.alpha_cutoff = material.alpha_cutoff,
+		.double_sided = material.double_sided,
+		.emissive_strength = material.emissive_strength,
+		.emissive_factor = { material.emissive_factor[0], material.emissive_factor[1], material.emissive_factor[2] },
+		.metallic = material.metallic,
+		.roughness = material.roughness,
+		.normal_texture = layer_texture(self, material.normal_texture)!,
+		.occlusion_texture = layer_texture(self, material.occlusion_texture)!,
+		.metallic_roughness_texture = layer_texture(self, material.metallic_roughness_texture)!,
+		.emissive_texture = layer_texture(self, material.emissive_texture)!,
+		.uv_scale = { material.uv_scale[0], material.uv_scale[1] },
+		.uv_offset = { material.uv_offset[0], material.uv_offset[1] },
+	};
+	return self.js.@object_of(record);
+}
+
+<*
+ `splitMesh(asset, mesh)` — one mesh, cut into its connected components, as an
+ array of `{ asset, mesh }`.
+
+ `scene/split.c3` has the algorithm and what a piece does and does not inherit.
+ What is here is the boundary: the three refusals it can produce become three
+ sentences an agent can act on, because "MESH_HAS_LAYERS" says nothing about what
+ to do next.
+
+ A piece carries which mesh of its asset it is, because a mesh that is already one
+ piece answers with an array of one holding *this* mesh — nothing is uploaded, and
+ that mesh need not be zero. That is not an error and is deliberately not reported
+ as one: "this kit was already cut" is something a script finds out by looking at
+ the length.
+
+ @return? js::THREW
+*>
+fn js::Value? js_split_mesh(JsRuntime* self, AssetId id, uint index)
+{
+	if (self.renderer == null)
+	{
+		return self.js.fail("splitting a mesh uploads its pieces, and this context has no GPU device")~;
+	}
+
+	@pool()
+	{
+		List{MeshPiece} pieces;
+		pieces.tinit(8);
+
+		uint? count = self.pass.assets.split_mesh(&self.renderer.gpu, id, index, &pieces);
+		if (catch err = count)
+		{
+			switch (err)
+			{
+				case MESH_HAS_LAYERS:
+					return self.js.fail(
+						"that mesh carries a layer stack, and a piece cut out of it cannot inherit one — "
+							"read the stack with ref.layers, build a LayeredMaterial from it, and put that on "
+							"the pieces yourself"
+					)~;
+				case MESH_CANNOT_BE_SPLIT:
+					return self.js.fail(
+						"there are no triangles to cut there — that mesh index does not exist, or it is a "
+							"line mesh, whose indices are pairs"
+					)~;
+				case TOO_MANY_SPLIT_PIECES:
+					return self.js.fail("that mesh comes apart into more than %d pieces, which is not a kit — it is "
+						"geometry whose triangles do not touch each other",
+						MAX_SPLIT_PIECES)~;
+				default:
+					return self.js.fail("that mesh could not be split: %s", err)~;
+			}
+		}
+
+		js::Value list = self.js.array((uint)pieces.len())!;
+		foreach (piece : pieces) self.js.push(list, self.js.@object_of(piece)!);
+		return list;
+	};
+}
+
+// What `merge` built, and how many triangles it came to — what
+// `MergedGeometry.parameters.triangles` reads.
+struct MergeAnswer
+{
+	AssetId asset;
+	uint triangles;
+}
+
+<*
+ `merge(assets, meshes, matrices, colors)` — every named mesh concatenated into
+ one asset, each one's vertices baked through its own matrix — `splitMesh` in
+ reverse.
+
+ `assets` is an array of Asset handles, one per input mesh, and `meshes` a
+ `Uint32Array` of the same length; `matrices` is a `Float32Array` of sixteen per
+ mesh, column-major — `Matrix4f.m`'s own layout, translation in `m[12..14]`;
+ `colors` is four per mesh, `mesh.color` exactly as JavaScript last wrote it, not
+ yet srgb-decoded. `scene/merge.c3` decodes it there, the way the shader decodes
+ `mesh.color`, and folds it into the merged mesh's vertex colours rather than its
+ own instance colour, because a merge only has one instance afterwards.
+
+ Every length disagreeing with `assets`' is a forged call — `prelude.js` built
+ these four together — and is refused as one rather than trusted to mean
+ something.
+
+ @return? js::THREW
+*>
+fn MergeAnswer? js_merge(JsRuntime* self, js::Value assets, uint[] meshes, float[] matrices, float[] colors)
+{
+	if (self.renderer == null)
+	{
+		return self.js.fail("merging meshes uploads the result, and this context has no GPU device")~;
+	}
+
+	long count = self.js.length(assets)!;
+	if (count <= 0) return self.js.fail("three.merge(...) wants at least one mesh")~;
+	if (meshes.len != count || matrices.len != count * 16 || colors.len != count * 4)
+	{
+		return self.js.fail("three.merge(...): the crossing arrays do not agree on how many meshes there are")~;
+	}
+
+	@pool()
+	{
+		MergeInput[] inputs = alloc::new_array(tmem, MergeInput, (sz)count);
+		foreach (usz i, &input : inputs)
+		{
+			void* data = js::data_of(self.js.get(assets, i)!, self.asset_class);
+			AssetId asset_id = data ? unpack_id(data, AssetId) : NO_ASSET;
+			if (!data || self.pass.assets.slot(asset_id) == null)
+			{
+				return self.js.fail(
+					"three.merge(...): one of the meshes named there is no longer loaded — "
+						"three.unloadUnused() or scene.unload() freed it since the subtree was walked"
+				)~;
+			}
+
+			Matrix4f matrix;
+			for (usz k = 0; k < 16; k++) matrix.m[k] = finite(matrices[i * 16 + k]);
+
+			float[4] color;
+			for (usz k = 0; k < 4; k++) color[k] = finite(colors[i * 4 + k], 1.0f);
+
+			*input = { .asset = asset_id, .mesh = meshes[i], .matrix = matrix, .color = color };
+		}
+
+		uint failed_at = 0;
+		AssetId? asset = self.pass.assets.merge(&self.renderer.gpu, inputs, &failed_at);
+		if (catch err = asset)
+		{
+			String named = "that mesh";
+			if (failed_at < inputs.len)
+			{
+				GpuMesh* mesh = self.pass.assets.mesh(inputs[failed_at].asset, inputs[failed_at].mesh);
+				named = mesh != null && mesh.name.len > 0
+					? string::tformat("'%s'", mesh.name)
+					: string::tformat("mesh %d of the subtree", failed_at);
+			}
+			switch (err)
+			{
+				case MESH_HAS_LAYERS:
+					return self.js.fail("%s carries a layer stack, and a merged mesh cannot inherit one — read it with "
+						"ref.layers, build a LayeredMaterial from it, and put that on the merged mesh "
+						"yourself",
+						named)~;
+				case MESH_CANNOT_BE_MERGED:
+					return self.js.fail("%s has no triangles to merge — its asset is no longer loaded, or it is a line "
+						"mesh, whose indices are pairs",
+						named)~;
+				case NOTHING_TO_MERGE:
+					return self.js.fail("three.merge(...) wants at least one mesh")~;
+				case TOO_MANY_MERGE_MESHES:
+					return self.js.fail("that merges %d meshes, more than the %d this refuses as a mistake rather than a "
+						"kit — a wide scatter of identical instances wants to stay instanced",
+						inputs.len, MAX_MERGE_MESHES)~;
+				default:
+					return self.js.fail("%s could not be merged: %s", named, err)~;
+			}
+		}
+
+		GpuMesh* built = self.pass.assets.mesh(asset, 0);
+		return { .asset = asset, .triangles = built != null ? built.index_count / 3 : 0 };
+	};
+}
+
+<*
+ One layer of an imported stack, with its texture slots as handles.
+
+ The blend mode and the mask channel are the extension's own ordinals and are
+ named on the far side, which keeps `gltf.c3l`'s enum the single authority for
+ what the ordinals mean.
+
+ The four uv numbers are the layer's `KHR_texture_transform` **relative to the
+ base material's**, which is what `LayeredMaterial` means by `uvScale` and
+ `uvOffset`: the base's own transform is already on `s.uv` by the time a layer's
+ uv is computed. `relative_uv` in `scene/asset.c3` has the arithmetic.
+*>
+struct LayerRecord
+{
+	String name;
+	bool enabled;
+	uint blend_mode;
+	uint mask_source;
+	uint mask_channel;
+	bool invert;
+	float opacity;
+	float[<4>] base_color;
+	float[<3>] emissive_factor;
+	js::Value texture;
+	js::Value normal_texture;
+	js::Value emissive_texture;
+	js::Value mask_texture;
+	float metallic;
+	float roughness;
+	js::Value metallic_roughness_texture;
+	js::Value height_texture;
+	float bump_strength;
+	float bump_distance;
+	float[<2>] uv_scale;
+	float[<2>] uv_offset;
+}
+
+<*
+ A whole imported stack. `height_texture` and the two bump numbers are the base
+ material's own relief, which hangs off the stack rather than off any layer — the
+ extension's `base` object, and the only place core glTF leaves for a height map.
+*>
+struct LayerStackRecord
+{
+	js::Value mask_texture;
+	js::Value layers;
+	js::Value height_texture;
+	float bump_strength;
+	float bump_distance;
+}
+
+<*
+ `meshLayers(asset, mesh)` — one mesh's `CUSTOM_materials_layers` stack as a
+ `LayerStackRecord`, or `null` when its material never carried the extension.
+
+ This uploads the mesh, unlike `meshBounds` beside it. A stack is texture slots,
+ and texture slots exist only once the primitive has been through
+ `upload_primitive` — so a verb that answered without uploading would answer
+ `null` for a mesh that has layers and has simply not been drawn yet, which is a
+ wrong answer that looks like a file without the extension. A script asking this
+ is about to build a material for the mesh anyway.
+
+ What crosses is a *description* rather than a material: the JS side turns it
+ into an ordinary `LayeredMaterial` through the ordinary constructor, so an
+ imported stack and a hand-written one are the same object and there is one
+ generator rather than two.
+
+ @return? js::THREW
+*>
+fn js::Value? js_mesh_layers(JsRuntime* self, AssetId id, uint index)
+{
+	self.pass.assets.ensure_uploaded(id, index);
+
+	GpuMesh* mesh = self.pass.assets.mesh(id, index);
+	if (mesh == null || !mesh.layers.present) return js::NULL;
+
+	js::Value layers = self.js.array((uint)mesh.layers.layers.len())!;
+	foreach (&layer : mesh.layers.layers)
+	{
+		LayerRecord record = {
+			.name = layer.name,
+			.enabled = layer.enabled,
+			.blend_mode = layer.blend_mode,
+			.mask_source = layer.mask_source,
+			.mask_channel = layer.mask_channel,
+			.invert = layer.invert,
+			.opacity = layer.opacity,
+			.base_color = { layer.base_color[0], layer.base_color[1], layer.base_color[2], layer.base_color[3] },
+			.emissive_factor = { layer.emissive_factor[0], layer.emissive_factor[1], layer.emissive_factor[2] },
+			.texture = layer_texture(self, layer.texture)!,
+			.normal_texture = layer_texture(self, layer.normal_texture)!,
+			.emissive_texture = layer_texture(self, layer.emissive_texture)!,
+			.mask_texture = layer_texture(self, layer.mask_texture)!,
+			.metallic = layer.metallic,
+			.roughness = layer.roughness,
+			.metallic_roughness_texture = layer_texture(self, layer.metallic_roughness_texture)!,
+			.height_texture = layer_texture(self, layer.height_texture)!,
+			.bump_strength = layer.bump_strength,
+			.bump_distance = layer.bump_distance,
+			.uv_scale = { layer.uv_scale[0], layer.uv_scale[1] },
+			.uv_offset = { layer.uv_offset[0], layer.uv_offset[1] },
+		};
+		self.js.push(layers, self.js.@object_of(record)!);
+	}
+
+	LayerStackRecord stack = {
+		.mask_texture = layer_texture(self, mesh.layers.mask_texture)!,
+		.layers = layers,
+		.height_texture = layer_texture(self, mesh.layers.height_texture)!,
+		.bump_strength = mesh.layers.bump_strength,
+		.bump_distance = mesh.layers.bump_distance,
+	};
+	return self.js.@object_of(stack);
+}
+
+<*
+ One entry of `assetNodes`: a node that should exist, naming its parent by
+ position in the same array.
 
  ## The rotation crosses twice, and both are needed
 
@@ -2243,77 +1890,109 @@ fn qjs::Value layer_texture_value(JsRuntime* self, qjs::Context* js, int index) 
 
  So `prelude.js` shows the Euler triple and sends the quaternion, and writing an
  Euler angle drops the quaternion.
-
- @return `An array of [name, parent, mesh, px, py, pz, ex, ey, ez, sx, sy, sz, qx, qy, qz, qw, gltfNode, r, g, b, a, skin].`
 *>
-fn void js_asset_nodes(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+struct AssetNodeRecord
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	String name;
+	int parent;
+	int mesh;
+	Vec3 position;
+	Vec3 euler;
+	Vec3 scale;
+	float[<4>] quaternion;
+	int gltf_node;
+	// The per-copy tint, which is white for everything but a copy an instanced
+	// node placed.
+	float[<4>] color;
+	// Which skin poses this node, or -1. The JS tree carries it to
+	// `_materialize`, which is where a host node learns it — the JavaScript path
+	// builds its nodes through the ordinary `add`, not through
+	// `Scene.instantiate`, so nothing else would ever set it.
+	int skin;
+	// What the file said about this entry, or the engine's default when it was
+	// not asked. `collides` is false on every mesh of a file whose colliders
+	// decide the index and did not name this one; `collision_only` is true on
+	// the proxy an implicit shape got.
+	bool collides;
+	bool collision_only;
+}
 
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
+<*
+ `assetNodes(asset, skeleton, physics)` — the asset's node tree, flattened into
+ the `AssetNodeRecord`s `asset.instantiate()` builds objects from.
 
-	// Whether the file's bone nodes become objects. False by default, which drops
-	// a character's skeleton — its pose comes out of the baked table and the nodes
-	// would drive nothing. See `Assets.flatten`.
-	bool skeleton = argc > 2 ? arg_truth(&js, argc, args, 2) : false;
+ Parents always come before their children, so `instantiate()` can walk it once
+ and never look forward.
 
-	// Whether the file's own `KHR_physics_rigid_bodies` decides what collides.
-	// False by default, which is every file loaded without the option and the
-	// reason no existing scene changes. See `scene/collider.c3`.
-	bool physics = argc > 3 ? arg_truth(&js, argc, args, 3) : false;
+ The tree is not built here and its shape is not decided here. `Assets.flatten`
+ decides — the same walk `Scene.instantiate` uses on the host — so a file placed
+ by the CLI and a file placed by a script produce the same hierarchy. What
+ crosses the boundary is a description, and JavaScript builds ordinary
+ `Object3D`s from it that materialize through the normal `add` path. That is
+ deliberate: an object handed back from here is one a script can move, hide,
+ recolour and re-parent before it ever reaches a scene.
 
+ `skeleton` keeps the file's bone nodes as objects. False drops a character's
+ skeleton — its pose comes out of the baked table and the nodes would drive
+ nothing. `physics` lets the file's own `KHR_physics_rigid_bodies` decide what
+ collides; false is every file loaded without the option and the reason no
+ existing scene changes. See `Assets.flatten` and `scene/collider.c3`.
+
+ @return? js::THREW
+*>
+fn js::Value? js_asset_nodes(JsRuntime* self, AssetId id, bool skeleton, bool physics)
+{
 	List{PlacedNode} placed;
 	placed.init(mem, 16);
 	defer placed.free();
 	self.pass.assets.flatten(id, &placed, skeleton, physics);
 
-	qjs::Value nodes = js.array();
-	foreach (i, &entry : placed)
+	js::Value nodes = self.js.array((uint)placed.len())!;
+	foreach (&entry : placed)
 	{
-		Vec3 euler = euler_from_quat(entry.rotation);
-
-		qjs::Value row = js.array();
-		js.set_index(row, 0, js.string(entry.name));
-		js.set_index(row, 1, qjs::int_value(entry.parent));
-		js.set_index(row, 2, qjs::int_value(entry.mesh));
-		put_numbers(&js, row, 3, {
-			entry.position.x, entry.position.y, entry.position.z, euler.x, euler.y, euler.z, entry.scale.x,
-			entry.scale.y, entry.scale.z, entry.rotation.i, entry.rotation.j, entry.rotation.k, entry.rotation.l,
-		});
-		js.set_index(row, 16, qjs::int_value(entry.gltf_node));
-		// The per-copy tint, which is white for everything but a copy an instanced
-		// node placed. Four numbers rather than an object because the row is already
-		// a flat array and `mesh.color` is already a flat array.
-		put_numbers(&js, row, 17, { entry.color[0], entry.color[1], entry.color[2], entry.color[3] });
-		// Which skin poses this node, or -1. The JS tree carries it to
-		// `_materialize`, which is where a host node learns it — the JavaScript path
-		// builds its nodes through the ordinary `add`, not through
-		// `Scene.instantiate`, so nothing else would ever set it.
-		js.set_index(row, 21, qjs::int_value(entry.skin));
-		// What the file said about this entry, or the engine's default when it was
-		// not asked. `collides` is false on every mesh of a file whose colliders
-		// decide the index and did not name this one; `collisionOnly` is true on
-		// the proxy an implicit shape got.
-		js.set_index(row, 22, qjs::bool_value(entry.collides));
-		js.set_index(row, 23, qjs::bool_value(entry.collision_only));
-
-		js.set_index(nodes, (uint)i, row);
+		Quaternionf q = entry.rotation;
+		AssetNodeRecord record = {
+			.name = entry.name,
+			.parent = entry.parent,
+			.mesh = entry.mesh,
+			.position = entry.position,
+			.euler = euler_from_quat(q),
+			.scale = entry.scale,
+			.quaternion = { q.i, q.j, q.k, q.l },
+			.gltf_node = entry.gltf_node,
+			.color = { entry.color[0], entry.color[1], entry.color[2], entry.color[3] },
+			.skin = entry.skin,
+			.collides = entry.collides,
+			.collision_only = entry.collision_only,
+		};
+		self.js.push(nodes, self.js.@object_of(record)!);
 	}
-	*out = nodes;
+	return nodes;
+}
+
+// One `KHR_lights_punctual` light (or area light), placed in world space.
+struct AssetLightRecord
+{
+	String name;
+	uint kind;
+	float[<3>] color;
+	float intensity;
+	float range;
+	float inner_cone;
+	float outer_cone;
+	Vec3 position;
+	Vec3 direction;
+	int gltf_node;
+	uint area_shape;
+	float width;
+	float height;
+	float spread;
+	Vec3 right;
+	Vec3 up;
 }
 
 <*
- `assetLights(index, generation)` — the file's `KHR_lights_punctual` lights,
- placed in world space.
+ `assetLights(asset)` — the file's lights, as `AssetLightRecord`s.
 
  A description and not a light. The renderer holds four slots and a level may
  author twenty, so which of them get lit is a choice, and this is what the choice
@@ -2328,47 +2007,39 @@ fn void js_asset_nodes(
  negation of the surface-to-light vector `three.light.direction` holds. The
  negation belongs in the importer, once.
 
- @return `An array of [name, kind, r, g, b, intensity, range, innerCone, outerCone, px, py, pz, dx, dy, dz, gltfNode].`
+ @return? js::THREW
 *>
-fn void js_asset_lights(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_lights(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value list = js.array();
-	foreach (i, &light : self.pass.assets.slot(id).lights)
+	js::Value list = self.js.array()!;
+	foreach (&light : self.pass.assets.slot(id).lights)
 	{
-		qjs::Value row = js.array();
-		js.set_index(row, 0, js.string(light.name));
-		js.set_index(row, 1, qjs::int_value((int)light.kind));
-		put_numbers(&js, row, 2, {
-			light.color[0], light.color[1], light.color[2], light.intensity, light.range, light.inner_cone,
-			light.outer_cone, light.position.x, light.position.y, light.position.z, light.direction.x,
-			light.direction.y, light.direction.z,
-		});
-		js.set_index(row, 15, qjs::int_value(light.gltf_node));
-		js.set_index(row, 16, qjs::int_value((int)light.area_shape));
-		put_numbers(&js, row, 17, {
-			light.width, light.height, light.spread, light.right.x, light.right.y, light.right.z, light.up.x,
-			light.up.y, light.up.z,
-		});
-		js.set_index(list, (uint)i, row);
+		AssetLightRecord record = {
+			.name = light.name,
+			.kind = light.kind,
+			.color = { light.color[0], light.color[1], light.color[2] },
+			.intensity = light.intensity,
+			.range = light.range,
+			.inner_cone = light.inner_cone,
+			.outer_cone = light.outer_cone,
+			.position = light.position,
+			.direction = light.direction,
+			.gltf_node = light.gltf_node,
+			.area_shape = light.area_shape,
+			.width = light.width,
+			.height = light.height,
+			.spread = light.spread,
+			.right = light.right,
+			.up = light.up,
+		};
+		self.js.push(list, self.js.@object_of(record)!);
 	}
-	*out = list;
+	return list;
 }
 
 <*
- `assetCameras(index, generation)` — the file's cameras, placed in world space.
+ `assetCameras(asset)` — the file's cameras, placed in world space, as
+ `AssetCamera`s.
 
  `distance` is the one number the file does not carry: a glTF camera is an eye and
  a heading and this renderer's is a turntable, so the orbit point has to be chosen.
@@ -2379,42 +2050,41 @@ fn void js_asset_lights(
  `Camera.projection` wants. An orthographic camera reports zeroes for all four
  lens numbers, because there is no orthographic projection here to describe.
 
- @return `An array of [name, px, py, pz, fx, fy, fz, ux, uy, uz, distance, yfov, znear, zfar, aspect, gltfNode].`
+ @return? js::THREW
 *>
-fn void js_asset_cameras(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_cameras(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	js::Value list = self.js.array()!;
+	foreach (&camera : self.pass.assets.slot(id).cameras) self.js.push(list, self.js.@object_of(*camera)!);
+	return list;
+}
 
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value list = js.array();
-	foreach (i, &camera : self.pass.assets.slot(id).cameras)
-	{
-		qjs::Value row = js.array();
-		js.set_index(row, 0, js.string(camera.name));
-		put_numbers(&js, row, 1, {
-			camera.position.x, camera.position.y, camera.position.z, camera.forward.x, camera.forward.y,
-			camera.forward.z, camera.up.x, camera.up.y, camera.up.z, camera.distance, camera.yfov, camera.znear,
-			camera.zfar, camera.aspect,
-		});
-		js.set_index(row, 15, qjs::int_value(camera.gltf_node));
-		js.set_index(list, (uint)i, row);
-	}
-	*out = list;
+// What the file's `KHR_physics_rigid_bodies` says about one node.
+struct AssetBodyRecord
+{
+	int gltf_node;
+	String name;
+	uint shape;
+	bool has_collider;
+	bool trigger;
+	bool has_motion;
+	bool kinematic;
+	float mass;
+	float gravity_factor;
+	float linear_damping;
+	float angular_damping;
+	Vec3 linear_velocity;
+	Vec3 angular_velocity;
+	bool has_material;
+	float friction;
+	float restitution;
+	bool has_proxy;
+	bool filtered;
 }
 
 <*
- `assetBodies(index, generation)` — what the file's `KHR_physics_rigid_bodies`
- says, node by node.
+ `assetBodies(asset)` — what the file's `KHR_physics_rigid_bodies` says, node by
+ node, as `AssetBodyRecord`s.
 
  A description and not a body, for `assetLights`' reason: the file states what
  collides and what to do about it is a policy over the statement.
@@ -2430,52 +2100,50 @@ fn void js_asset_cameras(
  shape's own numbers are not here — they are already in the proxy mesh the
  loader built, and a script that wants them reads that mesh's bounds.
 
- @return `An array of [gltfNode, name, shape, hasCollider, trigger, hasMotion, kinematic, mass, gravityFactor, linearDamping, angularDamping, lvx, lvy, lvz, avx, avy, avz, hasMaterial, friction, restitution, hasProxy, filtered].`
+ @return? js::THREW
 *>
-fn void js_asset_bodies(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_bodies(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value list = js.array();
-	foreach (i, &body : self.pass.assets.slot(id).bodies)
+	js::Value list = self.js.array()!;
+	foreach (&body : self.pass.assets.slot(id).bodies)
 	{
-		qjs::Value row = js.array();
-		js.set_index(row, 0, qjs::int_value(body.gltf_node));
-		js.set_index(row, 1, js.string(body.name));
-		js.set_index(row, 2, qjs::int_value((int)body.shape.ordinal));
-		js.set_index(row, 3, qjs::bool_value(body.has_collider));
-		js.set_index(row, 4, qjs::bool_value(body.trigger));
-		js.set_index(row, 5, qjs::bool_value(body.has_motion));
-		js.set_index(row, 6, qjs::bool_value(body.kinematic));
-		put_numbers(&js, row, 7, {
-			body.mass, body.gravity_factor, body.linear_damping, body.angular_damping, body.linear_velocity.x,
-			body.linear_velocity.y, body.linear_velocity.z, body.angular_velocity.x, body.angular_velocity.y,
-			body.angular_velocity.z,
-		});
-		js.set_index(row, 17, qjs::bool_value(body.has_material));
-		js.set_index(row, 18, qjs::number_value(body.friction));
-		js.set_index(row, 19, qjs::number_value(body.restitution));
-		js.set_index(row, 20, qjs::bool_value(body.proxy >= 0));
-		js.set_index(row, 21, qjs::bool_value(body.filtered));
-		js.set_index(list, (uint)i, row);
+		AssetBodyRecord record = {
+			.gltf_node = body.gltf_node,
+			.name = body.name,
+			.shape = (uint)body.shape.ordinal,
+			.has_collider = body.has_collider,
+			.trigger = body.trigger,
+			.has_motion = body.has_motion,
+			.kinematic = body.kinematic,
+			.mass = body.mass,
+			.gravity_factor = body.gravity_factor,
+			.linear_damping = body.linear_damping,
+			.angular_damping = body.angular_damping,
+			.linear_velocity = body.linear_velocity,
+			.angular_velocity = body.angular_velocity,
+			.has_material = body.has_material,
+			.friction = body.friction,
+			.restitution = body.restitution,
+			.has_proxy = body.proxy >= 0,
+			.filtered = body.filtered,
+		};
+		self.js.push(list, self.js.@object_of(record)!);
 	}
-	*out = list;
+	return list;
+}
+
+// One `physicsJoints` entry, without its limits — those are an array beside it.
+struct AssetJointRecord
+{
+	int body_a;
+	int body_b;
+	Vec3 pivot;
+	bool collide;
 }
 
 <*
- `assetJoints(index, generation)` — the file's `physicsJoints`, each resolved to
- the two nodes it holds.
+ `assetJoints(asset)` — the file's `physicsJoints`, each resolved to the two nodes
+ it holds: an `AssetJointRecord` plus `limits`, an array of `AssetJointLimit`s.
 
  glTF hangs a joint on a pivot node parented to one body and names a second pivot
  parented to the other, so the bodies are the pivots' parents; `record_joints`
@@ -2483,84 +2151,52 @@ fn void js_asset_bodies(
  is a joint the consumer cannot make.
 
  The limits are already `three.physics.joint`'s: an axis mask, a min and a max, a
- stiffness and a damping, split into a linear row and an angular row exactly as
- the JS side packs them. glTF's description of a joint and this one are the same
- object, which is why nothing is translated on the way through.
+ stiffness and a damping, split into a linear row and an angular row (`kind` 0 and
+ 1) exactly as the JS side packs them. glTF's description of a joint and this one
+ are the same object, which is why nothing is translated on the way through.
 
- @return `An array of [bodyA, bodyB, px, py, pz, collide, limits], with each limit [kind, axes, min, max, stiffness, damping] and kind 0 linear, 1 angular.`
+ @return? js::THREW
 *>
-fn void js_asset_joints(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_joints(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value list = js.array();
-	foreach (i, &joint : self.pass.assets.slot(id).joints)
+	js::Value list = self.js.array()!;
+	foreach (&joint : self.pass.assets.slot(id).joints)
 	{
-		qjs::Value limits = js.array();
-		foreach (k, &limit : joint.limits)
-		{
-			qjs::Value row = js.array();
-			js.set_index(row, 0, qjs::int_value((int)limit.kind));
-			js.set_index(row, 1, qjs::int_value((int)limit.axes));
-			put_numbers(&js, row, 2, { limit.min, limit.max, limit.stiffness, limit.damping });
-			js.set_index(limits, (uint)k, row);
-		}
+		js::Value limits = self.js.array((uint)joint.limits.len())!;
+		foreach (limit : joint.limits) self.js.push(limits, self.js.@object_of(limit)!);
 
-		qjs::Value entry = js.array();
-		js.set_index(entry, 0, qjs::int_value(joint.body_a));
-		js.set_index(entry, 1, qjs::int_value(joint.body_b));
-		put_numbers(&js, entry, 2, { joint.pivot.x, joint.pivot.y, joint.pivot.z });
-		js.set_index(entry, 5, qjs::bool_value(joint.collide));
-		js.set_index(entry, 6, limits);
-		js.set_index(list, (uint)i, entry);
+		AssetJointRecord record = {
+			.body_a = joint.body_a,
+			.body_b = joint.body_b,
+			.pivot = joint.pivot,
+			.collide = joint.collide,
+		};
+		js::Value entry = self.js.@object_of(record)!;
+		self.js.set(entry, "limits", limits)!;
+		self.js.push(list, entry);
 	}
-	*out = list;
+	return list;
 }
 
 <*
- `assetClips(index, generation)` — the names of a file's animations.
+ `assetClips(asset)` — the names of a file's animations.
 
  Free: names and durations are read at load out of the JSON chunk, so this
  answers on a file that has uploaded nothing. `mesh.animations` is what a script
  sees, and it is a plain array of strings rather than clip objects because a name
  is the only handle `play` takes.
+
+ @return? js::THREW
 *>
-fn void js_asset_clips(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_clips(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
-	qjs::Value names = js.array();
-	foreach (i, &clip : self.pass.assets.slot(id).clips)
-	{
-		js.set_index(names, (uint)i, js.string(clip.name));
-	}
-	*out = names;
+	js::Value names = self.js.array()!;
+	foreach (&clip : self.pass.assets.slot(id).clips) self.js.push(names, self.js.string(clip.name)!);
+	return names;
 }
 
 <*
- `assetBones(asset, generation)` — every joint name of every skin in a file.
+ `assetBones(asset)` — every joint name of every skin in a file.
 
  What a socket is named by, and unguessable without it: a rig calls its hand
  `mixamorig:RightHand` or `hand.R` or `Bone.014` depending on who exported it, and
@@ -2570,25 +2206,13 @@ fn void js_asset_clips(
 
  In skin order and then joint order, deduplicated: two skins sharing a joint —
  which a file with a body mesh and a head mesh usually does — name it once.
+
+ @return? js::THREW
 *>
-fn void js_asset_bones(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_asset_bones(JsRuntime* self, AssetId id)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	AssetId id = arg_asset(self, &js, argc, args, 0, out);
-	if (!id.is_set()) return;
-
 	Asset* asset     = self.pass.assets.slot(id);
-	qjs::Value names = js.array();
-	uint at          = 0;
+	js::Value names = self.js.array()!;
 
 	// The names already emitted, borrowed from the asset rather than copied — this
 	// list outlives nothing and the asset outlives it.
@@ -2616,11 +2240,19 @@ fn void js_asset_bones(
 			if (already) continue;
 
 			seen.push(name);
-			js.set_index(names, at, js.string(name));
-			at++;
+			self.js.push(names, self.js.string(name)!);
 		}
 	}
-	*out = names;
+	return names;
+}
+
+// One file of `three.inventory()`, before its lists.
+struct InventoryRecord
+{
+	String path;
+	uint triangles;
+	uint nodes;
+	uint skins;
 }
 
 <*
@@ -2634,127 +2266,79 @@ fn void js_asset_bones(
  Answers with an empty array rather than throwing when there is no assets root,
  because "nothing here" is the true answer for a plain `--mcp` run and an
  exception would make a script written for a game boot fail loudly under one.
-*>
-fn void js_inventory(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	qjs::Value listed = js.array();
-	if (self.modules.root.len == 0)
-	{
-		*out = listed;
-		return;
-	}
+ @return? js::THREW
+*>
+fn js::Value? js_inventory(JsRuntime* self)
+{
+	js::Value listed = self.js.array()!;
+	if (self.modules.root.len == 0) return listed;
 
 	Inventory? found = take_inventory(self.modules.root);
-	if (catch err = found)
-	{
-		js.release(listed);
-		*out = js.raisef("could not read %s: %s", self.modules.root, err);
-		return;
-	}
+	if (catch err = found) return self.js.fail("could not read %s: %s", self.modules.root, err)~;
 	defer found.free_entries();
 
-	foreach (i, &entry : found)
+	foreach (&entry : found)
 	{
-		qjs::Value described = js.object();
-		js.set_property(described, "path", js.string(entry.path));
-		js.set_property(described, "triangles", qjs::int_value((int)entry.triangles));
-		js.set_property(described, "nodes", qjs::int_value((int)entry.nodes));
-		js.set_property(described, "skins", qjs::int_value((int)entry.skins));
+		InventoryRecord record = {
+			.path = entry.path,
+			.triangles = entry.triangles,
+			.nodes = entry.nodes,
+			.skins = entry.skins,
+		};
+		js::Value described = self.js.@object_of(record)!;
 
-		qjs::Value meshes = js.array();
-		foreach (m, &mesh : entry.meshes)
-		{
-			qjs::Value described_mesh = js.object();
-			js.set_property(described_mesh, "name", js.string(mesh.name));
-			js.set_property(described_mesh, "triangles", qjs::int_value((int)mesh.triangles));
-			js.set_index(meshes, (uint)m, described_mesh);
-		}
-		js.set_property(described, "meshes", meshes);
+		js::Value meshes = self.js.array()!;
+		foreach (mesh : entry.meshes) self.js.push(meshes, self.js.@object_of(mesh)!);
+		self.js.set(described, "meshes", meshes)!;
 
-		qjs::Value animations = js.array();
-		foreach (a, name : entry.animations)
-		{
-			js.set_index(animations, (uint)a, js.string(name));
-		}
-		js.set_property(described, "animations", animations);
+		js::Value animations = self.js.array()!;
+		foreach (name : entry.animations) self.js.push(animations, self.js.string(name)!);
+		self.js.set(described, "animations", animations)!;
 
-		qjs::Value markers = js.array();
-		foreach (k, &marker : entry.markers)
-		{
-			qjs::Value described_marker = js.object();
-			js.set_property(described_marker, "name", js.string(marker.name));
-			js.set_property(described_marker, "piece", js.string(marker.piece));
-			js.set_property(described_marker, "position", vec3_value(&js, marker.position));
-			js.set_index(markers, (uint)k, described_marker);
-		}
-		js.set_property(described, "markers", markers);
+		js::Value markers = self.js.array()!;
+		foreach (marker : entry.markers) self.js.push(markers, self.js.@object_of(marker)!);
+		self.js.set(described, "markers", markers)!;
 
 		// Omitted rather than zeroed when the file had no position accessor to read
 		// them from: a box at the origin and "we could not tell" are different
 		// answers, and only one of them is safe to place a camera by.
-		if (entry.has_bounds)
-		{
-			qjs::Value bounds = js.object();
-			js.set_property(bounds, "min", vec3_value(&js, entry.bounds.min));
-			js.set_property(bounds, "max", vec3_value(&js, entry.bounds.max));
-			js.set_property(described, "bounds", bounds);
-		}
+		if (entry.has_bounds) self.js.set(described, "bounds", self.js.@object_of(entry.bounds)!)!;
 
-		js.set_index(listed, (uint)i, described);
+		self.js.push(listed, described);
 	}
-	*out = listed;
+	return listed;
 }
 
 <*
  `terrain(width, depth, segments, skirt, heights)` — a heightfield, as an asset.
 
- `heights` is a flat array of `(segments + 1)^2` numbers, row-major in z then x,
- for `js_convex`'s reason: it is the one shape the crossing can read in a single
- pass, and the prelude has to walk the caller's input to validate it anyway. A
- callback is resolved on the JS side into exactly this array, which is why there
- is no callback here.
+ `heights` is a `Float64Array` of `(segments + 1)^2` numbers, row-major in z then
+ x: the prelude has to walk the caller's input to validate it anyway. A callback
+ is resolved on the JS side into exactly this array, which is why there is no
+ callback here.
 
- The length is checked against the segment count in `Assets.terrain` and refused
- rather than padded: a height array off by a row is a surface that reads at the
- wrong stride, which produces a plausible-looking diagonal ripple and nothing
- that says why.
+ The length is checked against the segment count and refused rather than padded:
+ a height array off by a row is a surface that reads at the wrong stride, which
+ produces a plausible-looking diagonal ripple and nothing that says why.
+
+ @return? js::THREW
 *>
-fn void js_terrain(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn AssetId? js_terrain(JsRuntime* self, float width, float depth, int segments, float skirt, double[] heights)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	need_device(self, "building a shape")!;
 
-	if (!self.needs_device(&js, "building a shape", out)) return;
-
-	float width   = arg_float(&js, argc, args, 0);
-	float depth   = arg_float(&js, argc, args, 1);
-	long segments = arg_int(&js, argc, args, 2);
-	float skirt   = arg_float(&js, argc, args, 3);
-
-	if (segments < (long)MIN_TERRAIN_SEGMENTS || segments > (long)MAX_TERRAIN_SEGMENTS)
+	if (segments < (int)MIN_TERRAIN_SEGMENTS || segments > (int)MAX_TERRAIN_SEGMENTS)
 	{
-		*out = js.raisef("a terrain has between %d and %d segments a side, got %d",
-			MIN_TERRAIN_SEGMENTS, MAX_TERRAIN_SEGMENTS, segments);
-		return;
+		return self.js.fail("a terrain has between %d and %d segments a side, got %d",
+			MIN_TERRAIN_SEGMENTS, MAX_TERRAIN_SEGMENTS, segments)~;
 	}
 
-	long wanted = (segments + 1) * (segments + 1);
-	long length = arg_length(&js, argc, args, 4);
-	if (length != wanted)
+	long wanted = ((long)segments + 1) * ((long)segments + 1);
+	if (heights.len != wanted)
 	{
-		*out = js.raisef("a %d-segment terrain wants %d heights, got %d — the array is (segments + 1) squared, row-major in z",
-			segments, wanted, length);
-		return;
+		return self.js.fail("a %d-segment terrain wants %d heights, got %d — the array is (segments + 1) squared, row-major in z",
+			segments, wanted, heights.len)~;
 	}
 
 	@pool()
@@ -2766,63 +2350,59 @@ fn void js_terrain(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Val
 			.skirt = skirt > 0 ? skirt : 0,
 		};
 		field.heights.tinit((usz)wanted);
-		for (long i = 0; i < wanted; i++)
-		{
-			// A NaN here would spread through the normals into every neighbouring
-			// vertex and put a black hole in the middle of the ground.
-			field.heights.push(index_float(&js, args[4], (uint)i));
-		}
+		// A NaN here would spread through the normals into every neighbouring
+		// vertex and put a black hole in the middle of the ground.
+		foreach (height : heights) field.heights.push(finite((float)height));
 
 		AssetId? asset = self.pass.assets.terrain(&self.renderer.gpu, &field);
-		if (catch err = asset)
-		{
-			*out = js.raisef("could not build a terrain: %s", err);
-			return;
-		}
-		*out = asset_value(&js, asset);
+		if (catch err = asset) return self.js.fail("could not build a terrain: %s", err)~;
+		return asset;
 	};
 }
 
-<*
- `terrainAt(asset, generation, x, z)` — the ground and its normal at a point.
-
- Both in one crossing and one array, because every caller wants both: something
- placed on a hillside needs the height to sit at and the normal to lean with, and
- two calls would sample the grid twice to answer one question.
-
- `[y, nx, ny, nz]`, or an empty array when the handle does not name a live
- terrain — which the prelude turns into a sentence. Not a throw here, because the
- same call answers "is this a terrain at all" and a fault would make the ordinary
- negative answer expensive.
-*>
-fn void js_terrain_at(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+// An Asset handle argument that may name an asset since unloaded — for a verb whose
+// answer to that is null rather than a throw.
+struct AnyAsset
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	AssetId id;
+}
 
-	AssetId id = {
-		.index = (uint)arg_int(&js, argc, args, 0),
-		.generation = (uint)arg_int(&js, argc, args, 1),
-	};
-	Heightfield* field = self.pass.assets.terrain_field(id);
+<*
+ @return? js::THREW
+*>
+fn void? AnyAsset.from_js(&self, js::Call* c, int at)
+{
+	JsRuntime* rt = c.js.user;
+	void* data = js::data_of(c.get(at), rt.asset_class);
+	if (!data) return c.type_error(at, "an asset")~;
+	self.id = unpack_id(data, AssetId);
+}
 
-	qjs::Value list = js.array();
-	if (field == null)
-	{
-		*out = list;
-		return;
-	}
+// The ground at a point: its height, and the normal to lean with.
+struct TerrainSample
+{
+	float height;
+	Vec3 normal;
+}
 
-	float x     = arg_float(&js, argc, args, 2);
-	float z     = arg_float(&js, argc, args, 3);
-	Vec3 normal = field.normal_at(x, z);
-	put_numbers(&js, list, 0, { (double)field.height_at(x, z), (double)normal.x, (double)normal.y, (double)normal.z });
-	*out = list;
+<*
+ `terrainAt(asset, x, z)` — the ground and its normal at a point, as a
+ `TerrainSample`.
+
+ Both in one answer, because every caller wants both: something placed on a
+ hillside needs the height to sit at and the normal to lean with, and two calls
+ would sample the grid twice to answer one question.
+
+ `null` when the handle does not name a live terrain — which the prelude turns
+ into a sentence. Not a throw here, because the same call answers "is this a
+ terrain at all" and a fault would make the ordinary negative answer expensive.
+
+ @return? js::THREW
+*>
+fn js::Value? js_terrain_at(JsRuntime* self, AnyAsset asset, float x, float z)
+{
+	Heightfield* field = self.pass.assets.terrain_field(asset.id);
+	if (field == null) return js::NULL;
+	TerrainSample sample = { .height = field.height_at(x, z), .normal = field.normal_at(x, z) };
+	return self.js.@object_of(sample);
 }
