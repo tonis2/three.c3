@@ -762,10 +762,9 @@ class Player extends three.Entity {
 	@three.key('space', 'jump')
 	jump() { this.pending.add('jump'); }
 
-	// Decorators apply bottom-up, so this lists as j, k, shift in `three.keys()`.
-	@three.key('shift', 'spin')
-	@three.key('k', 'spin')
 	@three.key('j', 'spin')
+	@three.key('k', 'spin')
+	@three.key('shift', 'spin')
 	spinKey() { this.pending.add('spin'); }
 
 	// A waiting press, used up: true once per press.

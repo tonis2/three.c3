@@ -116,9 +116,12 @@ export function registerDecorated(Class, addSystem) {
 // second `three.onKeyDown` would. The description is what `three.keys()` lists.
 export function key(name, description = '', options = null) {
 	if (typeof name !== 'string' || name === '') throw new TypeError('@three.key(name, description) wants a key name');
+	// Listed here, as the decorator is evaluated, so `three.keys()` reads in
+	// source order: decorators are APPLIED last-first and statics first.
+	keyTable.set(name, String(description));
 	return (method, context) => {
 		if (context.kind !== 'method') throw new TypeError(`@three.key('${name}') goes on a method, not on a ${context.kind}`);
-		keyTable.set(name, String(description || context.name));
+		if (!description) keyTable.set(name, context.name);
 		context.addInitializer(function () {
 			const target = this;
 			globalThis.three[options?.up ? 'onKeyUp' : 'onKeyDown'](name, (...args) => target[context.name](...args));

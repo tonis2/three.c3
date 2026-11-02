@@ -136,7 +136,7 @@ fn void keys_bind_and_list_what_they_do() @test
 		`, "declaring");
 		@ticks(run, 1);
 		test::eq(@value(run, `return pressed.sort().join(' ')`, "reading"), `"jump pause"`);
-		test::eq(@value(run, `return three.keys()`, "the table"), `{"p":"pause","space":"jump"}`);
+		test::eq(@value(run, `return three.keys()`, "the table"), `{"space":"jump","p":"pause"}`);
 	};
 }
 
