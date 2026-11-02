@@ -19,7 +19,7 @@ module three;
 
 import std::math;
 import std::math::vector;
-import fastjs::qjs;
+import qjs;
 import image;
 import image::png;
 import std::collections::list;

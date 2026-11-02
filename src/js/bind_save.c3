@@ -41,7 +41,7 @@ module three;
 
 import std::io::file;
 import std::io::path;
-import fastjs::qjs;
+import qjs;
 
 fn void JsRuntime.bind_save_verbs(&self, qjs::Value host)
 {

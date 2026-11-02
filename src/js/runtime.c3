@@ -54,7 +54,7 @@ module three;
 import std::io;
 import std::time;
 import std::collections::list;
-import fastjs::qjs;
+import qjs;
 import c3w;
 
 faultdef JS_ENGINE_FAILED, JS_PRELUDE_FAILED;

@@ -140,14 +140,8 @@ jobs:
       - name: setup.sh
         run: ./setup.sh
 
-      # No quickjs compile step. quickjs.c3l ships a static archive per target in
-      # lib/<target>/ — libquickjs.a, or quickjs.lib on Windows — and every target
-      # links that instead of compiling the engine's four translation units. The
-      # linux-x64 archive is built with -fPIC there, which is what let the
-      # hand-rolled rebuild this workflow used to carry go away: ELF x86-64
-      # forbids the relocations non-PIC objects emit from inside the PIE the
-      # consumer links. Rebuilding an archive is the library's own job — see
-      # lib/quickjs.c3l/native/build-quickjs.sh and its README.
+      # No script-engine step: fastjs (lib/fastjs.c3l) is plain C3 and builds
+      # with everything else.
 
       # ---------------------------------------------------------------- build --
       # `--trust=full` is the documented invocation — a manifest that needs to
@@ -155,20 +149,8 @@ jobs:
       # the wrong thing. `--safe=no -O3` is claude.md's "the fast one", and a
       # release binary is exactly what it is for.
       #
-      # **Windows takes no `--cc`, and must not be given one.** The only C in
-      # this build is quickjs.c3l's shim, and that manifest used to carry one
-      # set of GNU-spelled cflags for every target — which cl rejects outright
-      # ("D8021: invalid numeric argument '/Wno-unused-parameter'"), so the leg
-      # had to be pointed at mingw. It now carries a `cflags-override` of MSVC
-      # switches for windows-x64, so the compiler c3c picks by default on a
-      # native toolchain is the right one. Pointing `--cc` at mingw here would
-      # hand `/O2 /std:c11 /J` to gcc and fail from the other side.
-      #
-      # No vcvars step goes with that. c3c finds cl.exe and its header
-      # environment from its own Visual Studio detection rather than from a
-      # developer prompt — verified on a machine where cl is not on PATH and
-      # INCLUDE is unset. If this ever regresses it fails inside the shim
-      # compile, naming the cl.exe path it resolved.
+      # The build has no C of its own (the script engine is C3), so no target
+      # needs a `--cc` or a compiler environment.
       - name: Build
         run: c3c build --trust=full --safe=no -O3
 

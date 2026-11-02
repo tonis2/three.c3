@@ -72,7 +72,7 @@ module three;
 
 import std::math;
 import c3w;
-import fastjs::qjs;
+import qjs;
 
 // Enough for a control scheme, small enough that running out means a script is
 // registering in a loop — a bug worth a message rather than an allocation.

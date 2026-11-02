@@ -30,7 +30,7 @@ module three;
 import std::collections::object;
 import std::core::string;
 import collision;
-import fastjs::qjs;
+import qjs;
 import std::math::vector;
 
 fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)

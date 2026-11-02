@@ -37,7 +37,7 @@
 module three;
 
 import std::collections::list;
-import fastjs::qjs;
+import qjs;
 
 <*
  Registers the post verbs on the host object.

@@ -9,7 +9,7 @@
 module three_tests::modules;
 
 import three;
-import fastjs::qjs;
+import qjs;
 
 <*
  Resolve, or say what it faulted with. Both are one line at the call site, which
@@ -40,7 +40,7 @@ fn void dot_dot_climbs_and_stops_at_the_root() @test
 		"one level up (%s)", @resolved("enemies/orc.js", "../shared/hp.js"));
 	test::@check(@resolved("a/b/c/deep.js", "../../top.js") == "a/top.js",
 		"two levels up (%s)", @resolved("a/b/c/deep.js", "../../top.js"));
-	test::@check(@resolved("main.js", "../secrets.js") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@resolved("main.js", "../secrets.js") == "<js::MODULE_ESCAPES_ROOT>",
 		"and climbing past the root is refused (%s)",
 		@resolved("main.js", "../secrets.js"));
 }
@@ -56,13 +56,13 @@ fn void dot_dot_climbs_and_stops_at_the_root() @test
 *>
 fn void an_escape_is_refused_rather_than_clamped() @test
 {
-	test::@check(@resolved("main.js", "../../../../etc/passwd") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@resolved("main.js", "../../../../etc/passwd") == "<js::MODULE_ESCAPES_ROOT>",
 		"a long climb is refused (%s)", @resolved("main.js", "../../../../etc/passwd"));
-	test::@check(@resolved("a/b.js", "../../..") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@resolved("a/b.js", "../../..") == "<js::MODULE_ESCAPES_ROOT>",
 		"and so is one that only just overshoots (%s)",
 		@resolved("a/b.js", "../../.."));
 	// The one that would slip past a check written as "does it start with ..".
-	test::@check(@resolved("main.js", "a/../../out.js") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@resolved("main.js", "a/../../out.js") == "<js::MODULE_ESCAPES_ROOT>",
 		"including one that climbs out only halfway through (%s)",
 		@resolved("main.js", "a/../../out.js"));
 }
@@ -87,7 +87,7 @@ fn void the_noise_in_a_path_is_dropped() @test
 		"a bare dot (%s)", @resolved("main.js", "./a/./b.js"));
 	test::@check(@resolved("main.js", "a//b.js") == "a/b.js",
 		"a doubled slash (%s)", @resolved("main.js", "a//b.js"));
-	test::@check(@resolved("main.js", "") == "<qjs::MODULE_SPECIFIER_IS_EMPTY>",
+	test::@check(@resolved("main.js", "") == "<js::MODULE_SPECIFIER_IS_EMPTY>",
 		"and an empty import is not a path at all (%s)", @resolved("main.js", ""));
 }
 
@@ -116,7 +116,7 @@ fn void a_path_deeper_than_the_walker_is_refused() @test
 	for (usz i = 0; i < 70; i++) deep.append_string("d/");
 	deep.append_string("x.js");
 
-	test::@check(@resolved("main.js", deep.str_view()) == "<qjs::MODULE_PATH_TOO_DEEP>",
+	test::@check(@resolved("main.js", deep.str_view()) == "<js::MODULE_PATH_TOO_DEEP>",
 		"seventy-one components is too many (%s)", @resolved("main.js", deep.str_view()));
 }
 
@@ -164,9 +164,9 @@ fn void an_asset_path_is_relative_to_the_assets_directory() @test
 
 fn void an_asset_path_cannot_climb_out_of_the_game() @test
 {
-	test::@check(@asset_path("game", "../secrets.glb") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@asset_path("game", "../secrets.glb") == "<js::MODULE_ESCAPES_ROOT>",
 		"one level up is refused (%s)", @asset_path("game", "../secrets.glb"));
-	test::@check(@asset_path("game", "../../../../etc/passwd") == "<qjs::MODULE_ESCAPES_ROOT>",
+	test::@check(@asset_path("game", "../../../../etc/passwd") == "<js::MODULE_ESCAPES_ROOT>",
 		"and so is a long climb, rather than being clamped to etc/passwd (%s)",
 		@asset_path("game", "../../../../etc/passwd"));
 }

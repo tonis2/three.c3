@@ -14,7 +14,7 @@ module three;
 
 import std::io;
 import c3w;
-import fastjs::qjs;
+import qjs;
 
 <*
  Tears the world down and boots it again.

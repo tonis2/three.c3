@@ -6,7 +6,7 @@ module three;
 
 import std::math;
 import collision;
-import fastjs::qjs;
+import qjs;
 
 // ============================================================================
 // Reading arguments

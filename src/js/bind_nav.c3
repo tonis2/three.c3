@@ -25,7 +25,7 @@ import std::collections::list;
 import std::math;
 import std::math::vector;
 import collision;
-import fastjs::qjs;
+import qjs;
 
 fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
 {

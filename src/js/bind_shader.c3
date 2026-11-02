@@ -21,7 +21,7 @@
 module three;
 
 import std::collections::list;
-import fastjs::qjs;
+import qjs;
 
 <*
  Registers the material verbs on the host object.
