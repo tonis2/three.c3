@@ -34,8 +34,8 @@
 //
 // `three.steer`, `field.sample` and `three.moveAndSlideAll` take Float32Arrays
 // and derive the agent count from the length: agent i IS floats i*3..i*3+2.
-// There is no mapping and nothing to look up. `bind_query.c3`'s `typed_view`
-// hands C3 a pointer into QuickJS's own buffer, so the host reads and writes the
+// There is no mapping and nothing to look up. A typed-array argument reaches C3
+// as a slice of the engine's own buffer, so the host reads and writes the
 // script's bytes directly — that is as true of a gathered staging array as of a
 // column, and the boundary costs nothing either way.
 //
@@ -60,7 +60,7 @@
 // measured every JavaScript-side layout at. So a game with a few hundred of
 // something should not declare a column at all: write the plain field, and reach
 // for this at the low thousands where the gather starts costing a percent of the
-// frame. QuickJS is an interpreter rather than a JIT, which is why the number is
+// frame. The engine is an interpreter rather than a JIT, which is why the number is
 // what it is and why it does not improve with a cleverer loop.
 //
 // A view is a function of the SLOT and not of the instance, which is what makes

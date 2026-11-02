@@ -230,7 +230,7 @@ fn void a_reload_empties_the_world() @test
  An `import` is evaluated again, and this is the property the whole feature rests
  on.
 
- QuickJS caches an evaluated module on the *runtime*, and `JsRuntime.close` takes
+ The engine caches an evaluated module, and `JsRuntime.close` takes
  the runtime down with it — so nothing here busts a cache, and this is the check
  that says so. The fixture writes a global from its module body, so a second
  evaluation is visible as that global coming back after it has been overwritten.

@@ -70,7 +70,7 @@ const double CLOCK_FIXED_HZ_MAX = 240.0;
 
  Eight against `PHYSICS_MAX_STEPS`'s five, for the same reason at a different
  layer: the solver's cap bounds work the host does, and this one bounds work a
- *script* does — eight calls into QuickJS against the frame budget. Both drop
+ *script* does — eight calls into the script engine against the frame budget. Both drop
  the remainder rather than carrying it, which is the difference between a
  stutter and a spiral.
 *>

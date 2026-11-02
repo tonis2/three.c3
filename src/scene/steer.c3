@@ -16,7 +16,7 @@
 
  Separation is the part that needs a host at all. Seek and arrive are per-agent;
  separation is every agent against every other, so two hundred agents is forty
- thousand distance tests per frame, which in QuickJS is milliseconds. The grid
+ thousand distance tests per frame, which in an interpreter is milliseconds. The grid
  below makes that linear in the crowd and constant in its density. It is rebuilt
  per call because the agents have all moved since the last one, and a rebuild
  over a flat array is cheaper than the updates would be.

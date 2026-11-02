@@ -66,7 +66,7 @@
 //     three.setAnimationLoop(fn)      throws stop it, for good, with the reason
 //     three.systems.add(name, fn)     throws are contained, named and counted
 //
-// A budget overrun is neither: QuickJS's interrupt is not catchable from
+// A budget overrun is neither: the engine's interrupt is not catchable from
 // JavaScript, so it goes past `_failed` to the host whichever door was used —
 // which is what keeps an endless system from being swallowed here.
 //

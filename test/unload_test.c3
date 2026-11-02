@@ -967,7 +967,7 @@ fn void the_scene_warning_waits_for_twice_the_count() @test
  `MATERIAL_WARN_AT` is the trigger `plan.md` §2 wrote down: the answer to "a
  material nobody disposes is immortal" is a warning naming the count rather than
  a `FinalizationRegistry`, because a collector-driven free would make device
- memory depend on when QuickJS felt like collecting — which is the property
+ memory depend on when the script engine felt like collecting — which is the property
  `three.unloadUnused()` exists so that assets do not have.
 
  The doubling is the part worth a test. A line per creation past the threshold

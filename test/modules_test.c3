@@ -9,7 +9,7 @@
 module three_tests::modules;
 
 import three;
-import qjs;
+import fastjs::js;
 
 <*
  Resolve, or say what it faulted with. Both are one line at the call site, which
@@ -17,7 +17,7 @@ import qjs;
 *>
 macro String @resolved(#base, #name)
 {
-	String? answer = qjs::resolve_module(#base, #name, tmem);
+	String? answer = js::resolve_module(#base, #name, tmem);
 	if (catch err = answer) return string::tformat("<%s>", err);
 	return answer;
 }
@@ -346,7 +346,7 @@ fn void a_script_writes_only_inside_its_own_directory() @test
 		"a leading '/' is the assets directory, not the filesystem's");
 
 	fault escaping = @catch(runtime.resolve_write("../secrets.glb", tmem));
-	test::@check(escaping == qjs::MODULE_ESCAPES_ROOT,
+	test::@check(escaping == js::MODULE_ESCAPES_ROOT,
 		"climbing out is refused, the same as a read (%s)", escaping);
 }
 

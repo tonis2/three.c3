@@ -916,8 +916,7 @@ fn void? Material.set_uniform(&self, String name, float[] values, uint row = 0, 
 
  Reads the reflected push fields and drops the mesh contract's, the same cut
  `set_uniform` makes. Used by the JS side to build the accessors on
- `material.uniforms` — the prelude cannot enumerate them any other way, because
- the QuickJS shim has no property enumeration at all.
+ `material.uniforms`: the uniforms are the shader's, so only the host knows them.
 *>
 fn void Material.uniform_fields(&self, List{ShaderField}* out)
 {
@@ -1051,7 +1050,7 @@ fn int Material.uniform_offset(&self, String name)
  The declarations a material has to keep, copied out of the caller's slices.
 
  `MaterialUniform.name` and `MaterialTexture.name` are borrowed from whoever
- described the material — for a script that is a QuickJS string that dies with
+ described the material — for a script that is a script string that dies with
  the call — so the names are copied too. `free_declarations` is the other half.
 *>
 fn MaterialUniform[] copy_uniform_declarations(MaterialUniform[] from)

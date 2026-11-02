@@ -14,7 +14,7 @@ module three;
 
 import std::io;
 import c3w;
-import qjs;
+import fastjs::js;
 
 <*
  Tears the world down and boots it again.
@@ -205,16 +205,12 @@ fn String JsRuntime.take_persist(&self, Allocator allocator)
 *>
 fn void JsRuntime.restore_persist(&self, String json)
 {
-	qjs::Value global = self.qjs.global();
-	defer self.qjs.release(global);
-
-	qjs::Value api = self.qjs.property(global, "three");
-	defer self.qjs.release(api);
-	if (api.tag() != qjs::TAG_OBJECT) return;
+	js::Value api = self.js.get(self.js.global(), "three") ?? js::UNDEFINED;
+	if (!api.is_object()) return;
 
 	// Set whether or not there is state to put back: a game that keeps nothing
 	// still wants to know it is starting from a reload rather than from a boot.
-	self.qjs.set_property(api, "reloaded", qjs::bool_value(true));
+	(void)self.js.set(api, "reloaded", js::TRUE);
 
 	if (json.len == 0 || json == "null")
 	{
@@ -227,18 +223,19 @@ fn void JsRuntime.restore_persist(&self, String json)
 		return;
 	}
 
-	qjs::Value? state = self.qjs.from_json(json, "<three.persist>");
+	js::Value? state = self.js.from_json(json);
 	if (catch state)
 	{
 		// Taken rather than left pending: the next thing to run is `main.js`, and a
 		// stray exception from the host's own restore would surface as the game
 		// having thrown.
-		String message = self.qjs.exception(mem);
-		defer message.free(mem);
-		io::printfn("three: three.persist did not parse back: %s", message);
+		@pool()
+		{
+			io::printfn("three: three.persist did not parse back: %s", self.js.take_error(tmem));
+		};
 		return;
 	}
-	self.qjs.set_property(api, "persist", state);
+	(void)self.js.set(api, "persist", state);
 }
 
 <*

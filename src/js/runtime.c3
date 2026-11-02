@@ -1,5 +1,5 @@
 <*
- The QuickJS context: one engine, one script at a time, and everything a run
+ The script engine: one engine, one script at a time, and everything a run
  always answers with.
 
  ## `run_script` is the whole contract
@@ -16,7 +16,7 @@
 
  ## Every script is an async function body
 
- The source is evaluated with `qjs::EVAL_ASYNC`, as the body of an async function
+ The source is evaluated with `EvalMode.ASYNC`, as the body of an async function
  that is called at once, which buys two things an agent will assume it has:
 
  - `await` at the top level. `three.load` is synchronous, so nothing here needs
@@ -45,7 +45,7 @@
 
  ## The runtime must not move
 
- `JsRuntime*` is handed to QuickJS as the opaque pointer behind every host
+ `JsRuntime*` is handed to the engine as the host pointer behind every host
  function and behind the interrupt handler. Copying or reallocating one after
  `open` leaves the engine calling into the old address.
 *>
@@ -55,7 +55,6 @@ import std::io;
 import std::time;
 import std::collections::list;
 import std::collections::map;
-import qjs;
 import fastjs::js;
 import c3w;
 
@@ -159,9 +158,9 @@ const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
  it: it is evaluated directly by `open`, and a part that imported it back would
  re-run nothing and read half-assigned globals.
 *>
-fn qjs::EmbeddedModule[] prelude_parts()
+fn js::EmbeddedModule[] prelude_parts()
 {
-	static qjs::EmbeddedModule[25] parts;
+	static js::EmbeddedModule[25] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -289,8 +288,6 @@ fn void HeldFn.release(&self, js::Engine* js)
 
 fn js::Value HeldFn.get(&self, js::Engine* js) => js.held(self.callback);
 
-// TEMPORARY: old-API values seen as new ones, for the files not moved yet.
-macro js::Value[] as_values(qjs::Value[] list) => ((js::Value*)list.ptr)[:list.len];
 
 <*
  One engine, and the host state it drives.
@@ -303,8 +300,6 @@ macro js::Value[] as_values(qjs::Value[] list) => ((js::Value*)list.ptr)[:list.l
 struct JsRuntime
 {
 	js::Engine* js;
-	// TEMPORARY: the same engine through the old API, for the files not moved yet.
-	qjs::Context qjs;
 	// Nodes and assets as script objects, one per live id — `bind_args.c3`.
 	js::NativeClass* node_class;
 	js::NativeClass* asset_class;
@@ -483,7 +478,7 @@ struct JsRuntime
 	// root means no `--assets` boot and no disk imports at all, which is what a
 	// plain `--mcp` run wants; the `three:` space works regardless. Addressed by
 	// the engine and must not move while the context is open.
-	qjs::ModuleLoader modules;
+	js::ModuleLoader modules;
 
 	<*
 	 Meshes a script asked for and has not been given yet — `js/bind_asset.c3`.
@@ -607,7 +602,6 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 {
 	self.js = js::open(memory_limit) ?? JS_ENGINE_FAILED~!;
 	self.js.user = self;
-	self.qjs = qjs::wrap(self.js);
 	self.node_handles.init(mem);
 	self.asset_handles.init(mem);
 	self.pass = pass;

@@ -358,7 +358,7 @@ fn void the_overlay_is_silent_over_a_post_chain() @test
  What a widget said, and which node said it.
 
  A listener rather than a JavaScript handler, because `render/ui.c3` is written
- to know nothing about QuickJS — which is exactly what makes the dispatch
+ to know nothing about the script engine — which is exactly what makes the dispatch
  testable without an engine, a script or a window.
 *>
 struct Heard

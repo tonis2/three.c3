@@ -29,7 +29,7 @@ module three_tests::shipping;
 import three;
 import three_tests::device;
 import vk;
-import qjs;
+import fastjs::js;
 import std::core::test;
 import std::io::file;
 import std::io::path;
@@ -749,7 +749,7 @@ fn void an_absolute_path_is_rooted_at_the_assets_directory() @test
 
  **This is not a refusal and must not be read as one.** `ModuleLoader.locate`
  confines a path lexically and never calls `realpath`, which is written down as
- a decision in `quickjs.c3l`: the root is the game author's own directory, a
+ a decision in fastjs's loader: the root is the game author's own directory, a
  link in it is something they put there, and resolving links would make a
  specifier's meaning depend on the filesystem in a way no error message could
  explain. The boundary it enforces is against a *script* reaching out, which is
@@ -825,7 +825,7 @@ fn void a_file_too_large_to_be_a_level_is_refused() @test
 {
 	@with_assets()
 	{
-		usz over = qjs::MAX_MODULE_BYTES + 1;
+		usz over = js::MAX_MODULE_BYTES + 1;
 		char[] big = alloc::new_array(mem, char, (sz)over);
 		defer free(big);
 		for (usz i = 0; i < over; i++) big[i] = 'a';

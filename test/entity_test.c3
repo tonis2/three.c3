@@ -129,7 +129,7 @@ fn void a_spawn_places_a_node_and_a_body_and_new_is_refused() @test
  check is deliberately not "the numbers came back right" — a staging copy would
  satisfy that. It is that `three.steer`, handed `Class.column('motion')`, changed
  the floats that `instance.motion` reads, with nothing copied in either
- direction: `bind_query.c3`'s `typed_view` hands C3 a pointer into QuickJS's own
+ direction: a typed-array argument reaches C3 as a slice of the engine's own
  buffer, so the two names are the same memory or the design is wrong.
 
  The subarray identity is asserted too, because a getter that answered with a

@@ -20,7 +20,7 @@ import three;
 import three_tests::device;
 import vk;
 import mcp;
-import qjs;
+import fastjs::js;
 import std::core::test;
 import std::io;
 import std::io::file;
@@ -74,18 +74,8 @@ macro @with_validating_server(; @body(mcp::Server* server, three::JsRuntime* run
 	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	qjs::Value global = runtime.qjs.global();
-	runtime.qjs.set_property(
-		global,
-		"provokeValidationError",
-		runtime.qjs.function(&js_provoke_error, "provokeValidationError", 0, renderer)
-	);
-	runtime.qjs.set_property(
-		global,
-		"provokeValidationWarning",
-		runtime.qjs.function(&js_provoke_warning, "provokeValidationWarning", 0, renderer)
-	);
-	runtime.qjs.release(global);
+	runtime.js.@bind(runtime.js.global(), "provokeValidationError", &js_provoke_error, renderer)!!;
+	runtime.js.@bind(runtime.js.global(), "provokeValidationWarning", &js_provoke_warning, renderer)!!;
 
 	three::ToolHost host = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = three::new_mcp_server(&host);
@@ -102,16 +92,8 @@ macro @with_validating_server(; @body(mcp::Server* server, three::JsRuntime* run
  invalid ever reaches the driver. `plan.md` §4's own example of a validation bug
  is a hang; a test suite is the wrong place to find one.
 *>
-fn void js_provoke_error(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void js_provoke_error(three::Renderer* renderer)
 {
-	three::Renderer* renderer = (three::Renderer*)opaque;
 	vk::Buffer? refused = vk::bufferCreateInfo()
 		.setSize(0)
 		.setUsage((vk::BufferUsageFlags)vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT)
@@ -130,16 +112,8 @@ fn void js_provoke_error(
  loader dispatches to registered messengers, so the severity mask and the
  `pUserData` are exercised exactly as a real message would exercise them.
 *>
-fn void js_provoke_warning(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void js_provoke_warning(three::Renderer* renderer)
 {
-	three::Renderer* renderer = (three::Renderer*)opaque;
 	ZString id = "THREE-TEST-WARNING";
 	ZString text = "advice, not a defect";
 	vk::DebugUtilsMessengerCallbackDataEXT data = vk::debugUtilsMessengerCallbackDataEXT()

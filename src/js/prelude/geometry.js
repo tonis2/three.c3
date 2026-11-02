@@ -588,7 +588,7 @@ export class TerrainGeometry extends Geometry {
 
 		if (typeof source === 'function') {
 			// **Sampled here rather than passed across**, because a callback that
-			// crossed into the host would be one QuickJS call per sample — a
+			// crossed into the host would be one host call per sample — a
 			// 256-segment field is sixty-six thousand of them — and because a
 			// script's height function is the most natural thing in the world to
 			// write in terms of Math.sin and a couple of closures.

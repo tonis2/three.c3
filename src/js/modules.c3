@@ -3,7 +3,7 @@
 
  A `--assets` boot evaluates `main.js` as an ES module, so a game can be many
  files rather than one. The mechanics — root-relative specifiers, refusing `..`
- past the root, the reusable read buffer — live in `quickjs.c3l`'s
+ past the root, the reusable read buffer — live in fastjs's
  `ModuleLoader`. This file is only the three.c3 part: which directory is the
  root, which namespace the prelude lives in, and where `three.load` reads from.
 
@@ -44,7 +44,7 @@ const String PRELUDE_SCHEME = "three:";
 fn void JsRuntime.install_module_hooks(&self)
 {
 	self.modules.set_embedded(PRELUDE_SCHEME, prelude_parts());
-	self.modules.install(self.qjs.engine());
+	self.modules.install(self.js);
 }
 
 <*

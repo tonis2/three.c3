@@ -817,7 +817,7 @@ fn uint MeshPass.claim_slot(&self, Material material)
 
  The answer is a warning and not a `FinalizationRegistry`, and that was decided
  before it was written: a collector-driven free makes device memory depend on
- when QuickJS felt like collecting, which is the property `three.unloadUnused()`
+ when the script engine felt like collecting, which is the property `three.unloadUnused()`
  exists to avoid for assets and would be no better here.
 
  Sixty-four because it is comfortably above every legitimate scene anybody has

@@ -992,7 +992,7 @@ fn void UiNode.drop_list(&self)
  Copies a string into the node and answers with a view that outlives the frame.
 
  Every string a cui widget holds is borrowed and must outlive the element, and
- everything reaching this file came from a QuickJS value, a temp format or a
+ everything reaching this file came from a script value, a temp format or a
  stack buffer. One copy here is the whole of that rule.
 *>
 fn String UiNode.keep(&self, String text)
@@ -1372,7 +1372,7 @@ fn void UiLayer.on_query(&self, UiQuery query)
  One line over the frame, replaced whenever it changes.
 
  The string is copied. A `cui::widgets::Label` borrows its text and must outlive the
- element, and the caller's is a QuickJS string, a temp-allocated format or a
+ element, and the caller's is a script string, a temp-allocated format or a
  stack buffer — so this owns the only copy the widget ever sees, and re-points
  the widget at it because a `DString` moves when it grows.
 
@@ -2646,7 +2646,7 @@ fn void UiLayer.push_row(&self, uint node, String label, String trailing, usz de
  One drawing of a `draw` node, in paint order.
 
  The text is copied here for the same reason every other string is: a `Painter`
- call happens at paint time, long after the QuickJS string that named it is
+ call happens at paint time, long after the script string that named it is
  gone. Sizes are clamped rather than refused — `Painter.rect` has a contract
  against a negative one, and any build but `--safe=no` would turn a script's typo
  into a panic in the renderer.
