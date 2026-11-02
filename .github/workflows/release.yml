@@ -315,9 +315,15 @@ jobs:
           if command -v zip >/dev/null 2>&1; then
             zip -qry "${{ steps.assemble.outputs.name }}.zip" "${{ steps.assemble.outputs.name }}"
           else
-            # Windows runners have bsdtar, which writes zip with -a.
-            tar -a -c -f "${{ steps.assemble.outputs.name }}.zip" "${{ steps.assemble.outputs.name }}"
+            # Windows runners: Git Bash's `tar` is GNU tar, which ignores -a and writes an
+            # uncompressed tar under a .zip name. Windows' own System32 tar is bsdtar, and
+            # that one writes a real zip with -a.
+            /c/Windows/System32/tar.exe -a -c -f "${{ steps.assemble.outputs.name }}.zip" "${{ steps.assemble.outputs.name }}"
           fi
+          # A zip starts with "PK"; fail here rather than ship something Explorer can't open.
+          for z in *.zip; do
+            [ "$(head -c2 "$z")" = "PK" ] || { echo "::error::$z is not a zip archive"; exit 1; }
+          done
           ls -la *.zip
 
       - uses: actions/upload-artifact@v4
