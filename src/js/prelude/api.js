@@ -26,7 +26,7 @@ import { ShaderMaterial } from './shader.js';
 import { LayeredMaterial } from './layers.js';
 import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
-import { Scene, liveObject, objectForHandle, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
+import { Scene, liveObject, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
 import { level, Level } from './level.js';
 import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, Path, Shape, ExtrudeGeometry, TerrainGeometry, RibbonGeometry, MergedGeometry, merge } from './geometry.js';
@@ -227,11 +227,11 @@ function lightAt(index, stable = true) {
 		get shadow() {
 			const at = index;
 			return {
-				get enabled() { return H.lightShadowGet(at)[2] !== 0; },
-				set enabled(v) { H.lightShadowSet(at, v ? 1 : 2, H.lightShadowGet(at)[1]); },
-				get size() { return H.lightShadowGet(at)[3]; },
-				set size(v) { H.lightShadowSet(at, H.lightShadowGet(at)[0], +v); },
-				get resident() { return H.lightShadowGet(at)[4] !== 0; },
+				get enabled() { return H.lightShadowGet(at).enabled; },
+				set enabled(v) { H.lightShadowSet(at, v ? 1 : 2, H.lightShadowGet(at).size); },
+				get size() { return H.lightShadowGet(at).effectiveSize; },
+				set size(v) { H.lightShadowSet(at, H.lightShadowGet(at).mode, +v); },
+				get resident() { return H.lightShadowGet(at).resident; },
 			};
 		},
 		// Whether this light's direct diffuse belongs in the lightmap —
@@ -252,7 +252,7 @@ function lightAt(index, stable = true) {
 
 		set shadow(v) {
 			if (v == null) { H.lightShadowSet(index, 0, 0); return; }
-			const [mode, size] = H.lightShadowGet(index);
+			const { mode, size } = H.lightShadowGet(index);
 			if (typeof v === 'boolean') { H.lightShadowSet(index, v ? 1 : 2, size); return; }
 			if (typeof v !== 'object') {
 				throw new TypeError('light.shadow takes true, false, null, or an object with enabled or size');
@@ -495,12 +495,8 @@ Object.defineProperties(light, {
 			// object, so it answers about the last frame rather than
 			// about whenever it was captured.
 			get fit() {
-				const [live, cx, cy, cz, extent, near, far, texel] = H.shadowFit();
-				return {
-					live: live !== 0,
-					center: [cx, cy, cz],
-					extent, near, far, texel,
-				};
+				const { live, centre, extent, near, far, texel } = H.shadowFit();
+				return { live, center: centre, extent, near, far, texel };
 			},
 		};
 		},
@@ -624,16 +620,17 @@ const lights = {
 			const at = typeof o.load === 'string' ? o.load : '';
 			const loaded = H.lightsLoadBake(at);
 			if (loaded) {
-				const [receivers, dirty, bytes, ms] = loaded;
+				const { tiles: receivers, dirty, bytes, ms } = loaded;
 				return { receivers, skipped: 0, texels: 0, bytes, ms, dirty, loaded: true };
 			}
 		}
-		const [receivers, skipped, texels, bytes, ms, dirty] = H.lightsBake(
+		const answer = H.lightsBake(
 			'texelsPerMetre' in o ? +o.texelsPerMetre : 0,
 			'maxBytes' in o ? +o.maxBytes : 0,
 			'budgetMs' in o ? +o.budgetMs : 0,
 			!!o.progressive);
-		const answer = { receivers, skipped, texels, bytes, ms, dirty, loaded: false };
+		answer.loaded = false;
+		const { receivers, dirty } = answer;
 		if (o.save && receivers > 0 && dirty > 0) {
 			throw new Error('three.lights.bake: save waits for a progressive bake to finish — '
 				+ 'call three.lights.saveBake() once three.stats().lightmapDirty is 0');
@@ -648,8 +645,7 @@ const lights = {
 	// shipped game loads it instead of baking on boot. Answers
 	// `{ path, tiles, dirty, bytes, ms }`.
 	saveBake(path) {
-		const [tiles, dirty, bytes, ms, where] = H.lightsSaveBake(path == null ? '' : String(path));
-		return { path: where, tiles, dirty, bytes, ms };
+		return H.lightsSaveBake(path == null ? '' : String(path));
 	},
 
 	// Reads one back, and answers null when there is none that fits this scene
@@ -657,10 +653,7 @@ const lights = {
 	// is how many of the tiles it loaded belong to a receiver that has moved
 	// since; those re-bake over the following frames.
 	loadBake(path) {
-		const loaded = H.lightsLoadBake(path == null ? '' : String(path));
-		if (!loaded) return null;
-		const [tiles, dirty, bytes, ms] = loaded;
-		return { tiles, dirty, bytes, ms };
+		return H.lightsLoadBake(path == null ? '' : String(path));
 	},
 
 	// The registry safety ceiling, and the number `add` refuses past.
@@ -761,8 +754,7 @@ const SHADOW_BUDGET_LIMITS = {
 };
 
 function shadowBudgetValues() {
-	const [maxViews, maxTexels, maxBytes, maxUpdates, maxUpdateTexels] = H.shadowBudgetGet();
-	return { maxViews, maxTexels, maxBytes, maxUpdates, maxUpdateTexels };
+	return H.shadowBudgetGet();
 }
 
 const shadows = {
@@ -801,15 +793,15 @@ for (let i = 0; i < MAX_LIGHTS; i++) {
 }
 
 const camera = {
-	get fov() { return H.cameraGet()[6]; },
+	get fov() { return H.cameraGet().fov; },
 	set fov(v) {
 		const c = H.cameraGet();
-		H.cameraSet(c[0], c[1], c[2], c[3], c[4], c[5], +v, c[9]);
+		H.cameraSet(...c.target, c.yaw, c.pitch, c.distance, +v, c.roll);
 	},
 
-	get yaw() { return H.cameraGet()[3]; },
-	get pitch() { return H.cameraGet()[4]; },
-	get distance() { return H.cameraGet()[5]; },
+	get yaw() { return H.cameraGet().yaw; },
+	get pitch() { return H.cameraGet().pitch; },
+	get distance() { return H.cameraGet().distance; },
 
 	// The third angle, in DEGREES around the view direction, and the one of
 	// the three that is assignable — because it is not part of aiming the
@@ -827,14 +819,14 @@ const camera = {
 	// Not clamped and not wrapped, unlike pitch and yaw, so `camera.roll += 1`
 	// in a loop reads back as a number that keeps climbing rather than as a
 	// sawtooth. See `Camera.roll` for why neither guard is needed here.
-	get roll() { return H.cameraGet()[9]; },
+	get roll() { return H.cameraGet().roll; },
 	set roll(v) {
 		const value = +v;
 		if (!Number.isFinite(value)) {
 			throw new TypeError(`three.camera.roll wants degrees around the view direction, not ${v}`);
 		}
 		const c = H.cameraGet();
-		H.cameraSet(c[0], c[1], c[2], c[3], c[4], c[5], c[6], value);
+		H.cameraSet(...c.target, c.yaw, c.pitch, c.distance, c.fov, value);
 	},
 
 	// The three that `orbit()` writes, and the two that nothing writes, all
@@ -865,8 +857,8 @@ const camera = {
 	// uninteresting. A sky that renders at one zoom level and not at another
 	// is `camera.far` moving, and until M6 there was no way to see that
 	// happening — only to render, guess, and get it wrong.
-	get near() { return H.cameraGet()[7]; },
-	get far() { return H.cameraGet()[8]; },
+	get near() { return H.cameraGet().near; },
+	get far() { return H.cameraGet().far; },
 
 	// Live, like `mesh.position` and unlike `getWorldPosition()` — so
 	// `three.camera.target.y = 2` raises the turntable's focus instead of
@@ -874,7 +866,7 @@ const camera = {
 	// through, so there is one path that moves the target and one place the
 	// planes are re-derived.
 	get target() {
-		const [tx, ty, tz] = H.cameraGet();
+		const [tx, ty, tz] = H.cameraGet().target;
 		const v = new Vector3(null, tx, ty, tz);
 		v._o = { _flush() { camera.lookAt(v.x, v.y, v.z); } };
 		return v;
@@ -886,16 +878,16 @@ const camera = {
 	orbit(yaw, pitch, distance) {
 		const c = H.cameraGet();
 		H.cameraSet(
-			c[0], c[1], c[2],
-			yaw ?? c[3],
-			pitch ?? c[4],
-			distance ?? c[5],
-			c[6],
+			...c.target,
+			yaw ?? c.yaw,
+			pitch ?? c.pitch,
+			distance ?? c.distance,
+			c.fov,
 			// Carried through, like the target and the fov. `cameraSet` writes
 			// every field it is given, so leaving roll off would level the
 			// camera on the next `orbit()` — which is one drag away, and would
 			// read as the roll not working rather than as orbit clearing it.
-			c[9],
+			c.roll,
 		);
 		return this;
 	},
@@ -903,7 +895,7 @@ const camera = {
 	lookAt(x, y, z) {
 		const c = H.cameraGet();
 		if (typeof x === 'object' && x !== null) ({ x, y, z } = x);
-		H.cameraSet(+x, +y, +z, c[3], c[4], c[5], c[6], c[9]);
+		H.cameraSet(+x, +y, +z, c.yaw, c.pitch, c.distance, c.fov, c.roll);
 		return this;
 	},
 
@@ -967,7 +959,7 @@ const camera = {
 			if (height !== undefined) oy = +height;
 			if (behind !== undefined) oz -= +behind;
 		}
-		const boom = distance === null ? H.cameraGet()[5] : +distance;
+		const boom = distance === null ? H.cameraGet().distance : +distance;
 		if (!Number.isFinite(boom) || boom < 0) {
 			throw new RangeError(
 				`three.camera.attach(object, { distance }) wants zero or more — ${distance} is not a boom length`
@@ -977,7 +969,7 @@ const camera = {
 		if (!Number.isFinite(lagSec) || lagSec < 0) {
 			throw new RangeError(`three.camera.attach(object, { lag }) wants seconds — 0 for rigid, not ${lag}`);
 		}
-		H.cameraAttach(target[0], target[1], ox, oy, oz, boom, lagSec * 1000, inLocal);
+		H.cameraAttach(target, ox, oy, oz, boom, lagSec * 1000, inLocal);
 		return this;
 	},
 
@@ -1004,7 +996,7 @@ const camera = {
 	// target along the orbit direction. Not `target`, which is what it
 	// orbits; not writable, because the turntable owns its own position.
 	position() {
-		const [tx, ty, tz, yaw, pitch, distance] = H.cameraGet();
+		const { target: [tx, ty, tz], yaw, pitch, distance } = H.cameraGet();
 		const a = yaw * Math.PI / 180, p = pitch * Math.PI / 180, cp = Math.cos(p);
 		return new Vector3(null,
 			tx + distance * cp * Math.sin(a),
@@ -1015,7 +1007,7 @@ const camera = {
 	// The direction the camera looks, world space, unit length, including the
 	// pitch. This is "forward" for a view relative to the camera.
 	forward() {
-		const [, , , yaw, pitch] = H.cameraGet();
+		const { yaw, pitch } = H.cameraGet();
 		const a = yaw * Math.PI / 180, p = pitch * Math.PI / 180, cp = Math.cos(p);
 		return new Vector3(null, -Math.sin(a) * cp, -Math.sin(p), -Math.cos(a) * cp);
 	},
@@ -1024,7 +1016,7 @@ const camera = {
 	// "Screen right" — the `D` key. Flattened so it stays useful for strafe
 	// while pitched down at a character.
 	right() {
-		const [, , , yaw] = H.cameraGet();
+		const { yaw } = H.cameraGet();
 		const a = yaw * Math.PI / 180;
 		return new Vector3(null, Math.cos(a), 0, -Math.sin(a));
 	},
@@ -1035,7 +1027,7 @@ const camera = {
 	// vector when both inputs are 0. This is the one call that keeps a
 	// character from drifting sideways off the camera's forward line.
 	planarMove(fwd, strafe) {
-		const [, , , yaw] = H.cameraGet();
+		const { yaw } = H.cameraGet();
 		const a = yaw * Math.PI / 180;
 		const Fx = -Math.sin(a), Fz = -Math.cos(a);
 		const Rx = Math.cos(a), Rz = -Math.sin(a);
@@ -1075,10 +1067,10 @@ const camera = {
 		if (!(Number.isFinite(+x) && Number.isFinite(+y))) {
 			throw new TypeError('three.camera.ray(x, y) wants two pixel coordinates');
 		}
-		const r = H.cameraRay(+x, +y);
+		const { origin: o, direction: d } = H.cameraRay(+x, +y);
 		return {
-			origin: new Vector3(null, r[0], r[1], r[2]),
-			direction: new Vector3(null, r[3], r[4], r[5]),
+			origin: new Vector3(null, o[0], o[1], o[2]),
+			direction: new Vector3(null, d[0], d[1], d[2]),
 		};
 	},
 
@@ -1109,13 +1101,12 @@ const camera = {
 	// attachment silently, because the alternative is throwing from inside a
 	// frame nobody called.
 	get attached() {
-		const handle = H.cameraAttached();
-		return handle === null ? null : objectForHandle(handle);
+		return H.cameraAttached()?.owner ?? null;
 	},
 	set attached(_) { throw new TypeError('the camera follows through three.camera.attach(object) and three.camera.detach()'); },
 
 	toJSON() {
-		const [x, y, z, yaw, pitch, distance, fov, near, far, roll] = H.cameraGet();
+		const { target: [x, y, z], yaw, pitch, distance, fov, near, far, roll } = H.cameraGet();
 		return { target: { x, y, z }, yaw, pitch, roll, distance, fov, near, far };
 	},
 };
@@ -2569,8 +2560,8 @@ export const three = {
 	//
 	// Like the post chain it belongs to the renderer rather than to the
 	// scene: `new three.Scene()` does not reset it.
-	get depthPrepass() { return H.depthPrepassGet() !== 0; },
-	set depthPrepass(v) { H.depthPrepassSet(v ? 1 : 0); },
+	get depthPrepass() { return H.depthPrepassGet(); },
+	set depthPrepass(v) { H.depthPrepassSet(!!v); },
 
 	// Draw every frame, even one that would put back exactly the picture
 	// already on screen.
@@ -2580,15 +2571,15 @@ export const three = {
 	// what keeps a paused game, a menu or an idle editor at the desktop's
 	// power. Turn this on for a picture that changes through a door the fold
 	// cannot see. `stats().skippedFrames` counts the frames it saved.
-	get alwaysRender() { return H.alwaysRenderGet() !== 0; },
-	set alwaysRender(v) { H.alwaysRenderSet(v ? 1 : 0); },
+	get alwaysRender() { return H.alwaysRenderGet(); },
+	set alwaysRender(v) { H.alwaysRenderSet(!!v); },
 
 	// Reuse unchanged colour and depth inside frames which are submitted. This is
 	// independent of `alwaysRender`: that property decides whether to submit an
 	// unchanged frame at all, while this one decides how much of a submitted scene
 	// is rebuilt.
-	get sceneCache() { return H.sceneCacheGet() !== 0; },
-	set sceneCache(v) { H.sceneCacheSet(v ? 1 : 0); },
+	get sceneCache() { return H.sceneCacheGet(); },
+	set sceneCache(v) { H.sceneCacheSet(!!v); },
 
 	// The shaders that run over the finished frame.
 	//
@@ -2943,8 +2934,7 @@ export const three = {
 	// It is the offscreen target's, never a window's: `three.window` is the
 	// window, and it can be a different size without moving this one.
 	renderSize() {
-		const [width, height] = H.renderSize();
-		return { width, height };
+		return H.renderSize();
 	},
 
 	// How big the window is, what it is called, and whether it fills a

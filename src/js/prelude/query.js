@@ -124,9 +124,9 @@ function fillIgnore(value, where) {
 	let count = 0;
 	for (const one of many) {
 		if (one === null || one === undefined) continue;
-		const [index, generation] = liveObject(one, where);
-		ignoreScratch[count * 2] = index;
-		ignoreScratch[count * 2 + 1] = generation;
+		const h = liveObject(one, where);
+		ignoreScratch[count * 2] = h.index;
+		ignoreScratch[count * 2 + 1] = h.generation;
 		count++;
 	}
 	return count;
@@ -345,9 +345,9 @@ function selfColumn(value, agents, where) {
 	for (let i = 0; i < agents; i++) {
 		const object = value[i];
 		if (object === null || object === undefined) { selfScratch[i * 2] = -1; continue; }
-		const [index, generation] = liveObject(object, where);
-		selfScratch[i * 2] = index;
-		selfScratch[i * 2 + 1] = generation;
+		const h = liveObject(object, where);
+		selfScratch[i * 2] = h.index;
+		selfScratch[i * 2 + 1] = h.generation;
 	}
 	return { view: selfScratch, count: agents };
 }
@@ -538,9 +538,9 @@ export class TransformBatch {
 		this.data = new Float32Array(objects.length * this.stride);
 
 		objects.forEach((object, i) => {
-			const [index, generation] = liveObject(object, where);
-			this.handles[i * 2] = index;
-			this.handles[i * 2 + 1] = generation;
+			const h = liveObject(object, where);
+			this.handles[i * 2] = h.index;
+			this.handles[i * 2 + 1] = h.generation;
 			// Seeded from where each object already is, so a batch made and
 			// immediately flushed changes nothing. A zero-filled one would
 			// teleport the whole crowd to the origin on its first flush, which

@@ -90,7 +90,7 @@ export class Mesh extends Object3D {
 	get color() { return [...this._color]; }
 	set color(v) {
 		this._color = readColor(v, 'mesh.color');
-		if (this._i >= 0) H.setColor(this._i, this._g, ...this._color);
+		if (this._h !== null) this._h.setColor(...this._color);
 	}
 
 	// Which row of the material's table this copy draws with. Zero, and
@@ -102,7 +102,7 @@ export class Mesh extends Object3D {
 			throw new RangeError(`mesh.variant wants a row index of 0 or more, got ${v}`);
 		}
 		this._variant = n;
-		if (this._i >= 0) H.setVariant(this._i, this._g, n);
+		if (this._h !== null) this._h.setVariant(n);
 	}
 
 	// -------------------------------------------------------------------
@@ -126,7 +126,7 @@ export class Mesh extends Object3D {
 	get morphs() {
 		if (this._morphs === undefined) {
 			const ref = this._ref();
-			this._morphs = ref ? H.meshMorphs(ref.asset, ref.assetGeneration, ref.mesh) : 0;
+			this._morphs = ref ? H.meshMorphs(ref._asset, ref.mesh) : 0;
 		}
 		return this._morphs;
 	}
@@ -228,7 +228,7 @@ export class MorphWeights {
 	// Nothing is sent while the mesh is a detached description; `_materialize`
 	// replays it at the add, the way colour and variant are replayed.
 	_push() {
-		if (this._o._i >= 0) H.setMorphWeights(this._o._i, this._o._g, this._v);
+		if (this._o._h !== null) this._o._h.setMorphWeights(this._v);
 	}
 }
 

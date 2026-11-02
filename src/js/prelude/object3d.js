@@ -97,10 +97,8 @@ export class Object3D {
 		// frame rather than keyed out of the baked table — `instantiate({ skeleton: true })`.
 		// Carried on the root, because that is what `_bindAnimation` runs on.
 		this._liveSkin = false;
-		// The host node, or -1 for "not in a scene". See the header.
-		this._i = -1;
-		this._g = -1;
-		// Its handle (a host `Node`), or null.
+		// The host node as its handle (a host `Node`), or null for "not in a
+		// scene". The verbs about one node are methods on it.
 		this._h = null;
 	}
 
@@ -129,13 +127,13 @@ export class Object3D {
 	get name() { return this._name; }
 	set name(v) {
 		this._name = String(v);
-		if (this._i >= 0) H.setName(this._i, this._g, this._name);
+		if (this._h !== null) this._h.setName(this._name);
 	}
 
 	get visible() { return this._visible; }
 	set visible(v) {
 		this._visible = !!v;
-		if (this._i >= 0) H.setVisible(this._i, this._g, this._visible);
+		if (this._h !== null) this._h.setVisible(this._visible);
 	}
 
 	// **"This will not move again."** A static object is rasterised into the
@@ -154,7 +152,7 @@ export class Object3D {
 	get static() { return this._static; }
 	set static(v) {
 		const want = !!v;
-		this._static = this._i >= 0 ? !!H.setStatic(this._i, this._g, want) : want;
+		this._static = this._h !== null ? !!this._h.setStatic(want) : want;
 	}
 
 	// **"This is scenery, not a wall."** Off takes the object out of the
@@ -173,7 +171,7 @@ export class Object3D {
 	get collides() { return this._collides; }
 	set collides(v) {
 		this._collides = !!v;
-		if (this._i >= 0) H.setCollides(this._i, this._g, this._collides);
+		if (this._h !== null) this._h.setCollides(this._collides);
 	}
 
 	// **"Find me, but walk past me."** Off, the object is still raycast, picked
@@ -192,7 +190,7 @@ export class Object3D {
 	get blocks() { return this._blocks; }
 	set blocks(v) {
 		this._blocks = !!v;
-		if (this._i >= 0) H.setBlocks(this._i, this._g, this._blocks);
+		if (this._h !== null) this._h.setBlocks(this._blocks);
 	}
 
 	// **"This is a shape, not a picture."** On, the object is swept against,
@@ -212,7 +210,7 @@ export class Object3D {
 	get collisionOnly() { return this._collisionOnly; }
 	set collisionOnly(v) {
 		this._collisionOnly = !!v;
-		if (this._i >= 0) H.setCollisionOnly(this._i, this._g, this._collisionOnly);
+		if (this._h !== null) this._h.setCollisionOnly(this._collisionOnly);
 	}
 
 	// What this object draws, or null for a group. Overridden by Mesh.
@@ -247,8 +245,8 @@ export class Object3D {
 	// every clip on the stack — or null before anything has played. A fresh
 	// object per read, so holding one is holding a snapshot.
 	get animation() {
-		if (this._i < 0 || !this._clips) return null;
-		return H.animationState(this._i, this._g);
+		if (this._h === null || !this._clips) return null;
+		return this._h.animationState();
 	}
 
 	// `fade` crossfades out of whatever is posing the character, in seconds —
@@ -267,7 +265,7 @@ export class Object3D {
 		// The host learns the node map on the first play and not before: a
 		// prop that never animates never sends it.
 		this._bindAnimation();
-		const played = H.playAnimation(this._i, this._g, String(name), !!loop, +speed, +time, +fade,
+		const played = this._h.playAnimation(String(name), !!loop, +speed, +time, +fade,
 			cycles(sync, 'play'));
 		if (!played) this._gone(`play("${name}")`);
 		return this;
@@ -319,7 +317,7 @@ export class Object3D {
 			}
 		}
 		this._bindAnimation();
-		if (!H.blendAnimation(this._i, this._g, +fade, +speed, ...args)) this._gone('blend()');
+		if (!this._h.blendAnimation(+fade, +speed, ...args)) this._gone('blend()');
 		return this;
 	}
 
@@ -327,7 +325,7 @@ export class Object3D {
 	// which is not an error; no clips at all is the wrong object.
 	stop() {
 		if (!this._clips) this._requireClips('stop()');
-		if (this._i >= 0) H.stopAnimation(this._i, this._g);
+		if (this._h !== null) this._h.stopAnimation();
 		return this;
 	}
 
@@ -350,7 +348,7 @@ export class Object3D {
 				+ 'animation clips. This object has none.'
 			);
 		}
-		if (this._i < 0) {
+		if (this._h === null) {
 			throw new Error(`${where} needs ${this._name || 'the object'} to be in a scene — add it first`);
 		}
 	}
@@ -390,7 +388,7 @@ export class Object3D {
 	// That is deliberate: they are ordinary objects with their own children,
 	// and deduping them would make removing one remove the other's contents.
 	socket(name) {
-		if (this._i < 0) {
+		if (this._h === null) {
 			throw new Error(`socket("${name}") needs ${this._name || 'the object'} to be in a scene — add it first`);
 		}
 		if (this._liveSkin) {
@@ -401,7 +399,7 @@ export class Object3D {
 		const holder = new Object3D();
 		holder.name = String(name);
 		this.add(holder);
-		if (!H.bindSocket(holder._i, holder._g, this._i, this._g, String(name))) {
+		if (!holder._h.bindSocket(this._h, String(name))) {
 			this.remove(holder);
 			throw new Error(`no bone named "${name}" — ${this._boneList()}`);
 		}
@@ -418,50 +416,46 @@ export class Object3D {
 	}
 
 	// Flat triples — glTF node index, host node index, host node generation
-	// — for every descendant that came from a glTF node. The per-primitive
+	// — for every descendant that came from a glTF node, read off its handle. The per-primitive
 	// children `instantiate()` synthesizes carry no glTF index and are
 	// skipped, because no channel can name them.
 	_bindAnimation() {
 		if (this._bound) return;
 		const pairs = [];
 		const walk = (o) => {
-			if (o._gltfNode >= 0 && o._i >= 0) pairs.push(o._gltfNode, o._i, o._g);
+			if (o._gltfNode >= 0 && o._h !== null) pairs.push(o._gltfNode, o._h.index, o._h.generation);
 			for (const c of o.children) walk(c);
 		};
 		walk(this);
 		// Cached only when the host took it: a bind it refused — the asset gone,
 		// or a file with neither clips nor a skin — is asked again next time
 		// rather than remembered as done.
-		this._bound = H.bindAnimation(
-			this._i, this._g, this._asset.index, this._asset.generation, pairs, !!this._liveSkin) === true;
+		this._bound = this._h.bindAnimation(this._asset, pairs, !!this._liveSkin) === true;
 	}
 
 	_flush() {
-		if (this._i < 0) return;
+		const h = this._h;
+		if (h === null) return;
 		const { position: p, rotation: r, scale: s } = this;
-		H.setTransform(this._i, this._g, p._x, p._y, p._z, r._x, r._y, r._z, s._x, s._y, s._z);
-		if (this._q) H.setQuaternion(this._i, this._g, this._q[0], this._q[1], this._q[2], this._q[3]);
+		h.setTransform(p._x, p._y, p._z, r._x, r._y, r._z, s._x, s._y, s._z);
+		if (this._q) h.setQuaternion(this._q[0], this._q[1], this._q[2], this._q[3]);
 	}
 
 	// Create the host node for this object under `parent`, then replay
 	// everything set before the add, then do the same for the subtree.
 	_materialize(parent) {
 		const ref = this._ref();
-		const h = H.add(
-			ref ? ref.asset : -1, ref ? ref.assetGeneration : 0, ref ? ref.mesh : -1,
-			parent._i, parent._g, this._name,
-		);
+		// A null asset is a group.
+		const h = H.add(ref ? ref._asset : null, ref ? ref.mesh : -1, parent._h, this._name);
 		// The host's Node: one object per live node, so a hit or an event names
 		// it back and `owner` is the object the script built.
 		this._h = h;
 		h.owner = this;
-		const i = this._i = h.index;
-		const g = this._g = h.generation;
 		this._flush();
-		if (!this._visible) H.setVisible(i, g, false);
-		if (!this._collides) H.setCollides(i, g, false);
-		if (this._collisionOnly) H.setCollisionOnly(i, g, true);
-		if (!this._blocks) H.setBlocks(i, g, false);
+		if (!this._visible) h.setVisible(false);
+		if (!this._collides) h.setCollides(false);
+		if (this._collisionOnly) h.setCollisionOnly(true);
+		if (!this._blocks) h.setBlocks(false);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(h, material);
@@ -469,9 +463,9 @@ export class Object3D {
 		// object added, and a scene of ten thousand default-coloured meshes
 		// should not pay twenty thousand crossings to say "white, row zero".
 		if (this._color && !(this._color[0] === 1 && this._color[1] === 1 && this._color[2] === 1 && this._color[3] === 1)) {
-			H.setColor(i, g, ...this._color);
+			h.setColor(...this._color);
 		}
-		if (this._variant) H.setVariant(i, g, this._variant);
+		if (this._variant) h.setVariant(this._variant);
 		// Replayed like colour and variant, and only when something is actually
 		// worn: an all-zero vector is the neutral mesh, which is what the host
 		// already has, so sending it would be a crossing to say nothing.
@@ -481,12 +475,12 @@ export class Object3D {
 		// `instantiate` — which sets it as it builds — is not the path a script
 		// takes. Without it a character from `asset.instantiate()` would draw its
 		// bind pose forever.
-		if (this._skin >= 0) H.bindSkin(i, g, this._skin, !!this._preskinned);
+		if (this._skin >= 0) h.bindSkin(this._skin, !!this._preskinned);
 		// **After `bindSkin`, not before.** The host refuses a static caster that
 		// has a skin, and it learns about the skin on the line above — so asking
 		// first would be told yes and then quietly overruled, and `this._static`
 		// would disagree with the node for the rest of the session.
-		if (this._static) this._static = !!H.setStatic(i, g, true);
+		if (this._static) this._static = !!h.setStatic(true);
 
 		for (const child of this.children) child._materialize(this);
 		// **A live character needs its player before anything plays**, unlike every
@@ -512,8 +506,6 @@ export class Object3D {
 	// re-adding it builds a new node. The whole subtree goes with it, because
 	// removing a node removes its descendants.
 	_demote() {
-		this._i = -1;
-		this._g = -1;
 		this._h = null;
 		// The host dropped the player along with the nodes, so the map has to be
 		// sent again if this subtree is re-added. Without this a character removed
@@ -560,14 +552,14 @@ export class Object3D {
 			o.parent = this;
 			this.children.push(o);
 
-			if (this._i >= 0) {
-				if (o._i >= 0) {
-					H.setParent(o._i, o._g, this._i, this._g);
+			if (this._h !== null) {
+				if (o._h !== null) {
+					o._h.setParent(this._h);
 				} else {
 					o._materialize(this);
 				}
-			} else if (o._i >= 0) {
-				H.remove(o._i, o._g);
+			} else if (o._h !== null) {
+				o._h.remove();
 				o._demote();
 			}
 		}
@@ -580,8 +572,8 @@ export class Object3D {
 			if (at < 0) continue;
 			this.children.splice(at, 1);
 			o.parent = null;
-			if (o._i >= 0) {
-				H.remove(o._i, o._g);
+			if (o._h !== null) {
+				o._h.remove();
 				o._demote();
 			}
 		}
@@ -602,8 +594,8 @@ export class Object3D {
 	}
 
 	getWorldPosition() {
-		if (this._i < 0) throw new Error('this object is not in a scene yet — add() it first');
-		const [x, y, z] = H.worldPosition(this._i, this._g);
+		if (this._h === null) throw new Error('this object is not in a scene yet — add() it first');
+		const [x, y, z] = this._h.worldPosition();
 		return new Vector3(null, x, y, z);
 	}
 
@@ -629,8 +621,8 @@ export class Object3D {
 	// world space is a thing a scene has, and answering with the local box
 	// would be a wrong answer rather than a missing one.
 	boundingBox() {
-		if (this._i < 0) throw new Error('this object is not in a scene yet — add() it first');
-		return boxFromSix(H.objectBounds(this._i, this._g));
+		if (this._h === null) throw new Error('this object is not in a scene yet — add() it first');
+		return boxFromSix(this._h.objectBounds());
 	}
 
 	// This object's box in its parent's coordinates — its own mesh, its
@@ -785,7 +777,7 @@ export class Object3D {
 	// The marker snap's world path, for two pieces under different parents —
 	// `_placeInWorld`'s frame rule, applied to a point instead of a box.
 	_snapMarkerInWorld(other, mine, theirs, name) {
-		if (this._i < 0 || other._i < 0) {
+		if (this._h === null || other._h === null) {
 			throw new Error(
 				`snapTo(other, ${JSON.stringify(name)}): these two hang from different parents, so they `
 				+ 'are placed in world space — and world space is something a scene has. add() them first.');
@@ -881,7 +873,7 @@ export class Object3D {
 	// tighter answer, which is why `_place` prefers it whenever the two objects
 	// really are siblings. It costs two host calls where that form costs none.
 	_placeInWorld(other, specs, where) {
-		if (this._i < 0 || other._i < 0) {
+		if (this._h === null || other._h === null) {
 			throw new Error(
 				`${where}: these two hang from different parents, so they are placed in world space — `
 				+ 'and world space is something a scene has. add() them first.');
@@ -976,7 +968,7 @@ export class Object3D {
 			collides: this._collides,
 			collisionOnly: this._collisionOnly,
 			blocks: this._blocks,
-			inScene: this._i >= 0,
+			inScene: this._h !== null,
 			children: this.children.length,
 		};
 	}

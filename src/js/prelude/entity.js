@@ -302,9 +302,9 @@ class Track {
 		if (this._handles === null) return;
 		const object = instance.object ?? null;
 		if (object === null || object === undefined) { this._handles[slot * 2] = -1; return; }
-		const [index, generation] = liveObject(object, `${this.name}.pose()`);
-		this._handles[slot * 2] = index;
-		this._handles[slot * 2 + 1] = generation;
+		const h = liveObject(object, `${this.name}.pose()`);
+		this._handles[slot * 2] = h.index;
+		this._handles[slot * 2 + 1] = h.generation;
 		const at = slot * TRANSFORM_STRIDE;
 		const t = this._transform;
 		t[at] = object.position.x; t[at + 1] = object.position.y; t[at + 2] = object.position.z;

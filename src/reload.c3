@@ -259,9 +259,7 @@ fn void JsRuntime.restore_persist(&self, String json)
  that threw under `--frames` would make a game unrunnable in the mode that checks
  it.
 *>
-fn void js_reload(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn void js_reload(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
 	self.reload_wanted = true;
-	*out = qjs::undefined_value();
 }
