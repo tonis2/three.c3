@@ -208,12 +208,21 @@ function part(parent, size, pos, look) {
 	return m;
 }
 
-class Player extends three.Entity {
-	static parent = groups.player;
+// The game's state lives on `G`, the Night below; these read it when they run.
+const playing = () => G.mode === 'playing';
+const running = () => !three.clock.paused;
+
+@three.entity({
+	parent: groups.player,
 	// The body a fly's trigger fires against: moveAndSlide carries no contact
 	// of its own, so this kinematic capsule is what the catch overlap is with.
-	static volume = { shape: 'capsule', radius: 0.42, height: 1.6, offset: [0, 0.8, 0] };
-	static collides = false;
+	volume: { shape: 'capsule', radius: 0.42, height: 1.6, offset: [0, 0.8, 0] },
+	collides: false,
+})
+class Player extends three.Entity {
+	// A jump press waiting for the next fixed step: the key handler runs once a
+	// frame, the fixed loop zero to eight times.
+	wantsJump = false;
 
 	constructor(x, z) {
 		super();
@@ -223,20 +232,15 @@ class Player extends three.Entity {
 		part(root, [0.54, 0.14, 0.52], [0, 1.84, 0.02], 0x2c3a55);       // hat
 		for (const side of [-1, 1]) part(root, [0.1, 0.1, 0.05], [side * 0.13, 1.62, 0.25], 0x101418);
 		// Limbs hang from pivots ON the body: a pivot off the scene draws nothing.
-		this.leg = [-1, 1].map(s => {
+		const limbs = (x, y, size, drop, colour) => [-1, 1].map(s => {
 			const pivot = new three.Group();
-			pivot.position.set(s * 0.18, 0.62, 0);
-			part(pivot, [0.22, 0.62, 0.26], [0, -0.3, 0], 0x2e3446);
+			pivot.position.set(s * x, y, 0);
+			part(pivot, size, [0, drop, 0], colour);
 			root.add(pivot);
 			return pivot;
 		});
-		this.arm = [-1, 1].map(s => {
-			const pivot = new three.Group();
-			pivot.position.set(s * 0.44, 1.3, 0);
-			part(pivot, [0.18, 0.56, 0.2], [0, -0.26, 0], 0x46587a);
-			root.add(pivot);
-			return pivot;
-		});
+		this.leg = limbs(0.18, 0.62, [0.22, 0.62, 0.26], -0.3, 0x2e3446);
+		this.arm = limbs(0.44, 1.3, [0.18, 0.56, 0.2], -0.26, 0x46587a);
 
 		// The jar: a glass box with a glow inside that grows with the catch.
 		const jar = new three.Group();
@@ -253,7 +257,6 @@ class Player extends three.Entity {
 		this.x = x; this.z = z; this.y = 0; this.vy = 0; this.grounded = false;
 		this.heading = 0; this.moving = false; this.walkT = 0;
 		this.yaw = 180; this.pitch = 20; this.dist = 9;
-		this.intent = { jump: false };
 	}
 
 	setJar(n) {
@@ -265,10 +268,13 @@ class Player extends three.Entity {
 	caught() {
 		G.caught++;
 		this.setJar(G.caught);
-		if (G.caught >= NEED) win();
+		if (G.caught >= NEED) G.finish(true);
 	}
 
-	step(dt) {
+	jump() { this.wantsJump = true; }
+
+	@three.systems.step({ when: () => playing() && running() })
+	move(dt) {
 		const held = k => three.input.isDown(k);
 		const axis = (...ks) => ks.reduce((a, k) => a + (held(k) ? 1 : 0), 0);
 		const move = three.camera.planarMove(
@@ -278,8 +284,8 @@ class Player extends three.Entity {
 		this.moving = move.length() > 0;
 		if (this.moving) this.heading = Math.atan2(move.x, move.z);
 
-		if (this.intent.jump && this.grounded) { this.vy = JUMP; this.grounded = false; }
-		this.intent.jump = false;
+		if (this.wantsJump && this.grounded) { this.vy = JUMP; this.grounded = false; }
+		this.wantsJump = false;
 		this.vy = Math.max(this.vy - GRAV * dt, -40);
 
 		const motion = [move.x * SPEED * dt, this.vy * dt, move.z * SPEED * dt];
@@ -289,6 +295,7 @@ class Player extends three.Entity {
 		if (this.grounded && this.vy < 0) this.vy = 0;
 	}
 
+	@three.systems.frame
 	look(dt) {
 		const ptr = three.input.pointer;
 		if (ptr.down) { this.yaw -= ptr.dx * 0.24; this.pitch += ptr.dy * 0.2; }
@@ -299,6 +306,7 @@ class Player extends three.Entity {
 		three.camera.orbit(this.yaw, this.pitch, this.dist);
 	}
 
+	@three.systems.frame
 	pose(dt) {
 		this.object.position.set(this.x, this.y, this.z);
 		this.object.rotation.y = this.heading;
@@ -315,13 +323,13 @@ class Player extends three.Entity {
 // rides its node the way a moving platform's body does — and the catch itself
 // is the `enter` it fires against the player's capsule.
 // ---------------------------------------------------------------------------
+@three.entity({ parent: groups.flies, trigger: { shape: 'sphere', radius: 1.0 }, collides: false })
 class Firefly extends three.Entity {
-	static parent = groups.flies;
-	static trigger = { shape: 'sphere', radius: 1.0 };
-	static collides = false;
-
 	constructor(i) {
 		super();
+		// Which fly this is, for its hashes. Kept rather than read off the
+		// column slot: a slot moves when a fly below it is caught.
+		this.seed = i;
 		const a = (i / NEED) * Math.PI * 2;
 		const r = 4 + hash(i, 1, 31) * 11;
 		this.homeX = Math.cos(a) * r;
@@ -340,18 +348,19 @@ class Firefly extends three.Entity {
 	}
 
 	// Wander home, or bolt when the player closes in.
+	@three.systems.step({ when: running })
 	drift(dt) {
-		const chasing = G.mode === 'playing';
 		let dvx, dvz;
 		const dx = this.x - player.x, dz = this.z - player.z;
 		const d = Math.hypot(dx, dz);
-		this.far = chasing && d < FLEE_R ? 1 - d / FLEE_R : 0;
+		this.far = playing() && d < FLEE_R ? 1 - d / FLEE_R : 0;
 
 		if (this.far > 0) {
 			dvx = (dx / (d || 1)) * FLEE_SPD;
 			dvz = (dz / (d || 1)) * FLEE_SPD;
 		} else {
-			this.dir += (hash(this.slot | 0, (three.clock.time * 0.5) | 0, 47) - 0.5) * 4 * dt;
+			// Each fly wanders on its own hash, re-drawn every two seconds.
+			this.dir += (hash(this.seed, (three.clock.time * 0.5) | 0, 47) - 0.5) * 4 * dt;
 			const hx = this.x - this.homeX, hz = this.z - this.homeZ;
 			const home = Math.hypot(hx, hz) > 3 ? Math.atan2(-hz, -hx) : this.dir;
 			this.dir = three.dampAngle(this.dir, home, 0.6, dt);
@@ -384,6 +393,7 @@ class Firefly extends three.Entity {
 		this.y = damp(this.y, this.baseY + bob + this.lift, 4, dt);
 	}
 
+	@three.systems.frame
 	glow(dt) {
 		this.object.position.set(this.x, this.y, this.z);
 		this.object.rotation.y = Math.atan2(this.vx, this.vz);
@@ -395,63 +405,21 @@ class Firefly extends three.Entity {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The night: state, rules, systems
-// ---------------------------------------------------------------------------
-const G = { mode: 'menu', caught: 0, endsAt: 0, left: TIME, win: false, used: 0 };
-
-function populate() { for (let i = 0; i < NEED; i++) Firefly.spawn(i); }
-
-const player = Player.spawn(0, HALF - 6);
-populate();
-
-three.camera.attach(player.object, { offset: [0, 1.35, 0], distance: player.dist, lag: 0.12 });
-three.controls.enabled = false;
-three.camera.orbit(player.yaw, player.pitch, player.dist);
-
-function start() {
-	for (const f of Firefly) f.remove();
-	populate();
-	player.x = 0; player.z = HALF - 6; player.y = 0; player.vy = 0;
-	player.setJar(0);
-	G.caught = 0; G.win = false;
-	G.endsAt = three.clock.time + TIME;
-	player.intent.jump = false;
-	show('playing');
-}
-
-function finish(won) {
-	G.win = won;
-	G.spare = Math.max(0, Math.round(G.left));
-	show('over');
-}
-function win() { if (G.mode === 'playing') finish(true); }
-function lose() { if (G.mode === 'playing') finish(false); }
 // A catch: the fly's trigger enters the player's capsule, subject first.
 // Removing the fly here is safe — engine events queue and drain at the frame
 // boundary — and the guard keeps a fly drifting into the standing player on
 // the menu from being caught before the night began.
 Firefly.on('enter', Player, (f, p) => {
-	if (G.mode !== 'playing') return;
+	if (!playing()) return;
 	f.remove();
 	p.caught();
 });
 
-Player.step('move', dt => { if (G.mode === 'playing' && !three.clock.paused) player.step(dt); });
-Player.frame('latch', () => {
-	if (three.input.pressed('space')) player.intent.jump = true;
-});
-Player.frame('look', dt => player.look(dt));
-Player.frame('pose', dt => player.pose(dt));
-Firefly.step('drift', dt => { if (!three.clock.paused) for (const f of Firefly) f.drift(dt); });
-Firefly.frame('glow', dt => { for (const f of Firefly) f.glow(dt); });
+const player = Player.spawn(0, HALF - 6);
 
-three.systems.frame('night', () => {
-	if (G.mode !== 'playing') return;
-	G.left = Math.max(G.endsAt - three.clock.time, 0);
-	hud.left = G.left;
-	if (G.left <= 0) lose();
-});
+three.camera.attach(player.object, { offset: [0, 1.35, 0], distance: player.dist, lag: 0.12 });
+three.controls.enabled = false;
+three.camera.orbit(player.yaw, player.pitch, player.dist);
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -461,10 +429,7 @@ const GOLD = [0.98, 0.85, 0.4];
 const SCRIM = [0.01, 0.02, 0.05, 0.6];
 
 class Hud extends three.Widget {
-	constructor() {
-		super();
-		this.left = TIME;
-	}
+	left = TIME;
 	render() {
 		return new Stack({},
 			new Panel({ at: 'top-left', margin: 16 },
@@ -479,13 +444,17 @@ class Hud extends three.Widget {
 
 class Menu extends three.Widget {
 	render() {
+		// The bound keys come from their `@three.key` decorators, so this line
+		// cannot drift from what the keys do.
+		const keys = Object.entries(three.keys()).map(([key, what]) => `${key} ${what}`);
 		return new Stack({},
 			new Rect({ color: SCRIM, solid: true }),
 			new Panel({ at: 'center', width: 330, gap: 10 },
 				new Label('Fireflies', { size: 36 }),
 				new Label(`${NEED} fireflies drift in the garden and scatter when you close in. Corner them against the walls and hedges — catch every one before the night ends.`, { color: DIM, size: 13 }),
-				new Button('Begin the night', () => start()),
-				new Label('wasd run · space jump · drag to look', { color: DIM, size: 12 }),
+				new Button('Begin the night', () => G.start()),
+				new Label('wasd run · drag to look', { color: DIM, size: 12 }),
+				new Label(keys.join(' · '), { color: DIM, size: 12 }),
 			),
 		);
 	}
@@ -498,8 +467,8 @@ class Pause extends three.Widget {
 			new Rect({ color: SCRIM, solid: true }),
 			new Panel({ at: 'center', width: 240, gap: 8 },
 				new Label('Paused', { size: 26 }),
-				new Button('Resume', () => show('playing')),
-				new Button('Give up', () => finish(false)),
+				new Button('Resume', () => G.show('playing')),
+				new Button('Give up', () => G.finish(false)),
 				new Button('Quit', () => three.quit()),
 			),
 		);
@@ -517,39 +486,90 @@ class Over extends three.Widget {
 					? `All ${NEED} fireflies caught with ${G.spare}s of night to spare.`
 					: `${G.caught} of ${NEED} caught before the sun rose.`, { color: DIM, size: 13 }),
 				new Row({ gap: 8 },
-					new Button('Another night', () => start()),
-					new Button('Menu', () => show('menu')),
+					new Button('Another night', () => G.start()),
+					new Button('Menu', () => G.show('menu')),
 				),
 			),
 		);
 	}
 }
 
-const hud = new Hud();
-const screens = { menu: new Menu(), pause: new Pause(), over: new Over() };
+// ---------------------------------------------------------------------------
+// The night: one object holding the game's state, the screens each mode
+// shows, the clock running down, and the keys that move between modes.
+// ---------------------------------------------------------------------------
+class Night {
+	mode = 'menu';
+	caught = 0;
+	endsAt = 0;
+	left = TIME;
+	win = false;
+	spare = 0;
 
-function show(mode) {
-	G.mode = mode;
-	const wanted = {
-		menu: [screens.menu],
-		playing: [hud],
-		paused: [hud, screens.pause],
-		over: [hud, screens.over],
-	}[mode];
-	for (const w of three.Widget.all()) if (!wanted.includes(w)) w.unmount();
-	for (const w of wanted) w.mount();
-	three.clock.timeScale = mode === 'paused' ? 0 : 1;
-	if (mode === 'playing') hud.left = G.left;
+	hud = new Hud();
+	screens = {
+		menu: [new Menu()],
+		playing: [this.hud],
+		paused: [this.hud, new Pause()],
+		over: [this.hud, new Over()],
+	};
+
+	show(mode) {
+		this.mode = mode;
+		const wanted = this.screens[mode];
+		for (const w of three.Widget.all()) if (!wanted.includes(w)) w.unmount();
+		for (const w of wanted) w.mount();
+		three.clock.timeScale = mode === 'paused' ? 0 : 1;
+		if (mode === 'playing') this.hud.left = this.left;
+	}
+
+	start() {
+		for (const f of Firefly) f.remove();
+		for (let i = 0; i < NEED; i++) Firefly.spawn(i);
+		Object.assign(player, { x: 0, z: HALF - 6, y: 0, vy: 0, wantsJump: false });
+		player.setJar(0);
+		this.caught = 0; this.win = false;
+		this.endsAt = three.clock.time + TIME;
+		this.show('playing');
+	}
+
+	finish(won) {
+		this.win = won;
+		this.spare = Math.max(0, Math.round(this.left));
+		this.show('over');
+	}
+
+	lose() { if (playing()) this.finish(false); }
+
+	// The clock running out.
+	@three.systems.frame({ when: playing })
+	night() {
+		this.left = Math.max(this.endsAt - three.clock.time, 0);
+		this.hud.left = this.left;
+		if (this.left <= 0) this.lose();
+	}
+
+	// Space is both: begin from the menu or the end screen, jump while playing.
+	// One handler per key, so one method.
+	@three.key('space', 'jump')
+	space() {
+		if (this.mode === 'menu' || this.mode === 'over') this.start();
+		else if (this.mode === 'playing') player.jump();
+	}
+
+	@three.key('p', 'pause')
+	pause() {
+		if (this.mode === 'playing') this.show('paused');
+		else if (this.mode === 'paused') this.show('playing');
+	}
+
+	@three.key('m', 'menu')
+	menu() { if (this.mode !== 'menu') this.show('menu'); }
 }
 
-three.onKeyDown('space', () => { if (G.mode === 'menu' || G.mode === 'over') start(); });
-three.onKeyDown('p', () => {
-	if (G.mode === 'playing') show('paused');
-	else if (G.mode === 'paused') show('playing');
-});
-three.onKeyDown('m', () => { if (G.mode !== 'menu') show('menu'); });
-
-show('menu');
+const G = new Night();
+for (let i = 0; i < NEED; i++) Firefly.spawn(i);
+G.show('menu');
 
 const stats = three.stats();
 console.log(`garden: ${NEED} fireflies, ${stats.instances} instances over ${stats.uniqueMeshes} meshes, `
@@ -561,7 +581,13 @@ three.debug.write({
 	instances: stats.instances,
 	uniqueMeshes: stats.uniqueMeshes,
 	colliders: stats.colliders,
+	keys: three.keys(),
 });
 
 // A handle for headless probes: drive the player, count the flies, force the dawn.
-globalThis.__fireflies = { player, Player, Firefly, G, start, lose, get count() { return Firefly.count; } };
+globalThis.__fireflies = {
+	player, Player, Firefly, G,
+	start: () => G.start(),
+	lose: () => G.lose(),
+	get count() { return Firefly.count; },
+};

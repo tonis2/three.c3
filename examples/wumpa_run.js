@@ -29,10 +29,15 @@
 //   arithmetic     helpers, then the trail's own curve
 //   the level      one three.Field carved into a corridor, then a
 //                  LayeredMaterial over it and one heightfield body
-//   the things     Crate, Wumpa, Player and Critter, each a three.Entity
+//   the things     Chips, Crate, Wumpa, Player and Critter — the last four
+//                  each a three.Entity
 //   the rules      two of them: fruit is collected, a critter that reaches you
 //                  costs a life
-//   the frame      every system, in declared order
+//
+// There is no list of systems at the bottom. Every one but the sky's is a
+// method decorated with `@three.systems.step` / `.frame` on the class it belongs
+// to, so it reports as `Player.step`, `Critter.walk` and so on, and runs in the
+// order the classes are declared — `three.systems.list()` is that order.
 //
 // An entity class owns its own spawn, lookup, body, collision volume and
 // removal, so there is no array-plus-map-plus-alive-flag anywhere below, and
@@ -475,6 +480,54 @@ for (let s = 8; s < PATH_LEN - 8; s += 11) {
 }
 
 // ---------------------------------------------------------------------------
+// Debris — a pool of chips, thrown by hand rather than given bodies.
+//
+// A plain class, not an Entity: the 48 meshes are made once and reused, never
+// spawned or removed, so there is nothing for a tracked class to track. Its
+// decorated method is still a system, registered when the pool is made.
+// ---------------------------------------------------------------------------
+class Chips {
+	constructor(size) {
+		this.pool = Array.from({ length: size }, () => {
+			const mesh = new three.Mesh(CHIP, mat.flat);
+			mesh.visible = false;
+			groups.debris.add(mesh);
+			return { mesh, life: 0, vx: 0, vy: 0, vz: 0, spin: 0 };
+		});
+		this.next = 0;
+	}
+
+	// Round the pool, so a TNT chain recycles the oldest chips mid-flight
+	// rather than running out.
+	scatter(x, y, z, colour, n) {
+		for (let i = 0; i < n; i++) {
+			this.next = (this.next + 1) % this.pool.length;
+			const c = this.pool[this.next];
+			const a = Math.random() * 6.28, sp = 3 + Math.random() * 4;
+			c.life = 0.75; c.vx = Math.cos(a) * sp; c.vz = Math.sin(a) * sp; c.vy = 3 + Math.random() * 5;
+			c.spin = (Math.random() - 0.5) * 22;
+			c.mesh.position.set(x, y, z); c.mesh.color = colour; c.mesh.visible = true;
+		}
+	}
+
+	@three.systems.frame
+	fly(dt) {
+		for (const c of this.pool) {
+			if (c.life <= 0) continue;
+			c.life -= dt;
+			if (c.life <= 0) { c.mesh.visible = false; continue; }
+			c.vy -= 24 * dt;
+			const p = c.mesh.position;
+			p.set(p.x + c.vx * dt, p.y + c.vy * dt, p.z + c.vz * dt);
+			c.mesh.rotation.x += c.spin * dt;
+			c.mesh.rotation.z += c.spin * 0.7 * dt;
+		}
+	}
+}
+
+const chips = new Chips(48);
+
+// ---------------------------------------------------------------------------
 // Crates — dynamic boxes.
 //
 // Drawable, so moveAndSlide walks INTO them and stops: Crash breaks crates, he
@@ -503,10 +556,10 @@ const CRATE_PLAN = [
 ];
 
 // The class owns the object -> instance map, the spawn and the removal, so the
-// only thing written here is what a crate IS.
+// only thing written here is what a crate IS. `@three.entity` is the class's
+// options in one place, and registers it now rather than on the first spawn.
+@three.entity({ body: { shape: 'box', mass: 5, friction: 0.7, restitution: 0.05 } })
 class Crate extends three.Entity {
-	static body = { shape: 'box', mass: 5, friction: 0.7, restitution: 0.05 };
-
 	constructor(at, k, yaw) {
 		super();
 		Object.assign(this, CRATE_KIND[k]);
@@ -529,7 +582,7 @@ class Crate extends three.Entity {
 		const p = this.object.position;
 		const [px, py, pz] = [p.x, p.y, p.z];
 		if (!this.remove()) return 0;
-		throwChips(px, py, pz, this.variant === 'tnt' ? 0xb03a2c : 0xa4763e, this.variant === 'tnt' ? 10 : 6);
+		chips.scatter(px, py, pz, this.tnt ? 0xb03a2c : 0xa4763e, this.tnt ? 10 : 6);
 		for (let i = 0; i < this.fruit; i++) {
 			const f = Wumpa.spawn(px + (Math.random() - 0.5) * 1.4, py + 0.4 + i * 0.5, pz + (Math.random() - 0.5) * 1.4);
 			f.free = true;
@@ -545,7 +598,7 @@ class Crate extends three.Entity {
 			for (const b of BOULDERS) {
 				const q = b.mesh.position;
 				const d = Math.hypot(q.x - px, q.z - pz);
-				if (d < 5) throwChips(q.x, q.y + b.r, q.z, 0x7d7a72, 3);
+				if (d < 5) chips.scatter(q.x, q.y + b.r, q.z, 0x7d7a72, 3);
 			}
 			// The live ones, as instances. Removal is deferred to the frame
 			// boundary, so this loop is safe even though a launch can end in a
@@ -580,21 +633,38 @@ for (const c of CRATE_PLAN) {
 const FRUIT_R = 0.62;      // the drawn fruit
 const PICKUP_R = 0.9;      // the volume that collects it — a WORLD radius, so
                            // the reach is 0.9 + the player's 0.42, as before
+//
+// A volume is a SIBLING — a body-backed node has to be a direct child of the
+// scene — so `Wumpa.follow` carries it. `bob` never touches it; follow runs
+// later in the frame and picks up wherever bob left the fruit.
+@three.entity({ collides: false, trigger: { shape: 'sphere', radius: PICKUP_R } })
 class Wumpa extends three.Entity {
-	static collides = false;
-	// A volume is a SIBLING — a body-backed node has to be a direct child of
-	// the scene — so `Wumpa.follow` carries it. The `bob` system never touches
-	// it; follow runs after and picks up wherever bob left the fruit.
-	static trigger = { shape: 'sphere', radius: PICKUP_R };
-
 	constructor(x, y, z) {
 		super();
 		this.object = new three.Mesh(BALL, mat.fruit);
 		this.object.scale.set(FRUIT_R, FRUIT_R, FRUIT_R);
 		this.object.position.set(x, y, z);
 		this.spin = hash2((x * 13) | 0, (z * 7) | 0, 5) * 6.28;
-		this.bob = hash2(x | 0, z | 0, 8) * 6.28;
-		this.free = false;
+		this.phase = hash2(x | 0, z | 0, 8) * 6.28;
+		this.free = false;      // fell out of a crate and has not landed yet
+	}
+
+	// An instance method, so it runs on every live fruit. No columns: nothing
+	// takes two dozen bobbing fruit in bulk.
+	@three.systems.frame
+	bob(dt) {
+		const p = this.object.position;
+		this.spin += dt * 3;
+		this.object.rotation.y = this.spin;
+		if (this.free) {
+			// One that fell out of a crate settles onto the ground it landed on.
+			const g = groundY(p.x, p.z) + 0.62;
+			if (p.y > g) p.y = Math.max(g, p.y - 9 * dt);
+			else this.free = false;
+		} else {
+			this.phase += dt * 2.4;
+			p.y += Math.sin(this.phase) * 0.4 * dt;
+		}
 	}
 }
 
@@ -609,9 +679,10 @@ for (let s = 12; s < PATH_LEN - 10; s += 7.5) {
 //
 // Where he is, what he is doing and what he has collected are fields; `step`,
 // `spin`, `hurt`, `collect`, `look` and `pose` are the verbs. There is one
-// `player`, and everything about him is on it.
+// `player`, and everything about him is on it — including when each verb runs,
+// written as a decorator on the method.
 //
-// `static volume` IS the kinematic capsule — moveAndSlide raises no contact, so
+// The `volume` IS the kinematic capsule — moveAndSlide raises no contact, so
 // without a body the player could not shove a crate or trip a trigger. A volume
 // is a SIBLING node, carried by `Player.follow`, and a `near` rule measures
 // against it rather than the drawn root, which sits at his feet.
@@ -624,21 +695,36 @@ const MOVE = { radius: RADIUS, height: HEIGHT, step: 0.45, slope: 52, skin: 0.02
 // The spin's broad-phase answer, kept OUTSIDE the loop that reads it.
 const hits = three.query.buffer(64);
 
+// The HELD keys, read every step. Jump and spin are presses, not holds, so they
+// are `@three.key` methods on the player instead.
 const held = k => three.input.isDown(k);
 const axis = (a, b) => ((a.some(held) ? 1 : 0) - (b.some(held) ? 1 : 0));
 const KEYS = {
 	forward: ['w', 'arrowup'], back: ['s', 'arrowdown'],
 	left: ['a', 'arrowleft'], right: ['d', 'arrowright'],
-	jump: ['space'], spin: ['j', 'k', 'shift'],
 	yawL: ['q'], yawR: ['e'], pitchU: ['r'], pitchD: ['f'],
 };
 
-class Player extends three.Entity {
-	static parent = groups.player;
-	static volume = { shape: 'capsule', radius: RADIUS, height: HEIGHT, offset: [0, HEIGHT / 2, 0] };
+@three.entity({
+	parent: groups.player,
+	volume: { shape: 'capsule', radius: RADIUS, height: HEIGHT, offset: [0, HEIGHT / 2, 0] },
 	// The drawn body is not collision geometry — the capsule above is. Without
 	// this the player's own meshes are in every sweep he makes.
-	static collides = false;
+	collides: false,
+})
+class Player extends three.Entity {
+	// The three countdowns: the spin's active window plus its 0.14s recovery in
+	// one, the grace window after leaving the ground, and the hurt window that
+	// refuses a second hit. Owned, so removing the player disposes them — a
+	// cooldown stays registered until it is.
+	@three.owned coyote = three.cooldown(0.12);
+	@three.owned spinning = three.cooldown(SPIN_TIME, { recover: 0.14 });
+	@three.owned hurting = three.cooldown(1.4);
+
+	// Presses waiting for the next fixed step. A key handler runs once per
+	// frame and the fixed loop zero to eight times, so a press is kept here
+	// until a step `take`s it rather than being seen by every step or none.
+	pending = new Set();
 
 	constructor(at) {
 		super();
@@ -669,25 +755,32 @@ class Player extends three.Entity {
 		this.heading = at.yaw; this.moving = false; this.walkT = 0; this.spinAngle = 0;
 		this.s = 0;
 
-		// The three hand-rolled countdowns this file used to carry — the spin's
-		// active window plus its 0.14s recovery in one three.cooldown, the grace
-		// window after leaving the ground, and the hurt window's own re-entry
-		// refusal. The nouns are the countdowns; the verbs below are the methods.
-		this.coyote = three.cooldown(0.12);
-		this.spinning = three.cooldown(SPIN_TIME, { recover: 0.14 });
-		this.hurting = three.cooldown(1.4);
-
-		// Edges mean something once per FRAME; the fixed loop runs zero to eight
-		// times per frame. `latch` fills this, `step` empties it.
-		this.intent = { jump: false, spin: false };
-
 		// The run, scored by the one who is running it.
 		this.fruit = 0; this.lives = 4; this.broken = 0; this.best = 0; this.done = false;
 	}
 
-	// The controller. The whole collision half is one moveAndSlide: no corridor
-	// fence, no ground snap, no per-boulder circle test, because the wall, the
-	// floor and the boulder are all triangles it sweeps against.
+	@three.key('space', 'jump')
+	jump() { this.pending.add('jump'); }
+
+	// Decorators apply bottom-up, so this lists as j, k, shift in `three.keys()`.
+	@three.key('shift', 'spin')
+	@three.key('k', 'spin')
+	@three.key('j', 'spin')
+	spinKey() { this.pending.add('spin'); }
+
+	// A waiting press, used up: true once per press.
+	take(press) { return this.pending.delete(press); }
+
+	// The controller, every fixed step. The whole collision half is one
+	// moveAndSlide: no corridor fence, no ground snap, no per-boulder circle
+	// test, because the wall, the floor and the boulder are all triangles it
+	// sweeps against.
+	//
+	// The Player class is declared before the pack, so this runs before the
+	// pack's systems and they chase where it left him. Not `first: true`: that
+	// would also put it ahead of the cooldowns' own tick, and his cooldowns
+	// would be read a step stale.
+	@three.systems.step({ when: () => !three.clock.paused })
 	step(dt) {
 		// Where the last step left him, for `pose` to blend from.
 		this.px = this.x; this.py = this.y; this.pz = this.z;
@@ -698,16 +791,14 @@ class Player extends three.Entity {
 		if (this.moving) this.heading = Math.atan2(move.x, move.z);
 
 		// --- spin --- the readiness check lives inside spin()'s start()
-		if (this.intent.spin) this.spin();
-		this.intent.spin = false;
+		if (this.take('spin')) this.spin();
 		if (this.spinning.active) this.spinAngle += dt * 34;
 		else this.spinAngle *= 0.72;
 
 		// --- vertical --- restart() every grounded frame keeps the window open
 		// the whole time he is on the ground; cancel() is the "spent it".
 		if (this.grounded) this.coyote.start({ restart: true });
-		if (this.intent.jump && this.coyote.active) { this.vy = JUMP; this.coyote.cancel(); this.grounded = false; }
-		this.intent.jump = false;
+		if (this.take('jump') && this.coyote.active) { this.vy = JUMP; this.coyote.cancel(); this.grounded = false; }
 		this.vy = Math.max(this.vy - GRAV * dt, -42);
 
 		// --- one call: the wall, the floor, the ledge and the boulder ---
@@ -757,8 +848,8 @@ class Player extends three.Entity {
 	// list of NODES, and what each one is comes from asking the classes rather
 	// than from a name. Crates in reach break; critters in reach fly.
 	spin() {
-		// start() answers false while active or still recovering, which is the
-		// readiness check step() used to make before calling this.
+		// start() answers false while active or still recovering — the
+		// readiness check, in the cooldown rather than in the caller.
 		if (!this.spinning.start()) return 0;
 		const centre = [this.x, this.y + HEIGHT / 2, this.z];
 		const n = three.query.sphere(centre, SPIN_R, hits);
@@ -792,8 +883,7 @@ class Player extends three.Entity {
 		return n;
 	}
 
-	// Taking a hit. The Cooldown ticks itself; start() answering false IS the
-	// re-entry refusal that used to be a hand-written `if (hurtT > 0) return`.
+	// Taking a hit. start() answering false IS the re-entry refusal.
 	hurt(fell) {
 		if (!this.hurting.start()) return false;
 		this.lives--;
@@ -820,6 +910,7 @@ class Player extends three.Entity {
 		}
 	}
 
+	@three.systems.frame
 	look(dt) {
 		const ptr = three.input.pointer;
 		if (ptr.down) { this.yaw -= ptr.dx * 0.24; this.pitch += ptr.dy * 0.2; }
@@ -832,8 +923,8 @@ class Player extends three.Entity {
 
 	// He is one character, so it is the SINGLE-agent verbs all the way through,
 	// including the ordinary property writes here. A column of one would be a
-	// crossing saved that was never spent. The capsule is not written here any
-	// more: `Player.follow` carries it.
+	// crossing saved that was never spent. The capsule is not written here:
+	// `Player.follow` carries it.
 	//
 	// **Drawn between the last two steps, not at the latest one.** He moves at
 	// the fixed rate and the screen does not: at 120 Hz a frame gets one step,
@@ -841,6 +932,7 @@ class Player extends three.Entity {
 	// `fixedAlpha` is how far the clock is into the next step, so the blend is
 	// one step behind and always smooth — and the camera, attached to this
 	// object, is smooth with it.
+	@three.systems.frame
 	pose(dt) {
 		const a = three.clock.fixedAlpha;
 		this.object.position.set(lerp(this.px, this.x, a), lerp(this.py, this.y, a), lerp(this.pz, this.z, a));
@@ -870,27 +962,6 @@ globalThis.__wumpa = {
 };
 
 // ---------------------------------------------------------------------------
-// Debris — a pool of chips, thrown by hand rather than given bodies.
-// ---------------------------------------------------------------------------
-const chips = [];
-for (let i = 0; i < 48; i++) {
-	const m = new three.Mesh(CHIP, mat.flat);
-	m.visible = false;
-	groups.debris.add(m);
-	chips.push({ m, life: 0, vx: 0, vy: 0, vz: 0, spin: 0 });
-}
-let chipAt = 0;
-function throwChips(x, y, z, colour, n) {
-	for (let i = 0; i < n; i++) {
-		const c = chips[chipAt = (chipAt + 1) % chips.length];
-		const a = Math.random() * 6.28, sp = 3 + Math.random() * 4;
-		c.life = 0.75; c.vx = Math.cos(a) * sp; c.vz = Math.sin(a) * sp; c.vy = 3 + Math.random() * 5;
-		c.spin = (Math.random() - 0.5) * 22;
-		c.m.position.set(x, y, z); c.m.color = colour; c.m.visible = true;
-	}
-}
-
-// ---------------------------------------------------------------------------
 // The pack.
 //
 // Each critter has to get round a boulder to reach you, which is what the nav
@@ -901,7 +972,7 @@ function throwChips(x, y, z, colour, n) {
 const PACK_N = 10;
 const CRITTER_R = 0.38, CRITTER_H = 1.15;
 const CRITTER_MOVE = { radius: CRITTER_R, height: CRITTER_H, step: 0.4, slope: 48, snap: 0.35 };
-
+const FLOW_EVERY = 0.35;  // seconds between re-aiming the pack's flow field
 
 // The pack — the one class here with COLUMNS.
 //
@@ -911,17 +982,24 @@ const CRITTER_MOVE = { radius: CRITTER_R, height: CRITTER_H, step: 0.4, slope: 4
 // That is the only reason to declare one, and the rule for deciding is simply
 // whether a bulk verb reads the field.
 //
-// So `stun`, `walk`, `homeS` and `chasing` are ordinary properties — nothing
-// takes those in bulk.
-class Critter extends three.Entity {
-	static parent = groups.pack;
-	static capacity = PACK_N;
+// So `stun`, `gait`, `homeS` and `chasing` are ordinary properties — nothing
+// takes those in bulk. `stun` and `life` stay plain numbers rather than
+// cooldowns: `stun` only counts down once a launched critter has landed, which
+// is the `walk` system's business, and ten critters would be twenty more timers
+// for the cooldown tick to walk.
+//
+// The pack's systems are its methods, in the order they run each fixed step:
+// `flow`, `sense`, `steer` and `walk` are static — once a step, for the whole
+// pack, three of them a single crossing — and `fly` is per critter, after them.
+@three.entity({
+	parent: groups.pack,
+	capacity: PACK_N,
 	// Nobody in the pack is collision geometry: you run THROUGH the critters,
 	// and the `near` rule is what happens when you do. They still collide with
 	// the ground, the crates and the boulders, which is everything that should
 	// stop them.
-	static collides = false;
-	static columns = {
+	collides: false,
+	columns: {
 		position: 3,   // the capsule CENTRE, moved in place
 		prev: 3,       // where the last fixed step left it
 		shown: 3,      // between the two, where it is drawn
@@ -931,7 +1009,17 @@ class Critter extends three.Entity {
 		arc: 3,        // the free flight of a launched one
 		cost: 1,       // ground distance to the player, written by field.sample
 		move: three.moveResult.stride,
-	};
+	},
+})
+class Critter extends three.Entity {
+	// The flow field the whole pack steers down: one solve, kept and re-aimed at
+	// the player a few times a second. It belongs to the pack, not to any one
+	// critter, so it is a static.
+	static flowField = null;
+	static flowAge = 0;
+
+	// Twenty leg pivots in one crossing — see `swingLegs`.
+	static legBatch = null;
 
 	constructor(i, s, off) {
 		super();
@@ -942,7 +1030,7 @@ class Critter extends three.Entity {
 		this.prev.set(this.position);
 
 		this.heading = at.yaw;
-		this.walk = hash2(i, 9, 5) * 6;    // the leg-swing phase
+		this.gait = hash2(i, 9, 5) * 6;    // the leg-swing phase
 		this.vy = 0;
 		this.stun = 0;
 		this.life = 0;                     // how long a launch lasts
@@ -967,22 +1055,153 @@ class Critter extends three.Entity {
 		this.legAt = i * 2;
 	}
 
-	// The flow field the whole pack steers down: one solve, kept and re-aimed at
-	// the player a few times a second. It belongs to the pack, not to any one
-	// critter, so it is a static.
-	static flow = null;
-	static flowAge = 0;
-
-	static resolve() {
+	// The kept solve, re-aimed at the player every FLOW_EVERY seconds.
+	@three.systems.step
+	static flow(dt) {
+		Critter.flowAge += dt;
+		if (Critter.flowField !== null && Critter.flowAge < FLOW_EVERY) return;
 		const next = three.nav.field([player.x, player.y + 0.2, player.z]);
 		if (next) {
-			if (Critter.flow) Critter.flow.dispose();
-			Critter.flow = next;
+			Critter.flowField?.dispose();
+			Critter.flowField = next;
 		}
 		// A null answer means the player is off the mesh — mid-jump, or on a
 		// shelf the bake found too small. Keep the last good field, so the pack
 		// waits at the bottom of a ledge instead of forgetting you exist.
 		Critter.flowAge = 0;
+	}
+
+	// How far everyone is from the player, ALONG THE GROUND — one crossing, and
+	// `field.cost` in a loop is what it replaces. A NEGATIVE cost is unreachable
+	// here where `cost()` answers Infinity, which is the one place the convenient
+	// form and the flat form disagree about a value.
+	@three.systems.step
+	static sense() {
+		for (const c of Critter) {
+			c.foot[0] = c.position[0];
+			c.foot[1] = c.position[1] - CRITTER_H / 2 + 0.2;
+			c.foot[2] = c.position[2];
+		}
+		if (Critter.flowField) {
+			Critter.flowField.sample(Critter.column('foot'), { costs: Critter.column('cost') });
+		} else {
+			Critter.column('cost').fill(-1);
+		}
+		// Out of earshot: hold station near home rather than sprinting the whole
+		// level at you, which is what makes a hollow feel populated.
+		for (const c of Critter) {
+			c.chasing = c.cost[0] >= 0 && c.cost[0] < 26 && c.stun <= 0;
+		}
+	}
+
+	// Seek, arrive and separation for the whole pack in one crossing. What comes
+	// back is a DESIRED velocity — going there is still moveAndSlide's decision.
+	@three.systems.step
+	static steer() {
+		if (Critter.flowField) {
+			three.steer(Critter.column('position'), Critter.column('velocity'), {
+				field: Critter.flowField, maxSpeed: 4.6, arrive: 1.6, separation: 1.5, separationWeight: 1.5,
+			});
+		} else {
+			Critter.column('velocity').fill(0);
+		}
+	}
+
+	// The whole pack's collision, in one call. A launched critter is given zero
+	// motion and has its position overwritten by `fly` below, so its sweep is
+	// wasted — cheaper than branching the one call that makes this fast.
+	@three.systems.step
+	static walk(dt) {
+		// The first of the systems that move the pack, so this is where a step starts.
+		Critter.column('prev').set(Critter.column('position'));
+		for (const c of Critter) {
+			if (c.launched) {
+				c.motion[0] = 0; c.motion[1] = 0; c.motion[2] = 0;
+				continue;
+			}
+			if (c.stun > 0) c.stun -= dt;
+
+			let vx = c.velocity[0], vz = c.velocity[2];
+			if (!c.chasing) {
+				const h = onPath(c.homeS + Math.sin(three.clock.time * 0.5 + c.build) * 5, c.homeOff);
+				const dx = h.x - c.position[0], dz = h.z - c.position[2], d = Math.hypot(dx, dz);
+				vx = d > 0.4 ? (dx / d) * 1.7 : 0;
+				vz = d > 0.4 ? (dz / d) * 1.7 : 0;
+			} else if (c.stun > 0) {
+				vx *= 0.2; vz *= 0.2;
+			}
+
+			c.vy = Math.max(c.vy - GRAV * dt, -40);
+			c.motion[0] = vx * dt;
+			c.motion[1] = c.vy * dt;
+			c.motion[2] = vz * dt;
+
+			c.moving = Math.hypot(vx, vz) > 0.25;
+			if (c.moving) c.heading = Math.atan2(vx, vz);
+			c.gait += dt * (c.chasing ? 15 : 9) * (c.moving ? 1 : 0);
+		}
+
+		// `Critter.handles` is both things a crowd needs in one array: the `self`
+		// column that keeps an agent from colliding with its own mesh, and the
+		// handle array the flush below writes through.
+		three.moveAndSlideAll(Critter.column('position'), Critter.column('motion'), {
+			...CRITTER_MOVE,
+			results: Critter.column('move'),
+			self: Critter.handles,
+		});
+
+		for (const c of Critter) {
+			if (c.launched) continue;
+			const grounded = (c.move[three.moveResult.flags] | 0) & three.moveResult.GROUNDED;
+			if (grounded && c.vy < 0) c.vy = 0;
+			if (c.position[1] < -6) c.remove();
+		}
+	}
+
+	// One that a spin or a TNT sent flying: a free arc, no steering, and the
+	// only thing it collides with is the ground it lands on.
+	@three.systems.step
+	fly(dt) {
+		if (!this.launched) return;
+		const p = this.position;
+		this.life -= dt;
+		this.arc[1] -= GRAV * 0.7 * dt;
+		p[0] += this.arc[0] * dt;
+		p[1] += this.arc[1] * dt;
+		p[2] += this.arc[2] * dt;
+		this.tumble += dt * 16;
+
+		const foot = p[1] - CRITTER_H / 2;
+		const ground = groundY(p[0], p[2]);
+		if (foot > ground && this.life > 0) return;
+
+		p[1] = Math.max(p[1], ground + CRITTER_H / 2);
+		this.launched = false;
+		this.vy = 0;
+		if (Math.abs(p[0]) > W / 2 - 4 || Math.abs(p[2]) > D / 2 - 4 || foot < -4) this.remove();
+	}
+
+	// Drawing them: two crossings for the whole pack, whatever its size. `lift`
+	// carries the capsule-centre-to-feet offset — those are never the same point —
+	// and `heading` here is an ordinary field, which pose reads just as happily as
+	// a column.
+	//
+	// Posed from `shown`, the blend between the last two steps, for the reason
+	// `Player.pose` gives.
+	@three.systems.frame({ after: 'Player.pose' })
+	static draw() {
+		const a = three.clock.fixedAlpha;
+		const prev = Critter.column('prev'), pos = Critter.column('position'), shown = Critter.column('shown');
+		for (let i = 0; i < shown.length; i++) shown[i] = prev[i] + (pos[i] - prev[i]) * a;
+		Critter.pose('shown', { lift: -CRITTER_H / 2, heading: 'heading' });
+		const t = Critter.transform;
+		let slot = 0;
+		for (const c of Critter) {
+			if (c.launched) t[slot * 9 + 4] = c.tumble;
+			slot++;
+		}
+		Critter.flush();
+		Critter.swingLegs();
 	}
 
 	// Twenty leg pivots in one crossing. A batch rather than a column because a
@@ -995,8 +1214,6 @@ class Critter extends three.Entity {
 	//
 	// Built on first draw, so the membership is whoever is alive then. The whole
 	// pack spawns before frame one; a critter spawned later would walk stiff.
-	static legBatch = null;
-
 	static swingLegs() {
 		if (Critter.legBatch === null) {
 			const pivots = [];
@@ -1005,7 +1222,7 @@ class Critter extends three.Entity {
 		}
 		const b = Critter.legBatch;
 		for (const c of Critter) {
-			const swing = c.launched ? 0 : (c.moving ? Math.sin(c.walk) * 0.5 : 0);
+			const swing = c.launched ? 0 : (c.moving ? Math.sin(c.gait) * 0.5 : 0);
 			b.positions[b.rotationAt(c.legAt)] = swing;
 			b.positions[b.rotationAt(c.legAt + 1)] = -swing;
 		}
@@ -1013,8 +1230,7 @@ class Critter extends three.Entity {
 	}
 
 	// Sent flying — by a spin, by a TNT, by anything with a direction and a
-	// number. The `arc` system below is what happens next, and it is the only
-	// thing that reads `life` and `launched`.
+	// number. `fly` is what happens next.
 	launch(dx, dz, power) {
 		this.arc[0] = dx * power;
 		this.arc[1] = 7.5;
@@ -1075,124 +1291,8 @@ if (bake && bake.largest < bake.walkable * 0.75) {
 Wumpa.on('enter', Player, (f, p) => { f.remove(); p.collect(); });
 
 // ---------------------------------------------------------------------------
-// The pack's systems — six named things in a declared order. Three of them are
-// one crossing apiece for the whole pack, whatever its size.
+// A critter reaching you — the other rule.
 // ---------------------------------------------------------------------------
-
-// The kept solve, re-aimed at the player a few times a second.
-const FLOW_EVERY = 0.35;  // seconds
-Critter.step('flow', (dt) => {
-	Critter.flowAge += dt;
-	if (Critter.flow === null || Critter.flowAge >= FLOW_EVERY) Critter.resolve();
-});
-
-// How far everyone is from the player, ALONG THE GROUND — one crossing, and
-// `field.cost` in a loop is what it replaces. A NEGATIVE cost is unreachable
-// here where `cost()` answers Infinity, which is the one place the convenient
-// form and the flat form disagree about a value.
-Critter.step('sense', () => {
-	for (const c of Critter) {
-		c.foot[0] = c.position[0];
-		c.foot[1] = c.position[1] - CRITTER_H / 2 + 0.2;
-		c.foot[2] = c.position[2];
-	}
-	if (Critter.flow) {
-		Critter.flow.sample(Critter.column('foot'), { costs: Critter.column('cost') });
-	} else {
-		Critter.column('cost').fill(-1);
-	}
-	// Out of earshot: hold station near home rather than sprinting the whole
-	// level at you, which is what makes a hollow feel populated.
-	for (const c of Critter) {
-		c.chasing = c.cost[0] >= 0 && c.cost[0] < 26 && c.stun <= 0;
-	}
-});
-
-// Seek, arrive and separation for the whole pack in one crossing. What comes
-// back is a DESIRED velocity — going there is still moveAndSlide's decision.
-Critter.step('steer', () => {
-	if (Critter.flow) {
-		three.steer(Critter.column('position'), Critter.column('velocity'), {
-			field: Critter.flow, maxSpeed: 4.6, arrive: 1.6, separation: 1.5, separationWeight: 1.5,
-		});
-	} else {
-		Critter.column('velocity').fill(0);
-	}
-});
-
-// The whole pack's collision, in one call. A launched critter is given zero
-// motion and has its position overwritten by `arc` below, so its sweep is
-// wasted — cheaper than branching the one call that makes this fast.
-Critter.step('walk', (dt) => {
-	// The first of the systems that move the pack, so this is where a step starts.
-	Critter.column('prev').set(Critter.column('position'));
-	for (const c of Critter) {
-		if (c.launched) {
-			c.motion[0] = 0; c.motion[1] = 0; c.motion[2] = 0;
-			continue;
-		}
-		if (c.stun > 0) c.stun -= dt;
-
-		let vx = c.velocity[0], vz = c.velocity[2];
-		if (!c.chasing) {
-			const h = onPath(c.homeS + Math.sin(three.clock.time * 0.5 + c.build) * 5, c.homeOff);
-			const dx = h.x - c.position[0], dz = h.z - c.position[2], d = Math.hypot(dx, dz);
-			vx = d > 0.4 ? (dx / d) * 1.7 : 0;
-			vz = d > 0.4 ? (dz / d) * 1.7 : 0;
-		} else if (c.stun > 0) {
-			vx *= 0.2; vz *= 0.2;
-		}
-
-		c.vy = Math.max(c.vy - GRAV * dt, -40);
-		c.motion[0] = vx * dt;
-		c.motion[1] = c.vy * dt;
-		c.motion[2] = vz * dt;
-
-		c.moving = Math.hypot(vx, vz) > 0.25;
-		if (c.moving) c.heading = Math.atan2(vx, vz);
-		c.walk += dt * (c.chasing ? 15 : 9) * (c.moving ? 1 : 0);
-	}
-
-	// `Critter.handles` is both things a crowd needs in one array: the `self`
-	// column that keeps an agent from colliding with its own mesh, and the
-	// handle array the flush below writes through.
-	three.moveAndSlideAll(Critter.column('position'), Critter.column('motion'), {
-		...CRITTER_MOVE,
-		results: Critter.column('move'),
-		self: Critter.handles,
-	});
-
-	for (const c of Critter) {
-		if (c.launched) continue;
-		const grounded = (c.move[three.moveResult.flags] | 0) & three.moveResult.GROUNDED;
-		if (grounded && c.vy < 0) c.vy = 0;
-		if (c.position[1] < -6) c.remove();
-	}
-});
-
-// The ones a spin or a TNT sent flying: a free arc, no steering, and the only
-// thing they collide with is the ground they land on.
-Critter.step('arc', (dt) => {
-	for (const c of Critter) {
-		if (!c.launched) continue;
-		c.life -= dt;
-		c.arc[1] -= GRAV * 0.7 * dt;
-		c.position[0] += c.arc[0] * dt;
-		c.position[1] += c.arc[1] * dt;
-		c.position[2] += c.arc[2] * dt;
-		c.tumble += dt * 16;
-
-		const foot = c.position[1] - CRITTER_H / 2;
-		const ground = groundY(c.position[0], c.position[2]);
-		if (foot > ground && c.life > 0) continue;
-
-		c.position[1] = Math.max(c.position[1], ground + CRITTER_H / 2);
-		c.launched = false;
-		c.vy = 0;
-		if (Math.abs(c.position[0]) > W / 2 - 4 || Math.abs(c.position[2]) > D / 2 - 4 || foot < -4) c.remove();
-	}
-});
-
 // Reaching the player costs a life — unless you are spinning, in which case the
 // critter loses.
 //
@@ -1207,28 +1307,6 @@ Critter.on('near', Player, (c, p) => {
 	if (p.spinning.active) c.launch(nx, nz, 15);
 	else { p.hurt(false); c.launch(nx, nz, 7); }
 }, { within: 0.95 });
-
-// Drawing them: two crossings for the whole pack, whatever its size. `lift`
-// carries the capsule-centre-to-feet offset — those are never the same point —
-// and `heading` here is an ordinary field, which pose reads just as happily as
-// a column.
-//
-// Posed from `shown`, the blend between the last two steps, for the reason
-// `Player.pose` gives.
-Critter.frame('draw', () => {
-	const a = three.clock.fixedAlpha;
-	const prev = Critter.column('prev'), pos = Critter.column('position'), shown = Critter.column('shown');
-	for (let i = 0; i < shown.length; i++) shown[i] = prev[i] + (pos[i] - prev[i]) * a;
-	Critter.pose('shown', { lift: -CRITTER_H / 2, heading: 'heading' });
-	const t = Critter.transform;
-	let slot = 0;
-	for (const c of Critter) {
-		if (c.launched) t[slot * 9 + 4] = c.tumble;
-		slot++;
-	}
-	Critter.flush();
-	Critter.swingLegs();
-}, { after: 'Player.pose' });
 
 // ---------------------------------------------------------------------------
 // The sky and the haze, in one post pass. p.depth is in WORLD UNITS and a pixel
@@ -1250,75 +1328,18 @@ const sky = three.setPost({
 });
 
 // ---------------------------------------------------------------------------
-// The frame, as a list of named things.
+// The camera, and the one system that belongs to no class.
 //
-// Gameplay runs in the FIXED phase, at a dt that is the same every call.
-// Drawing the consequence runs in the frame phase, which is also the only
-// place a key EDGE means anything.
-//
-// `three.systems.list()` is the running order and `three.systems.report()` says
-// what each one costs, most expensive first. The pack's six are declared beside
-// the pack; these are what is left.
+// Gameplay runs in the FIXED phase, at a dt that is the same every call, and
+// drawing the consequence in the frame phase — which is which is the decorator
+// on each method above. `three.systems.list()` is the running order and
+// `three.systems.report()` says what each one costs, most expensive first.
 // ---------------------------------------------------------------------------
 three.camera.attach(player.object, { offset: [0, 1.5, 0], distance: player.dist, lag: 0.095 });
 three.controls.enabled = false;
 three.camera.orbit(player.yaw, player.pitch, player.dist);
 
 sky.uniforms.viewFar = three.camera.far;
-
-// Declared on the class, so they report as `Player.step`, `Player.pose` and so
-// on, and `Player.dispose()` would take them with it. What each one does is a
-// method; where it runs is the option beside it.
-Player.step('step', dt => {
-	if (three.clock.paused) return;
-	player.step(dt);
-}, { first: true });
-
-Player.frame('look', dt => player.look(dt));
-
-// Edges mean something once per FRAME, and the fixed loop runs zero to eight
-// times per frame — so latch here, consume in `step`.
-Player.frame('latch', () => {
-	if (KEYS.jump.some(k => three.input.pressed(k))) player.intent.jump = true;
-	if (KEYS.spin.some(k => three.input.pressed(k))) player.intent.spin = true;
-});
-
-Player.frame('pose', dt => player.pose(dt));
-
-// No columns: nothing takes two dozen bobbing fruit in bulk. The trigger volume
-// is not written here either — `Wumpa.follow` runs later and picks up wherever
-// this left the fruit.
-Wumpa.frame('bob', dt => {
-	for (const f of Wumpa) {
-		f.spin += dt * 3;
-		f.object.rotation.y = f.spin;
-		if (f.free) {
-			// One that fell out of a crate settles onto the ground it landed on.
-			const g = groundY(f.object.position.x, f.object.position.z) + 0.62;
-			if (f.object.position.y > g) f.object.position.y = Math.max(g, f.object.position.y - 9 * dt);
-			else f.free = false;
-		} else {
-			f.bob += dt * 2.4;
-			f.object.position.y += Math.sin(f.bob) * 0.4 * dt;
-		}
-	}
-});
-
-three.systems.frame('chips', dt => {
-	for (const c of chips) {
-		if (c.life <= 0) continue;
-		c.life -= dt;
-		if (c.life <= 0) { c.m.visible = false; continue; }
-		c.vy -= 24 * dt;
-		c.m.position.set(
-			c.m.position.x + c.vx * dt,
-			c.m.position.y + c.vy * dt,
-			c.m.position.z + c.vz * dt);
-		c.m.rotation.x += c.spin * dt;
-		c.m.rotation.z += c.spin * 0.7 * dt;
-	}
-});
-
 three.systems.frame('sky', () => { sky.uniforms.viewFar = three.camera.far; });
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1360,7 @@ three.debug.write({
 	crates: Crate.count,
 	wumpa: Wumpa.count,
 	critters: Critter.count,
+	keys: three.keys(),       // the presses bound with @three.key, and what each does
 	nav: bake && {
 		cell: bake.cell, voxels: bake.voxels, walkable: bake.walkable,
 		components: bake.components, largest: bake.largest, bakeMs: +bake.bakeMs.toFixed(1),
