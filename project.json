@@ -13,6 +13,7 @@
 	"targets": {
 		"three": {
 			"type": "executable",
+			"opt": "O1",
 			"sources": ["src/**"]
 		}
 	},
