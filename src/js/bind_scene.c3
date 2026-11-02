@@ -152,7 +152,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_nav_verbs(js_host)!!;
 
 	// Buffers, kernels and dispatches (js/bind_compute.c3)
-	self.bind_compute_verbs(host);
+	self.bind_compute_verbs(js_host)!!;
 
 	// The frame
 	self.bind(host, "stats", &js_stats, 1);
