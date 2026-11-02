@@ -308,7 +308,7 @@ fn void? js_compute_write_buffer(JsRuntime* self, StorageRef ref, char[] data, d
 	long at = (long)at_number;
 	if (at < 0 || data.len == 0)
 	{
-		return self.js.fail("three.compute.write(handle, data, byteOffset, byteCount) was given a negative or empty view")~;
+		return self.js.fail("three.compute.write(handle, data, byteOffset) was given a negative offset or empty data")~;
 	}
 
 	Compute* compute = &self.renderer.compute;
