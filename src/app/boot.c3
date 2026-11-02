@@ -35,7 +35,6 @@ import c3w;
 import vk;
 import image;
 import mcp;
-import qjs;
 
 const String VERSION = "0.1.0";
 
@@ -773,9 +772,7 @@ fn void wake_window(void* ctx)
  script has to work in both, and a verb that threw under `--frames` would make a
  game unrunnable in the mode that checks it.
 *>
-fn void js_quit(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out)
+fn void js_quit(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
 	self.quit_wanted = true;
-	*out = qjs::undefined_value();
 }

@@ -322,10 +322,10 @@ fn void a_handle_into_a_removed_object_throws() @test
 			const scene = new three.Scene();
 			const g = new three.Group();
 			scene.add(g);
-			const stolen = { i: g._i, gen: g._g };
+			const stolen = g._h;
 			scene.remove(g);
 			try {
-				__three.setVisible(stolen.i, stolen.gen, false);
+				stolen.setVisible(false);
 				return "no throw";
 			} catch (e) {
 				return e.message;
@@ -349,7 +349,7 @@ fn void a_handle_into_a_removed_object_throws() @test
  screen possible at all.
 
  Proved by injection: have `js_scene_create` empty the active scene before
- claiming, or have `arg_handle` search only `pass.scene`, and `stillTakesAdd`
+ claiming, or have `JsRuntime.find_node` search only `pass.scene`, and `stillTakesAdd`
  comes back false with the stale-handle sentence in `said`.
 *>
 fn void two_scenes_are_independent() @test
@@ -442,7 +442,7 @@ fn void invalid_shadow_budget_writes_change_nothing() @test
  reached for the rendered scene instead of the one the handle came from would
  move the wrong object, silently, with every number still looking right. What
  stops it is that node generations come from one process-wide counter, so a
- handle matches in at most one scene and `arg_handle` can say which.
+ handle matches in at most one scene and `JsRuntime.find_node` can say which.
 
  Proved by injection: give `create_slot` back its per-slot generation and both
  objects come back at x = 5, because the second scene's node 1 answers to the
@@ -470,8 +470,8 @@ fn void a_handle_from_an_inactive_scene_reaches_its_own_scene() @test
 			return {
 				moved: a.getWorldPosition().x,
 				untouched: b.getWorldPosition().x,
-				handlesClash: a._i === b._i,
-				generationsDiffer: a._g !== b._g,
+				handlesClash: a._h.index === b._h.index,
+				generationsDiffer: a._h.generation !== b._h.generation,
 			};
 		`);
 		defer result.free();
@@ -667,10 +667,10 @@ fn void reparenting_keeps_the_same_node() @test
 			const child = new three.Group();
 			scene.add(a, b);
 			a.add(child);
-			const was = [child._i, child._g];
+			const was = [child._h, child._h.index, child._h.generation];
 			b.add(child);
 			return {
-				same: child._i === was[0] && child._g === was[1],
+				same: child._h === was[0] && child._h.index === was[1] && child._h.generation === was[2],
 				parent: b.children.indexOf(child) === 0,
 				gone: a.children.length === 0,
 			};
@@ -4497,7 +4497,7 @@ fn void a_kits_node_names_are_listed_and_a_typo_is_refused() @test
  filled it would pass whether or not the check survived.
 
  Both walks are warmed, because they are two entries, and the message has to be
- the one `arg_asset` writes rather than a second sentence living beside it.
+ the one `AssetId.from_js` writes rather than a second sentence living beside it.
 *>
 fn void a_cached_kit_still_refuses_a_handle_from_before_an_unload() @test
 {

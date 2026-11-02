@@ -195,7 +195,7 @@ struct MeshPass
 	 Three.js's meaning and is why `SceneStats.scenes` and `note_scene_created`
 	 exist: the cost of the ones nobody is looking at has to be visible.
 
-	 Pointers, and each scene is its own allocation, because `arg_handle` hands a
+	 Pointers, and each scene is its own allocation, because `NodeRef.from_js` hands a
 	 `Scene*` to every verb that names a node and a `List` that reallocated on its
 	 next push would leave those pointing into freed memory.
 	*>

@@ -60,10 +60,12 @@ export class Scene extends Object3D {
 		// What Object3D.add checks for — see the note there.
 		this._isScene = true;
 		const claimed = adopt !== undefined && adopt !== null && adopt[0] === ADOPT;
-		const [sid, i, g] = claimed ? adopt[1] : H.sceneCreate();
+		// `{ id, root }`: the host's scene id, and its root node's handle — which
+		// is this Scene's `_h`, so adding to a Scene is adding under its root.
+		const { id: sid, root } = claimed ? adopt[1] : H.sceneCreate();
 		this._sid = sid;
-		this._i = i;
-		this._g = g;
+		this._h = root;
+		root.owner = this;
 		this._name = 'Scene';
 		// The sky, cached on this side — `_writeSky` has why the host is written
 		// all five fields at once and why this is where the Texture objects live.
@@ -261,7 +263,7 @@ export class Scene extends Object3D {
 	// clamps anyway.
 	get backgroundIntensity() {
 		this._check();
-		return H.skyGet(this._sid)[2];
+		return H.skyGet(this._sid).backgroundIntensity;
 	}
 
 	set backgroundIntensity(v) {
@@ -272,7 +274,7 @@ export class Scene extends Object3D {
 
 	get environmentIntensity() {
 		this._check();
-		return H.skyGet(this._sid)[3];
+		return H.skyGet(this._sid).environmentIntensity;
 	}
 
 	set environmentIntensity(v) {
@@ -290,7 +292,7 @@ export class Scene extends Object3D {
 	// where a level wants it is the request both names exist to serve.
 	get environmentRotation() {
 		this._check();
-		return H.skyGet(this._sid)[4];
+		return H.skyGet(this._sid).rotation;
 	}
 
 	set environmentRotation(v) {
@@ -314,9 +316,9 @@ export class Scene extends Object3D {
 			this._sid,
 			this._background ? this._background._index() : -1,
 			this._environment ? this._environment._index() : -1,
-			this._backgroundIntensity ?? held[2],
-			this._environmentIntensity ?? held[3],
-			this._rotation ?? held[4],
+			this._backgroundIntensity ?? held.backgroundIntensity,
+			this._environmentIntensity ?? held.environmentIntensity,
+			this._rotation ?? held.rotation,
 		);
 	}
 
@@ -561,29 +563,21 @@ export class Scene extends Object3D {
 		return this._intersection(H.pick(+x, +y));
 	}
 
-	// A host hit becomes the object the script is holding. The search is a
-	// walk rather than a lookup table because a table would have to be kept
-	// in step with every add, remove and re-parent, and a picked hit is one
-	// per user gesture — the walk is not the expensive part of a raycast.
+	// A host hit becomes the object the script is holding: the node's handle
+	// carries it as `owner`.
 	//
 	// `object` is null only for a node this scene did not build: `three
 	// <file.glb>` opens one from the command line, and `name` is what
 	// identifies it then.
 	_intersection(raw) {
 		if (raw === null) return null;
-		// `object` is a LAZY getter — see lazyObject. It used to walk the whole
-		// scene here, which made a pick 79 us in a 500-node scene against 0.5 us
-		// for the raycast itself: a hundred agents casting one ground ray apiece
-		// was eight milliseconds of finding JavaScript objects nobody looked at.
-		// That is `plan.md` §17's entry arriving one layer above where it was
-		// fixed.
-		const hit = {
+		return {
 			name: raw.name,
 			distance: raw.distance,
 			point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
 			normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+			object: raw.node?.owner ?? null,
 		};
-		return lazyObject(hit, 'object', Int32Array.from(raw.node), 0);
 	}
 }
 
@@ -596,8 +590,7 @@ export class Scene extends Object3D {
 function forgetScene(scene) {
 	scenesById.delete(scene._sid);
 	scene.children.length = 0;
-	scene._i = -1;
-	scene._g = -1;
+	scene._h = null;
 	if (liveScene === scene) liveScene = null;
 }
 
@@ -626,7 +619,7 @@ export function sceneForId(id) {
 	const held = scenesById.get(sid);
 	if (held !== undefined) return held;
 
-	const found = H.sceneIds().find(([each]) => each === sid);
+	const found = H.sceneIds().find((each) => each.id === sid);
 	if (found === undefined) {
 		throw new Error(`there is no scene ${sid} — three.scenes lists the ones there are`);
 	}
@@ -645,7 +638,7 @@ export function sceneForId(id) {
 // without it.
 export function sceneOverview() {
 	const active = H.sceneActive();
-	return H.sceneIds().map(([id]) => ({
+	return H.sceneIds().map(({ id }) => ({
 		id,
 		active: id === active,
 		held: scenesById.has(id),
@@ -686,96 +679,18 @@ export function disposeInactiveScenes() {
 // The handle a host verb wants, having checked the object is one this scene
 // can still reach. A body needs a world position, so an object that has not
 // been added has nowhere to put one.
+//
+// The answer is the object's Node handle; a verb that fills a typed array with
+// ints reads `index` and `generation` off it.
 export function liveObject(object, where) {
-	if (object === null || object === undefined || typeof object._i !== 'number') {
+	if (!(object instanceof Object3D)) {
 		throw new TypeError(`${where}(object) wants a scene object`);
 	}
-	if (object._i < 0) {
+	if (object._h === null) {
 		throw new Error(
 			`${where}: add the object to the scene first — a body is placed at a world position, `
 			+ 'and an object that is not in the scene does not have one yet'
 		);
 	}
-	return [object._i, object._g];
-}
-
-// A node handle, resolved on FIRST ACCESS rather than eagerly.
-//
-// Turning a handle back into the Object3D a script built means walking the
-// scene — there is no lookup table, because one would have to be kept in step
-// with every add, remove and re-parent. Measured: `scene.traverse` over a
-// 501-node scene is **79 us** in QuickJS, against 0.5 us for the host raycast
-// underneath it. So the walk is not a detail of the answer, it IS the answer's
-// cost, and it is paid for a property most callers never read: a character
-// reads `grounded` sixty times a second and looks at what it hit almost never.
-//
-// The result reads exactly as it did — `hit.object` is still a property — and
-// a caller that does read it pays what it always cost. What changes is that a
-// caller that does not pays nothing.
-export function lazyObject(target, key, pairs, at) {
-	let resolved;
-	let done = false;
-	Object.defineProperty(target, key, {
-		enumerable: true,
-		get() {
-			if (!done) { resolved = objectsForHandles(pairs, pairs.length / 2)[at]; done = true; }
-			return resolved;
-		},
-	});
-	return target;
-}
-
-// Many handles at once, resolved in ONE walk of the scene.
-//
-// `objectForHandle` below traverses the whole tree per handle, which is the
-// right trade for a pick (one handle, and no table to keep in step). A bulk
-// query answers with hundreds, and hundreds of walks over a five-hundred-node
-// scene is the cost the query was built to remove, arriving one layer up.
-//
-// The key packs the pair into one number: both halves are below 2^31 and the
-// product is under 2^53, so it is exact.
-//
-// `pairs` is an Int32Array of [index, generation, ...] as the host wrote it.
-// Handles the walk cannot place come back as null — a node the host knows and
-// this scene never built an object for, which is every node of a scene opened
-// from the command line.
-export function objectsForHandles(pairs, count) {
-	if (count <= 0) return [];
-	if (liveScene === null || !liveScene.isActive) return new Array(count).fill(null);
-
-	const wanted = new Map();
-	for (let i = 0; i < count; i++) {
-		// A negative index is the host's spelling of "nothing here" — a move
-		// that hit no wall, a sweep that touched nothing. Skipped rather than
-		// looked for, and if they are ALL absent the walk is skipped entirely:
-		// a traverse of a five-hundred-node scene to find nothing is the
-		// commonest single call this makes, once per character per frame.
-		if (pairs[i * 2] < 0) continue;
-		wanted.set(pairs[i * 2] * 4294967296 + pairs[i * 2 + 1], i);
-	}
-
-	const found = new Array(count).fill(null);
-	if (wanted.size === 0) return found;
-
-	let left = wanted.size;
-	liveScene.traverse(o => {
-		if (left === 0) return;
-		const at = wanted.get(o._i * 4294967296 + o._g);
-		if (at === undefined) return;
-		found[at] = o;
-		left--;
-	});
-	return found;
-}
-
-// A [x, y, z] handle from the host, back to the object a script is holding.
-// The same walk `_intersection` does and for the same reason: a lookup table
-// would have to be kept in step with every add, remove and re-parent.
-export function objectForHandle(handle) {
-	if (!handle) return null;
-	if (liveScene === null || !liveScene.isActive) return null;
-	const [i, g] = handle;
-	let found = null;
-	liveScene.traverse(o => { if (found === null && o._i === i && o._g === g) found = o; });
-	return found;
+	return object._h;
 }

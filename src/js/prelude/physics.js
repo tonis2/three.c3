@@ -25,8 +25,7 @@ const H = globalThis.__three;
 
 // The object's Node handle, after `liveObject`'s checks and its sentences.
 function liveHandle(object, where) {
-	liveObject(object, where);
-	return object._h;
+	return liveObject(object, where);
 }
 
 // The four shorthand words, as the limit lists they stand for. Every one of
