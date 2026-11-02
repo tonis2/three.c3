@@ -8,10 +8,9 @@
 //
 // ## Controls
 //
-//   click        pop the lit cube            drag    look
-//   space        play / play again           p       pause
-//   m            back to the menu            wheel   zoom
-//
+// Click the lit cube; drag to look, wheel to zoom. The keys are the
+// `@three.key` methods on `Game` below, and the menu's help line is made from
+// them, so they are written down once.
 
 const { Panel, Stack, Row, Column, Label, Button, Select, TextField, Tree, Rect } = three.ui;
 
@@ -59,94 +58,8 @@ for (let i = 0; i < 9; i++) {
 three.camera.lookAt(0, 0.6, 0);
 three.camera.orbit(35, 30, 12);
 
-// ---------------------------------------------------------------------------
-// The game
-// ---------------------------------------------------------------------------
-
-const G = {
-	mode: 'menu',
-	level: 0,
-	name: three.persist.name ?? 'you',
-	score: 0,
-	streak: 0,
-	best: 0,
-	lit: -1,
-	litUntil: 0,
-	nextAt: 0,
-	endsAt: 0,
-	pausedAt: 0,
-};
-
 // Survives `three.reload()`, so editing this file keeps the scoreboard.
 three.persist.board = three.persist.board ?? [];
-
-function level() { return LEVELS[G.level]; }
-
-function light(index) {
-	if (G.lit >= 0) {
-		cubes[G.lit].color = [0.30, 0.33, 0.42];
-		cubes[G.lit].position.y = 0.7;
-	}
-	G.lit = index;
-	if (index >= 0) {
-		cubes[index].color = GOLD;
-		cubes[index].position.y = 1.1;
-		G.litUntil = three.clock.time + level().life;
-	}
-}
-
-function start() {
-	G.score = 0;
-	G.streak = 0;
-	G.endsAt = three.clock.time + ROUND;
-	G.nextAt = three.clock.time + 0.4;
-	light(-1);
-	show('playing');
-}
-
-function finish() {
-	light(-1);
-	G.best = Math.max(G.best, G.score);
-	three.persist.name = G.name;
-	three.persist.board = [...three.persist.board, { name: G.name, score: G.score, level: level().name }]
-		.sort((a, b) => b.score - a.score)
-		.slice(0, 8);
-	show('over');
-}
-
-three.onClick((hit) => {
-	if (G.mode !== 'playing') return;
-	const index = hit && hit.name.startsWith('cube_') ? +hit.name.slice(5) : -1;
-	if (index < 0 || index !== G.lit) {
-		G.streak = 0;
-		hud.streak = 0;
-		return;
-	}
-	G.streak += 1;
-	G.score += 10 + Math.min(G.streak - 1, 9) * 5;
-	hud.score = G.score;
-	hud.streak = G.streak;
-	light(-1);
-	G.nextAt = three.clock.time + level().gap;
-});
-
-three.systems.frame('pop', () => {
-	if (G.mode !== 'playing') return;
-	const now = three.clock.time;
-
-	// The HUD is a field assignment. It re-renders, the re-render is compared
-	// against the last one, and one label crosses.
-	hud.left = Math.max(G.endsAt - now, 0);
-
-	if (now >= G.endsAt) { finish(); return; }
-	if (G.lit >= 0 && now >= G.litUntil) {
-		G.streak = 0;
-		hud.streak = 0;
-		light(-1);
-		G.nextAt = now + level().gap;
-	}
-	if (G.lit < 0 && now >= G.nextAt) light(Math.floor(Math.random() * cubes.length));
-});
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -170,36 +83,34 @@ class Stat extends three.Widget {
 	}
 }
 
+// The menu shows the game's own level and name rather than a copy of them:
+// a handler firing marks the widget for a re-render, so writing `game.level`
+// from the Select is all it takes for the menu to show it.
 class Menu extends three.Widget {
-	constructor() {
-		super();
-		this.level = G.level;
-		this.name = G.name;
-	}
-
 	render() {
+		const help = Object.entries(three.keys()).map(([key, what]) => `${key} ${what}`).join(' · ');
 		return new Stack({},
 			new Rect({ color: SCRIM, solid: true }),
 			new Panel({ at: 'center', width: 340, gap: 12 },
 				new Label('Pop', { size: 36 }),
 				new Label('Click the lit cube before it goes out.', { color: DIM, size: 13 }),
-				new Select(LEVELS.map(l => l.name), this.level, i => { this.level = i; G.level = i; }),
-				new TextField({ key: 'name', text: this.name, placeholder: 'your name', onChange: t => { this.name = t; G.name = t; } }),
-				new Button('Play', () => start()),
-				new Label('space to start · p to pause · m for this menu', { color: DIM, size: 12 }),
+				new Select(LEVELS.map(l => l.name), game.level, i => { game.level = i; }),
+				new TextField({ key: 'name', text: game.name, placeholder: 'your name', onChange: t => { game.name = t; } }),
+				new Button('Play', () => game.start()),
+				new Label(help, { color: DIM, size: 12 }),
 			),
 		);
 	}
 }
 
+// The scoreboard IS the score: the game adds to `hud.score` and nothing else
+// holds a copy, so there is nothing to keep in step. A field assignment
+// re-renders it, and assigning the number it already holds does not.
 class Hud extends three.Widget {
-	constructor() {
-		super();
-		this.score = 0;
-		this.streak = 0;
-		this.left = ROUND;
-		this.best = new Stat('best', 0);
-	}
+	score = 0;
+	streak = 0;
+	left = ROUND;
+	best = new Stat('best', 0);
 
 	render() {
 		return new Stack({},
@@ -225,8 +136,8 @@ class Pause extends three.Widget {
 			new Rect({ color: SCRIM, solid: true }),
 			new Panel({ at: 'center', width: 240 },
 				new Label('Paused', { size: 26 }),
-				new Button('Resume', () => show('playing')),
-				new Button('Give up', () => finish()),
+				new Button('Resume', () => game.show('playing')),
+				new Button('Give up', () => game.finish()),
 			),
 		);
 	}
@@ -241,14 +152,14 @@ class Over extends three.Widget {
 			new Rect({ color: SCRIM, solid: true }),
 			new Panel({ at: 'center', width: 340, gap: 10 },
 				new Label('Time', { size: 32 }),
-				new Label(`${G.name} scored ${G.score} on ${level().name}`, { color: DIM, size: 13 }),
+				new Label(`${game.name} scored ${hud.score} on ${game.difficulty.name}`, { color: DIM, size: 13 }),
 				board.length > 0 && new Tree(
 					board.map(row => ({ label: row.name, trailing: `${row.score}` })),
 					board.length,
 				),
 				new Row({ gap: 8 },
-					new Button('Again', () => start()),
-					new Button('Menu', () => show('menu')),
+					new Button('Again', () => game.start()),
+					new Button('Menu', () => game.show('menu')),
 				),
 			),
 		);
@@ -258,36 +169,120 @@ class Over extends three.Widget {
 const hud = new Hud();
 const screens = { menu: new Menu(), pause: new Pause(), over: new Over() };
 
-// Which widgets are on screen for each mode. Mounting is idempotent and
-// unmounting keeps the instance, so a screen carries its own state across a
-// visit — the name box remembers what was typed into it.
-function show(mode) {
-	G.mode = mode;
-	const wanted = {
+// ---------------------------------------------------------------------------
+// The game
+// ---------------------------------------------------------------------------
+
+class Game {
+	mode = 'menu';
+	level = 0;
+	name = three.persist.name ?? 'you';
+	lit = -1;          // the cube that is lit, or -1
+	litUntil = 0;      // clock times: the timers stop with the clock on pause
+	nextAt = 0;
+	endsAt = 0;
+
+	// Which widgets are on screen for each mode. Mounting is idempotent and
+	// unmounting keeps the instance, so a screen carries its own state across a
+	// visit — the name box remembers what was typed into it.
+	modes = {
 		menu: [screens.menu],
 		playing: [hud],
 		paused: [hud, screens.pause],
 		over: [hud, screens.over],
-	}[mode];
+	};
 
-	for (const widget of three.Widget.all()) {
-		if (!wanted.includes(widget)) widget.unmount();
+	constructor() {
+		three.onClick(hit => this.click(hit));
 	}
-	for (const widget of wanted) widget.mount();
 
-	if (mode === 'playing') {
-		hud.score = G.score;
-		hud.streak = G.streak;
-		hud.best.value = Math.max(G.best, G.score);
+	get difficulty() { return LEVELS[this.level]; }
+
+	show(mode) {
+		this.mode = mode;
+		const wanted = this.modes[mode];
+		for (const widget of three.Widget.all()) {
+			if (!wanted.includes(widget)) widget.unmount();
+		}
+		for (const widget of wanted) widget.mount();
+		three.clock.timeScale = mode === 'paused' ? 0 : 1;
 	}
-	three.clock.timeScale = mode === 'paused' ? 0 : 1;
+
+	light(index) {
+		if (this.lit >= 0) {
+			cubes[this.lit].color = [0.30, 0.33, 0.42];
+			cubes[this.lit].position.y = 0.7;
+		}
+		this.lit = index;
+		if (index >= 0) {
+			cubes[index].color = GOLD;
+			cubes[index].position.y = 1.1;
+			this.litUntil = three.clock.time + this.difficulty.life;
+		}
+	}
+
+	// The lit cube goes dark, and the next one lights after the level's gap.
+	darken() {
+		this.light(-1);
+		this.nextAt = three.clock.time + this.difficulty.gap;
+	}
+
+	start() {
+		hud.score = 0;
+		hud.streak = 0;
+		this.endsAt = three.clock.time + ROUND;
+		this.nextAt = three.clock.time + 0.4;
+		this.light(-1);
+		this.show('playing');
+	}
+
+	finish() {
+		this.light(-1);
+		hud.best.value = Math.max(hud.best.value, hud.score);
+		three.persist.name = this.name;
+		three.persist.board = [...three.persist.board, { name: this.name, score: hud.score, level: this.difficulty.name }]
+			.sort((a, b) => b.score - a.score)
+			.slice(0, 8);
+		this.show('over');
+	}
+
+	click(hit) {
+		if (this.mode !== 'playing') return;
+		const index = hit && hit.name.startsWith('cube_') ? +hit.name.slice(5) : -1;
+		if (index < 0 || index !== this.lit) {
+			hud.streak = 0;
+			return;
+		}
+		hud.streak += 1;
+		hud.score += 10 + Math.min(hud.streak - 1, 9) * 5;
+		this.darken();
+	}
+
+	@three.systems.frame({ when: () => game.mode === 'playing' })
+	tick() {
+		const now = three.clock.time;
+		hud.left = Math.max(this.endsAt - now, 0);
+
+		if (now >= this.endsAt) { this.finish(); return; }
+		if (this.lit >= 0 && now >= this.litUntil) {
+			hud.streak = 0;
+			this.darken();
+		}
+		if (this.lit < 0 && now >= this.nextAt) this.light(Math.floor(Math.random() * cubes.length));
+	}
+
+	@three.key('space', 'to start')
+	play() { if (this.mode === 'menu' || this.mode === 'over') this.start(); }
+
+	@three.key('p', 'to pause')
+	pause() {
+		if (this.mode === 'playing') this.show('paused');
+		else if (this.mode === 'paused') this.show('playing');
+	}
+
+	@three.key('m', 'for this menu')
+	menu() { if (this.mode !== 'menu') { this.light(-1); this.show('menu'); } }
 }
 
-three.onKeyDown('space', () => { if (G.mode === 'menu' || G.mode === 'over') start(); });
-three.onKeyDown('p', () => {
-	if (G.mode === 'playing') show('paused');
-	else if (G.mode === 'paused') show('playing');
-});
-three.onKeyDown('m', () => { if (G.mode !== 'menu') { light(-1); show('menu'); } });
-
-show('menu');
+const game = new Game();
+game.show('menu');

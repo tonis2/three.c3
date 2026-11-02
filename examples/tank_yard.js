@@ -370,16 +370,86 @@ const markFloats = new Float32Array(markBytes);
 const markWords = new Uint32Array(markBytes);
 const markPush = new Uint8Array(markBytes);
 
-// Scars waiting for the next frame: one { x, z, size, seed } per explosion.
-// The 'ground' system marks as many as fit and leaves the rest here.
-const scars = [];
+// The yard's memory: the scars waiting to be burnt in, and the system that
+// burns them and the tanks' tracks into the mask.
+class Ground {
+	// Scars waiting for the next frame: one { x, z, size, seed } per explosion.
+	// `remember` marks as many as fit and leaves the rest here.
+	static scars = [];
 
-// The seed is worked out from where the scar is, not drawn from `three.seed`'s
-// stream. Drawing from the stream would change every random number after it,
-// so the match would no longer play out the way it did before the ground
-// remembered anything.
-function scar(x, z, size) {
-	scars.push({ x, z, size, seed: Math.abs(x * 12.9898 + z * 78.233) % 6.2832 });
+	// The seed is worked out from where the scar is, not drawn from
+	// `three.seed`'s stream. Drawing from the stream would change every random
+	// number after it, so the match would no longer play out the way it did
+	// before the ground remembered anything.
+	static scar(x, z, size) {
+		Ground.scars.push({ x, z, size, seed: Math.abs(x * 12.9898 + z * 78.233) % 6.2832 });
+	}
+
+	// The yard is swept: the ground goes back to how `splatTex` paints it, and
+	// any scars from the last frame of the old round go with the old round.
+	static reset() {
+		Ground.scars.length = 0;
+		sweep.dispatch({ ground: groundMask, pristine: splatTex }, { threads: [GROUND / 4, GROUND / 4] });
+	}
+
+	// Every tank that moved or turned since it was last marked presses its
+	// tracks into the mask, and every explosion since the last frame leaves a
+	// scar. All of it goes in one dispatch, of one slice of threads per mark. A
+	// tank's slice is 72x72, so four tanks and a shell hit is about 26,000
+	// threads, and no frame goes past seven slices of that size.
+	//
+	// This runs once a frame, not once a step. A tank covers less than a fifth
+	// of a unit in a frame, and the footprint it marks is 1.6 long, so the
+	// tracks still come out unbroken.
+	//
+	// A dispatch only records work. `submitAsync` sends it and does not wait.
+	// The frame drawn next is queued behind it, so that frame already sees the
+	// new marks, and the CPU never stops for the GPU.
+	@three.systems.frame
+	static remember() {
+		const scars = Ground.scars;
+		let count = 0, scorched = 0, widest = 0;
+		const add = (x, z, a, b, reach) => {
+			markFloats.set([x, z, a, b], count * 4);
+			widest = Math.max(widest, reachOf(reach));
+			count++;
+		};
+
+		// A scar wider than a tank's tracks gets a frame to itself. Every slice
+		// is as wide as the widest mark, so a wreck sharing a frame with four
+		// tanks would make all five slices its size. The tanks skip that one
+		// frame, and their next mark still overlaps their last.
+		const small = (scar) => reachOf(scar.size) <= reachOf(TREAD_REACH);
+		if (scars.length > 0 && !small(scars[0])) {
+			const s = scars.shift();
+			scorched = 1;
+			add(s.x, s.z, s.size, s.seed, s.size);
+		} else {
+			for (const t of Tank) {
+				if (count === MARKS) break;
+				const p = t.object.position;
+				const last = t.printed;
+				if (last && last[0] === p.x && last[1] === p.z && last[2] === t.dir) continue;
+				t.printed = [p.x, p.z, t.dir];
+				add(p.x, p.z, DIRS[t.dir][0], DIRS[t.dir][1], TREAD_REACH);
+			}
+			while (count < MARKS && scars.length > 0 && small(scars[0])) {
+				const s = scars.shift();
+				scorched |= 1 << count;
+				add(s.x, s.z, s.size, s.seed, s.size);
+			}
+		}
+
+		if (count > 0) {
+			markWords[MARKS * 4] = count;
+			markWords[MARKS * 4 + 1] = scorched;
+			// One slice per mark, each as wide as the widest mark's square: 2r + 1
+			// texels, plus one in case the kernel's float rounding makes r one bigger.
+			const groups = Math.ceil((2 * widest + 2) / 8);
+			mark.dispatch({ ground: groundMask }, { workgroups: [groups, groups, count], push: markPush });
+		}
+		three.compute.submitAsync();
+	}
 }
 
 // The eagle's plate: a pale star on dark metal.
@@ -524,9 +594,9 @@ scene.add(ground);
 // dynamic bodies there are, and they should fly dead straight.
 three.physics.gravity = [0, 0, 0];
 
-// Every tank's nodes hang off this one Group, which is what `static parent`
-// below points at. A Group draws nothing and costs no draw call; what it buys
-// is that the tanks are one thing the scene graph can see.
+// Every tank's nodes hang off this one Group, which is what the `parent` on
+// Tank below points at. A Group draws nothing and costs no draw call; what it
+// buys is that the tanks are one thing the scene graph can see.
 const tanks = new three.Group();
 scene.add(tanks);
 
@@ -548,7 +618,8 @@ const FOES_AT_ONCE = 3, FOES_PER_ROUND = 12, FOE_EVERY = 3.2;
 // a box's local +Z is its front.
 const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 const HEADING = DIRS.map(([dx, dz]) => Math.atan2(dx, dz));
-const KEY_FOR_DIR = ['up', 'right', 'down', 'left'];
+// The keys that drive the player, by direction: an arrow, and WASD beside it.
+const DRIVE_KEYS = [['up', 'w'], ['right', 'd'], ['down', 's'], ['left', 'a']];
 
 function part(size, at, tint) {
 	const m = new three.Mesh(UNIT, tankMat);
@@ -567,14 +638,22 @@ function towards(from, to) {
 // ---------------------------------------------------------------------------
 // The entities
 //
-// Five classes, and the statics on each one are the whole declaration — there
-// is no registration call anywhere below.
+// Six classes, and the `@three.entity` on each one is the whole declaration —
+// there is no registration call anywhere below. The decorator registers the
+// class as it is defined, so the systems written on it as methods run from the
+// first tick, whether or not one has been spawned yet.
+//
+// A system is a method marked `@three.systems.step` (the fixed clock, where the
+// rules of the game go) or `.frame` (once per drawn frame): a static one runs
+// once a tick, an instance one on every live entity. They run in the order the
+// file declares them, and `three.systems.report()` names each one —
+// `Tank.hunt`, `Blast.burn` — which is what makes a slow frame attributable.
 // ---------------------------------------------------------------------------
 
 // Steel: it stops everything and it never changes. It is its own class rather
 // than a flag on Brick so that the rule about it can be one line.
+@three.entity({ body: { shape: 'box', mass: 0 } })
 class Steel extends three.Entity {
-	static body = { shape: 'box', mass: 0 };
 
 	constructor(col, row) {
 		super();
@@ -587,8 +666,8 @@ class Steel extends three.Entity {
 }
 
 // Brick: three hits, and each one is a material swap down the same stack.
+@three.entity({ body: { shape: 'box', mass: 0 } })
 class Brick extends three.Entity {
-	static body = { shape: 'box', mass: 0 };
 
 	constructor(col, row) {
 		super();
@@ -613,8 +692,8 @@ class Brick extends three.Entity {
 }
 
 // The eagle. One of these exists at a time and losing it ends the round.
+@three.entity({ body: { shape: 'box', mass: 0 } })
 class Eagle extends three.Entity {
-	static body = { shape: 'box', mass: 0 };
 
 	constructor(col, row) {
 		super();
@@ -625,12 +704,20 @@ class Eagle extends three.Entity {
 	}
 }
 
-// A tank. The drawn body is a Group of five tinted boxes; the thing bullets
-// actually hit is the invisible kinematic box `static volume` declares beside
-// it, carried every frame by the `Tank.follow` system the class installs.
+// A tank. The drawn body is a Group of five tinted boxes, hung off `tanks`; the
+// thing bullets actually hit is the invisible kinematic box `volume` declares
+// beside it, carried every frame by the `Tank.follow` system the class installs.
+@three.entity({
+	parent: tanks,
+	volume: { shape: 'box', size: [1.5, 1.0, 1.5], offset: [0, 0.5, 0] },
+})
 class Tank extends three.Entity {
-	static parent = tanks;
-	static volume = { shape: 'box', size: [1.5, 1.0, 1.5], offset: [0, 0.5, 0] };
+	// The gun's cooldown is ticked by a system until it is disposed, so it goes
+	// with the tank: `@three.owned` disposes it when the tank is shot, and when
+	// `Tank.clear()` sweeps the yard for a new round.
+	@three.owned gun = null;
+	// Where `Ground.remember` last pressed this tank's tracks.
+	printed = null;
 
 	constructor(col, row, foe) {
 		super();
@@ -695,23 +782,99 @@ class Tank extends three.Entity {
 	die() {
 		const p = this.object.position;
 		Blast.spawn([p.x, 0.7, p.z], 2.2, 0.75, this.foe ? [1.0, 0.72, 0.34] : [1.0, 0.45, 0.30]);
-		scar(p.x, p.z, 1.7);
+		Ground.scar(p.x, p.z, 1.7);
 		this.remove();
+	}
+
+	static *foes() {
+		for (const t of Tank) if (t.foe) yield t;
+	}
+
+	// Whether any of `among` is standing within `reach` of a map square.
+	static near(col, row, reach, among = Tank) {
+		for (const t of among) {
+			const c = t.centre();
+			if (Math.hypot(c[0] - cellX(col), c[2] - cellZ(row)) < reach) return true;
+		}
+		return false;
+	}
+
+	// A spawn square with nobody standing on it, so a wave can put several
+	// enemies in the yard at once instead of stacking them on one. Null when
+	// every open square of the top row is still occupied, which `arrive` reads
+	// as "ask again next tick" — sixty tries a second, and one that costs
+	// nothing when there is nowhere to put a tank.
+	static freeSquare() {
+		for (let tries = 0; tries < 8; tries++) {
+			const at = G.spawns[three.randInt(0, G.spawns.length - 1)];
+			if (!Tank.near(at[0], at[1], 1.8)) return at;
+		}
+		return null;
+	}
+
+	// Enemies arrive along the top row: the whole opening wave at the top of a
+	// round, so the yard starts as the fight it is rather than filling up over
+	// ten empty seconds, and then one replacement at a time on the `FOE_EVERY`
+	// clock.
+	@three.systems.step({ when: () => !G.over })
+	static arrive(dt) {
+		G.since += dt;
+		if (G.waiting <= 0) return;
+		if ([...Tank.foes()].length >= FOES_AT_ONCE) { G.opening = false; return; }
+		// The opening wave is gated by the yard rather than by the clock: every
+		// tick that finds a free square adds one until `FOES_AT_ONCE` are standing.
+		if (!G.opening && G.since < FOE_EVERY) return;
+		const at = Tank.freeSquare();
+		if (at === null) return;
+		G.since = 0;
+		G.waiting--;
+		Tank.spawn(at[0], at[1], true);
+		// A tank materialising is worth a puff of its own.
+		Blast.spawn([cellX(at[0]), 0.7, cellZ(at[1])], 1.6, 0.5, [0.55, 0.80, 1.0]);
+	}
+
+	// The player. Keys are polled rather than latched, because driving is a
+	// state and not an edge — a held key fires no repeat event.
+	@three.systems.step({ when: () => G.player !== null })
+	static steer(dt) {
+		const dir = DRIVE_KEYS.findIndex((keys) => keys.some((k) => three.input.isDown(k)));
+		G.player.drive(dt, dir);
+		if (three.input.isDown('space')) G.player.fire();
+	}
+
+	// Each enemy. Drive at the eagle, turn when something is in the way, fire
+	// on the gun's own cooldown — which is a `three.cooldown` rather than a
+	// number counted down by hand, so a paused clock pauses it too.
+	@three.systems.step
+	hunt(dt) {
+		if (!this.foe) return;
+		this.turn -= dt;
+		if (this.blocked || this.turn <= 0) {
+			this.turn = three.randFloat(0.8, 2.2);
+			const goal = G.eagle?.object.position;
+			// Mostly towards the eagle, sometimes not — a pack that all takes
+			// the same corner every round is a pack you have already beaten.
+			this.dir = (goal && three.randFloat(0, 1) < 0.6)
+				? towards(this.centre(), [goal.x, goal.y, goal.z])
+				: three.randInt(0, 3);
+		}
+		this.drive(dt, this.dir);
+		this.fire();
 	}
 }
 
 // A shot. The only dynamic body in the world, and the only thing that raises a
 // contact — which is what every rule below is written against.
+// `collides: false` because a bullet is not scenery: without it a tank's
+// movement sweep walks into its own shot and stops dead a metre from the barrel.
+@three.entity({
+	body: { shape: 'sphere', mass: 0.2, friction: 0, restitution: 0 },
+	collides: false,
+})
 class Bullet extends three.Entity {
-	static body = { shape: 'sphere', mass: 0.2, friction: 0, restitution: 0 };
-	// A bullet is not scenery: without this a tank's movement sweep walks into
-	// its own shot and stops dead a metre from the barrel.
-	static collides = false;
-
 	constructor(from, dir) {
 		super();
 		this.foe = from.foe;
-		this.dead = false;
 		this.velocity = [DIRS[dir][0] * SHOT_SPEED, 0, DIRS[dir][1] * SHOT_SPEED];
 		this.object = new three.Mesh(SHOT, shotMat);
 		this.object.name = 'shot';
@@ -720,21 +883,26 @@ class Bullet extends three.Entity {
 	}
 
 	// Idempotent, because a shot that hits two things in one step is dispatched
-	// twice and a second removal would throw.
+	// twice: `remove()` answers false the second time, and that is the guard.
 	pop(size = 0.9) {
-		if (this.dead) return;
-		this.dead = true;
 		const p = this.object.position;
+		if (!this.remove()) return;
 		Blast.spawn([p.x, p.y, p.z], size, 0.35, [1.0, 0.78, 0.42]);
-		scar(p.x, p.z, size * 0.75);
-		this.remove();
+		Ground.scar(p.x, p.z, size * 0.75);
+	}
+
+	// A dynamic body's velocity is recomputed by the solver at the end of every
+	// step, so re-asserting it is what keeps a shell flying dead straight
+	// instead of drifting off the first thing it grazes.
+	@three.systems.step
+	fly() {
+		three.physics.setVelocity(this.object, this.velocity);
 	}
 }
 
 // Fire. No body, no collider, nothing to hit — it only draws.
+@three.entity({ collides: false })
 class Blast extends three.Entity {
-	static collides = false;
-
 	constructor(at, size, life, tint) {
 		super();
 		this.age = 0;
@@ -744,6 +912,24 @@ class Blast extends three.Entity {
 		this.object = new three.Mesh(FIRE, blastMat);
 		this.object.name = 'blast';
 		this.object.position.set(at[0], at[1], at[2]);
+	}
+
+	// One clock for every fireball: they share the material.
+	@three.systems.frame
+	static flicker() {
+		blastMat.uniforms.t = three.clock.time;
+	}
+
+	// Everything here is per-copy — a scale and a colour — which is why twenty
+	// blasts are still one draw call.
+	@three.systems.frame
+	burn(dt) {
+		this.age += dt / this.life;
+		if (this.age >= 1) { this.remove(); return; }
+		// Fast out, then slowing: a square root is the whole easing curve.
+		const s = this.size * (0.3 + 0.85 * Math.sqrt(this.age));
+		this.object.scale.set(s, s, s);
+		this.object.color = [this.tint[0], this.tint[1], this.tint[2], this.age];
 	}
 }
 
@@ -778,7 +964,7 @@ Bullet.on('touch', Eagle, (shot, eagle) => {
 	if (G.over) return;
 	G.over = three.clock.time;
 	Blast.spawn([eagle.object.position.x, 1.0, eagle.object.position.z], 3.4, 1.1, [1.0, 0.5, 0.25]);
-	scar(eagle.object.position.x, eagle.object.position.z, 2.6);
+	Ground.scar(eagle.object.position.x, eagle.object.position.z, 2.6);
 });
 
 // Two shells meeting in the air take each other out, as they always have.
@@ -793,7 +979,7 @@ Bullet.on('touch', Bullet, (a, b) => { a.pop(0.6); b.pop(0.6); });
 const G = globalThis.yard = {
 	scene, player: null, eagle: null, spawns: [], home: [0, 0],
 	round: 0, kills: 0, lost: 0, broken: 0, waiting: FOES_PER_ROUND, opening: false,
-	over: 0, since: 0, auto: true, held: new Set(),
+	over: 0, since: 0, auto: true,
 };
 
 // The steel never changes, so it is built once and outlives every round.
@@ -809,217 +995,50 @@ MAP.forEach((line, row) => {
 	});
 });
 
-// A round is the bricks, the eagle and everybody standing in the yard. Losing
-// the eagle rebuilds all of it, which is what makes a long headless run keep
-// having something to look at.
-function newRound() {
-	Bullet.clear();
-	Blast.clear();
-	Brick.clear();
-	Tank.clear();
-	Eagle.clear();
-	eagleMat.layers[0].opacity = 0;
+// Its systems are written after the tanks' and the shots', so they run after
+// them: a round ends, and the player comes back, on what this tick did.
+class Round {
+	// A round is the bricks, the eagle and everybody standing in the yard.
+	// Losing the eagle rebuilds all of it, which is what makes a long headless
+	// run keep having something to look at.
+	static start() {
+		Bullet.clear();
+		Blast.clear();
+		Brick.clear();
+		Tank.clear();
+		Eagle.clear();
+		eagleMat.layers[0].opacity = 0;
+		Ground.reset();
 
-	// The yard is swept: the ground goes back to how `splatTex` paints it, and
-	// any scars from the last frame of the old round go with the old round.
-	scars.length = 0;
-	sweep.dispatch({ ground: groundMask, pristine: splatTex }, { threads: [GROUND / 4, GROUND / 4] });
-
-	MAP.forEach((line, row) => {
-		[...line].forEach((c, col) => {
-			if (c === 'b') Brick.spawn(col, row);
-			if (c === 'A') G.eagle = Eagle.spawn(col, row);
+		MAP.forEach((line, row) => {
+			[...line].forEach((c, col) => {
+				if (c === 'b') Brick.spawn(col, row);
+				if (c === 'A') G.eagle = Eagle.spawn(col, row);
+			});
 		});
-	});
-	G.player = Tank.spawn(G.home[0], G.home[1], false);
-	G.waiting = FOES_PER_ROUND;
-	G.opening = true;
-	G.since = 0;
-	G.over = 0;
-	G.round++;
+		G.player = Tank.spawn(G.home[0], G.home[1], false);
+		G.waiting = FOES_PER_ROUND;
+		G.opening = true;
+		G.since = 0;
+		G.over = 0;
+		G.round++;
+	}
+
+	// The eagle's ruin layer is the one `animated: true` layer in the file, so
+	// the fade is a uniform write per tick rather than a new pipeline.
+	@three.systems.step
+	static watch(dt) {
+		if (G.over) {
+			eagleMat.layers[0].opacity = three.moveTowards(eagleMat.layers[0].opacity, 1, dt * 2.2);
+			if (three.clock.time - G.over > 3.5) Round.start();
+			return;
+		}
+		// A player who has been shot comes back at the corner he started from,
+		// once nothing hostile is standing on it.
+		const [col, row] = G.home;
+		if (!G.player && !Tank.near(col, row, 3, Tank.foes())) G.player = Tank.spawn(col, row, false);
+	}
 }
-
-// ---------------------------------------------------------------------------
-// The systems
-//
-// A named, ordered list rather than one animation callback with five things in
-// it. It makes nothing faster; it makes a slow frame attributable, and
-// `three.systems.report()` will say which of these it was.
-// ---------------------------------------------------------------------------
-
-// A spawn square with nobody standing on it, so a wave can put several enemies
-// in the yard at once instead of stacking them on one. Null when every open
-// square of the top row is still occupied, which the spawn system reads as "ask
-// again next tick" — sixty tries a second, and one that costs nothing when
-// there is nowhere to put a tank.
-function freeSpawn() {
-	for (let tries = 0; tries < 8; tries++) {
-		const [col, row] = G.spawns[three.randInt(0, G.spawns.length - 1)];
-		let clear = true;
-		for (const t of Tank) {
-			const c = t.centre();
-			if (Math.hypot(c[0] - cellX(col), c[2] - cellZ(row)) < 1.8) { clear = false; break; }
-		}
-		if (clear) return [col, row];
-	}
-	return null;
-}
-
-// Enemies arrive along the top row: the whole opening wave at the top of a
-// round, so the yard starts as the fight it is rather than filling up over ten
-// empty seconds, and then one replacement at a time on the `FOE_EVERY` clock.
-three.systems.step('spawn', (dt) => {
-	if (G.over) return;
-	G.since += dt;
-	if (G.waiting <= 0) return;
-	let alive = 0;
-	for (const t of Tank) if (t.foe) alive++;
-	if (alive >= FOES_AT_ONCE) { G.opening = false; return; }
-	// The opening wave is gated by the yard rather than by the clock: every tick
-	// that finds a free square adds one until `FOES_AT_ONCE` are standing.
-	if (!G.opening && G.since < FOE_EVERY) return;
-	const at = freeSpawn();
-	if (at === null) return;
-	G.since = 0;
-	G.waiting--;
-	Tank.spawn(at[0], at[1], true);
-	// A tank materialising is worth a puff of its own.
-	Blast.spawn([cellX(at[0]), 0.7, cellZ(at[1])], 1.6, 0.5, [0.55, 0.80, 1.0]);
-});
-
-// The player. Keys are polled rather than latched, because driving is a state
-// and not an edge — a held key fires no repeat event.
-three.systems.step('player', (dt) => {
-	const p = G.player;
-	if (!p) return;
-	let dir = -1;
-	if (three.input.isDown('up') || three.input.isDown('w')) dir = 0;
-	else if (three.input.isDown('right') || three.input.isDown('d')) dir = 1;
-	else if (three.input.isDown('down') || three.input.isDown('s')) dir = 2;
-	else if (three.input.isDown('left') || three.input.isDown('a')) dir = 3;
-	p.drive(dt, dir);
-	if (three.input.isDown('space')) p.fire();
-});
-
-// The enemies. Drive at the eagle, turn when something is in the way, fire on
-// the gun's own cooldown — which is a `three.cooldown` rather than a number
-// counted down by hand, so a paused clock pauses it too.
-three.systems.step('foes', (dt) => {
-	const goal = G.eagle ? G.eagle.object.position : null;
-	for (const t of Tank) {
-		if (!t.foe) continue;
-		t.turn -= dt;
-		if (t.blocked || t.turn <= 0) {
-			t.turn = three.randFloat(0.8, 2.2);
-			const at = t.centre();
-			// Mostly towards the eagle, sometimes not — a pack that all takes
-			// the same corner every round is a pack you have already beaten.
-			t.dir = (goal && three.randFloat(0, 1) < 0.6)
-				? towards(at, [goal.x, goal.y, goal.z])
-				: three.randInt(0, 3);
-		}
-		t.drive(dt, t.dir);
-		t.fire();
-	}
-});
-
-// A dynamic body's velocity is recomputed by the solver at the end of every
-// step, so re-asserting it is what keeps a shell flying dead straight instead
-// of drifting off the first thing it grazes.
-three.systems.step('shots', () => {
-	for (const b of Bullet) if (!b.dead) three.physics.setVelocity(b.object, b.velocity);
-});
-
-// The fire. Everything here is per-copy — a scale and a colour — which is why
-// twenty blasts are still one draw call.
-three.systems.frame('fire', (dt) => {
-	blastMat.uniforms.t = three.clock.time;
-	for (const b of Blast) {
-		b.age += dt / b.life;
-		if (b.age >= 1) { b.remove(); continue; }
-		// Fast out, then slowing: a square root is the whole easing curve.
-		const s = b.size * (0.3 + 0.85 * Math.sqrt(b.age));
-		b.object.scale.set(s, s, s);
-		b.object.color = [b.tint[0], b.tint[1], b.tint[2], b.age];
-	}
-});
-
-// The ground. Every tank that moved or turned since it was last marked presses
-// its tracks into the mask, and every explosion since the last frame leaves a
-// scar. All of it goes in one dispatch, of one slice of threads per mark. A
-// tank's slice is 72x72, so four tanks and a shell hit is about 26,000
-// threads, and no frame goes past seven slices of that size.
-//
-// This runs once a frame, not once a step. A tank covers less than a fifth of
-// a unit in a frame, and the footprint it marks is 1.6 long, so the tracks
-// still come out unbroken.
-//
-// A dispatch only records work. `submitAsync` sends it and does not wait. The
-// frame drawn next is queued behind it, so that frame already sees the new
-// marks, and the CPU never stops for the GPU.
-three.systems.frame('ground', () => {
-	let count = 0, scorched = 0, widest = 0;
-	const add = (x, z, a, b, reach) => {
-		markFloats.set([x, z, a, b], count * 4);
-		widest = Math.max(widest, reachOf(reach));
-		count++;
-	};
-
-	// A scar wider than a tank's tracks gets a frame to itself. Every slice is
-	// as wide as the widest mark, so a wreck sharing a frame with four tanks
-	// would make all five slices its size. The tanks skip that one frame, and
-	// their next mark still overlaps their last.
-	const small = (scar) => reachOf(scar.size) <= reachOf(TREAD_REACH);
-	if (scars.length > 0 && !small(scars[0])) {
-		const s = scars.shift();
-		scorched = 1;
-		add(s.x, s.z, s.size, s.seed, s.size);
-	} else {
-		for (const t of Tank) {
-			if (count === MARKS) break;
-			const p = t.object.position;
-			const last = t.printed;
-			if (last && last[0] === p.x && last[1] === p.z && last[2] === t.dir) continue;
-			t.printed = [p.x, p.z, t.dir];
-			add(p.x, p.z, DIRS[t.dir][0], DIRS[t.dir][1], TREAD_REACH);
-		}
-		while (count < MARKS && scars.length > 0 && small(scars[0])) {
-			const s = scars.shift();
-			scorched |= 1 << count;
-			add(s.x, s.z, s.size, s.seed, s.size);
-		}
-	}
-
-	if (count > 0) {
-		markWords[MARKS * 4] = count;
-		markWords[MARKS * 4 + 1] = scorched;
-		// One slice per mark, each as wide as the widest mark's square: 2r + 1
-		// texels, plus one in case the kernel's float rounding makes r one bigger.
-		const groups = Math.ceil((2 * widest + 2) / 8);
-		mark.dispatch({ ground: groundMask }, { workgroups: [groups, groups, count], push: markPush });
-	}
-	three.compute.submitAsync();
-});
-
-// The round. The eagle's ruin layer is the one `animated: true` layer in the
-// file, so this is a uniform write per frame rather than a new pipeline.
-three.systems.step('round', (dt) => {
-	if (G.over) {
-		eagleMat.layers[0].opacity = three.moveTowards(eagleMat.layers[0].opacity, 1, dt * 2.2);
-		if (three.clock.time - G.over > 3.5) newRound();
-		return;
-	}
-	// A player who has been shot comes back at the corner he started from,
-	// once nothing hostile is standing on it.
-	if (!G.player) {
-		let clear = true;
-		for (const t of Tank) if (t.foe) {
-			const d = t.centre();
-			if (Math.hypot(d[0] - cellX(G.home[0]), d[2] - cellZ(G.home[1])) < 3) clear = false;
-		}
-		if (clear) G.player = Tank.spawn(G.home[0], G.home[1], false);
-	}
-});
 
 // ---------------------------------------------------------------------------
 // The autopilot
@@ -1030,52 +1049,77 @@ three.systems.step('round', (dt) => {
 // headless run is a playtest that says whether the level still plays.
 //
 // It keeps the set of keys it pressed itself: a key that is down and not in
-// that set is somebody taking the controls, and it stands aside.
+// that set is somebody taking the controls, and it stands aside. `G.auto` is
+// the switch, and `p` flips it.
 // ---------------------------------------------------------------------------
 
-function press(k) { if (!G.held.has(k)) { three.input.press(k); G.held.add(k); } }
-function lift(k) { if (G.held.has(k)) { three.input.release(k); G.held.delete(k); } }
-function liftAll() { for (const k of [...G.held]) lift(k); }
+class Autopilot {
+	static held = new Set();
 
-three.systems.frame('autopilot', () => {
-	for (const k of ['up', 'down', 'left', 'right', 'w', 'a', 's', 'd', 'space'])
-		if (three.input.isDown(k) && !G.held.has(k)) G.auto = false;
-	if (!G.auto || !G.player) { liftAll(); return; }
-
-	// Head for the nearest enemy; back off towards the eagle when there is
-	// none in the yard yet.
-	const me = G.player.centre();
-	let target = G.eagle ? G.eagle.object.position : null;
-	let best = Infinity;
-	for (const t of Tank) {
-		if (!t.foe) continue;
-		const p = t.object.position;
-		const d = Math.hypot(p.x - me[0], p.z - me[2]);
-		if (d < best) { best = d; target = p; }
+	static press(k) {
+		if (Autopilot.held.has(k)) return;
+		three.input.press(k);
+		Autopilot.held.add(k);
 	}
-	let dir = target ? towards(me, [target.x, target.y, target.z]) : 0;
-	// Blocked? Take the other axis rather than grinding against the wall.
-	if (G.player.blocked) dir = (dir + (three.randFloat(0, 1) < 0.5 ? 1 : 3)) % 4;
 
-	for (const k of KEY_FOR_DIR) if (k !== KEY_FOR_DIR[dir]) lift(k);
-	press(KEY_FOR_DIR[dir]);
-	// The gun's own cooldown decides the rate, so holding fire is enough.
-	press('space');
-}, { before: 'fire' });
+	static lift(k) {
+		if (Autopilot.held.delete(k)) three.input.release(k);
+	}
 
-three.onKeyDown('p', () => { G.auto = !G.auto; liftAll(); });
+	static liftAll() {
+		for (const k of [...Autopilot.held]) Autopilot.lift(k);
+	}
+
+	// Before the fire, as the old single system was: what it presses this
+	// frame is what the next fixed step reads.
+	@three.systems.frame({ before: 'Blast.flicker' })
+	static drive() {
+		for (const k of [...DRIVE_KEYS.flat(), 'space']) {
+			if (three.input.isDown(k) && !Autopilot.held.has(k)) G.auto = false;
+		}
+		const me = G.player;
+		if (!G.auto || !me) { Autopilot.liftAll(); return; }
+
+		// Head for the nearest enemy; back off towards the eagle when there is
+		// none in the yard yet.
+		const at = me.centre();
+		let target = G.eagle ? G.eagle.object.position : null;
+		let best = Infinity;
+		for (const t of Tank.foes()) {
+			const p = t.object.position;
+			const d = Math.hypot(p.x - at[0], p.z - at[2]);
+			if (d < best) { best = d; target = p; }
+		}
+		let dir = target ? towards(at, [target.x, target.y, target.z]) : 0;
+		// Blocked? Take the other axis rather than grinding against the wall.
+		if (me.blocked) dir = (dir + (three.randFloat(0, 1) < 0.5 ? 1 : 3)) % 4;
+
+		const key = DRIVE_KEYS[dir][0];
+		for (const [arrow] of DRIVE_KEYS) if (arrow !== key) Autopilot.lift(arrow);
+		Autopilot.press(key);
+		// The gun's own cooldown decides the rate, so holding fire is enough.
+		Autopilot.press('space');
+	}
+
+	@three.key('p', 'autopilot on/off')
+	static toggle() {
+		G.auto = !G.auto;
+		Autopilot.liftAll();
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Go
 // ---------------------------------------------------------------------------
 
-newRound();
+Round.start();
 
 three.camera.lookAt(0, 0, 0);
 three.camera.orbit(0, 62, 34);
 
 three.debug.write({
-	keys: { 'arrows / wasd': 'drive', space: 'fire', p: 'autopilot on/off' },
+	// Driving and firing are polled every step; the rest are `@three.key`s.
+	keys: { 'arrows / wasd': 'drive', space: 'fire', ...three.keys() },
 	map: `${MAP[0].length}x${MAP.length} cells of ${CELL}`,
 	steel: Steel.count, brick: Brick.count, tanks: Tank.count,
 	materials: 'ground, brick x3 and eagle are LayeredMaterial; the fire is a ShaderMaterial',
