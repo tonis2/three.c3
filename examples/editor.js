@@ -23,20 +23,12 @@
 //
 // ## Controls
 //
+// The keyboard is the `Keys` class near the end, one method per key, and
+// `three.keys()` lists it. The mouse:
+//
 //   click            select the piece under the cursor, or nothing · commit a grab
 //   shift+click      add the piece to the selection, or take it back out
 //   ctrl+click       place the asset browser's stamp here
-//   1 / 2 / 3        grid / face / marker snap mode
-//   g                grab the selection and move it live under the cursor
-//   s                scale the selection live — pull away to grow, in to shrink
-//   x / y / z         while grabbing or scaling: confine it to that axis, again frees it
-//   r / shift+r      rotate a quarter turn, the other way with shift
-//   arrows           nudge one unit on x/z · pageup/pagedown or [ / ]  y
-//   shift+d          duplicate (offset one unit on x) and start a grab
-//   delete / x       remove, after a confirm
-//   ctrl+z           undo · ctrl+shift+z or ctrl+y   redo
-//   escape           free a locked axis, then cancel the grab, then clear the stamp
-//   f / home         frame the selection / frame everything
 //   shift (held)     while placing or committing: skip the snap, freehand
 //
 // ## Grabbing and scaling on one axis
@@ -55,6 +47,13 @@
 // is here: the API has no world-to-screen projection to measure with.
 // The factor rounds to quarters unless shift is held, each piece scales about
 // its own pivot, and a click commits exactly as a grab's does.
+//
+// ## How the file is laid out
+//
+// Pure helpers first (geometry, naming, the kit's node tree), then `Editor`,
+// the one object holding every piece of editor state and every operation on
+// it, then the widgets that draw it, then the keys. `globalThis.editor` is the
+// scriptable surface over the same `Editor`, for headless drivers.
 
 // ---------------------------------------------------------------------------
 // World
@@ -75,42 +74,22 @@ helpers.name = '__helpers__';
 scene.add(helpers);
 const gridHelper = new three.GridHelper(40, 40, 0x445566);
 helpers.add(gridHelper);
-// One per selected piece, in the selection's own order. The active piece — the
-// last one picked — is the bright one, because a grab and the properties panel
-// are both about that one and nothing else says which it is.
-let selectionHelpers = [];
+
+// The active piece — the last one picked — is the bright outline, because a
+// grab and the properties panel are both about that one and nothing else says
+// which it is.
 const ACTIVE_COLOR = 0xffff00;
 const ALSO_COLOR = 0xb08a20;
 const CLASH_COLOR = 0xff3333;
 
-// The line drawn along a locked axis while a grab is constrained to it, in the
-// colours an axis is always drawn in — x red, y green, z blue, the same three
-// `AxesHelper` uses. It lives in `helpers` rather than beside the pieces for
-// one reason worth naming: it is 200 units long, and `frameAll` measures what
-// is drawable rather than what is interesting, so anywhere else a `home` press
-// mid-grab would frame the guide instead of the level.
+// The line drawn along a locked axis, in the colours an axis is always drawn
+// in — x red, y green, z blue, the same three `AxesHelper` uses. It lives in
+// `helpers` rather than beside the pieces for one reason worth naming: it is
+// 200 units long, and `frameAll` measures what is drawable rather than what is
+// interesting, so anywhere else a `home` press mid-grab would frame the guide
+// instead of the level.
 const AXIS_COLOR = { x: 0xff4d4d, y: 0x4dff77, z: 0x4d9dff };
 const AXIS_REACH = 100;
-let axisGuide = null;
-
-function showAxisGuide(axis, at) {
-	hideAxisGuide();
-	if (!axis) return;
-	const min = { x: at.x, y: at.y, z: at.z };
-	const max = { x: at.x, y: at.y, z: at.z };
-	min[axis] -= AXIS_REACH;
-	max[axis] += AXIS_REACH;
-	// A box with two axes of zero size draws as the line along the third: the
-	// twelve edges collapse onto one segment, which is the picture wanted and
-	// one mesh rather than a new primitive.
-	axisGuide = new three.Box3Helper(new three.Box3(min.x, min.y, min.z, max.x, max.y, max.z), AXIS_COLOR[axis]);
-	helpers.add(axisGuide);
-}
-
-function hideAxisGuide() {
-	if (axisGuide && axisGuide.parent) axisGuide.parent.remove(axisGuide);
-	axisGuide = null;
-}
 
 function frameAllExcludingHelpers() {
 	const parent = helpers.parent;
@@ -122,6 +101,8 @@ function frameAllExcludingHelpers() {
 // ---------------------------------------------------------------------------
 // Small helpers — geometry and naming, nothing here touches state
 // ---------------------------------------------------------------------------
+
+const held = (key) => three.input.isDown(key);
 
 // `three.wrapAngle` folds into [-pi, pi); the brief wants rotation kept in
 // [0, 2*pi), which is the more readable "how many quarter turns" number.
@@ -165,14 +146,47 @@ function axisUnderCursor(start, axis, px, py) {
 	return start[axis] + (b * vw - c * uw) / denom;
 }
 
-// Walks up from whatever `scene.pick` handed back — often a Mesh several
-// levels inside a piece — to the row's own root, identified the way
-// `Level` identifies it: the object a row's id is the key for.
-function pieceOf(object) {
-	for (let o = object; o; o = o.parent) {
-		if (level.objects.get(o.name) === o) return o;
-	}
-	return null;
+// How far the cursor is from `anchor`, measured on the plane through it that
+// faces the camera — the scale gesture's ruler.
+//
+// Not the ground plane, which was the first try and is wrong in a way that is
+// invisible until it bites: a ray through a cursor above the horizon never
+// meets y = 0, so the gesture silently froze whenever the camera was tilted up.
+// A camera-facing plane is hit by every ray through the viewport, and the
+// distance on it is the depth-corrected version of "how far the cursor is from
+// the thing on screen", which is the reading Blender's own scale has.
+//
+// The anchor is a POINT captured once and not the piece's live centre: a piece
+// grows about its pivot, so its centre moves as it is scaled, and measuring to
+// something the gesture is itself moving is a feedback loop — the factor
+// crept away from what the cursor was asking for, frame after frame.
+function cursorReach(anchor) {
+	const pointer = three.input.pointer;
+	const ray = three.camera.ray(pointer.x, pointer.y);
+	const n = three.camera.forward();
+	const denom = ray.direction.x * n.x + ray.direction.y * n.y + ray.direction.z * n.z;
+	if (Math.abs(denom) < 1e-8) return null;
+	const t = ((anchor.x - ray.origin.x) * n.x + (anchor.y - ray.origin.y) * n.y + (anchor.z - ray.origin.z) * n.z) / denom;
+	if (!(t > 0)) return null;
+	return Math.hypot(
+		ray.origin.x + ray.direction.x * t - anchor.x,
+		ray.origin.y + ray.direction.y * t - anchor.y,
+		ray.origin.z + ray.direction.z * t - anchor.z,
+	);
+}
+
+// Where the piece is, as three plain numbers that will not move under the
+// gesture: its box centre if it has one, its pivot if it does not.
+function anchorOf(object) {
+	const box = object.boundingBox();
+	const at = box ? box.center : object.position;
+	return { x: at.x, y: at.y, z: at.z };
+}
+
+function snapAxisToGrid(object, axis) {
+	const box = object.boundsInParent();
+	if (!box) return;
+	object.align(axis, 'min', Math.round(box.edge(axis, 'min')));
 }
 
 // A marker is a leaf node with no mesh — the same test `object3d.js`'s
@@ -202,20 +216,8 @@ function sideFromNormal(n) {
 	return n.z >= 0 ? '+z' : '-z';
 }
 
-function freshId(piece) {
-	let n = 1;
-	while (level.objects.has(`${piece}_${n}`)) n++;
-	return `${piece}_${n}`;
-}
-
-// Wraps a key or click handler so one throw reports on the status line
-// instead of unbinding the handler for the rest of the run — onKeyDown,
-// onClick, a widget handler and the animation loop are all "stopped for
-// good if it throws".
-function safe(fn) {
-	return (...args) => {
-		try { fn(...args); } catch (e) { setStatus(String(e && e.message ? e.message : e)); }
-	};
+function positionText(object) {
+	return `${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -287,791 +289,998 @@ function buildPieceList(tree) {
 	return candidates.map(i => rows[i].name);
 }
 
-// Swaps in a freshly loaded kit and rebuilds the browser's models with it —
-// every place `currentAsset` changes goes through this rather than assigning
-// it directly, so the asset, the piece list and the catalog never drift
-// apart.
-function setCurrentAsset(asset) {
-	currentAsset = asset;
-	assetTree = buildAssetTree(asset);
-	const names = buildPieceList(assetTree);
-	state.pieces = names.map(name => ({ name, category: categoryOf(name) }));
-	const cards = new Map();
-	for (const p of state.pieces) {
-		let box = null;
-		try { box = asset.node(p.name).boundsInParent(); } catch (e) { box = null; }
-		cards.set(p.name, new Card(p.name, p.category, box));
-	}
-	pieceCards = cards;
-	if (state.stamp && !pieceCards.has(state.stamp)) state.stamp = null;
-	catalog.refresh();
-	browser.update();
+const isKitPath = (path) => /\.glb$|\.gltf$/i.test(path);
+
+// ---------------------------------------------------------------------------
+// Decorators for the editor's own methods
+// ---------------------------------------------------------------------------
+
+// A handler that throws is unbound for good — onKeyDown, onClick, a widget
+// handler and a system all stop that way — so the UI-facing ones put the
+// message on the status line instead. A method decorator, and also a plain
+// wrapper for the arrow functions handed to widgets.
+function safe(fn) {
+	return function (...args) {
+		try { return fn.apply(this, args); } catch (e) { ed.setStatus(String(e && e.message ? e.message : e)); }
+	};
 }
 
-// ---------------------------------------------------------------------------
-// Editor state
-// ---------------------------------------------------------------------------
-
-const state = {
-	mode: three.persist.mode ?? 'grid',
-	// The selection, in the order it was picked. The last id is the active one
-	// — see the header comment; `activeId()` is the only reader of that rule.
-	selection: [],
-	stamp: null,
-	grab: null,
-	// The live scale gesture, `s`, shaped like `grab`: an original per piece to
-	// measure against, an optional axis, and the factor the cursor is asking
-	// for. Only ever one of the two is live — a modal verb at a time.
-	scaling: null,
-	path: null,
-	dirty: false,
-	showGrid: true,
-	markerChoice: null,
-	markerChoices: [],
-	pieces: [],
-	pendingKit: null,
-	dockOpen: three.persist.dockOpen ?? true,
-	confirmDeleteIds: [],
-	confirmDeleteOpen: false,
-	confirmNewOpen: false,
-	openDialogOpen: false,
-	kitDialogOpen: false,
-	saveAsOpen: false,
-	saveAsText: '',
-	exportOpen: false,
-	exportText: '',
-	lastError: '',
-};
-
-let undoStack = [];
-let redoStack = [];
+// What an `@undoable` edit answers when it turned out to change nothing, so no
+// undo step is kept for it.
+const UNCHANGED = Symbol('unchanged');
 const UNDO_CAP = 100;
-
-let level;                 // the live three.level.Level — reassigned by undo/open/new
-let currentAsset = null;   // three.load(level.kit), kept for the asset browser
-let assetTree = null;      // buildAssetTree(currentAsset) — the browser's own model
-let pieceCards = new Map(); // piece name -> its Card widget, rebuilt with the asset
-
-function setStatus(message) {
-	state.lastError = message;
-	syncUI();
-}
-
-function markDirty() { state.dirty = true; }
-
-function syncPersist() {
-	three.persist.path = state.path;
-	three.persist.selected = state.selection;
-	three.persist.mode = state.mode;
-	three.persist.dockOpen = state.dockOpen;
-}
-
-// The active piece: the last one picked, and the one every "there is only room
-// to say this about one of them" reading is about — the properties panel, the
-// snap a grab makes, the marker choice.
-function activeId() {
-	return state.selection.length > 0 ? state.selection[state.selection.length - 1] : null;
-}
-
-function isSelected(id) { return state.selection.includes(id); }
-
-// ---------------------------------------------------------------------------
-// Undo / redo — snapshots of level.toJSON(), deep-cloned because toJSON()
-// hands back the level's own row objects and mutates them in place on every
-// future call, which would otherwise corrupt a stored snapshot silently.
-// ---------------------------------------------------------------------------
-
-function snapshot() { return JSON.parse(JSON.stringify(level.toJSON())); }
 
 function pushSnapshot(stack, snap) {
 	stack.push(snap);
 	if (stack.length > UNDO_CAP) stack.shift();
 }
 
-function pushUndo() {
-	pushSnapshot(undoStack, snapshot());
-	redoStack = [];
-}
-
-// Rebuilds a Level from a saved snapshot — `load` without the file: drop
-// every current object and replay `add(row)` in order over a fresh
-// `three.level.create(kit)`.
-function restore(snap) {
-	for (const obj of [...level.objects.values()]) if (obj.parent) obj.parent.remove(obj);
-	const next = three.level.create(snap.kit);
-	next.parent = scene;
-	for (const row of snap.rows) next.add(row);
-	level = next;
-	setCurrentAsset(snap.kit ? three.load(snap.kit) : null);
-}
-
-function undo() {
-	if (undoStack.length === 0) return;
-	pushSnapshot(redoStack, snapshot());
-	restore(undoStack.pop());
-	// The ids that survived the restore, in the order they were picked.
-	select(state.selection.filter(id => level.objects.has(id)));
-	markDirty();
-	syncUI();
-}
-
-function redo() {
-	if (redoStack.length === 0) return;
-	pushSnapshot(undoStack, snapshot());
-	restore(redoStack.pop());
-	// The ids that survived the restore, in the order they were picked.
-	select(state.selection.filter(id => level.objects.has(id)));
-	markDirty();
-	syncUI();
-}
-
-// ---------------------------------------------------------------------------
-// Placement — the one rule "what does a cursor mean", shared by a fresh
-// stamp, a live grab preview and a grab's final commit.
-// ---------------------------------------------------------------------------
-
-function snapAxisToGrid(object, axis) {
-	const box = object.boundsInParent();
-	if (!box) return;
-	object.align(axis, 'min', Math.round(box.edge(axis, 'min')));
-}
-
-// Moves `object` (already in the scene, rotation already set) according to
-// the current mode, a ground-plane candidate point and an optional pick hit.
-// Answers the row's new `snap` (or null for freehand) — it does not touch
-// the row itself, so a caller can decide when that write happens.
-function placeByMode(object, groundPoint, pickHit, opts = {}) {
-	const freehand = !!opts.freehand;
-	const mode = opts.mode ?? state.mode;
-
-	if (!freehand && (mode === 'face' || mode === 'marker')) {
-		const target = pickHit && pickHit.object ? pieceOf(pickHit.object) : null;
-		if (target && target !== object) {
-			if (mode === 'marker') {
-				const common = commonMarkers(object, target);
-				state.markerChoices = common;
-				const marker = common.includes(state.markerChoice) ? state.markerChoice : common[0];
-				if (marker) {
-					state.markerChoice = marker;
-					object.snapTo(target, marker);
-					return { to: target.name, side: marker };
-				}
-				// No marker in common — the documented fallback is face, not grid.
-			}
-			const side = sideFromNormal(pickHit.normal);
-			object.position.copy(pickHit.point);
-			object.snapTo(target, side);
-			for (const axis of ['x', 'y', 'z']) {
-				if (axis !== side[1]) snapAxisToGrid(object, axis);
-			}
-			return { to: target.name, side };
+// An edit to the level: the level as it stood is kept for undo (unless the
+// edit answers UNCHANGED), the level is marked unsaved, and the interface is
+// brought up to date. Every edit is the same three steps around a different
+// middle, and this is where they are written once.
+function undoable(method) {
+	return function (...args) {
+		const before = this.snapshot();
+		const result = method.apply(this, args);
+		if (result !== UNCHANGED) {
+			this.remember(before);
+			this.dirty = true;
 		}
-	}
-
-	// The grid rule — the default mode, and the fallback for face/marker
-	// when nothing is under the cursor.
-	if (freehand) {
-		object.position.x = groundPoint.x;
-		object.position.z = groundPoint.z;
-		return null;
-	}
-	object.align('x', 'min', Math.round(groundPoint.x));
-	object.align('z', 'min', Math.round(groundPoint.z));
-	return null;
-}
-
-// Whether `object` is inside anything that is not part of the selection —
-// what turns the outlines red while a grab is live. The whole selection is
-// excluded rather than just this one piece, because a row of walls moving
-// together is not a collision with itself.
-function overlapsAnother(object) {
-	const box = object.boundingBox().expandByScalar(-0.01);
-	const hits = three.query.box(box);
-	for (const hit of hits) {
-		const other = pieceOf(hit);
-		if (other && other !== object && !isSelected(other.name)) return true;
-	}
-	return false;
-}
-
-function syncRowById(id, snap) {
-	const row = level.rows.find(r => r.id === id);
-	const object = level.objects.get(id);
-	if (!row || !object) return;
-	row.position = object.position.toArray();
-	row.rotation = object.rotation.toArray();
-	row.scale = object.scale.toArray();
-	if (snap !== undefined) {
-		if (snap) row.snap = snap; else delete row.snap;
-	}
-}
-
-function placeNewPiece(piece, groundPoint, pickHit, opts = {}) {
-	if (!currentAsset || !currentAsset.nodes.includes(piece)) {
-		setStatus(`no piece named '${piece}' in the current kit`);
-		return null;
-	}
-	// The same "nothing to draw" refusal the browser's own pieces already
-	// exclude, kept here too: a stamp set straight through editor.stamp() (a
-	// script driving this headlessly, say) never saw that filter.
-	if (currentAsset.node(piece).boundsInParent() === null) {
-		setStatus(`${piece} has nothing to draw`);
-		state.stamp = null;
-		syncUI();
-		return null;
-	}
-	pushUndo();
-	const id = freshId(piece);
-	const row = { id, piece, position: [0, 0, 0], rotation: [0, 0, 0] };
-	let object;
-	try {
-		object = level.add(row);
-	} catch (e) {
-		undoStack.pop();
-		setStatus(String(e.message ?? e));
-		return null;
-	}
-	const snap = placeByMode(object, groundPoint, pickHit, opts);
-	syncRowById(id, snap);
-	select(id);
-	markDirty();
-	setStatus(`placed ${id}`);
-	return id;
-}
-
-// ---------------------------------------------------------------------------
-// Selection and the outlines that follow it
-// ---------------------------------------------------------------------------
-
-function rebuildSelectionHelpers() {
-	for (const { helper } of selectionHelpers) if (helper.parent) helper.parent.remove(helper);
-	selectionHelpers = [];
-	const active = activeId();
-	for (const id of state.selection) {
-		const object = level.objects.get(id);
-		if (!object || !object.parent) continue;
-		const helper = new three.BoxHelper(object, id === active ? ACTIVE_COLOR : ALSO_COLOR);
-		object.parent.add(helper);
-		selectionHelpers.push({ id, helper });
-	}
-}
-
-function updateSelectionHelpers() {
-	const active = activeId();
-	for (const { id, helper } of selectionHelpers) {
-		helper.update();
-		const object = level.objects.get(id);
-		const clash = object ? overlapsAnother(object) : false;
-		helper.color = clash ? CLASH_COLOR : id === active ? ACTIVE_COLOR : ALSO_COLOR;
-	}
-}
-
-// The one writer of `state.selection` — everything else goes through `select`
-// or `toggleSelected`, so the outlines, the panel and `three.persist` cannot
-// drift from the list.
-function setSelection(ids) {
-	// A Set keeps it deduplicated and an array keeps the order it was picked
-	// in, which is the order the last-is-active rule reads.
-	const seen = new Set();
-	const kept = [];
-	for (const id of ids) {
-		if (!id || seen.has(id) || !level.objects.has(id)) continue;
-		seen.add(id);
-		kept.push(id);
-	}
-	state.selection = kept;
-	state.markerChoice = null;
-	state.markerChoices = [];
-	rebuildSelectionHelpers();
-	syncPersist();
-	syncUI();
-}
-
-// One id, a list of them, or null for nothing.
-function select(ids) {
-	if (ids === null || ids === undefined) { setSelection([]); return; }
-	setSelection(Array.isArray(ids) ? ids : [ids]);
-}
-
-// What shift+click does: out if it was in, and on the END if it was not, so
-// the piece just added is the active one.
-function toggleSelected(id) {
-	if (!id || !level.objects.has(id)) return;
-	setSelection(isSelected(id) ? state.selection.filter(other => other !== id) : [...state.selection, id]);
-}
-
-// ---------------------------------------------------------------------------
-// Grab — a live preview driven by the cursor every frame, committed or
-// cancelled on a click / escape.
-//
-// The active piece is the one the cursor and the snap rules are about; the
-// rest of the selection holds the offset it had when the grab began, which is
-// what makes moving a wall and its door move the pair rather than stack them.
-// ---------------------------------------------------------------------------
-
-function grab() {
-	if (state.selection.length === 0 || state.grab || state.scaling) return;
-	const id = activeId();
-	const lead = level.objects.get(id);
-	if (!lead) return;
-	const row = level.rows.find(r => r.id === id);
-	const followers = [];
-	const original = new Map();
-	for (const other of state.selection) {
-		const object = level.objects.get(other);
-		if (!object) continue;
-		const theirRow = level.rows.find(r => r.id === other);
-		original.set(other, {
-			position: object.position.toArray(),
-			rotation: object.rotation.toArray(),
-			snap: theirRow && theirRow.snap ? { ...theirRow.snap } : null,
-		});
-		if (other === id) continue;
-		followers.push({
-			id: other,
-			offset: [
-				object.position.x - lead.position.x,
-				object.position.y - lead.position.y,
-				object.position.z - lead.position.z,
-			],
-		});
-	}
-	state.grab = {
-		id,
-		followers,
-		original,
-		// Which single direction the move is confined to, or null for the
-		// cursor's own reading of the ground. `x` / `y` / `z` while grabbing.
-		axis: null,
-		before: snapshot(),
-		lastSnap: row ? (row.snap ?? null) : null,
+		this.sync();
+		return result === UNCHANGED ? undefined : result;
 	};
 }
 
-// Lock the live gesture — a grab or a scale — to one direction, or free it
-// again with null. The line is drawn through the active piece as it stands,
-// and a move is measured from where the grab began, so switching from x to z
-// puts back the x it had rather than keeping a half-finished move on an axis
-// nobody chose. A scale recomputes from each piece's original either way.
-function setAxis(axis) {
-	const op = state.grab ?? state.scaling;
-	if (!op) return;
-	op.axis = axis;
-	const lead = level.objects.get(state.grab ? state.grab.id : activeId());
-	const box = lead ? lead.boundingBox() : null;
-	if (axis && box) showAxisGuide(axis, box.center); else hideAxisGuide();
-	if (state.grab) updateGrabPreview(); else updateScalePreview();
-	syncUI();
-}
-
-function updateGrabPreview() {
-	if (!state.grab) return;
-	const lead = level.objects.get(state.grab.id);
-	if (!lead) { state.grab = null; return; }
-	const pointer = three.input.pointer;
-	const freehand = three.input.isDown('shift');
-	const axis = state.grab.axis;
-
-	if (axis) {
-		// One coordinate moves and the other two go back to where the grab
-		// began — which is what "on this axis only" has to mean, and why the
-		// start position is read from `original` rather than from the piece.
-		const start = state.grab.original.get(state.grab.id).position;
-		const from = { x: start[0], y: start[1], z: start[2] };
-		const along = axisUnderCursor(from, axis, pointer.x, pointer.y);
-		if (along !== null) {
-			lead.position.set(
-				axis === 'x' ? along : from.x,
-				axis === 'y' ? along : from.y,
-				axis === 'z' ? along : from.z,
-			);
-			// The grid still applies, on the one axis that moved; shift is the
-			// same "skip the snap" it is everywhere else here.
-			if (!freehand) snapAxisToGrid(lead, axis);
-		}
-		// A constrained move is a move and not a snap: whatever it used to
-		// hang off, it is where the axis put it now.
-		state.grab.lastSnap = null;
-	} else {
-		const groundPoint = groundHit(pointer.x, pointer.y, lead.position.y);
-		const hit = scene.pick(pointer.x, pointer.y);
-		if (groundPoint) {
-			state.grab.lastSnap = placeByMode(lead, groundPoint, hit, { freehand });
-		}
-	}
-
-	for (const follower of state.grab.followers) {
-		const object = level.objects.get(follower.id);
-		if (!object) continue;
-		object.position.set(
-			lead.position.x + follower.offset[0],
-			lead.position.y + follower.offset[1],
-			lead.position.z + follower.offset[2],
-		);
-	}
-	updateSelectionHelpers();
-}
-
-function commit() {
-	if (!state.grab) return;
-	updateGrabPreview();
-	const { id, followers, before } = state.grab;
-	syncRowById(id, state.grab.lastSnap ?? null);
-	// A follower was carried rather than snapped, so whatever it used to be
-	// snapped to is no longer where it is — the row says freehand and means it.
-	for (const follower of followers) syncRowById(follower.id, null);
-	pushSnapshot(undoStack, before);
-	redoStack = [];
-	state.grab = null;
-	hideAxisGuide();
-	select(state.selection);
-	markDirty();
-}
-
-function cancelGrab() {
-	for (const [id, orig] of state.grab.original) {
-		const object = level.objects.get(id);
-		if (!object) continue;
-		object.position.set(orig.position[0], orig.position[1], orig.position[2]);
-		object.rotation.set(orig.rotation[0], orig.rotation[1], orig.rotation[2]);
-		syncRowById(id, orig.snap);
-	}
-	state.grab = null;
-	hideAxisGuide();
-	select(state.selection);
-}
-
-// Escape backs out one step at a time: the axis lock first, then the gesture,
-// then the stamp. Undoing a whole move because the axis was the wrong one is
-// the annoyance that made this two steps rather than one.
-function cancel() {
-	const op = state.grab ?? state.scaling;
-	if (op && op.axis) { setAxis(null); return; }
-	if (state.grab) cancelGrab();
-	else if (state.scaling) cancelScale();
-	else if (state.stamp) state.stamp = null;
-	syncUI();
+// A field `three.persist` mirrors under `key`, so it survives `three.reload()`:
+// every assignment is written through. Its starting value is the field's own,
+// and fills the key only if a previous run left nothing there — `boot` reads
+// what was remembered before it replaces it.
+function persisted(key) {
+	return ({ set }) => ({
+		init(value) { three.persist[key] ??= value; return value; },
+		set(value) { set.call(this, value); three.persist[key] = value; },
+	});
 }
 
 // ---------------------------------------------------------------------------
-// Scale — `s`, the same modal shape as a grab: live under the cursor, locked
-// to an axis with x / y / z, committed with a click and cancelled with escape.
-//
-// The ruler is how far the cursor is from the piece on a camera-facing plane
-// through it: pull away to grow it, come back in to shrink it. That is the
-// closest thing to Blender's screen-space distance available here — there is
-// no world-to-screen projection in the API — and it reads the same way at any
-// camera angle, including one tilted up at the horizon.
-//
-// Each piece scales about its own pivot and keeps its position, which is the
-// same choice `rotate` makes: a kit's pieces are placed by their own origins,
-// so scaling around a shared centre would slide four walls off their corners.
+// The editor — every piece of state, and every operation on it
 // ---------------------------------------------------------------------------
 
 const SCALE_STEP = 0.25;   // what a factor rounds to unless shift is held
 const SCALE_MIN = 0.05;
 const SCALE_MAX = 20;
 const REACH_MIN = 0.5;     // a cursor on top of the pivot is not a ruler
+const MODES = ['grid', 'face', 'marker'];
+const DEFAULT_LEVEL = 'levels/level.json';
 
-// How far the cursor is from `anchor`, measured on the plane through it that
-// faces the camera.
-//
-// Not the ground plane, which was the first try and is wrong in a way that is
-// invisible until it bites: a ray through a cursor above the horizon never
-// meets y = 0, so the gesture silently froze whenever the camera was tilted up.
-// A camera-facing plane is hit by every ray through the viewport, and the
-// distance on it is the depth-corrected version of "how far the cursor is from
-// the thing on screen", which is the reading Blender's own scale has.
-//
-// The anchor is a POINT captured once and not the piece's live centre: a piece
-// grows about its pivot, so its centre moves as it is scaled, and measuring to
-// something the gesture is itself moving is a feedback loop — the factor
-// crept away from what the cursor was asking for, frame after frame.
-function cursorReach(anchor) {
-	const pointer = three.input.pointer;
-	const ray = three.camera.ray(pointer.x, pointer.y);
-	const n = three.camera.forward();
-	const denom = ray.direction.x * n.x + ray.direction.y * n.y + ray.direction.z * n.z;
-	if (Math.abs(denom) < 1e-8) return null;
-	const t = ((anchor.x - ray.origin.x) * n.x + (anchor.y - ray.origin.y) * n.y + (anchor.z - ray.origin.z) * n.z) / denom;
-	if (!(t > 0)) return null;
-	return Math.hypot(
-		ray.origin.x + ray.direction.x * t - anchor.x,
-		ray.origin.y + ray.direction.y * t - anchor.y,
-		ray.origin.z + ray.direction.z * t - anchor.z,
-	);
-}
+class Editor {
+	// The live three.level.Level — replaced whole by undo, open and new.
+	level = null;
+	// three.load(level.kit), its node tree, its pieces and one Card per piece:
+	// the browser's model, rebuilt together by `useAsset` so they never drift.
+	asset = null;
+	assetTree = null;
+	pieces = [];
+	cards = new Map();
 
-// Where the piece is, as three plain numbers that will not move under the
-// gesture: its box centre if it has one, its pivot if it does not.
-function anchorOf(object) {
-	const box = object.boundingBox();
-	const at = box ? box.center : object.position;
-	return { x: at.x, y: at.y, z: at.z };
-}
+	// What a reload keeps.
+	@persisted('path') accessor path = null;
+	@persisted('mode') accessor mode = three.persist.mode ?? 'grid';
+	// The selection, in the order it was picked. The last id is the active one
+	// — see the header comment; `activeId` is the only reader of that rule.
+	@persisted('selected') accessor selection = [];
+	@persisted('dockOpen') accessor dockOpen = three.persist.dockOpen ?? true;
 
-function startScale() {
-	if (state.selection.length === 0 || state.grab || state.scaling) return;
-	const lead = level.objects.get(activeId());
-	if (!lead) return;
-	const original = new Map();
-	for (const id of state.selection) {
-		const object = level.objects.get(id);
-		if (object) original.set(id, object.scale.toArray());
-	}
-	if (original.size === 0) return;
-	const anchor = anchorOf(lead);
-	state.scaling = {
-		axis: null,
-		original,
-		anchor,
-		// Set only by `editor.scale(factor)` — see `updateScalePreview`.
-		pinned: false,
-		reach: Math.max(cursorReach(anchor) ?? REACH_MIN, REACH_MIN),
-		factor: 1,
-		before: snapshot(),
-	};
-	syncUI();
-}
-
-function applyScale() {
-	if (!state.scaling) return;
-	const { original, axis, factor } = state.scaling;
-	for (const [id, base] of original) {
-		const object = level.objects.get(id);
-		if (!object) continue;
-		// Always from the ORIGINAL, never from what is on screen: a preview
-		// that multiplied what it drew last frame would compound sixty times a
-		// second, and locking an axis after a uniform pull could not put the
-		// other two back.
-		object.scale.set(
-			!axis || axis === 'x' ? base[0] * factor : base[0],
-			!axis || axis === 'y' ? base[1] * factor : base[1],
-			!axis || axis === 'z' ? base[2] * factor : base[2],
-		);
-	}
-}
-
-function updateScalePreview() {
-	if (!state.scaling) return;
-	if (!level.objects.has(activeId())) { state.scaling = null; hideAxisGuide(); return; }
-	// A factor a script named is the factor, and the cursor does not get a
-	// vote: without this the next frame — or the read `commitScale` does —
-	// would quietly put the pointer's own reading back over it.
-	if (state.scaling.pinned) { applyScale(); updateSelectionHelpers(); return; }
-	const reach = cursorReach(state.scaling.anchor);
-	if (reach !== null) {
-		const raw = reach / state.scaling.reach;
-		const stepped = three.input.isDown('shift') ? raw : Math.round(raw / SCALE_STEP) * SCALE_STEP;
-		const floor = three.input.isDown('shift') ? SCALE_MIN : SCALE_STEP;
-		state.scaling.factor = Math.min(Math.max(stepped, floor), SCALE_MAX);
-	}
-	applyScale();
-	updateSelectionHelpers();
-}
-
-function commitScale() {
-	if (!state.scaling) return;
-	updateScalePreview();
-	const { before, original } = state.scaling;
-	// `snap` is left alone: it aligns edges, and a piece that grew still meets
-	// the face it was snapped to along the edge the loader will align again.
-	for (const id of original.keys()) syncRowById(id);
-	pushSnapshot(undoStack, before);
+	stamp = null;            // the browser's piece that ctrl+click places
+	// The two modal gestures, and only ever one of them live: a grab (`g`) and
+	// a scale (`s`). Each keeps an original per piece to measure against or
+	// put back, and an optional axis.
+	grabbing = null;
+	scaling = null;
+	dirty = false;
+	showGrid = true;
+	markerChoice = null;
+	markerChoices = [];
+	lastError = '';
+	undoStack = [];
 	redoStack = [];
-	state.scaling = null;
-	hideAxisGuide();
-	select(state.selection);
-	markDirty();
-}
 
-function cancelScale() {
-	for (const [id, base] of state.scaling.original) {
-		const object = level.objects.get(id);
-		if (object) object.scale.set(base[0], base[1], base[2]);
+	// The dialogs.
+	pendingKit = null;       // the kit a "discard changes?" is on the way to
+	confirmDeleteIds = [];
+	confirmDeleteOpen = false;
+	confirmNewOpen = false;
+	openDialogOpen = false;
+	kitDialogOpen = false;
+	saveAsOpen = false;
+	saveAsText = '';
+	exportOpen = false;
+	exportText = '';
+
+	// One outline per selected piece, in the selection's order, and the line
+	// along a locked axis.
+	outlines = [];
+	axisGuide = null;
+
+	// Whichever modal gesture is live reads the cursor here — this is the only
+	// thing driving either of them, so a branch missing from this line is a key
+	// that appears to do nothing at all.
+	@three.systems.frame @safe
+	follow() {
+		if (this.grabbing) this.updateGrabPreview();
+		else if (this.scaling) this.updateScalePreview();
+		statusBar.sync();
+		props.sync();
 	}
-	state.scaling = null;
-	hideAxisGuide();
-	select(state.selection);
-}
 
-// ---------------------------------------------------------------------------
-// Rotate, nudge, duplicate, delete
-// ---------------------------------------------------------------------------
-
-// Every selected piece turns about its own centre rather than the group's,
-// which is what a kit wants: four walls each facing the way they were built,
-// turned a quarter each, still make a room.
-function rotate(dir) {
-	if (state.selection.length === 0 || state.scaling) return;
-	if (!state.grab) pushUndo();
-	let turned = 0;
-	for (const id of state.selection) {
-		const object = level.objects.get(id);
-		if (!object) continue;
-		object.rotation.y = wrapTurn(object.rotation.y + dir * Math.PI / 2);
-		if (!state.grab) syncRowById(id);
-		turned++;
+	// The interface, up to date now rather than a frame late: the parts that
+	// cache their own text re-sync, and both floors re-render so whatever
+	// structural state changed — a dialog, a filter, a new kit — shows.
+	sync() {
+		props.sync();
+		statusBar.sync();
+		chrome.update();
+		dialogs.update();
 	}
-	if (turned === 0) return;
-	if (!state.grab) markDirty();
-	updateSelectionHelpers();
-	syncUI();
-}
 
-function nudge(dx, dy, dz) {
-	if (state.selection.length === 0 || state.grab || state.scaling) return;
-	pushUndo();
-	let moved = 0;
-	for (const id of state.selection) {
-		const object = level.objects.get(id);
-		if (!object) continue;
-		object.position.set(object.position.x + dx, object.position.y + dy, object.position.z + dz);
-		syncRowById(id);
-		moved++;
+	setStatus(message) {
+		this.lastError = message;
+		this.sync();
 	}
-	if (moved === 0) { undoStack.pop(); return; }
-	updateSelectionHelpers();
-	markDirty();
-	syncUI();
-}
 
-// A copy of everything selected, one unit along x, selected in the order the
-// originals were — and then grabbed, so the copies land where the cursor says
-// rather than in the pile they were made in.
-function duplicate() {
-	if (state.selection.length === 0 || state.grab || state.scaling) return;
-	pushUndo();
-	const copies = [];
-	for (const source of state.selection) {
-		const src = level.rows.find(r => r.id === source);
-		const object = level.objects.get(source);
-		if (!src || !object) continue;
-		const id = freshId(src.piece);
-		level.add({
-			id,
-			piece: src.piece,
-			position: [object.position.x + 1, object.position.y, object.position.z],
-			rotation: object.rotation.toArray(),
-		});
-		copies.push(id);
+	// ---- Reading the level --------------------------------------------------
+
+	// The active piece: the last one picked, and the one every "there is only
+	// room to say this about one of them" reading is about — the properties
+	// panel, the snap a grab makes, the marker choice.
+	get activeId() {
+		return this.selection.length > 0 ? this.selection[this.selection.length - 1] : null;
 	}
-	if (copies.length === 0) { undoStack.pop(); return; }
-	select(copies);
-	grab();
-	markDirty();
-}
 
-function requestRemove() {
-	if (state.selection.length === 0) return;
-	state.confirmDeleteIds = [...state.selection];
-	state.confirmDeleteOpen = true;
-	syncUI();
-}
+	// Whether a modal gesture owns the keyboard and the next click.
+	get gesture() { return this.grabbing ?? this.scaling ?? null; }
 
-function confirmRemove() {
-	const ids = state.confirmDeleteIds.filter(id => level.objects.has(id));
-	state.confirmDeleteIds = [];
-	state.confirmDeleteOpen = false;
-	if (ids.length === 0) { syncUI(); return; }
+	isSelected(id) { return this.selection.includes(id); }
 
-	// A piece snapped to one of these keeps it alive — unless it is going too,
-	// which is what makes "remove the wall and the door on it" work while
-	// "remove the wall out from under the door" still does not.
-	const going = new Set(ids);
-	for (const id of ids) {
-		const blocking = level.rows.find(r => r.snap && r.snap.to === id && !going.has(r.id));
-		if (blocking) {
-			setStatus(`cannot remove ${id} — ${blocking.id} snaps to it`);
-			return;
+	rowOf(id) { return this.level.rows.find(r => r.id === id); }
+
+	// Walks up from whatever `scene.pick` handed back — often a Mesh several
+	// levels inside a piece — to the row's own root, identified the way
+	// `Level` identifies it: the object a row's id is the key for.
+	pieceOf(object) {
+		for (let o = object; o; o = o.parent) {
+			if (this.level.objects.get(o.name) === o) return o;
 		}
-	}
-	pushUndo();
-	for (const id of ids) level.remove(id);
-	select(state.selection.filter(id => !going.has(id)));
-	markDirty();
-	setStatus(ids.length === 1 ? `removed ${ids[0]}` : `removed ${ids.length} pieces`);
-}
-
-function cancelRemove() {
-	state.confirmDeleteIds = [];
-	state.confirmDeleteOpen = false;
-	syncUI();
-}
-
-// ---------------------------------------------------------------------------
-// Files
-// ---------------------------------------------------------------------------
-
-function doSave(path) {
-	// `three.level.save` answers the full filesystem path it actually wrote
-	// to, for a log or a status line — not what `state.path` wants, which
-	// has to stay assets-relative so a later save, `three.level.load` and
-	// `three.persist.path` all keep meaning the same file.
-	const target = path ?? state.path ?? 'levels/level.json';
-	three.level.save(target, level);
-	state.path = target;
-	state.dirty = false;
-	syncPersist();
-	syncUI();
-	return state.path;
-}
-
-function doOpen(path) {
-	for (const obj of [...level.objects.values()]) if (obj.parent) obj.parent.remove(obj);
-	const next = three.level.load(path, scene);
-	if (!next) {
-		setStatus(`no level at ${path}`);
 		return null;
 	}
-	level = next;
-	setCurrentAsset(level.kit ? three.load(level.kit) : null);
-	state.path = path;
-	state.dirty = false;
-	undoStack = [];
-	redoStack = [];
-	select(null);
-	syncPersist();
-	frameAllExcludingHelpers();
-	syncUI();
-	return level;
-}
 
-function doNewLevel(kit) {
-	if (level) for (const obj of [...level.objects.values()]) if (obj.parent) obj.parent.remove(obj);
-	const next = three.level.create(kit);
-	next.parent = scene;
-	level = next;
-	setCurrentAsset(kit ? three.load(kit) : null);
-	state.path = null;
-	state.dirty = false;
-	// A kit is now chosen, so whatever asked for one closes — the dialog's
-	// own onChoose already does this before calling in on the normal path,
-	// but `editor.newLevel()` (a script driving this headlessly, with no
-	// dialog to click through) is a second way in that needs it done here.
-	state.kitDialogOpen = false;
-	undoStack = [];
-	redoStack = [];
-	select(null);
-	syncPersist();
-	syncUI();
-	return level;
-}
+	freshId(piece) {
+		let n = 1;
+		while (this.level.objects.has(`${piece}_${n}`)) n++;
+		return `${piece}_${n}`;
+	}
 
-function requestNew() {
-	state.pendingKit = null;
-	if (state.dirty) { state.confirmNewOpen = true; syncUI(); }
-	else { state.kitDialogOpen = true; syncUI(); }
-}
+	// Copies the piece's transform back onto its row, and its snap when one is
+	// given (null for freehand).
+	syncRow(id, snap) {
+		const row = this.rowOf(id);
+		const object = this.level.objects.get(id);
+		if (!row || !object) return;
+		row.position = object.position.toArray();
+		row.rotation = object.rotation.toArray();
+		row.scale = object.scale.toArray();
+		if (snap !== undefined) {
+			if (snap) row.snap = snap; else delete row.snap;
+		}
+	}
 
-// Picking a different kit straight off the catalog's library dropdown runs
-// the same discard flow as File > New, just already knowing which kit it is
-// headed for — `state.pendingKit` is what the confirm dialog's onConfirm
-// reads instead of falling back to the file browser.
-function requestKitChange(path) {
-	if (!path || (level && level.kit === path)) return;
-	if (state.dirty) { state.pendingKit = path; state.confirmNewOpen = true; syncUI(); }
-	else { doNewLevel(path); }
+	// Whether `object` is inside anything that is not part of the selection —
+	// what turns the outlines red while a grab is live. The whole selection is
+	// excluded rather than just this one piece, because a row of walls moving
+	// together is not a collision with itself.
+	overlapsAnother(object) {
+		const box = object.boundingBox().expandByScalar(-0.01);
+		for (const hit of three.query.box(box)) {
+			const other = this.pieceOf(hit);
+			if (other && other !== object && !this.isSelected(other.name)) return true;
+		}
+		return false;
+	}
+
+	// ---- The kit ------------------------------------------------------------
+
+	// Swaps in a freshly loaded kit and rebuilds the browser's models with it.
+	useAsset(asset) {
+		this.asset = asset;
+		this.assetTree = buildAssetTree(asset);
+		this.pieces = buildPieceList(this.assetTree).map(name => ({ name, category: categoryOf(name) }));
+		const cards = new Map();
+		for (const p of this.pieces) {
+			let box = null;
+			try { box = asset.node(p.name).boundsInParent(); } catch (e) { box = null; }
+			cards.set(p.name, new Card(p.name, p.category, box));
+		}
+		this.cards = cards;
+		if (this.stamp && !this.cards.has(this.stamp)) this.stamp = null;
+		catalog.refresh();
+		browser.update();
+	}
+
+	setStamp(piece) {
+		this.stamp = piece;
+		this.sync();
+	}
+
+	setMode(mode) {
+		if (!MODES.includes(mode)) return;
+		this.mode = mode;
+		this.sync();
+	}
+
+	// ---- Undo / redo --------------------------------------------------------
+	//
+	// Snapshots of level.toJSON(), deep-cloned because toJSON() hands back the
+	// level's own row objects and mutates them in place on every future call,
+	// which would otherwise corrupt a stored snapshot silently.
+
+	snapshot() { return JSON.parse(JSON.stringify(this.level.toJSON())); }
+
+	// Keep `before` as the newest undo step; anything that was redoable no
+	// longer follows from it.
+	remember(before) {
+		pushSnapshot(this.undoStack, before);
+		this.redoStack = [];
+	}
+
+	undo() { this.travel(this.undoStack, this.redoStack); }
+	redo() { this.travel(this.redoStack, this.undoStack); }
+
+	// Restore the newest snapshot on `from`, keeping the level as it is on `to`.
+	travel(from, to) {
+		if (from.length === 0) return;
+		pushSnapshot(to, this.snapshot());
+		this.restore(from.pop());
+		// The ids that survived the restore, in the order they were picked.
+		this.select(this.selection.filter(id => this.level.objects.has(id)));
+		this.dirty = true;
+		this.sync();
+	}
+
+	// Take every current piece out of the scene, ahead of a level replacing it.
+	clearLevel() {
+		if (!this.level) return;
+		for (const obj of [...this.level.objects.values()]) if (obj.parent) obj.parent.remove(obj);
+	}
+
+	// Rebuilds a Level from a saved snapshot — `load` without the file: drop
+	// every current object and replay `add(row)` in order over a fresh
+	// `three.level.create(kit)`.
+	restore(snap) {
+		this.clearLevel();
+		const next = three.level.create(snap.kit);
+		next.parent = scene;
+		for (const row of snap.rows) next.add(row);
+		this.level = next;
+		this.useAsset(snap.kit ? three.load(snap.kit) : null);
+	}
+
+	// ---- Placement — the one rule "what does a cursor mean", shared by a fresh
+	// stamp, a live grab preview and a grab's final commit. ---------------------
+
+	// Moves `object` (already in the scene, rotation already set) according to
+	// the current mode, a ground-plane candidate point and an optional pick hit.
+	// Answers the row's new `snap` (or null for freehand) — it does not touch
+	// the row itself, so a caller can decide when that write happens.
+	placeByMode(object, groundPoint, pickHit, opts = {}) {
+		const freehand = !!opts.freehand;
+		const mode = opts.mode ?? this.mode;
+
+		if (!freehand && (mode === 'face' || mode === 'marker')) {
+			const target = pickHit && pickHit.object ? this.pieceOf(pickHit.object) : null;
+			if (target && target !== object) {
+				if (mode === 'marker') {
+					const common = commonMarkers(object, target);
+					this.markerChoices = common;
+					const marker = common.includes(this.markerChoice) ? this.markerChoice : common[0];
+					if (marker) {
+						this.markerChoice = marker;
+						object.snapTo(target, marker);
+						return { to: target.name, side: marker };
+					}
+					// No marker in common — the documented fallback is face, not grid.
+				}
+				const side = sideFromNormal(pickHit.normal);
+				object.position.copy(pickHit.point);
+				object.snapTo(target, side);
+				for (const axis of ['x', 'y', 'z']) {
+					if (axis !== side[1]) snapAxisToGrid(object, axis);
+				}
+				return { to: target.name, side };
+			}
+		}
+
+		// The grid rule — the default mode, and the fallback for face/marker
+		// when nothing is under the cursor.
+		if (freehand) {
+			object.position.x = groundPoint.x;
+			object.position.z = groundPoint.z;
+			return null;
+		}
+		object.align('x', 'min', Math.round(groundPoint.x));
+		object.align('z', 'min', Math.round(groundPoint.z));
+		return null;
+	}
+
+	// A new piece of the kit, placed by the mode at a ground point. Answers its
+	// id, or nothing when it was refused.
+	@undoable
+	place(piece, groundPoint, pickHit, opts = {}) {
+		if (!this.asset || !this.asset.nodes.includes(piece)) {
+			this.setStatus(`no piece named '${piece}' in the current kit`);
+			return UNCHANGED;
+		}
+		// The same "nothing to draw" refusal the browser's own pieces already
+		// exclude, kept here too: a stamp set straight through editor.stamp() (a
+		// script driving this headlessly, say) never saw that filter.
+		if (this.asset.node(piece).boundsInParent() === null) {
+			this.stamp = null;
+			this.setStatus(`${piece} has nothing to draw`);
+			return UNCHANGED;
+		}
+		const id = this.freshId(piece);
+		let object;
+		try {
+			object = this.level.add({ id, piece, position: [0, 0, 0], rotation: [0, 0, 0] });
+		} catch (e) {
+			this.setStatus(String(e.message ?? e));
+			return UNCHANGED;
+		}
+		this.syncRow(id, this.placeByMode(object, groundPoint, pickHit, opts));
+		this.select(id);
+		this.setStatus(`placed ${id}`);
+		return id;
+	}
+
+	// ---- Selection and the outlines that follow it --------------------------
+
+	rebuildOutlines() {
+		for (const { helper } of this.outlines) if (helper.parent) helper.parent.remove(helper);
+		this.outlines = [];
+		const active = this.activeId;
+		for (const id of this.selection) {
+			const object = this.level.objects.get(id);
+			if (!object || !object.parent) continue;
+			const helper = new three.BoxHelper(object, id === active ? ACTIVE_COLOR : ALSO_COLOR);
+			object.parent.add(helper);
+			this.outlines.push({ id, helper });
+		}
+	}
+
+	updateOutlines() {
+		const active = this.activeId;
+		for (const { id, helper } of this.outlines) {
+			helper.update();
+			const object = this.level.objects.get(id);
+			const clash = object ? this.overlapsAnother(object) : false;
+			helper.color = clash ? CLASH_COLOR : id === active ? ACTIVE_COLOR : ALSO_COLOR;
+		}
+	}
+
+	// The one writer of `selection` — everything else goes through `select` or
+	// `toggle`, so the outlines, the panel and `three.persist` cannot drift
+	// from the list.
+	setSelection(ids) {
+		// A Set keeps it deduplicated and an array keeps the order it was
+		// picked in, which is the order the last-is-active rule reads.
+		const seen = new Set();
+		const kept = [];
+		for (const id of ids) {
+			if (!id || seen.has(id) || !this.level.objects.has(id)) continue;
+			seen.add(id);
+			kept.push(id);
+		}
+		this.selection = kept;
+		this.markerChoice = null;
+		this.markerChoices = [];
+		this.rebuildOutlines();
+		this.sync();
+	}
+
+	// One id, a list of them, or null for nothing.
+	select(ids) {
+		if (ids === null || ids === undefined) { this.setSelection([]); return; }
+		this.setSelection(Array.isArray(ids) ? ids : [ids]);
+	}
+
+	// What shift+click does: out if it was in, and on the END if it was not,
+	// so the piece just added is the active one.
+	toggle(id) {
+		if (!id || !this.level.objects.has(id)) return;
+		this.setSelection(this.isSelected(id) ? this.selection.filter(other => other !== id) : [...this.selection, id]);
+	}
+
+	// ---- Axis lock, shared by both gestures ---------------------------------
+
+	showAxisGuide(axis, at) {
+		this.hideAxisGuide();
+		if (!axis) return;
+		const min = { x: at.x, y: at.y, z: at.z };
+		const max = { x: at.x, y: at.y, z: at.z };
+		min[axis] -= AXIS_REACH;
+		max[axis] += AXIS_REACH;
+		// A box with two axes of zero size draws as the line along the third:
+		// the twelve edges collapse onto one segment, which is the picture
+		// wanted and one mesh rather than a new primitive.
+		this.axisGuide = new three.Box3Helper(new three.Box3(min.x, min.y, min.z, max.x, max.y, max.z), AXIS_COLOR[axis]);
+		helpers.add(this.axisGuide);
+	}
+
+	hideAxisGuide() {
+		if (this.axisGuide && this.axisGuide.parent) this.axisGuide.parent.remove(this.axisGuide);
+		this.axisGuide = null;
+	}
+
+	// Lock the live gesture to one direction, or free it again with null. The
+	// line is drawn through the active piece as it stands, and a move is
+	// measured from where the grab began, so switching from x to z puts back
+	// the x it had rather than keeping a half-finished move on an axis nobody
+	// chose. A scale recomputes from each piece's original either way.
+	setAxis(axis) {
+		const op = this.gesture;
+		if (!op) return;
+		op.axis = axis;
+		const lead = this.level.objects.get(this.grabbing ? this.grabbing.id : this.activeId);
+		const box = lead ? lead.boundingBox() : null;
+		if (axis && box) this.showAxisGuide(axis, box.center); else this.hideAxisGuide();
+		if (this.grabbing) this.updateGrabPreview(); else this.updateScalePreview();
+		this.sync();
+	}
+
+	// Pressing the axis already locked frees it, so the same key is on and off.
+	toggleAxis(axis) {
+		const op = this.gesture;
+		if (op) this.setAxis(op.axis === axis ? null : axis);
+	}
+
+	// Both gestures end the same way, committed or not.
+	endGesture() {
+		this.grabbing = null;
+		this.scaling = null;
+		this.hideAxisGuide();
+		this.select(this.selection);
+	}
+
+	commit() {
+		if (this.scaling) this.commitScale(); else this.commitGrab();
+	}
+
+	// Escape backs out one step at a time: the axis lock first, then the
+	// gesture, then the stamp. Undoing a whole move because the axis was the
+	// wrong one is the annoyance that made this two steps rather than one.
+	cancel() {
+		const op = this.gesture;
+		if (op && op.axis) { this.setAxis(null); return; }
+		if (this.grabbing) this.cancelGrab();
+		else if (this.scaling) this.cancelScale();
+		else if (this.stamp) this.stamp = null;
+		this.sync();
+	}
+
+	// ---- Grab — a live preview driven by the cursor every frame, committed or
+	// cancelled on a click / escape.
+	//
+	// The active piece is the one the cursor and the snap rules are about; the
+	// rest of the selection holds the offset it had when the grab began, which
+	// is what makes moving a wall and its door move the pair rather than stack
+	// them. ------------------------------------------------------------------
+
+	grab() {
+		if (this.selection.length === 0 || this.gesture) return;
+		const id = this.activeId;
+		const lead = this.level.objects.get(id);
+		if (!lead) return;
+		const followers = [];
+		const original = new Map();
+		for (const other of this.selection) {
+			const object = this.level.objects.get(other);
+			if (!object) continue;
+			const theirRow = this.rowOf(other);
+			original.set(other, {
+				position: object.position.toArray(),
+				rotation: object.rotation.toArray(),
+				snap: theirRow && theirRow.snap ? { ...theirRow.snap } : null,
+			});
+			if (other === id) continue;
+			followers.push({
+				id: other,
+				offset: [
+					object.position.x - lead.position.x,
+					object.position.y - lead.position.y,
+					object.position.z - lead.position.z,
+				],
+			});
+		}
+		this.grabbing = {
+			id,
+			followers,
+			original,
+			// Which single direction the move is confined to, or null for the
+			// cursor's own reading of the ground. `x` / `y` / `z` while grabbing.
+			axis: null,
+			before: this.snapshot(),
+			lastSnap: this.rowOf(id)?.snap ?? null,
+		};
+	}
+
+	updateGrabPreview() {
+		const grab = this.grabbing;
+		if (!grab) return;
+		const lead = this.level.objects.get(grab.id);
+		if (!lead) { this.grabbing = null; return; }
+		const pointer = three.input.pointer;
+		const freehand = held('shift');
+
+		if (grab.axis) {
+			// One coordinate moves and the other two go back to where the grab
+			// began — which is what "on this axis only" has to mean, and why the
+			// start position is read from `original` rather than from the piece.
+			const start = grab.original.get(grab.id).position;
+			const from = { x: start[0], y: start[1], z: start[2] };
+			const along = axisUnderCursor(from, grab.axis, pointer.x, pointer.y);
+			if (along !== null) {
+				lead.position.set(
+					grab.axis === 'x' ? along : from.x,
+					grab.axis === 'y' ? along : from.y,
+					grab.axis === 'z' ? along : from.z,
+				);
+				// The grid still applies, on the one axis that moved; shift is
+				// the same "skip the snap" it is everywhere else here.
+				if (!freehand) snapAxisToGrid(lead, grab.axis);
+			}
+			// A constrained move is a move and not a snap: whatever it used to
+			// hang off, it is where the axis put it now.
+			grab.lastSnap = null;
+		} else {
+			const groundPoint = groundHit(pointer.x, pointer.y, lead.position.y);
+			const hit = scene.pick(pointer.x, pointer.y);
+			if (groundPoint) grab.lastSnap = this.placeByMode(lead, groundPoint, hit, { freehand });
+		}
+
+		for (const follower of grab.followers) {
+			const object = this.level.objects.get(follower.id);
+			if (!object) continue;
+			object.position.set(
+				lead.position.x + follower.offset[0],
+				lead.position.y + follower.offset[1],
+				lead.position.z + follower.offset[2],
+			);
+		}
+		this.updateOutlines();
+	}
+
+	// The grab's own snapshot, taken when it began, is the undo step — not one
+	// taken now, which would already hold the move.
+	commitGrab() {
+		if (!this.grabbing) return;
+		this.updateGrabPreview();
+		if (!this.grabbing) return;
+		const { id, followers, before, lastSnap } = this.grabbing;
+		this.syncRow(id, lastSnap ?? null);
+		// A follower was carried rather than snapped, so whatever it used to be
+		// snapped to is no longer where it is — the row says freehand and means it.
+		for (const follower of followers) this.syncRow(follower.id, null);
+		this.remember(before);
+		this.endGesture();
+		this.dirty = true;
+	}
+
+	cancelGrab() {
+		for (const [id, orig] of this.grabbing.original) {
+			const object = this.level.objects.get(id);
+			if (!object) continue;
+			object.position.set(...orig.position);
+			object.rotation.set(...orig.rotation);
+			this.syncRow(id, orig.snap);
+		}
+		this.endGesture();
+	}
+
+	// ---- Scale — `s`, the same modal shape as a grab: live under the cursor,
+	// locked to an axis with x / y / z, committed with a click and cancelled
+	// with escape.
+	//
+	// The ruler is `cursorReach`. Each piece scales about its own pivot and
+	// keeps its position, which is the same choice `rotate` makes: a kit's
+	// pieces are placed by their own origins, so scaling around a shared centre
+	// would slide four walls off their corners. ---------------------------------
+
+	startScale() {
+		if (this.selection.length === 0 || this.gesture) return;
+		const lead = this.level.objects.get(this.activeId);
+		if (!lead) return;
+		const original = new Map();
+		for (const id of this.selection) {
+			const object = this.level.objects.get(id);
+			if (object) original.set(id, object.scale.toArray());
+		}
+		if (original.size === 0) return;
+		const anchor = anchorOf(lead);
+		this.scaling = {
+			axis: null,
+			original,
+			anchor,
+			// Set only by `editor.scale(factor)` — see `updateScalePreview`.
+			pinned: false,
+			reach: Math.max(cursorReach(anchor) ?? REACH_MIN, REACH_MIN),
+			factor: 1,
+			before: this.snapshot(),
+		};
+		this.sync();
+	}
+
+	applyScale() {
+		if (!this.scaling) return;
+		const { original, axis, factor } = this.scaling;
+		for (const [id, base] of original) {
+			const object = this.level.objects.get(id);
+			if (!object) continue;
+			// Always from the ORIGINAL, never from what is on screen: a preview
+			// that multiplied what it drew last frame would compound sixty times
+			// a second, and locking an axis after a uniform pull could not put
+			// the other two back.
+			object.scale.set(
+				!axis || axis === 'x' ? base[0] * factor : base[0],
+				!axis || axis === 'y' ? base[1] * factor : base[1],
+				!axis || axis === 'z' ? base[2] * factor : base[2],
+			);
+		}
+	}
+
+	updateScalePreview() {
+		const scaling = this.scaling;
+		if (!scaling) return;
+		if (!this.level.objects.has(this.activeId)) { this.scaling = null; this.hideAxisGuide(); return; }
+		// A factor a script named is the factor, and the cursor does not get a
+		// vote: without this the next frame — or the read `commitScale` does —
+		// would quietly put the pointer's own reading back over it.
+		if (!scaling.pinned) {
+			const reach = cursorReach(scaling.anchor);
+			if (reach !== null) {
+				const raw = reach / scaling.reach;
+				const free = held('shift');
+				const stepped = free ? raw : Math.round(raw / SCALE_STEP) * SCALE_STEP;
+				scaling.factor = Math.min(Math.max(stepped, free ? SCALE_MIN : SCALE_STEP), SCALE_MAX);
+			}
+		}
+		this.applyScale();
+		this.updateOutlines();
+	}
+
+	commitScale() {
+		if (!this.scaling) return;
+		this.updateScalePreview();
+		if (!this.scaling) return;
+		const { before, original } = this.scaling;
+		// `snap` is left alone: it aligns edges, and a piece that grew still
+		// meets the face it was snapped to along the edge the loader will align
+		// again.
+		for (const id of original.keys()) this.syncRow(id);
+		this.remember(before);
+		this.endGesture();
+		this.dirty = true;
+	}
+
+	cancelScale() {
+		for (const [id, base] of this.scaling.original) {
+			const object = this.level.objects.get(id);
+			if (object) object.scale.set(...base);
+		}
+		this.endGesture();
+	}
+
+	// No factor starts the interactive gesture, the way `s` does; a factor is
+	// the whole thing at once — start, scale, commit — which is what a script
+	// with no cursor to pull actually wants.
+	scaleBy(factor) {
+		if (factor === undefined) { this.startScale(); return; }
+		const wanted = +factor;
+		if (!(wanted > 0)) return;
+		const live = !!this.scaling;
+		if (!live) this.startScale();
+		if (!this.scaling) return;
+		this.scaling.factor = Math.min(Math.max(wanted, SCALE_MIN), SCALE_MAX);
+		this.scaling.pinned = true;
+		this.applyScale();
+		if (!live) this.commitScale();
+	}
+
+	// ---- Rotate, nudge, duplicate, delete -------------------------------------
+
+	// Every selected piece turns about its own centre rather than the group's,
+	// which is what a kit wants: four walls each facing the way they were
+	// built, turned a quarter each, still make a room. Mid-grab the turn is part
+	// of the move, and the grab's commit is its undo step.
+	rotate(dir) {
+		if (this.selection.length === 0 || this.scaling) return;
+		if (!this.grabbing) { this.turnPlaced(dir); return; }
+		if (this.turnSelection(dir)) this.sync();
+	}
+
+	@undoable
+	turnPlaced(dir) {
+		if (!this.turnSelection(dir)) return UNCHANGED;
+		for (const id of this.selection) this.syncRow(id);
+	}
+
+	// Answers how many pieces turned.
+	turnSelection(dir) {
+		let turned = 0;
+		for (const id of this.selection) {
+			const object = this.level.objects.get(id);
+			if (!object) continue;
+			object.rotation.y = wrapTurn(object.rotation.y + dir * Math.PI / 2);
+			turned++;
+		}
+		if (turned > 0) this.updateOutlines();
+		return turned;
+	}
+
+	@undoable
+	nudge(dx, dy, dz) {
+		if (this.selection.length === 0 || this.gesture) return UNCHANGED;
+		let moved = 0;
+		for (const id of this.selection) {
+			const object = this.level.objects.get(id);
+			if (!object) continue;
+			object.position.set(object.position.x + dx, object.position.y + dy, object.position.z + dz);
+			this.syncRow(id);
+			moved++;
+		}
+		if (moved === 0) return UNCHANGED;
+		this.updateOutlines();
+	}
+
+	// A copy of everything selected, one unit along x, selected in the order the
+	// originals were — and then grabbed, so the copies land where the cursor says
+	// rather than in the pile they were made in.
+	@undoable
+	duplicate() {
+		if (this.selection.length === 0 || this.gesture) return UNCHANGED;
+		const copies = [];
+		for (const source of this.selection) {
+			const src = this.rowOf(source);
+			const object = this.level.objects.get(source);
+			if (!src || !object) continue;
+			const id = this.freshId(src.piece);
+			this.level.add({
+				id,
+				piece: src.piece,
+				position: [object.position.x + 1, object.position.y, object.position.z],
+				rotation: object.rotation.toArray(),
+			});
+			copies.push(id);
+		}
+		if (copies.length === 0) return UNCHANGED;
+		this.select(copies);
+		this.grab();
+	}
+
+	@undoable
+	refit() { this.level.refit(); }
+
+	requestRemove() {
+		if (this.selection.length === 0) return;
+		this.confirmDeleteIds = [...this.selection];
+		this.confirmDeleteOpen = true;
+		this.sync();
+	}
+
+	@undoable
+	confirmRemove() {
+		const ids = this.confirmDeleteIds.filter(id => this.level.objects.has(id));
+		this.confirmDeleteIds = [];
+		this.confirmDeleteOpen = false;
+		if (ids.length === 0) return UNCHANGED;
+
+		// A piece snapped to one of these keeps it alive — unless it is going
+		// too, which is what makes "remove the wall and the door on it" work
+		// while "remove the wall out from under the door" still does not.
+		const going = new Set(ids);
+		for (const id of ids) {
+			const blocking = this.level.rows.find(r => r.snap && r.snap.to === id && !going.has(r.id));
+			if (blocking) {
+				this.setStatus(`cannot remove ${id} — ${blocking.id} snaps to it`);
+				return UNCHANGED;
+			}
+		}
+		for (const id of ids) this.level.remove(id);
+		this.select(this.selection.filter(id => !going.has(id)));
+		this.setStatus(ids.length === 1 ? `removed ${ids[0]}` : `removed ${ids.length} pieces`);
+	}
+
+	cancelRemove() {
+		this.confirmDeleteIds = [];
+		this.confirmDeleteOpen = false;
+		this.sync();
+	}
+
+	// The whole selection, not just the active piece — framing one wall of four
+	// that were picked together is a camera move nobody asked for.
+	frameSelection() {
+		let box = null;
+		for (const id of this.selection) {
+			const theirs = this.level.objects.get(id)?.boundingBox();
+			if (theirs) box = box ? box.union(theirs) : theirs;
+		}
+		if (box) three.camera.lookAt(box.center.x, box.center.y, box.center.z);
+	}
+
+	toggleGrid() {
+		this.showGrid = !this.showGrid;
+		gridHelper.visible = this.showGrid;
+	}
+
+	toggleDock() {
+		this.dockOpen = !this.dockOpen;
+		this.sync();
+	}
+
+	// ---- Files ----------------------------------------------------------------
+
+	save(path) {
+		// `three.level.save` answers the full filesystem path it actually wrote
+		// to, for a log or a status line — not what `path` wants, which has to
+		// stay assets-relative so a later save, `three.level.load` and
+		// `three.persist.path` all keep meaning the same file.
+		const target = path ?? this.path ?? DEFAULT_LEVEL;
+		three.level.save(target, this.level);
+		this.path = target;
+		this.dirty = false;
+		this.sync();
+		return this.path;
+	}
+
+	// A level replacing the current one wholesale: nothing selected, nothing to
+	// undo back into.
+	adopt(level, path) {
+		this.level = level;
+		this.useAsset(level.kit ? three.load(level.kit) : null);
+		this.path = path;
+		this.dirty = false;
+		this.undoStack = [];
+		this.redoStack = [];
+		this.select(null);
+	}
+
+	open(path) {
+		this.clearLevel();
+		const next = three.level.load(path, scene);
+		if (!next) {
+			this.setStatus(`no level at ${path}`);
+			return null;
+		}
+		this.adopt(next, path);
+		frameAllExcludingHelpers();
+		this.sync();
+		return this.level;
+	}
+
+	newLevel(kit) {
+		this.clearLevel();
+		const next = three.level.create(kit);
+		next.parent = scene;
+		// A kit is now chosen, so whatever asked for one closes — the dialog's
+		// own onChoose already does this before calling in on the normal path,
+		// but `editor.newLevel()` (a script driving this headlessly, with no
+		// dialog to click through) is a second way in that needs it done here.
+		this.kitDialogOpen = false;
+		this.adopt(next, null);
+		this.sync();
+		return this.level;
+	}
+
+	requestNew() {
+		this.pendingKit = null;
+		if (this.dirty) this.confirmNewOpen = true;
+		else this.kitDialogOpen = true;
+		this.sync();
+	}
+
+	// Picking a different kit straight off the catalog's library dropdown runs
+	// the same discard flow as File > New, just already knowing which kit it is
+	// headed for — `pendingKit` is what the confirm dialog's onConfirm reads
+	// instead of falling back to the file browser.
+	requestKitChange(path) {
+		if (!path || (this.level && this.level.kit === path)) return;
+		if (this.dirty) { this.pendingKit = path; this.confirmNewOpen = true; this.sync(); }
+		else this.newLevel(path);
+	}
+
+	confirmNew() {
+		this.confirmNewOpen = false;
+		if (this.pendingKit) { const kit = this.pendingKit; this.pendingKit = null; this.newLevel(kit); }
+		else this.kitDialogOpen = true;
+		this.sync();
+	}
+
+	openSaveAs() {
+		this.saveAsText = this.path ?? DEFAULT_LEVEL;
+		this.saveAsOpen = true;
+		this.sync();
+	}
+
+	openExport() {
+		this.exportText = 'levels/level.glb';
+		this.exportOpen = true;
+		this.sync();
+	}
+
+	// The scene without the editor's own furniture: the grid is not the level.
+	exportGlb(path) {
+		const parent = helpers.parent;
+		if (parent) parent.remove(helpers);
+		try {
+			this.setStatus(`exported ${scene.export(path || 'levels/level.glb').path}`);
+		} finally {
+			if (parent) parent.add(helpers);
+		}
+	}
+
+	// three.persist.path, or the assets directory's one .glb, or a prompt
+	// through the kit file browser.
+	boot() {
+		const bootPath = three.persist.path ?? DEFAULT_LEVEL;
+		const loaded = three.level.load(bootPath, scene);
+		if (loaded) {
+			this.level = loaded;
+			this.path = bootPath;
+			this.useAsset(loaded.kit ? three.load(loaded.kit) : null);
+		} else {
+			// Forget a remembered path that no longer loads.
+			this.path = null;
+			const glbs = three.inventory().filter(e => isKitPath(e.path));
+			const kit = glbs.length === 1 ? glbs[0].path : null;
+			this.level = three.level.create(kit);
+			this.level.parent = scene;
+			if (kit) this.useAsset(three.load(kit));
+			else this.kitDialogOpen = true;
+		}
+		// One id is what older runs of this editor remembered; a list is what it
+		// remembers now, and both have to open the same way.
+		const remembered = three.persist.selected;
+		if (remembered) this.select(Array.isArray(remembered) ? remembered : [remembered]);
+		frameAllExcludingHelpers();
+	}
+
+	// ---- The mouse ------------------------------------------------------------
+
+	// Three clicks, and which one it is decided before anything else happens: a
+	// gesture is modal and eats the click, then ctrl places, then shift adds,
+	// then a plain click selects the one piece under the cursor. Holding a stamp
+	// changes none of it — placing is ctrl+click, never the plain click.
+	click(hit, x, y) {
+		if (this.grabbing) { this.commitGrab(); return; }
+		if (this.scaling) { this.commitScale(); return; }
+		const piece = hit && hit.object ? this.pieceOf(hit.object) : null;
+
+		if (held('ctrl')) {
+			if (!this.stamp) { this.setStatus('nothing to place — pick a piece in the asset browser first'); return; }
+			const groundPoint = groundHit(x, y, 0);
+			if (!groundPoint) { this.setStatus('nothing to place on'); return; }
+			this.place(this.stamp, groundPoint, hit, { freehand: held('shift') });
+			return;
+		}
+
+		if (held('shift')) {
+			// A shift+click on nothing keeps what is selected: the gesture is
+			// "and this one too", and a miss should not undo the four before it.
+			if (piece) this.toggle(piece.name);
+			return;
+		}
+
+		this.select(piece ? piece.name : null);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1410,7 @@ class Card extends three.Widget {
 	}
 
 	render() {
-		const stamped = state.stamp === this.name;
+		const stamped = ed.stamp === this.name;
 		const bg = stamped ? THEME.accent : this.hovered ? THEME.hover : THEME.panel;
 		const ops = [
 			{ op: 'rect', at: [0, 0], size: [CARD_W, CARD_H], radius: THEME.radius, color: bg, borderColor: THEME.border, borderWidth: 1 },
@@ -1211,7 +1420,7 @@ class Card extends three.Widget {
 		];
 		return new Drawing({
 			key: this.name, size: [CARD_W, CARD_H], ops,
-			onClick: safe(() => editor.stamp(state.stamp === this.name ? null : this.name)),
+			onClick: safe(() => ed.setStamp(ed.stamp === this.name ? null : this.name)),
 			onHover: entered => { this.hovered = entered; },
 		});
 	}
@@ -1237,19 +1446,19 @@ class Catalog extends three.Widget {
 		return this.activeIndex > 0 && this.rows[this.activeIndex] ? this.rows[this.activeIndex].label : null;
 	}
 
-	// Called by setCurrentAsset() whenever the kit (and so the piece list)
+	// Called by `Editor.useAsset` whenever the kit (and so the piece list)
 	// changes — recomputes the library options and the category counts,
 	// keeping whatever category was active if it still exists.
 	refresh() {
-		this.kitOptions = three.inventory().filter(e => /\.glb$|\.gltf$/i.test(e.path)).map(e => e.path);
-		this.kitSelected = level && level.kit ? this.kitOptions.indexOf(level.kit) : -1;
+		this.kitOptions = three.inventory().filter(e => isKitPath(e.path)).map(e => e.path);
+		this.kitSelected = ed.level && ed.level.kit ? this.kitOptions.indexOf(ed.level.kit) : -1;
 
 		const counts = new Map();
-		for (const p of state.pieces) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+		for (const p of ed.pieces) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
 		const names = [...counts.keys()].sort();
-		const activeLabel = this.activeIndex > 0 && this.rows[this.activeIndex] ? this.rows[this.activeIndex].label : null;
+		const activeLabel = this.activeCategory;
 		this.rows = [
-			{ label: 'All', trailing: String(state.pieces.length) },
+			{ label: 'All', trailing: String(ed.pieces.length) },
 			...names.map(name => ({ label: name, trailing: String(counts.get(name)) })),
 		];
 		this.activeIndex = activeLabel ? Math.max(0, this.rows.findIndex(r => r.label === activeLabel)) : 0;
@@ -1260,22 +1469,13 @@ class Catalog extends three.Widget {
 			new Column({ gap: 10 },
 				new Label('Kit', { color: THEME.dim, textSize: 11 }),
 				new Select(this.kitOptions.map(kitLabel), this.kitSelected,
-					safe(i => requestKitChange(this.kitOptions[i])), { key: 'kitSelect' }),
+					safe(i => ed.requestKitChange(this.kitOptions[i])), { key: 'kitSelect' }),
 				new Scroll({ key: 'catalogScroll' },
 					new Tree(this.rows, this.activeIndex,
 						safe(i => { this.activeIndex = i; browser.update(); }), { key: 'categoryTree' })),
 			),
 		);
 	}
-}
-
-// Every piece currently passing the catalog's category filter and the
-// browser's own search text — the grid's contents, and what `editor._tree`
-// reports.
-function visiblePieces() {
-	const q = browser.search.trim().toLowerCase();
-	const category = catalog.activeCategory;
-	return state.pieces.filter(p => (!category || p.category === category) && (!q || p.name.toLowerCase().includes(q)));
 }
 
 // The dock's right column: a search header over a scrolling grid of cards.
@@ -1285,10 +1485,18 @@ class Browser extends three.Widget {
 		this.search = '';
 	}
 
+	// Every piece passing the catalog's category filter and this search text —
+	// the grid's contents, and what `editor._tree` reports.
+	visible() {
+		const q = this.search.trim().toLowerCase();
+		const category = catalog.activeCategory;
+		return ed.pieces.filter(p => (!category || p.category === category) && (!q || p.name.toLowerCase().includes(q)));
+	}
+
 	render() {
-		const visible = visiblePieces();
-		const cards = visible.map(p => pieceCards.get(p.name)).filter(Boolean);
-		const stampText = state.stamp ? `stamp: ${state.stamp} · esc clears` : 'click a piece to stamp it';
+		const visible = this.visible();
+		const cards = visible.map(p => ed.cards.get(p.name)).filter(Boolean);
+		const stampText = ed.stamp ? `stamp: ${ed.stamp} · esc clears` : 'click a piece to stamp it';
 
 		return new Column({},
 			new Stack({ size: [0, HEADER_H] },
@@ -1299,11 +1507,11 @@ class Browser extends three.Widget {
 							key: 'search', text: this.search, placeholder: 'Search', size: [180, 0],
 							onChange: safe(t => { this.search = t; }),
 						}),
-						new Label(`${visible.length} of ${state.pieces.length}`, { color: THEME.dim, textSize: 12 }),
+						new Label(`${visible.length} of ${ed.pieces.length}`, { color: THEME.dim, textSize: 12 }),
 					),
 				),
 				new Anchored({ h: 'end', v: 'center', margin: [10, 0] },
-					new Label(stampText, { color: state.stamp ? THEME.accent : THEME.dim, textSize: 12 }),
+					new Label(stampText, { color: ed.stamp ? THEME.accent : THEME.dim, textSize: 12 }),
 				),
 			),
 			new Scroll({ key: 'browserScroll' },
@@ -1318,7 +1526,7 @@ class Browser extends three.Widget {
 class Props extends three.Widget {
 	constructor() {
 		super();
-		this.mode = state.mode;
+		this.mode = ed.mode;
 		this.hasMarker = false;
 		this.markerOptions = [];
 		this.markerIndex = -1;
@@ -1332,51 +1540,42 @@ class Props extends three.Widget {
 		this.snap = '';
 	}
 
-	// Pulls this frame's numbers off `state`/`level` and writes only the
-	// fields that actually changed — the animation loop calls this every
-	// frame, so an unchanged value must not touch the proxy.
+	// Pulls this frame's numbers off the editor. The animation loop calls this
+	// every frame, and a widget only re-renders when a field really changes.
 	sync() {
-		if (this.mode !== state.mode) this.mode = state.mode;
-
-		const showMarker = state.mode === 'marker' && !!state.grab && state.markerChoices.length > 0;
-		if (this.hasMarker !== showMarker) this.hasMarker = showMarker;
-		if (showMarker) {
-			if (this.markerOptions.join(' ') !== state.markerChoices.join(' ')) this.markerOptions = state.markerChoices;
-			const idx = state.markerChoices.indexOf(state.markerChoice);
-			if (this.markerIndex !== idx) this.markerIndex = idx;
+		this.mode = ed.mode;
+		this.hasMarker = ed.mode === 'marker' && !!ed.grabbing && ed.markerChoices.length > 0;
+		if (this.hasMarker) {
+			// A list is always a change when assigned, so compare what it says.
+			if (this.markerOptions.join(' ') !== ed.markerChoices.join(' ')) this.markerOptions = ed.markerChoices;
+			this.markerIndex = ed.markerChoices.indexOf(ed.markerChoice);
 		}
 
 		// The panel reads the ACTIVE piece and says how many others came with
 		// it — five sets of numbers in a card this size is a wall of digits
 		// nobody reads, and the active one is the piece every verb is aimed at.
-		const active = activeId();
-		const row = active ? level.rows.find(r => r.id === active) : null;
-		const object = active ? level.objects.get(active) : null;
-		const has = !!(row && object);
-		if (this.hasSelection !== has) this.hasSelection = has;
-		if (this.count !== state.selection.length) this.count = state.selection.length;
-		if (!has) return;
+		const active = ed.activeId;
+		const row = active ? ed.rowOf(active) : null;
+		const object = active ? ed.level.objects.get(active) : null;
+		this.hasSelection = !!(row && object);
+		this.count = ed.selection.length;
+		if (!this.hasSelection) return;
 
-		if (this.id !== row.id) this.id = row.id;
-		if (this.piece !== row.piece) this.piece = row.piece;
-		const pos = positionText(object);
-		if (this.position !== pos) this.position = pos;
+		this.id = row.id;
+		this.piece = row.piece;
+		this.position = positionText(object);
 		const turns = Math.round(wrapTurn(object.rotation.y) / (Math.PI / 2)) % 4;
-		const rot = `${turns} quarter turn${turns === 1 ? '' : 's'}`;
-		if (this.rotation !== rot) this.rotation = rot;
+		this.rotation = `${turns} quarter turn${turns === 1 ? '' : 's'}`;
 		// Empty for a piece nobody has scaled, which is nearly all of them —
 		// a row saying "1, 1, 1" forever is a row nobody reads.
 		const s = object.scale;
-		const scaled = s.x !== 1 || s.y !== 1 || s.z !== 1
+		this.scale = s.x !== 1 || s.y !== 1 || s.z !== 1
 			? `${s.x.toFixed(2)}, ${s.y.toFixed(2)}, ${s.z.toFixed(2)}`
 			: '';
-		if (this.scale !== scaled) this.scale = scaled;
-		const snap = row.snap ? `${row.snap.to} ${row.snap.side}` : '(freehand)';
-		if (this.snap !== snap) this.snap = snap;
+		this.snap = row.snap ? `${row.snap.to} ${row.snap.side}` : '(freehand)';
 	}
 
 	render() {
-		const modes = ['grid', 'face', 'marker'];
 		// A Row with no size hugs its content, so `main: 'space-between'` has
 		// no slack to spend — the caption instead gets a fixed-size column (a
 		// Stack, which has a box size to give it) so the value lands at a
@@ -1392,14 +1591,14 @@ class Props extends three.Widget {
 			new Label('Item', { textSize: 13 }),
 			new Row({ gap: 8 },
 				new Label('mode', { color: THEME.dim, textSize: 11 }),
-				new Select(modes, modes.indexOf(this.mode), safe(i => editor.setMode(modes[i])), { key: 'modeSelect' }),
+				new Select(MODES, MODES.indexOf(this.mode), safe(i => ed.setMode(MODES[i])), { key: 'modeSelect' }),
 			),
 		];
 		if (this.hasMarker) {
 			children.push(new Row({ gap: 8 },
 				new Label('marker', { color: THEME.dim, textSize: 11 }),
 				new Select(this.markerOptions, this.markerIndex,
-					safe(i => { state.markerChoice = this.markerOptions[i]; }), { key: 'markerSelect' }),
+					safe(i => { ed.markerChoice = this.markerOptions[i]; }), { key: 'markerSelect' }),
 			));
 		}
 		if (!this.hasSelection) {
@@ -1421,35 +1620,8 @@ class Props extends three.Widget {
 	}
 }
 
-// Pressing the axis already locked frees it, so the same key is on and off.
-function toggleAxis(axis) {
-	const op = state.grab ?? state.scaling;
-	if (!op) return;
-	setAxis(op.axis === axis ? null : axis);
-}
-
-// Whether a modal gesture owns the keyboard and the next click.
-function gesture() { return state.grab ?? state.scaling ?? null; }
-
-function hintText() {
-	if (state.grab) {
-		return state.grab.axis
-			? `moving on ${state.grab.axis.toUpperCase()} · click commits · esc frees the axis`
-			: 'x / y / z locks an axis · click to commit · esc cancels';
-	}
-	if (state.scaling) {
-		const factor = `×${state.scaling.factor.toFixed(2)}`;
-		return state.scaling.axis
-			? `scaling ${state.scaling.axis.toUpperCase()} ${factor} · click commits · esc frees the axis`
-			: `scaling ${factor} · x / y / z locks an axis · click commits · esc cancels`;
-	}
-	if (state.stamp) return 'ctrl+click to place · +shift freehand · esc clears';
-	if (state.selection.length > 0) return 'g grab · s scale · r rotate · x delete';
-	return 'click selects · shift+click adds · ctrl+click places the stamp';
-}
-
-// The bottom status strip: the existing status text on the left, contextual
-// key hints on the right.
+// The bottom status strip: the status text on the left, contextual key hints
+// on the right.
 class StatusBar extends three.Widget {
 	constructor() {
 		super();
@@ -1458,10 +1630,37 @@ class StatusBar extends three.Widget {
 	}
 
 	sync() {
-		const t = statusText();
-		if (this.text !== t) this.text = t;
-		const h = hintText();
-		if (this.hint !== h) this.hint = h;
+		this.text = StatusBar.status();
+		this.hint = StatusBar.hint();
+	}
+
+	static status() {
+		const stats = scene.stats();
+		const rows = ed.level.rows.length;
+		const extra = ed.selection.length - 1;
+		const selected = `${ed.activeId ?? '(none)'}${extra > 0 ? ` +${extra}` : ''}`;
+		let text = `${ed.mode} · ${selected} · ${rows} piece${rows === 1 ? '' : 's'}`
+			+ ` · ${stats.drawCalls} draws${ed.dirty ? ' · *' : ''}`;
+		if (ed.lastError) text += ` · ${ed.lastError}`;
+		return text;
+	}
+
+	static hint() {
+		const { grabbing, scaling } = ed;
+		if (grabbing) {
+			return grabbing.axis
+				? `moving on ${grabbing.axis.toUpperCase()} · click commits · esc frees the axis`
+				: 'x / y / z locks an axis · click to commit · esc cancels';
+		}
+		if (scaling) {
+			const factor = `×${scaling.factor.toFixed(2)}`;
+			return scaling.axis
+				? `scaling ${scaling.axis.toUpperCase()} ${factor} · click commits · esc frees the axis`
+				: `scaling ${factor} · x / y / z locks an axis · click commits · esc cancels`;
+		}
+		if (ed.stamp) return 'ctrl+click to place · +shift freehand · esc clears';
+		if (ed.selection.length > 0) return 'g grab · s scale · r rotate · x delete';
+		return 'click selects · shift+click adds · ctrl+click places the stamp';
 	}
 
 	render() {
@@ -1483,7 +1682,7 @@ function menuSpec() {
 		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
 		{
 			title: 'View',
-			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: state.dockOpen }],
+			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: ed.dockOpen }],
 		},
 	];
 }
@@ -1498,40 +1697,36 @@ function menuLabel(menu, item) {
 	return typeof entry === 'string' ? entry : entry.label;
 }
 
-function toggleDock() {
-	state.dockOpen = !state.dockOpen;
-	syncUI();
-}
-
 function onMenuSelect(menu, item) {
 	switch (menuLabel(menu, item)) {
-		case 'New': requestNew(); break;
-		case 'Open…': state.openDialogOpen = true; syncUI(); break;
-		case 'Save': doSave(); break;
-		case 'Save as…': state.saveAsText = state.path ?? 'levels/level.json'; state.saveAsOpen = true; syncUI(); break;
-		case 'Export .glb…': state.exportText = 'levels/level.glb'; state.exportOpen = true; syncUI(); break;
+		case 'New': ed.requestNew(); break;
+		case 'Open…': ed.openDialogOpen = true; ed.sync(); break;
+		case 'Save': ed.save(); break;
+		case 'Save as…': ed.openSaveAs(); break;
+		case 'Export .glb…': ed.openExport(); break;
 		case 'Quit': three.quit(); break;
-		case 'Undo': undo(); break;
-		case 'Redo': redo(); break;
-		case 'Duplicate': duplicate(); break;
-		case 'Delete': requestRemove(); break;
+		case 'Undo': ed.undo(); break;
+		case 'Redo': ed.redo(); break;
+		case 'Duplicate': ed.duplicate(); break;
+		case 'Delete': ed.requestRemove(); break;
 		case 'Frame all': frameAllExcludingHelpers(); break;
-		case 'Toggle grid': state.showGrid = !state.showGrid; gridHelper.visible = state.showGrid; break;
-		case 'Refit': pushUndo(); level.refit(); markDirty(); syncUI(); break;
-		case 'Asset browser': toggleDock(); break;
+		case 'Toggle grid': ed.toggleGrid(); break;
+		case 'Refit': ed.refit(); break;
+		case 'Asset browser': ed.toggleDock(); break;
 	}
 }
-
-let chromeRenderCount = 0;
 
 // Floor 0: the dock, the properties panel, the status strip and the menu
 // bar, in that order — the menu bar LAST, so its open dropdown paints over
 // the panels beside it in this same Stack rather than under them.
 class Chrome extends three.Widget {
+	// How many times it has rendered, for `editor._renderCount()`.
+	static renders = 0;
+
 	render() {
-		chromeRenderCount++;
+		Chrome.renders++;
 		return new Stack({},
-			state.dockOpen && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
+			ed.dockOpen && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
 				new Stack({ size: [0, DOCK_H] },
 					new Rect({ color: THEME.header, solid: true }),
 					new Row({},
@@ -1556,78 +1751,65 @@ class Dialogs extends three.Widget {
 	static layer = 1;
 
 	render() {
+		const close = (flag) => safe(() => { ed[flag] = false; ed.sync(); });
 		return new Stack({},
 			new ConfirmDialog({
 				key: 'deleteConfirm', title: 'Remove piece',
-				message: state.confirmDeleteIds.length === 1
-					? `Remove ${state.confirmDeleteIds[0]}?`
-					: `Remove ${state.confirmDeleteIds.length} pieces?`,
+				message: ed.confirmDeleteIds.length === 1
+					? `Remove ${ed.confirmDeleteIds[0]}?`
+					: `Remove ${ed.confirmDeleteIds.length} pieces?`,
 				confirm: 'Remove', decline: 'Keep',
-				open: state.confirmDeleteOpen, onConfirm: safe(confirmRemove), onDismiss: safe(cancelRemove),
+				open: ed.confirmDeleteOpen,
+				onConfirm: safe(() => ed.confirmRemove()), onDismiss: safe(() => ed.cancelRemove()),
 			}),
 			new ConfirmDialog({
 				key: 'newConfirm', title: 'Discard changes',
 				message: 'This level has unsaved changes — discard them and start a new one?',
-				confirm: 'Discard', decline: 'Cancel', open: state.confirmNewOpen,
-				onConfirm: safe(() => {
-					state.confirmNewOpen = false;
-					if (state.pendingKit) { const kit = state.pendingKit; state.pendingKit = null; doNewLevel(kit); }
-					else state.kitDialogOpen = true;
-					syncUI();
-				}),
-				onDismiss: safe(() => { state.confirmNewOpen = false; state.pendingKit = null; syncUI(); }),
+				confirm: 'Discard', decline: 'Cancel', open: ed.confirmNewOpen,
+				onConfirm: safe(() => ed.confirmNew()),
+				onDismiss: safe(() => { ed.confirmNewOpen = false; ed.pendingKit = null; ed.sync(); }),
 			}),
 			new Dialog({
-				key: 'openDialog', title: 'Open level', open: state.openDialogOpen,
+				key: 'openDialog', title: 'Open level', open: ed.openDialogOpen,
 				modal: true, closeOutside: true, size: [360, 320],
-				onDismiss: safe(() => { state.openDialogOpen = false; syncUI(); }),
+				onDismiss: close('openDialogOpen'),
 			},
 				// A FileBrowser sizes itself to its listing and has no scrollbar
 				// of its own — the Scroll is what keeps a long directory inside
 				// the panel instead of painting down over the scene.
 				new Scroll({ key: 'openScroll' },
-					new FileBrowser({ key: 'openBrowser', start: 'levels/', mask: ['*.json'], onChoose: safe(path => { state.openDialogOpen = false; doOpen(path); }) })),
+					new FileBrowser({ key: 'openBrowser', start: 'levels/', mask: ['*.json'], onChoose: safe(path => { ed.openDialogOpen = false; ed.open(path); }) })),
 			),
 			new Dialog({
-				key: 'kitDialog', title: 'Choose a kit', open: state.kitDialogOpen,
+				key: 'kitDialog', title: 'Choose a kit', open: ed.kitDialogOpen,
 				modal: true, closeOutside: false, size: [360, 320],
 			},
 				new Scroll({ key: 'kitScroll' },
-					new FileBrowser({ key: 'kitBrowser', mask: ['*.glb', '*.gltf'], onChoose: safe(path => { state.kitDialogOpen = false; doNewLevel(path); }) })),
+					new FileBrowser({ key: 'kitBrowser', mask: ['*.glb', '*.gltf'], onChoose: safe(path => { ed.kitDialogOpen = false; ed.newLevel(path); }) })),
 			),
 			new Dialog({
-				key: 'saveAsDialog', title: 'Save level as', open: state.saveAsOpen,
+				key: 'saveAsDialog', title: 'Save level as', open: ed.saveAsOpen,
 				modal: true, closeOutside: true, size: [340, 0],
-				onDismiss: safe(() => { state.saveAsOpen = false; syncUI(); }),
+				onDismiss: close('saveAsOpen'),
 			},
 				new Column({ gap: 8 },
-					new TextField({ key: 'saveAsField', text: state.saveAsText, onChange: t => { state.saveAsText = t; } }),
+					new TextField({ key: 'saveAsField', text: ed.saveAsText, onChange: t => { ed.saveAsText = t; } }),
 					new Row({ gap: 8 },
-						new Button('Cancel', safe(() => { state.saveAsOpen = false; syncUI(); })),
-						new Button('Save', safe(() => { state.saveAsOpen = false; doSave(state.saveAsText); })),
+						new Button('Cancel', close('saveAsOpen')),
+						new Button('Save', safe(() => { ed.saveAsOpen = false; ed.save(ed.saveAsText); })),
 					),
 				),
 			),
 			new Dialog({
-				key: 'exportDialog', title: 'Export .glb', open: state.exportOpen,
+				key: 'exportDialog', title: 'Export .glb', open: ed.exportOpen,
 				modal: true, closeOutside: true, size: [340, 0],
-				onDismiss: safe(() => { state.exportOpen = false; syncUI(); }),
+				onDismiss: close('exportOpen'),
 			},
 				new Column({ gap: 8 },
-					new TextField({ key: 'exportField', text: state.exportText, onChange: t => { state.exportText = t; } }),
+					new TextField({ key: 'exportField', text: ed.exportText, onChange: t => { ed.exportText = t; } }),
 					new Row({ gap: 8 },
-						new Button('Cancel', safe(() => { state.exportOpen = false; syncUI(); })),
-						new Button('Export', safe(() => {
-							state.exportOpen = false;
-							const parent = helpers.parent;
-							if (parent) parent.remove(helpers);
-							try {
-								const result = scene.export(state.exportText || 'levels/level.glb');
-								setStatus(`exported ${result.path}`);
-							} finally {
-								if (parent) parent.add(helpers);
-							}
-						})),
+						new Button('Cancel', close('exportOpen')),
+						new Button('Export', safe(() => { ed.exportOpen = false; ed.exportGlb(ed.exportText); })),
 					),
 				),
 			),
@@ -1635,20 +1817,64 @@ class Dialogs extends three.Widget {
 	}
 }
 
-function positionText(object) {
-	return `${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)}`;
+// ---------------------------------------------------------------------------
+// The keyboard — one method per key, and its description is what
+// `three.keys()` and the debug line list.
+// ---------------------------------------------------------------------------
+
+class Keys {
+	@three.key('1', 'grid snap') @safe static grid() { ed.setMode('grid'); }
+	@three.key('2', 'face snap') @safe static face() { ed.setMode('face'); }
+	@three.key('3', 'marker snap') @safe static marker() { ed.setMode('marker'); }
+	@three.key('g', 'grab the selection, live under the cursor') @safe static grab() { ed.grab(); }
+	@three.key('s', 'scale the selection — pull away to grow, in to shrink') @safe static scale() { ed.startScale(); }
+	@three.key('r', 'rotate a quarter turn (shift: the other way)') @safe static rotate() { ed.rotate(held('shift') ? -1 : 1); }
+	@three.key('f', 'frame the selection') @safe static frame() { ed.frameSelection(); }
+	@three.key('home', 'frame everything') @safe static home() { frameAllExcludingHelpers(); }
+	@three.key('escape', 'free the axis, then cancel the gesture, then clear the stamp') @safe static escape() { ed.cancel(); }
+	@three.key('delete', 'remove, after a confirm') @safe static remove() { ed.requestRemove(); }
+
+	// x / y / z belong to the gesture while one is live, and to what they always
+	// did otherwise. The modifier is the tell: a bare press during a gesture is
+	// an axis, and a ctrl press is still undo or redo, because those never meant
+	// an axis.
+	static lockAxis(axis) {
+		if (!ed.gesture || held('ctrl')) return false;
+		ed.toggleAxis(axis);
+		return true;
+	}
+
+	@three.key('x', 'remove, after a confirm · mid-gesture: lock to x')
+	@safe static x() { if (!Keys.lockAxis('x')) ed.requestRemove(); }
+
+	@three.key('y', 'ctrl: redo · mid-gesture: lock to y')
+	@safe static y() { if (!Keys.lockAxis('y') && held('ctrl')) ed.redo(); }
+
+	@three.key('z', 'ctrl: undo, ctrl+shift: redo · mid-gesture: lock to z')
+	@safe static z() {
+		if (Keys.lockAxis('z') || !held('ctrl')) return;
+		if (held('shift')) ed.redo(); else ed.undo();
+	}
+
+	@three.key('d', 'shift: duplicate and grab the copies')
+	@safe static d() { if (held('shift')) ed.duplicate(); }
+
+	@three.key('arrowleft', 'nudge -x') @safe static left() { ed.nudge(-1, 0, 0); }
+	@three.key('arrowright', 'nudge +x') @safe static right() { ed.nudge(1, 0, 0); }
+	@three.key('arrowup', 'nudge -z') @safe static up() { ed.nudge(0, 0, -1); }
+	@three.key('arrowdown', 'nudge +z') @safe static down() { ed.nudge(0, 0, 1); }
+	@three.key('pageup', 'nudge +y') @safe static raise() { ed.nudge(0, 1, 0); }
+	@three.key('pagedown', 'nudge -y') @safe static lower() { ed.nudge(0, -1, 0); }
+	@three.key('[', 'nudge -y') @safe static lowerBracket() { ed.nudge(0, -1, 0); }
+	@three.key(']', 'nudge +y') @safe static raiseBracket() { ed.nudge(0, 1, 0); }
 }
 
-function statusText() {
-	const stats = scene.stats();
-	const extra = state.selection.length - 1;
-	const selected = `${activeId() ?? '(none)'}${extra > 0 ? ` +${extra}` : ''}`;
-	let text = `${state.mode} · ${selected} · ${level.rows.length} piece${level.rows.length === 1 ? '' : 's'}`
-		+ ` · ${stats.drawCalls} draws${state.dirty ? ' · *' : ''}`;
-	if (state.lastError) text += ` · ${state.lastError}`;
-	return text;
-}
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
 
+// The editor first: every widget reads it, starting in Props' constructor.
+const ed = new Editor();
 const catalog = new Catalog();
 const browser = new Browser();
 const props = new Props();
@@ -1656,147 +1882,15 @@ const statusBar = new StatusBar();
 const chrome = new Chrome();
 const dialogs = new Dialogs();
 
-// The `three.ui.set`/`patch` era's one entry point, kept as the seam every
-// action handler still writes through: it re-syncs the parts that cache
-// their own text (so the very next flush is already correct, not one frame
-// stale) and marks both floors dirty so whatever structural state changed
-// — a dialog opening, a filter, a new kit — is picked up too.
-function syncUI() {
-	props.sync();
-	statusBar.sync();
-	chrome.update();
-	dialogs.update();
-	syncPersist();
-}
-
-// ---------------------------------------------------------------------------
-// Boot — three.persist.path, or the assets directory's one .glb, or a
-// prompt through the kit file browser.
-// ---------------------------------------------------------------------------
-
-function boot() {
-	const bootPath = three.persist.path ?? 'levels/level.json';
-	const loaded = three.level.load(bootPath, scene);
-	if (loaded) {
-		level = loaded;
-		state.path = bootPath;
-		setCurrentAsset(level.kit ? three.load(level.kit) : null);
-	} else {
-		const glbs = three.inventory().filter(e => /\.glb$|\.gltf$/i.test(e.path));
-		if (glbs.length === 1) {
-			level = three.level.create(glbs[0].path);
-			level.parent = scene;
-			setCurrentAsset(three.load(glbs[0].path));
-		} else {
-			level = three.level.create(null);
-			level.parent = scene;
-			state.kitDialogOpen = true;
-		}
-	}
-	// One id is what older runs of this editor remembered; a list is what it
-	// remembers now, and both have to open the same way.
-	const remembered = three.persist.selected;
-	if (remembered) select(Array.isArray(remembered) ? remembered : [remembered]);
-	frameAllExcludingHelpers();
-}
-
-boot();
+ed.boot();
 // Make sure the very first frame is already correct rather than waiting for
-// the animation loop's first tick.
+// the editor's first tick.
 props.sync();
 statusBar.sync();
 chrome.mount();
 dialogs.mount();
 
-// ---------------------------------------------------------------------------
-// Input
-// ---------------------------------------------------------------------------
-
-// Three clicks, and which one it is decided before anything else happens: a
-// grab is modal and eats the click, then ctrl places, then shift adds, then a
-// plain click selects the one piece under the cursor. Holding a stamp changes
-// none of it — see the header comment on why placing is not the plain click.
-three.onClick(safe((hit, x, y) => {
-	if (state.grab) { commit(); return; }
-	if (state.scaling) { commitScale(); return; }
-	const piece = hit && hit.object ? pieceOf(hit.object) : null;
-
-	if (three.input.isDown('ctrl')) {
-		if (!state.stamp) { setStatus('nothing to place — pick a piece in the asset browser first'); return; }
-		const groundPoint = groundHit(x, y, 0);
-		if (!groundPoint) { setStatus('nothing to place on'); return; }
-		placeNewPiece(state.stamp, groundPoint, hit, { freehand: three.input.isDown('shift') });
-		return;
-	}
-
-	if (three.input.isDown('shift')) {
-		// A shift+click on nothing keeps what is selected: the gesture is
-		// "and this one too", and a miss should not undo the four before it.
-		if (piece) toggleSelected(piece.name);
-		return;
-	}
-
-	select(piece ? piece.name : null);
-}));
-
-three.onKeyDown('1', safe(() => editor.setMode('grid')));
-three.onKeyDown('2', safe(() => editor.setMode('face')));
-three.onKeyDown('3', safe(() => editor.setMode('marker')));
-three.onKeyDown('g', safe(() => grab()));
-three.onKeyDown('s', safe(() => startScale()));
-three.onKeyDown('r', safe(() => rotate(three.input.isDown('shift') ? -1 : 1)));
-// The whole selection, not just the active piece — framing one wall of four
-// that were picked together is a camera move nobody asked for.
-three.onKeyDown('f', safe(() => {
-	let box = null;
-	for (const id of state.selection) {
-		const object = level.objects.get(id);
-		if (!object) continue;
-		const theirs = object.boundingBox();
-		if (!theirs) continue;
-		box = box ? box.union(theirs) : theirs;
-	}
-	if (!box) return;
-	three.camera.lookAt(box.center.x, box.center.y, box.center.z);
-}));
-three.onKeyDown('home', safe(() => frameAllExcludingHelpers()));
-three.onKeyDown('escape', safe(() => cancel()));
-three.onKeyDown('delete', safe(() => requestRemove()));
-// x / y / z belong to the grab while one is live, and to what they always did
-// otherwise. The modifier is the tell: a bare press during a grab is an axis,
-// and a ctrl press is still undo or redo, because those never meant an axis.
-three.onKeyDown('x', safe(() => {
-	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('x'); return; }
-	requestRemove();
-}));
-three.onKeyDown('d', safe(() => { if (three.input.isDown('shift')) duplicate(); }));
-three.onKeyDown('z', safe(() => {
-	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('z'); return; }
-	if (!three.input.isDown('ctrl')) return;
-	if (three.input.isDown('shift')) redo(); else undo();
-}));
-three.onKeyDown('y', safe(() => {
-	if (gesture() && !three.input.isDown('ctrl')) { toggleAxis('y'); return; }
-	if (three.input.isDown('ctrl')) redo();
-}));
-three.onKeyDown('arrowleft', safe(() => nudge(-1, 0, 0)));
-three.onKeyDown('arrowright', safe(() => nudge(1, 0, 0)));
-three.onKeyDown('arrowup', safe(() => nudge(0, 0, -1)));
-three.onKeyDown('arrowdown', safe(() => nudge(0, 0, 1)));
-three.onKeyDown('pageup', safe(() => nudge(0, 1, 0)));
-three.onKeyDown('pagedown', safe(() => nudge(0, -1, 0)));
-three.onKeyDown('[', safe(() => nudge(0, -1, 0)));
-three.onKeyDown(']', safe(() => nudge(0, 1, 0)));
-
-three.setAnimationLoop(safe(() => {
-	// Whichever modal gesture is live reads the cursor here — this is the only
-	// thing driving either of them, so a branch missing from this line is a key
-	// that appears to do nothing at all.
-	if (state.grab) updateGrabPreview();
-	else if (state.scaling) updateScalePreview();
-	statusBar.sync();
-	props.sync();
-}));
+three.onClick(safe((hit, x, y) => ed.click(hit, x, y)));
 
 // ---------------------------------------------------------------------------
 // The drivable surface — everything a key or a widget calls, so the whole
@@ -1806,80 +1900,60 @@ three.setAnimationLoop(safe(() => {
 const editor = {
 	// One id, a list of them, or null — the plain click and the whole
 	// selection in one verb, so a script says what it means either way.
-	select(ids) { select(ids); },
+	select(ids) { ed.select(ids); },
 	// What shift+click does: in if it was out, out if it was in.
-	toggle(id) { toggleSelected(id); },
-	selection() { return [...state.selection]; },
-	setMode(mode) {
-		if (!['grid', 'face', 'marker'].includes(mode)) return;
-		state.mode = mode;
-		syncUI();
-	},
-	stamp(piece) { state.stamp = piece; syncUI(); },
+	toggle(id) { ed.toggle(id); },
+	selection() { return [...ed.selection]; },
+	setMode(mode) { ed.setMode(mode); },
+	stamp(piece) { ed.setStamp(piece); },
 	placeAt(x, z, opts = {}) {
-		if (!state.stamp) return null;
-		return placeNewPiece(state.stamp, { x: +x, y: 0, z: +z }, null, { freehand: !!opts.freehand });
+		if (!ed.stamp) return null;
+		return ed.place(ed.stamp, { x: +x, y: 0, z: +z }, null, { freehand: !!opts.freehand }) ?? null;
 	},
-	grab() { grab(); },
+	grab() { ed.grab(); },
 	// The keyboard's x / y / z during a grab, for a script with no keyboard.
 	// Null frees it; anything that is not an axis is ignored rather than
 	// silently taken as "free", which would look like the lock never held.
 	axis(which) {
-		if (which === null || which === undefined) { setAxis(null); return; }
-		if (['x', 'y', 'z'].includes(which)) setAxis(which);
+		if (which === null || which === undefined) { ed.setAxis(null); return; }
+		if (['x', 'y', 'z'].includes(which)) ed.setAxis(which);
 	},
-	// No factor starts the interactive gesture, the way `s` does; a factor is
-	// the whole thing at once — start, scale, commit — which is what a script
-	// with no cursor to pull actually wants.
-	scale(factor) {
-		if (factor === undefined) { startScale(); return; }
-		const wanted = +factor;
-		if (!(wanted > 0)) return;
-		const live = !!state.scaling;
-		if (!live) startScale();
-		if (!state.scaling) return;
-		state.scaling.factor = Math.min(Math.max(wanted, SCALE_MIN), SCALE_MAX);
-		state.scaling.pinned = true;
-		applyScale();
-		if (!live) commitScale();
-	},
-	commit() {
-		if (state.scaling) commitScale(); else commit();
-	},
-	cancel() { cancel(); },
-	rotate(dir) { rotate(dir); },
-	nudge(dx, dy, dz) { nudge(dx, dy, dz); },
-	duplicate() { duplicate(); },
-	remove() { requestRemove(); confirmRemove(); },
-	undo() { undo(); },
-	redo() { redo(); },
-	save(path) { return doSave(path); },
-	open(path) { return doOpen(path); },
-	newLevel(kit) { return doNewLevel(kit); },
+	scale(factor) { ed.scaleBy(factor); },
+	commit() { ed.commit(); },
+	cancel() { ed.cancel(); },
+	rotate(dir) { ed.rotate(dir); },
+	nudge(dx, dy, dz) { ed.nudge(dx, dy, dz); },
+	duplicate() { ed.duplicate(); },
+	remove() { ed.requestRemove(); ed.confirmRemove(); },
+	undo() { ed.undo(); },
+	redo() { ed.redo(); },
+	save(path) { return ed.save(path); },
+	open(path) { return ed.open(path); },
+	newLevel(kit) { return ed.newLevel(kit); },
 	state() {
 		return {
-			path: state.path,
+			path: ed.path,
 			// The active piece, and the whole list beside it — a driver that
 			// only ever selects one still reads the field it always read.
-			selected: activeId(),
-			selection: [...state.selection],
-			mode: state.mode,
-			axis: (state.grab ?? state.scaling)?.axis ?? null,
-			scaling: state.scaling ? state.scaling.factor : null,
-			stamp: state.stamp,
-			dirty: state.dirty,
-			rows: JSON.parse(JSON.stringify(level.toJSON().rows)),
+			selected: ed.activeId,
+			selection: [...ed.selection],
+			mode: ed.mode,
+			axis: ed.gesture?.axis ?? null,
+			scaling: ed.scaling ? ed.scaling.factor : null,
+			stamp: ed.stamp,
+			dirty: ed.dirty,
+			rows: JSON.parse(JSON.stringify(ed.level.toJSON().rows)),
 		};
 	},
 
 	// Internal hooks for the headless test harness — not part of the
 	// documented surface above, but how a `--script` driving this file
 	// reaches inside it without a pointer or a window.
-	_objectOf(id) { return level.objects.get(id) ?? null; },
-	_placeByMode(object, groundPoint, pickHit, opts) { return placeByMode(object, groundPoint, pickHit, opts); },
-	_level() { return level; },
-	_tree() { return visiblePieces().map(p => p.name); },
-	_renderCount() { return chromeRenderCount; },
+	_objectOf(id) { return ed.level.objects.get(id) ?? null; },
+	_placeByMode(object, groundPoint, pickHit, opts) { return ed.placeByMode(object, groundPoint, pickHit, opts); },
+	_level() { return ed.level; },
+	_tree() { return browser.visible().map(p => p.name); },
+	_renderCount() { return Chrome.renders; },
 };
 globalThis.editor = editor;
 
@@ -1888,13 +1962,7 @@ three.debug.write({
 		click: 'select one · commit a grab',
 		'shift+click': 'add to / take out of the selection',
 		'ctrl+click': 'place the stamp',
-		'1/2/3': 'grid / face / marker mode',
-		g: 'grab', s: 'scale', 'x/y/z': 'while grabbing or scaling: lock that axis',
-		'r': 'rotate (shift: the other way)',
-		delete: 'remove', 'shift+d': 'duplicate',
-		'ctrl+z': 'undo', 'ctrl+shift+z / ctrl+y': 'redo',
-		escape: 'free the axis / cancel a grab / clear the stamp',
-		f: 'frame selection', home: 'frame all',
+		...three.keys(),
 	},
 	state: editor.state(),
 });

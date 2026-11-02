@@ -6,29 +6,20 @@
 //     ./build/three --script examples/village.js
 //     ./build/three --script examples/village.js --mcp   # and attach an agent
 //
-// Once it is running: `space` holds the clock and `.` steps a held one by a
-// single frame, `t` shows the swatch board, `d` toggles the shadow map, `n`
-// re-rolls every texture from a new seed, and `s` prints what the frame costs.
+// The keys are the `Keys` class at the end; the first lines it prints list
+// them, from `three.keys()`.
 //
 
 
 const SIZE = 128;
 let seed = 20260823;
 
-// One integer in, one float in [0, 1) out. Math.imul because the products
-// leave the range a double holds exactly, and a hash that rounds is a hash
-// with visible structure in it.
-function hash2(x, y, s) {
-	let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 2246822519);
-	h = Math.imul(h ^ (h >>> 13), 1274126177);
-	return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
-
-function smooth(t) { return t * t * (3 - 2 * t); }
-function lerp(a, b, t) { return a + (b - a) * t; }
+// `three.hash` is the integer hash (Math.imul, so a hash with no visible
+// structure in it), `smoothstep` the eased 0..1 ramp — value first, edges
+// after. The two below work on [r, g, b] in 0..255, which three's colour
+// helpers do not.
+const { hash, lerp, smoothstep } = three;
 function mix(a, b, t) { return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]; }
-function clamp01(t) { return t < 0 ? 0 : t > 1 ? 1 : t; }
-function step(lo, hi, x) { return smooth(clamp01((x - lo) / (hi - lo))); }
 function tint(c, k) { return [c[0] * k, c[1] * k, c[2] * k]; }
 
 // Value noise on a wrapping lattice. The wrap is the point: the grid indices
@@ -40,18 +31,18 @@ function valueNoise(size, cellsX, cellsY, s) {
 	for (let y = 0; y < size; y++) {
 		const gy = (y / size) * cellsY;
 		const y0 = Math.floor(gy);
-		const fy = smooth(gy - y0);
+		const fy = smoothstep(gy - y0, 0, 1);
 		const ya = y0 % cellsY;
 		const yb = (y0 + 1) % cellsY;
 		for (let x = 0; x < size; x++) {
 			const gx = (x / size) * cellsX;
 			const x0 = Math.floor(gx);
-			const fx = smooth(gx - x0);
+			const fx = smoothstep(gx - x0, 0, 1);
 			const xa = x0 % cellsX;
 			const xb = (x0 + 1) % cellsX;
 			out[y * size + x] = lerp(
-				lerp(hash2(xa, ya, s), hash2(xb, ya, s), fx),
-				lerp(hash2(xa, yb, s), hash2(xb, yb, s), fx),
+				lerp(hash(xa, ya, s), hash(xb, ya, s), fx),
+				lerp(hash(xa, yb, s), hash(xb, yb, s), fx),
 				fy,
 			);
 		}
@@ -107,7 +98,7 @@ function makeTextures(s) {
 	const turf = fbm(SIZE, 10, s + 3, 3);
 	const grass = paint(SIZE, (x, y, k) => {
 		const c = mix([58, 88, 42], [116, 150, 70], turf[k]);
-		const blade = hash2(x, y, s + 5);
+		const blade = hash(x, y, s + 5);
 		if (blade > 0.94) return [c[0] + 16, c[1] + 26, c[2] + 8];
 		if (blade < 0.04) return [c[0] - 14, c[1] - 12, c[2] - 8];
 		return c;
@@ -131,15 +122,15 @@ function makeTextures(s) {
 				const cy = Math.floor(gy) + oy;
 				const wx = ((cx % CELLS) + CELLS) % CELLS;
 				const wy = ((cy % CELLS) + CELLS) % CELLS;
-				const px = cx + 0.2 + 0.6 * hash2(wx, wy, s + 13);
-				const py = cy + 0.2 + 0.6 * hash2(wx, wy, s + 17);
+				const px = cx + 0.2 + 0.6 * hash(wx, wy, s + 13);
+				const py = cy + 0.2 + 0.6 * hash(wx, wy, s + 17);
 				const d = Math.hypot(gx - px, gy - py);
 				if (d < d1) { d2 = d1; d1 = d; id = wy * CELLS + wx; }
 				else if (d < d2) { d2 = d; }
 			}
 		}
-		const stone = step(0.03, 0.16, d2 - d1);
-		const tone = 0.72 + 0.5 * hash2(id, id >> 3, s + 19);
+		const stone = smoothstep(d2 - d1, 0.03, 0.16);
+		const tone = 0.72 + 0.5 * hash(id, id >> 3, s + 19);
 		return mix([64, 62, 58], tint([124, 120, 114], tone), stone);
 	});
 
@@ -166,7 +157,7 @@ function makeTextures(s) {
 		const r = Math.floor(y / ROWH);
 		const cx = (x + ((r & 1) ? BRICKW / 2 : 0)) % SIZE;
 		if ((y % ROWH) < 2.5 || (cx % BRICKW) < 2.5) return mix([172, 166, 154], [200, 194, 182], speck[k]);
-		return tint(mix([150, 72, 56], [182, 104, 78], speck[k]), 0.82 + 0.32 * hash2(Math.floor(cx / BRICKW), r, s + 31));
+		return tint(mix([150, 72, 56], [182, 104, 78], speck[k]), 0.82 + 0.32 * hash(Math.floor(cx / BRICKW), r, s + 31));
 	});
 
 	// Courses of shingles, every other one offset by half a tile. The lip of
@@ -182,8 +173,8 @@ function makeTextures(s) {
 		const cx = (x + ((r & 1) ? CW / 2 : 0)) % SIZE;
 		const u = (cx % CW) / CW;
 		const v = (y % CH) / CH;
-		const shade = (1 - 0.5 * step(0.84, 1, v)) * (0.55 + 0.45 * step(0.05, 0.14, Math.min(u, 1 - u)));
-		return tint(mix([104, 58, 46], [158, 98, 72], hash2(Math.floor(cx / CW), r, s + 37)), shade);
+		const shade = (1 - 0.5 * smoothstep(v, 0.84, 1)) * (0.55 + 0.45 * smoothstep(Math.min(u, 1 - u), 0.05, 0.14));
+		return tint(mix([104, 58, 46], [158, 98, 72], hash(Math.floor(cx / CW), r, s + 37)), shade);
 	});
 
 	// Planks, so the grain has to run the long way: the lattice is 40 cells
@@ -192,7 +183,7 @@ function makeTextures(s) {
 	const PLANKW = SIZE / 4;
 	const planks = paint(SIZE, (x, y, k) => {
 		if ((x % PLANKW) < 2.5) return [46, 32, 22];
-		return tint(mix([104, 72, 44], [148, 108, 68], fibre[k]), 0.85 + 0.3 * hash2(Math.floor(x / PLANKW), 0, s + 43));
+		return tint(mix([104, 72, 44], [148, 108, 68], fibre[k]), 0.85 + 0.3 * hash(Math.floor(x / PLANKW), 0, s + 43));
 	});
 
 	// Not a hole in the wall: a frame, four panes, and a warm gradient with
@@ -209,7 +200,7 @@ function makeTextures(s) {
 	const clump = fbm(SIZE, 5, s + 47, 3);
 	const leaves = paint(SIZE, (x, y, k) => {
 		const c = mix([36, 70, 32], [100, 140, 58], clump[k]);
-		return hash2(x, y, s + 53) > 0.9 ? [c[0], c[1] + 24, c[2]] : c;
+		return hash(x, y, s + 53) > 0.9 ? [c[0], c[1] + 24, c[2]] : c;
 	});
 
 	// A four-texel over-under weave with a slub in it. Near white on purpose:
@@ -370,7 +361,7 @@ function makeHouse(h) {
 const houses = [];
 for (let row = 0; row < 2; row++) {
 	for (let i = 0; i < 5; i++) {
-		const r = (n) => hash2(i, row, seed + n);
+		const r = (n) => hash(i, row, seed + n);
 		houses.push(makeHouse({
 			name: `house_${row}_${i}`,
 			x: row ? 7.6 : -7.6,
@@ -396,7 +387,7 @@ for (let row = 0; row < 2; row++) {
 // ---------------------------------------------------------------------------
 
 for (let i = 0; i < 14; i++) {
-	const r = (n) => hash2(i, 7, seed + n);
+	const r = (n) => hash(i, 7, seed + n);
 	const s = 0.75 + r(2) * 0.7;
 	const g = new three.Group();
 	g.name = `tree_${i}`;
@@ -503,7 +494,7 @@ function makePerson(p) {
 
 const people = [];
 for (let i = 0; i < 16; i++) {
-	const r = (n) => hash2(i, 11, seed + n);
+	const r = (n) => hash(i, 11, seed + n);
 	// Twelve walk the street in two lanes; the last four stand about outside
 	// the houses and sway, which is what makes the walkers read as walking.
 	const walking = i < 12;
@@ -599,73 +590,77 @@ function reroll() {
 	console.log(`seed ${seed} — nine images in ${Date.now() - began} ms`);
 }
 
-three.onKeyDown('space', () => {
+class Keys {
 	// One number holds the whole village: the crowd below stops because its
 	// step is zero, and so would a clip, a body and a post pass — none of which
 	// a flag in this file could ever have reached.
-	three.clock.timeScale = three.clock.paused ? 1 : 0;
-	console.log(three.clock.paused ? 'held' : 'running');
-});
-three.onKeyDown('.', () => {
+	@three.key('space', 'hold the clock')
+	static hold() {
+		three.clock.timeScale = three.clock.paused ? 1 : 0;
+		console.log(three.clock.paused ? 'held' : 'running');
+	}
+
 	// A held clock moved by hand, one sixtieth at a time. It is the same amount
 	// of world every press however long you wait between them, which is what
 	// makes a paused scene something to step through rather than only to look
 	// at — and what makes two screenshots of the same step the same picture.
-	if (!three.clock.paused) return;
-	three.clock.advance(three.clock.fixedDelta);
-	console.log(`stepped to ${three.clock.time.toFixed(3)}s`);
-});
-three.onKeyDown('t', () => {
-	board.visible = !board.visible;
-	console.log(board.visible ? 'swatch board up' : 'swatch board down');
-});
-three.onKeyDown('d', () => {
-	three.light.shadow.enabled = !three.light.shadow.enabled;
-	console.log(three.light.shadow.enabled ? 'shadows on' : 'shadows off');
-});
-three.onKeyDown('n', () => reroll());
-three.onKeyDown('s', () => report());
+	@three.key('.', 'step a held clock one frame')
+	static step() {
+		if (!three.clock.paused) return;
+		three.clock.advance(three.clock.fixedDelta);
+		console.log(`stepped to ${three.clock.time.toFixed(3)}s`);
+	}
 
-// The crowd walks in the *fixed* loop rather than the animation one, which is
-// the shape a game wants and costs nothing to adopt here: it is called at
+	@three.key('t', 'swatches')
+	static swatches() {
+		board.visible = !board.visible;
+		console.log(`swatch board ${board.visible ? 'up' : 'down'}`);
+	}
+
+	@three.key('d', 'shadows')
+	static shadows() {
+		const shadow = three.light.shadow;
+		shadow.enabled = !shadow.enabled;
+		console.log(`shadows ${shadow.enabled ? 'on' : 'off'}`);
+	}
+
+	@three.key('n', 're-roll textures') static reroll() { reroll(); }
+	@three.key('s', 'stats') static stats() { report(); }
+}
+
+// The crowd walks in the *fixed* step rather than once a frame, which is the
+// shape a game wants and costs nothing to adopt here: it is called at
 // `three.clock.fixedRate` with the same `dt` every time, however fast the
 // frames happen to be arriving, so twelve walkers cover the same ground on a
-// machine drawing at 30 as on one drawing at 144. The animation callback is for
-// drawing the consequence; there is nothing to draw here that the scene graph
-// does not already hold, so this file has only the one loop.
-three.setFixedLoop((dt) => {
-	const t = three.clock.time;
+// machine drawing at 30 as on one drawing at 144. There is nothing to draw
+// once a frame that the scene graph does not already hold, so this is the
+// file's only system.
+class Crowd {
+	@three.systems.step
+	static walk(dt) {
+		const t = three.clock.time;
 
-	for (const p of people) {
-		const s = Math.sin(t * p.cadence + p.phase);
-		if (p.speed !== 0) {
-			p.z += p.speed * dt;
-			if (p.z > 19) p.z -= 38;
-			else if (p.z < -19) p.z += 38;
+		for (const p of people) {
+			const s = Math.sin(t * p.cadence + p.phase);
+			if (p.speed !== 0) {
+				p.z += p.speed * dt;
+				if (p.z > 19) p.z -= 38;
+				else if (p.z < -19) p.z += 38;
+			}
+			// One write rather than three: every component of a position
+			// flushes to the host on its own, and sixteen people is enough for
+			// that to be worth caring about.
+			p.group.position.set(p.x, Math.abs(s) * (p.speed !== 0 ? 0.05 : 0.012), p.z);
+			p.legL.rotation.x = s * p.stride;
+			p.legR.rotation.x = -s * p.stride;
+			p.armL.rotation.x = -s * p.stride * 0.8;
+			p.armR.rotation.x = s * p.stride * 0.8;
 		}
-		// One write rather than three: every component of a position flushes
-		// to the host on its own, and sixteen people is enough for that to be
-		// worth caring about.
-		p.group.position.set(p.x, Math.abs(s) * (p.speed !== 0 ? 0.05 : 0.012), p.z);
-		p.legL.rotation.x = s * p.stride;
-		p.legR.rotation.x = -s * p.stride;
-		p.armL.rotation.x = -s * p.stride * 0.8;
-		p.armR.rotation.x = s * p.stride * 0.8;
 	}
-});
+}
 
 console.log(`${houses.length} houses, ${people.length} people, ${NAMES.length} generated images — seed ${seed}`);
-console.log('space holds · . steps a held clock · t swatch board · d shadows · n re-roll · s the cost');
+console.log(Object.entries(three.keys()).map(([key, what]) => `${key} ${what}`).join(' · '));
 report();
 
-three.debug.write({
-	keys: {
-		space: 'hold the clock',
-		'.': 'step a held clock one frame',
-		t: 'swatches',
-		d: 'shadows',
-		n: 're-roll textures',
-		s: 'stats',
-	},
-	stats: three.stats(),
-});
+three.debug.write({ keys: three.keys(), stats: three.stats() });

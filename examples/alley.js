@@ -91,76 +91,85 @@ ball.color = [0.25, 0.5, 0.85, 1];
 scene.add(ball);
 
 // Each run_script call has its own scope, so anything a later call needs to
-// reach — or a key handler, or the animation loop — has to be kept here.
-const A = globalThis.alley = {
-	scene, ground, stack, slots, ball, floorMat, wallMatA, wallMatB,
-	phase: 'racked', mark: 0, now: 0, auto: true, rolls: 0,
-};
+// reach has to be kept on a global: `alley` is the scene's handles and its
+// state, and its methods are what the keys and the timer below call.
+class Alley {
+	scene = scene; ground = ground; stack = stack; slots = slots; ball = ball;
+	floorMat = floorMat; wallMatA = wallMatA; wallMatB = wallMatB;
+	phase = 'racked'; mark = 0; now = 0; auto = true; rolls = 0;
 
-// A dynamic body refuses a transform write — the solver owns it, and a script
-// and a solver writing the same transform every frame is jitter, not a
-// compromise. So re-racking is: take the body away, move the node, give it a
-// body back.
-A.rerack = () => {
-	A.stack.forEach((box, k) => {
-		three.physics.remove(box);
-		box.rotation.set(0, 0, 0);
-		box.position.set(...A.slots[k]);
-		three.physics.add(box, CRATE);
-	});
-	three.physics.remove(A.ball);
-	A.ball.rotation.set(0, 0, 0);
-	A.ball.position.set(11, 0.7, -3);
-	three.physics.add(A.ball, BALL);
-	A.phase = 'racked';
-	A.mark = A.now;
-};
-
-// setVelocity assigns a speed; applyTorqueImpulse adds a spin with no shove,
-// so it rolls the way it travels instead of skidding.
-A.roll = () => {
-	three.physics.setVelocity(A.ball, [-16, 1.2, 0]);
-	three.physics.applyTorqueImpulse(A.ball, [0, 0, -9]);
-	A.phase = 'rolling';
-	A.mark = A.now;
-	A.rolls++;
-};
-
-// An off-centre impulse: one call is both a shove and a tumble.
-A.bomb = () => {
-	for (const box of A.stack) {
-		three.physics.applyImpulse(box, [0, 4.5, 0], [0.35, 0, 0.2]);
+	// A dynamic body refuses a transform write — the solver owns it, and a
+	// script and a solver writing the same transform every frame is jitter, not
+	// a compromise. So re-racking is: take the body away, move the node, give
+	// it a body back.
+	@three.key('r', 're-rack')
+	rerack() {
+		this.stack.forEach((box, k) => {
+			three.physics.remove(box);
+			box.rotation.set(0, 0, 0);
+			box.position.set(...this.slots[k]);
+			three.physics.add(box, CRATE);
+		});
+		three.physics.remove(this.ball);
+		this.ball.rotation.set(0, 0, 0);
+		this.ball.position.set(11, 0.7, -3);
+		three.physics.add(this.ball, BALL);
+		this.phase = 'racked';
+		this.mark = this.now;
 	}
-};
 
-three.onKeyDown('space', () => A.roll());
-three.onKeyDown('r', () => A.rerack());
-three.onKeyDown('b', () => A.bomb());
-three.onKeyDown('a', () => { A.auto = !A.auto; A.mark = A.now; });
+	// setVelocity assigns a speed; applyTorqueImpulse adds a spin with no
+	// shove, so it rolls the way it travels instead of skidding.
+	@three.key('space', 'roll')
+	roll() {
+		three.physics.setVelocity(this.ball, [-16, 1.2, 0]);
+		three.physics.applyTorqueImpulse(this.ball, [0, 0, -9]);
+		this.phase = 'rolling';
+		this.mark = this.now;
+		this.rolls++;
+	}
 
-three.setAnimationLoop(() => {
-	// Seconds, from the game clock — so every interval below is written in the
-	// unit a person says them in, and `three.clock.timeScale = 0` holds the
-	// timer as well as the picture.
-	const t = three.clock.time;
-	A.now = t;
-	// The side wall's bricks slide while the mesh stands still — offset moving
-	// the tiling, not the geometry. Delete this line for a wall that holds
-	// still; `wallMatB.offset = [0.5, 0.25]` once, at build time, makes the
-	// same point more quietly — half a brick and a quarter row of shift, so
-	// the two walls do not show visibly the same seam in the same place.
-	A.wallMatB.offset = [(t / 9) % 1, 0];
-	if (!A.auto) return;
-	if (A.phase === 'racked' && t - A.mark > 1.2) A.roll();
-	else if (A.phase === 'rolling' && t - A.mark > 6.5) A.rerack();
-});
+	// An off-centre impulse: one call is both a shove and a tumble.
+	@three.key('b', 'bomb the stack')
+	bomb() {
+		for (const box of this.stack) {
+			three.physics.applyImpulse(box, [0, 4.5, 0], [0.35, 0, 0.2]);
+		}
+	}
+
+	@three.key('a', 'auto on/off')
+	toggleAuto() {
+		this.auto = !this.auto;
+		this.mark = this.now;
+	}
+
+	@three.systems.frame
+	tick() {
+		// Seconds, from the game clock — so every interval below is written in
+		// the unit a person says them in, and `three.clock.timeScale = 0` holds
+		// the timer as well as the picture.
+		const t = three.clock.time;
+		this.now = t;
+		// The side wall's bricks slide while the mesh stands still — offset
+		// moving the tiling, not the geometry. Delete this line for a wall that
+		// holds still; `wallMatB.offset = [0.5, 0.25]` once, at build time, makes
+		// the same point more quietly — half a brick and a quarter row of shift,
+		// so the two walls do not show visibly the same seam in the same place.
+		this.wallMatB.offset = [(t / 9) % 1, 0];
+		if (!this.auto) return;
+		if (this.phase === 'racked' && t - this.mark > 1.2) this.roll();
+		else if (this.phase === 'rolling' && t - this.mark > 6.5) this.rerack();
+	}
+}
+
+const A = globalThis.alley = new Alley();
 
 A.rerack();
 three.camera.lookAt(0, 1.6, -3);
 three.camera.orbit(24, 14, 20);
 
 three.debug.write({
-	keys: { space: 'roll', r: 're-rack', b: 'bomb the stack', a: 'auto on/off' },
+	keys: three.keys(),
 	auto: 'rolls every ~7.7s on its own',
 	stats: three.stats(),
 });

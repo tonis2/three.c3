@@ -6,13 +6,8 @@
 //   ./build/three --script examples/village_walk.js --camera 0,18,3.2 --screenshot village_walk.png
 //
 // WASD or the arrows walk (relative to the camera), shift runs, space jumps,
-// dragging the mouse orbits and the wheel zooms.
-//
-//   p  relief on / off — the same village, flat. Walk up to a wall and flip it.
-//   l  the relief shading itself toward the sun (self shadow) on / off
-//   m  march steps: 8 / 16 / 32
-//   o  shadow map on / off
-//   s  print what the frame costs
+// dragging the mouse orbits and the wheel zooms. The other keys are the `Keys`
+// class near the end, and the startup line lists them from `three.keys()`.
 //
 // Every image is generated below as a PAIR: a colour map and the height map it
 // was painted from, so the mortar in one is the valley in the other. Height is
@@ -25,16 +20,12 @@ const SEED = 7;
 // Noise and painting
 // ---------------------------------------------------------------------------
 
-function hash2(x, y, s) {
-	let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 2246822519);
-	h = Math.imul(h ^ (h >>> 13), 1274126177);
-	return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
-const clamp01 = (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
+const { hash, lerp, clamp01 } = three;
 const smooth = (t) => t * t * (3 - 2 * t);
-const lerp = (a, b, t) => a + (b - a) * t;
 const mix = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 const tint = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+// An eased ramp from `lo` to `hi`. Not `three.smoothstep`: the beams below
+// ramp down (lo > hi), which this answers and that one does not.
 const ramp = (lo, hi, x) => smooth(clamp01((x - lo) / (hi - lo)));
 
 // Value noise that wraps, so the image tiles.
@@ -48,10 +39,10 @@ function noise(cells, s) {
 			const gx = (x / SIZE) * cells;
 			const x0 = Math.floor(gx);
 			const fx = smooth(gx - x0);
-			const a = hash2(x0 % cells, y0 % cells, s);
-			const b = hash2((x0 + 1) % cells, y0 % cells, s);
-			const c = hash2(x0 % cells, (y0 + 1) % cells, s);
-			const d = hash2((x0 + 1) % cells, (y0 + 1) % cells, s);
+			const a = hash(x0 % cells, y0 % cells, s);
+			const b = hash((x0 + 1) % cells, y0 % cells, s);
+			const c = hash(x0 % cells, (y0 + 1) % cells, s);
+			const d = hash((x0 + 1) % cells, (y0 + 1) % cells, s);
 			out[y * SIZE + x] = lerp(lerp(a, b, fx), lerp(c, d, fx), fy);
 		}
 	}
@@ -102,7 +93,7 @@ function makeSurfaces() {
 		const face = ramp(1.5, 5, edge);
 		const k = y * SIZE + x;
 		const id = row * 7 + Math.floor(cx / BRICK) * 13;
-		const clay = tint(mix([150, 70, 52], [190, 108, 80], speck[k]), 0.82 + 0.3 * hash2(id, 3, SEED));
+		const clay = tint(mix([150, 70, 52], [190, 108, 80], speck[k]), 0.82 + 0.3 * hash(id, 3, SEED));
 		const mortar = mix([168, 162, 150], [196, 190, 178], speck[k]);
 		return { h: 0.1 + 0.8 * face - 0.04 * speck[k], c: mix(mortar, clay, face > 0.35 ? 1 : face / 0.35) };
 	});
@@ -132,8 +123,8 @@ function makeSurfaces() {
 			for (let ox = -1; ox <= 1; ox++) {
 				const cx = Math.floor(gx) + ox, cy = Math.floor(gy) + oy;
 				const wx = ((cx % CELLS) + CELLS) % CELLS, wy = ((cy % CELLS) + CELLS) % CELLS;
-				const px = cx + 0.2 + 0.6 * hash2(wx, wy, SEED + 11);
-				const py = cy + 0.2 + 0.6 * hash2(wx, wy, SEED + 12);
+				const px = cx + 0.2 + 0.6 * hash(wx, wy, SEED + 11);
+				const py = cy + 0.2 + 0.6 * hash(wx, wy, SEED + 12);
 				const d = Math.hypot(gx - px, gy - py);
 				if (d < d1) { d2 = d1; d1 = d; id = wy * CELLS + wx; }
 				else if (d < d2) d2 = d;
@@ -142,7 +133,7 @@ function makeSurfaces() {
 		const gap = d2 - d1;
 		const stone = ramp(0.02, 0.2, gap);
 		const dome = 0.8 + 0.2 * (1 - clamp01(d1 / 0.5)) * stone;
-		const tone = 0.7 + 0.5 * hash2(id, id >> 3, SEED + 13);
+		const tone = 0.7 + 0.5 * hash(id, id >> 3, SEED + 13);
 		return { h: 0.08 + 0.55 * stone * dome, c: mix([58, 56, 52], tint([128, 122, 114], tone), stone) };
 	});
 
@@ -156,7 +147,7 @@ function makeSurfaces() {
 		const u = (cx % CW) / CW, v = (y % CH) / CH;
 		const side = ramp(0.0, 0.07, Math.min(u, 1 - u));
 		const h = 0.15 + 0.75 * (1 - v) * side;
-		const base = mix([96, 56, 44], [160, 100, 72], hash2(Math.floor(cx / CW), r, SEED + 21));
+		const base = mix([96, 56, 44], [160, 100, 72], hash(Math.floor(cx / CW), r, SEED + 21));
 		return { h, c: tint(base, (0.6 + 0.4 * (1 - v)) * (0.65 + 0.35 * side)) };
 	});
 
@@ -166,11 +157,11 @@ function makeSurfaces() {
 	const stone = paint((x, y) => {
 		const row = Math.floor(y / BH);
 		const widths = [0.5, 0.3, 0.45, 0.25, 0.35];
-		let start = hash2(row, 1, SEED + 31) * SIZE, cell = 0, edgeX = 0, w = 0, acc = start;
+		let start = hash(row, 1, SEED + 31) * SIZE, cell = 0, edgeX = 0, w = 0, acc = start;
 		const px = (x - start + SIZE * 2) % SIZE;
 		let run = 0;
 		for (let i = 0; i < 12; i++) {
-			w = SIZE * (0.18 + 0.2 * hash2(row, i, SEED + 32));
+			w = SIZE * (0.18 + 0.2 * hash(row, i, SEED + 32));
 			if (px < run + w) { cell = i; edgeX = Math.min(px - run, run + w - px); break; }
 			run += w;
 		}
@@ -178,7 +169,7 @@ function makeSurfaces() {
 		const edge = Math.min(edgeX, by, BH - by);
 		const face = ramp(1, 6, edge);
 		const wob = grain[y * SIZE + x];
-		const tone = 0.75 + 0.4 * hash2(row, cell, SEED + 33);
+		const tone = 0.75 + 0.4 * hash(row, cell, SEED + 33);
 		return { h: 0.1 + 0.7 * face + 0.1 * wob, c: mix([70, 68, 64], tint([150, 146, 138], tone), face) };
 	});
 
@@ -186,7 +177,7 @@ function makeSurfaces() {
 	const turf = noise(10, SEED + 41);
 	const grass = paint((x, y) => {
 		const k = y * SIZE + x;
-		const blade = hash2(x, y, SEED + 42);
+		const blade = hash(x, y, SEED + 42);
 		const c = mix([54, 88, 40], [118, 152, 72], turf[k]);
 		const lift = blade > 0.9 ? 0.2 : 0;
 		return { h: 0.35 + 0.35 * turf[k] + lift, c: [c[0] + lift * 70, c[1] + lift * 120, c[2]] };
@@ -213,9 +204,9 @@ const surface = makeSurfaces();
 
 const reliefMaterials = [];
 const cache = new Map();
-let reliefOn = true;
-let selfShadow = 1;
-let steps = 1; // multiplier index, see `m`
+// What the `p`, `l` and `m` keys change, applied to every relief material by
+// `applyRelief`.
+const look = { relief: true, selfShadow: 1, steps: 1 };
 
 function relief(kind, w, h) {
 	const s = surface[kind];
@@ -229,7 +220,7 @@ function relief(kind, w, h) {
 			heightMap: s.height,
 			heightScale: s.depth,
 			parallaxSteps: s.steps,
-			parallaxShadow: selfShadow,
+			parallaxShadow: look.selfShadow,
 			roughness: 0.9,
 		});
 		m.repeat = [rx, ry];
@@ -243,17 +234,15 @@ function relief(kind, w, h) {
 
 function applyRelief() {
 	for (const m of reliefMaterials) {
-		m.heightScale = reliefOn ? m.baseDepth : 0;
-		m.parallaxSteps = Math.min(64, Math.round(m.baseSteps * steps));
-		m.parallaxShadow = selfShadow;
+		m.heightScale = look.relief ? m.baseDepth : 0;
+		m.parallaxSteps = Math.min(64, Math.round(m.baseSteps * look.steps));
+		m.parallaxShadow = look.selfShadow;
 	}
 }
 
 // Colour is per mesh, so every plain prop shares this one white material and
 // carries its colour on the mesh, which keeps them in one batch.
 const WHITE = new three.MeshLambertMaterial({ roughness: 0.85 });
-const SKIN = WHITE;
-const plain = () => WHITE;
 function solid(geometry, color) {
 	const m = new three.Mesh(geometry, WHITE);
 	m.color = color;
@@ -325,7 +314,6 @@ function skinnedBox(parent, kind, w, h, d, topKind) {
 
 const ROOF_TINTS = [0xffffff, 0xe0c2b0, 0xc9d3c8, 0xe9cfa8];
 const WALL_KINDS = ['brick', 'timber', 'timber', 'brick'];
-const WALLS_SOLID = [];
 
 function house(name, x, z, facing, w, d, wallH, roofH, kind, roofTint) {
 	const g = new three.Group();
@@ -362,7 +350,7 @@ function house(name, x, z, facing, w, d, wallH, roofH, kind, roofTint) {
 	step.position.set(0, 0.1, d / 2 + 0.45);
 	g.add(step);
 
-		for (const dx of [-1, 1]) {
+	for (const dx of [-1, 1]) {
 		const win = solid(BOX, 0xf1d27c);
 		win.scale.set(0.75, 0.8, 0.1);
 		win.position.set(dx * w * 0.3, 0.6 + wallH * 0.55, d / 2 + 0.03);
@@ -403,7 +391,7 @@ const lots = [
 	{ x: 9.5, z: 14, f: Math.PI, w: 5.2, d: 4.6 },
 ];
 lots.forEach((l, i) => {
-	const r = (n) => hash2(i, n, SEED + 50);
+	const r = (n) => hash(i, n, SEED + 50);
 	house(
 		`house_${i}`, l.x, l.z, l.f, l.w, l.d,
 		2.7 + r(1) * 0.9, 1.7 + r(2) * 1.0,
@@ -480,7 +468,7 @@ function crate(x, z, s = 0.9) {
 	const c = solid(BOX, 0x8a6a3c);
 	c.scale.set(s, s, s);
 	c.position.set(x, s / 2, z);
-	c.rotation.y = hash2(x * 10, z * 10, SEED) * 1.2;
+	c.rotation.y = hash(x * 10, z * 10, SEED) * 1.2;
 	scene.add(c);
 }
 barrel(-8.2, -10.6); barrel(-7.4, -10.7); crate(8, -10.6); crate(8.8, -10.8, 0.7);
@@ -491,7 +479,7 @@ barrel(-11.2, 0.5); crate(-11, 8); barrel(11.2, 8); crate(11.4, -0.5);
 // ---------------------------------------------------------------------------
 
 for (let i = 0; i < 26; i++) {
-	const r = (n) => hash2(i, n, SEED + 70);
+	const r = (n) => hash(i, n, SEED + 70);
 	const a = r(1) * Math.PI * 2;
 	const dist = 26 + r(2) * 24;
 	const x = Math.cos(a) * dist, z = Math.sin(a) * dist;
@@ -556,16 +544,15 @@ function person(coat, hat) {
 		body.add(m);
 		return m;
 	};
-	const cloth = plain(0xffffff);
-	part(ROD, cloth, coat, [0.46, 0.62, 0.3], [0, 0.95, 0]);
-	part(BALL, SKIN, 0xe0aa80, [0.34, 0.38, 0.32], [0, 1.42, 0]);
-	part(CONE, cloth, hat, [0.42, 0.3, 0.42], [0, 1.66, 0]);
+	part(ROD, WHITE, coat, [0.46, 0.62, 0.3], [0, 0.95, 0]);
+	part(BALL, WHITE, 0xe0aa80, [0.34, 0.38, 0.32], [0, 1.42, 0]);
+	part(CONE, WHITE, hat, [0.42, 0.3, 0.42], [0, 1.66, 0]);
 	return {
 		root, body,
-		legL: limb(body, -0.12, 0.64, 0.64, 0.17, cloth, 0x3a3328),
-		legR: limb(body, 0.12, 0.64, 0.64, 0.17, cloth, 0x3a3328),
-		armL: limb(body, -0.27, 1.2, 0.58, 0.13, SKIN, 0xe0aa80),
-		armR: limb(body, 0.27, 1.2, 0.58, 0.13, SKIN, 0xe0aa80),
+		legL: limb(body, -0.12, 0.64, 0.64, 0.17, WHITE, 0x3a3328),
+		legR: limb(body, 0.12, 0.64, 0.64, 0.17, WHITE, 0x3a3328),
+		armL: limb(body, -0.27, 1.2, 0.58, 0.13, WHITE, 0xe0aa80),
+		armR: limb(body, 0.27, 1.2, 0.58, 0.13, WHITE, 0xe0aa80),
 	};
 }
 
@@ -585,9 +572,7 @@ hero.root.name = 'hero';
 hero.root.collides = false;
 scene.add(hero.root);
 
-const me = { x: 0, y: 0.05, z: 22, vy: 0, grounded: false, heading: Math.PI, walk: 0, jump: false };
-hero.root.position.set(me.x, me.y, me.z);
-
+hero.root.position.set(0, 0.05, 22);
 // --- a few strollers ---
 const folk = [];
 const routes = [
@@ -613,85 +598,116 @@ const held = (k) => three.input.isDown(k);
 const axis = (a, b) => (a.some(held) ? 1 : 0) - (b.some(held) ? 1 : 0);
 const GRAV = 24, JUMP = 8.5;
 
-three.setFixedLoop((dt) => {
-	const run = held('shift') ? 1.7 : 1;
-	const speed = 3.6 * run;
-	const move = three.camera.planarMove(
-		axis(['w', 'arrowup'], ['s', 'arrowdown']),
-		axis(['d', 'arrowright'], ['a', 'arrowleft']),
-	);
-	const moving = move.length() > 0;
-	if (moving) {
-		// Turn toward the way we are going rather than snapping to it.
-		const want = Math.atan2(move.x, move.z);
-		me.heading += three.angleDelta(me.heading, want) * Math.min(1, dt * 14);
+// The player: where the capsule is, and the walk cycle drawn on `hero`.
+class Walker {
+	x = 0; y = 0.05; z = 22; vy = 0;
+	grounded = false; heading = Math.PI; walk = 0; jump = false;
+
+	// Edges are per frame; the fixed step can run zero or several times in
+	// one, so the press is latched here and spent by `move`.
+	@three.systems.frame
+	latchJump() {
+		if (three.input.pressed('space')) this.jump = true;
 	}
 
-	if (me.jump && me.grounded) { me.vy = JUMP; me.grounded = false; }
-	me.jump = false;
-	me.vy = Math.max(me.vy - GRAV * dt, -30);
+	@three.systems.step
+	move(dt) {
+		const run = held('shift') ? 1.7 : 1;
+		const speed = 3.6 * run;
+		const move = three.camera.planarMove(
+			axis(['w', 'arrowup'], ['s', 'arrowdown']),
+			axis(['d', 'arrowright'], ['a', 'arrowleft']),
+		);
+		const moving = move.length() > 0;
+		if (moving) {
+			// Turn toward the way we are going rather than snapping to it.
+			const want = Math.atan2(move.x, move.z);
+			this.heading += three.angleDelta(this.heading, want) * Math.min(1, dt * 14);
+		}
 
-	const r = three.moveAndSlide(
-		[me.x, me.y + HEIGHT / 2, me.z],
-		[move.x * speed * dt, me.vy * dt, move.z * speed * dt],
-		MOVE,
-	);
-	me.x = r.position.x;
-	me.y = r.position.y - HEIGHT / 2;
-	me.z = r.position.z;
-	if (r.grounded) { if (me.vy < 0) me.vy = 0; me.grounded = true; }
-	else { me.grounded = false; if (me.vy > 0 && r.remaining.y > 1e-4) me.vy = 0; }
-	if (me.y < -10) { me.x = 0; me.y = 1; me.z = 22; me.vy = 0; }
+		if (this.jump && this.grounded) { this.vy = JUMP; this.grounded = false; }
+		this.jump = false;
+		this.vy = Math.max(this.vy - GRAV * dt, -30);
 
-	me.walk += moving && me.grounded ? dt * 6.5 * run : 0;
-	hero.root.position.set(me.x, me.y, me.z);
-	hero.body.rotation.y = me.heading;
-	swing(hero, me.walk, moving ? 0.7 : 0);
-	hero.body.position.y = moving && me.grounded ? Math.abs(Math.sin(me.walk)) * 0.05 : 0;
+		const r = three.moveAndSlide(
+			[this.x, this.y + HEIGHT / 2, this.z],
+			[move.x * speed * dt, this.vy * dt, move.z * speed * dt],
+			MOVE,
+		);
+		this.x = r.position.x;
+		this.y = r.position.y - HEIGHT / 2;
+		this.z = r.position.z;
+		if (r.grounded) { if (this.vy < 0) this.vy = 0; this.grounded = true; }
+		else { this.grounded = false; if (this.vy > 0 && r.remaining.y > 1e-4) this.vy = 0; }
+		if (this.y < -10) { this.x = 0; this.y = 1; this.z = 22; this.vy = 0; }
 
-	for (const f of folk) {
-		const [tx, tz] = f.route[f.at];
-		const dx = tx - f.x, dz = tz - f.z;
-		const dist = Math.hypot(dx, dz);
-		if (dist < 0.3) { f.at = (f.at + 1) % f.route.length; continue; }
-		f.x += (dx / dist) * f.speed * dt;
-		f.z += (dz / dist) * f.speed * dt;
-		f.phase += dt * 5.5;
-		f.p.root.position.set(f.x, Math.abs(Math.sin(f.phase)) * 0.04, f.z);
-		f.p.body.rotation.y = Math.atan2(dx, dz);
-		swing(f.p, f.phase, 0.6);
+		this.walk += moving && this.grounded ? dt * 6.5 * run : 0;
+		hero.root.position.set(this.x, this.y, this.z);
+		hero.body.rotation.y = this.heading;
+		swing(hero, this.walk, moving ? 0.7 : 0);
+		hero.body.position.y = moving && this.grounded ? Math.abs(Math.sin(this.walk)) * 0.05 : 0;
 	}
-});
+}
 
-// Edges are per frame; the fixed loop can run zero or several times in one.
-three.setAnimationLoop(() => {
-	if (three.input.pressed('space')) me.jump = true;
-});
+const me = new Walker();
 
-three.onKeyDown('p', () => {
-	reliefOn = !reliefOn;
-	applyRelief();
-	console.log(reliefOn ? 'relief on' : 'relief off — the same surfaces, flat');
-});
-three.onKeyDown('l', () => {
-	selfShadow = selfShadow > 0 ? 0 : 1;
-	applyRelief();
-	console.log(selfShadow ? 'relief self-shadow on' : 'relief self-shadow off');
-});
-three.onKeyDown('m', () => {
-	steps = steps === 1 ? 2 : steps === 2 ? 0.5 : 1;
-	applyRelief();
-	console.log(`march steps x${steps}`);
-});
-three.onKeyDown('o', () => {
-	three.light.shadow.enabled = !three.light.shadow.enabled;
-	console.log(three.light.shadow.enabled ? 'shadow map on' : 'shadow map off');
-});
-three.onKeyDown('s', () => {
-	const s = three.stats();
-	console.log(`draws ${s.drawCalls} (+${s.shadowDraws} shadow) · ${s.triangles} tris · ${s.gpuMs.toFixed(2)} ms · ${reliefMaterials.length} relief materials`);
-});
+// The strollers walk their routes, point to point, round and round.
+class Folk {
+	@three.systems.step
+	static stroll(dt) {
+		for (const f of folk) {
+			const [tx, tz] = f.route[f.at];
+			const dx = tx - f.x, dz = tz - f.z;
+			const dist = Math.hypot(dx, dz);
+			if (dist < 0.3) { f.at = (f.at + 1) % f.route.length; continue; }
+			f.x += (dx / dist) * f.speed * dt;
+			f.z += (dz / dist) * f.speed * dt;
+			f.phase += dt * 5.5;
+			f.p.root.position.set(f.x, Math.abs(Math.sin(f.phase)) * 0.04, f.z);
+			f.p.body.rotation.y = Math.atan2(dx, dz);
+			swing(f.p, f.phase, 0.6);
+		}
+	}
+}
+
+class Keys {
+	// The same village, flat. Walk up to a wall and flip it.
+	@three.key('p', 'relief on / off')
+	static relief() {
+		look.relief = !look.relief;
+		applyRelief();
+		console.log(look.relief ? 'relief on' : 'relief off — the same surfaces, flat');
+	}
+
+	@three.key('l', 'relief self-shadow on / off')
+	static selfShadow() {
+		look.selfShadow = look.selfShadow > 0 ? 0 : 1;
+		applyRelief();
+		console.log(`relief self-shadow ${look.selfShadow ? 'on' : 'off'}`);
+	}
+
+	@three.key('m', 'march steps x1 / x2 / x0.5')
+	static steps() {
+		look.steps = look.steps === 1 ? 2 : look.steps === 2 ? 0.5 : 1;
+		applyRelief();
+		console.log(`march steps x${look.steps}`);
+	}
+
+	@three.key('o', 'shadow map on / off')
+	static shadowMap() {
+		const shadow = three.light.shadow;
+		shadow.enabled = !shadow.enabled;
+		console.log(`shadow map ${shadow.enabled ? 'on' : 'off'}`);
+	}
+
+	@three.key('s', 'what the frame costs')
+	static cost() {
+		const s = three.stats();
+		console.log(`draws ${s.drawCalls} (+${s.shadowDraws} shadow) · ${s.triangles} tris · ${s.gpuMs.toFixed(2)} ms · ${reliefMaterials.length} relief materials`);
+	}
+}
 
 applyRelief();
 console.log(`${lots.length} houses, ${reliefMaterials.length} relief materials`);
-console.log('WASD walk · shift run · space jump · drag orbit · p relief · l self-shadow · m steps · o shadow map · s cost');
+console.log(['WASD walk', 'shift run', 'space jump', 'drag orbit',
+	...Object.entries(three.keys()).map(([key, what]) => `${key} ${what}`)].join(' · '));
