@@ -152,7 +152,7 @@ jobs:
       # The build has no C of its own (the script engine is C3), so no target
       # needs a `--cc` or a compiler environment.
       - name: Build
-        run: c3c build --trust=full --safe=no -O3
+        run: c3c build --trust=full --safe=no -O3 -g0
 
       # -------------------------------------------------------------- assemble --
       - name: Assemble the bundle

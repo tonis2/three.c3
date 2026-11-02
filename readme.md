@@ -91,7 +91,7 @@ c3c build
 release assets rather than committed binaries, so a clone stays cheap. It is
 safe to re-run, and takes one step by name — `./setup.sh driver`.
 
-For a release build: `c3c build --safe=no -O3`
+For a release build: `c3c build --safe=no -O3 -g0`
 
 ### Documentation
 
