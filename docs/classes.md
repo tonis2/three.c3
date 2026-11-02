@@ -2115,6 +2115,10 @@ is, costing what a retained one does.
 marks the widget for a re-render; and what reaches the host is the difference — one `three.ui.patch` per
 changed value, and a `set` only when the shape itself changed.
 
+Assigning a number, string or boolean the field already holds is not a change, so copying game state into
+a widget every frame (`hud.score = G.score`) re-renders only when the state moved. Assigning an object or
+array always counts, since it may have changed in place.
+
 So the two things `three.ui.set`/`patch` make a script carry stop existing: a unique string key per value
 invented by hand, and the rule that every tree the game can set must still contain the keys the loop
 patches.

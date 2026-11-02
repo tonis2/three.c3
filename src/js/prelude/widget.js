@@ -443,10 +443,16 @@ let installed = false;
 // The set trap. It writes the field and marks the widget dirty, and that is all
 // it does — no getters, no interception of reads, nothing that costs anything
 // on the way out.
+//
+// Writing a number, a string or a boolean the field already holds is not a
+// change, so `this.score = state.score` every frame costs no re-render. An
+// object or a function always counts: it may have been changed in place, and
+// assigning it again is how a script says so.
 const TRAP = {
 	set(target, name, value) {
+		const before = target[name];
 		target[name] = value;
-		if (typeof name !== 'symbol') {
+		if (typeof name !== 'symbol' && (!Object.is(before, value) || (typeof value === 'object' && value !== null) || typeof value === 'function')) {
 			const record = target[STATE].owner;
 			if (record !== null) record.dirty = true;
 		}

@@ -2768,6 +2768,43 @@ fn void a_widget_class_becomes_the_interface() @test
 }
 
 <*
+ Writing a field the value it already holds is not a change: a HUD that copies
+ game state into itself every frame re-renders only when the state moved. An
+ object written again still counts, since it may have changed in place.
+*>
+fn void writing_the_value_a_field_holds_is_not_a_change() @test
+{
+	@with_ui_js(; three::Renderer* renderer, three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const { Label } = three.ui;
+			globalThis.renders = 0;
+			class Hud extends three.Widget {
+				constructor() { super(); this.score = 0; this.rows = []; }
+				render() { renders++; return new Label('score ' + this.score); }
+			}
+			globalThis.hud = Hud.mount();
+		`);
+		defer built.free();
+		test::@check(built.ok, "the script ran: %s", built.error);
+
+		String[4] steps = { `hud.score = 0;`, `hud.score = 1;`, `hud.rows = hud.rows;`, `hud.score = 1;` };
+		String[4] expected = { "1", "2", "3", "3" };
+		double at = 0;
+		foreach (i, step : steps)
+		{
+			three::RunResult wrote = run.run(step);
+			wrote.free();
+			at += 16;
+			run.tick(at);
+			three::RunResult read = run.run(`return renders`);
+			defer read.free();
+			test::@check(read.value == expected[i], "after `%s` renders is %s, not %s", step, read.value, expected[i]);
+		}
+	};
+}
+
+<*
  A value changed is a patch; the shape changed is a rebuild.
 
  The reason the class layer exists: `render()` is written as though it ran every
