@@ -16,8 +16,8 @@
 
  ## Every script is an async function body
 
- The source is wrapped in `(async()=>{` ... `})()` before evaluation, which buys
- two things an agent will assume it has:
+ The source is evaluated with `qjs::EVAL_ASYNC`, as the body of an async function
+ that is called at once, which buys two things an agent will assume it has:
 
  - `await` at the top level. `three.load` is synchronous, so nothing here needs
  it — but `const kit = await three.load(...)` is the line an agent that has
@@ -25,13 +25,10 @@
  surprising on the first line of the first script.
  - `return` at the top level, which is where the returned value comes from.
 
- The open brace carries no newline, so a stack trace's line numbers are the
- script's own. The cost is that a bare trailing expression is *not* the result —
- `return` it. `run_script`'s input schema says so (`src/mcp/server.c3`), the one
- place this shape is visible from outside.
-
- `JS_EVAL_FLAG_ASYNC` would do this natively; quickjs.c3l's shim does not expose
- the flag, and reaching it would mean changing that submodule.
+ A stack trace's line and column numbers are the script's own. The cost is that
+ a bare trailing expression is *not* the result — `return` it. `run_script`'s
+ input schema says so (`src/mcp/server.c3`), the one place this shape is visible
+ from outside.
 
  ## The device gets to speak into the error too
 
@@ -806,12 +803,10 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 
 	@pool()
 	{
-		// No newline after the brace: the script's line 1 stays line 1 in every
-		// stack trace. A module needs neither — its top level is already async and
-		// its line 1 is already its own.
-		String wrapped = as_module ? source : string::tformat("(async()=>{%s\n})()", source);
-
-		qjs::Value? started = self.js.eval(wrapped, name, as_module ? qjs::EVAL_MODULE : qjs::EVAL_GLOBAL);
+		// A script runs as the body of an async function (EVAL_ASYNC), so it can
+		// await and return at top level, with its own line numbers. A module's top
+		// level is already async.
+		qjs::Value? started = self.js.eval(source, name, as_module ? qjs::EVAL_MODULE : qjs::EVAL_ASYNC);
 		if (catch err = started)
 		{
 			// A parse error, or a throw before the first await — the async wrapper
@@ -934,46 +929,20 @@ fn void JsRuntime.clear_uploads(&self)
 }
 
 <*
- Attaches handlers to the script's promise and runs the microtask queue until it
- settles.
-
- Reading the result through `then` rather than through `JS_PromiseResult` is not
- a preference: the shim does not export the promise-state calls, and the two that
- would do it pass `JSValue` by value — the ABI bet the whole shim exists to
- avoid.
+ Runs the microtask queue until the script's promise settles, then reads its
+ value or its rejection straight off the promise.
 *>
 fn void JsRuntime.await_settled(&self, qjs::Value promise)
 {
-	qjs::Value then = self.js.property(promise, "then");
-	defer self.js.release(then);
-
-	if (!self.js.is_function(then))
+	if (self.js.promise_state(promise) == NOT_A_PROMISE)
 	{
-		// Cannot happen with the async wrapper in place, and is a clear message
-		// rather than a silent empty result if it ever does.
+		// Cannot happen with EVAL_ASYNC, and is a clear message rather than a
+		// silent empty result if it ever does.
 		self.error.append_string("the script did not produce a promise");
 		self.rejected = true;
 		self.settled = true;
 		return;
 	}
-
-	qjs::Value on_ok  = self.js.function(&js_settled, "resolve", 1, self);
-	qjs::Value on_err = self.js.function(&js_rejected, "reject", 1, self);
-	defer self.js.release(on_ok);
-	defer self.js.release(on_err);
-
-	qjs::Value[2] handlers = { on_ok, on_err };
-	qjs::Value? attached   = self.js.call(then, promise, handlers[..]);
-	if (catch err = attached)
-	{
-		String message = self.js.exception(mem);
-		defer message.free(mem);
-		self.error.append_string(message);
-		self.rejected = true;
-		self.settled = true;
-		return;
-	}
-	self.js.release(attached);
 
 	uint drained = 0;
 	while (drained < JS_MAX_JOBS)
@@ -988,13 +957,14 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 		// being a queue. Draining it here regardless would make
 		// `instantiateAsync` in a `main.js` cost exactly what the synchronous
 		// path costs, on the one code path where it matters most.
-		else if (self.settled || !self.step_upload())
+		else if (self.js.promise_state(promise) != PENDING || !self.step_upload())
 		{
 			break;
 		}
 		drained++;
 		if (self.timed_out) break;
 	}
+	self.take_settlement(promise);
 
 	if (self.timed_out)
 	{
@@ -1175,54 +1145,31 @@ fn int on_interrupt(qjs::Runtime runtime, void* opaque) @local
 	return 1;
 }
 
-fn void js_settled(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+<*
+ What a settled script promise answered: its value as JSON, or its rejection
+ described. A pending one leaves `settled` false for `await_settled` to explain.
+*>
+fn void JsRuntime.take_settlement(&self, qjs::Value promise)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
+	qjs::PromiseState state = self.js.promise_state(promise);
+	if (state == PENDING) return;
+	qjs::Value result = self.js.promise_result(promise);
+	defer self.js.release(result);
 	self.settled = true;
-	self.rejected = false;
-
-	if (argc < 1) return;
+	self.rejected = state == REJECTED;
+	if (self.rejected)
+	{
+		String described = describe_throw(&self.js, result, mem);
+		defer described.free(mem);
+		self.error.append_string(described);
+		return;
+	}
 	// `undefined` has no JSON form, which is exactly the answer wanted for a
 	// script that returned nothing: an empty `value`, distinguishable from the
 	// four characters `null`.
-	String json = js.json(args[0], mem);
+	String json = self.js.json(result, mem);
 	defer json.free(mem);
 	self.value.append_string(json);
-}
-
-fn void js_rejected(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	self.settled = true;
-	self.rejected = true;
-
-	if (argc < 1)
-	{
-		self.error.append_string("the script rejected with nothing");
-		return;
-	}
-
-	String described = describe_throw(&js, args[0], mem);
-	defer described.free(mem);
-	self.error.append_string(described);
 }
 
 <*

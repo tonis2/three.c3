@@ -775,6 +775,8 @@ fn String JsRuntime.loop_timeout_message(&self, String what)
 fn bool JsRuntime.is_thenable(&self, qjs::Value value)
 {
 	if (value.tag() != qjs::TAG_OBJECT) return false;
+	// A real promise answers without a property lookup.
+	if (self.js.promise_state(value) != NOT_A_PROMISE) return true;
 	qjs::Value then = self.js.property(value, "then");
 	defer self.js.release(then);
 	return self.js.is_function(then);
