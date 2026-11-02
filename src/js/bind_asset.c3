@@ -20,6 +20,7 @@ module three;
 import std::math;
 import std::math::vector;
 import qjs;
+import fastjs::js;
 import image;
 import image::png;
 import std::collections::list;
@@ -1711,8 +1712,8 @@ fn void js_upload_mesh(
 		{
 			.asset = id,
 			.mesh = (uint)arg_int(&js, argc, args, 2),
-			.resolve = js.retain(args[3]),
-			.reject = js.retain(args[4]),
+			.resolve = self.js.hold((js::Value)args[3]),
+			.reject = self.js.hold((js::Value)args[4]),
 		}
 	);
 	*out = qjs::undefined_value();

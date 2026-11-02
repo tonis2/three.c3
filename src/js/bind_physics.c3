@@ -31,6 +31,7 @@ import std::collections::object;
 import std::core::string;
 import collision;
 import qjs;
+import fastjs::js;
 import std::math::vector;
 
 fn void JsRuntime.bind_physics_verbs(&self, qjs::Value host)
@@ -922,10 +923,10 @@ fn void js_on_trigger(
 		return;
 	}
 
-	self.trigger_handler.release(&self.js);
+	self.trigger_handler.release(self.js);
 	if (clearing) return;
 
-	self.trigger_handler.hold(&js, args[0]);
+	self.trigger_handler.hold(self.js, (js::Value)args[0]);
 }
 
 fn void js_on_contact(
@@ -947,10 +948,10 @@ fn void js_on_contact(
 		return;
 	}
 
-	self.contact_handler.release(&self.js);
+	self.contact_handler.release(self.js);
 	if (clearing) return;
 
-	self.contact_handler.hold(&js, args[0]);
+	self.contact_handler.hold(self.js, (js::Value)args[0]);
 }
 
 <*
@@ -959,8 +960,8 @@ fn void js_on_contact(
 *>
 fn void JsRuntime.clear_physics_handlers(&self)
 {
-	self.trigger_handler.release(&self.js);
-	self.contact_handler.release(&self.js);
+	self.trigger_handler.release(self.js);
+	self.contact_handler.release(self.js);
 }
 
 // The rendered scene's, in all three of these: they are the frame's half of
@@ -1005,9 +1006,9 @@ fn void JsRuntime.dispatch_physics_events(&self)
 		foreach (hit : self.pass.scene.physics.trigger_events)
 		{
 			if (self.timed_out) break;
-			if (!self.call_physics_handler(self.trigger_handler.callback, self.trigger_event_value(hit), "trigger"))
+			if (!self.call_physics_handler(self.trigger_handler.get(self.js), self.trigger_event_value(hit), "trigger"))
 			{
-				self.trigger_handler.release(&self.js);
+				self.trigger_handler.release(self.js);
 				break;
 			}
 		}
@@ -1018,9 +1019,9 @@ fn void JsRuntime.dispatch_physics_events(&self)
 		foreach (hit : self.pass.scene.physics.contact_events)
 		{
 			if (self.timed_out) break;
-			if (!self.call_physics_handler(self.contact_handler.callback, self.contact_event_value(hit), "contact"))
+			if (!self.call_physics_handler(self.contact_handler.get(self.js), self.contact_event_value(hit), "contact"))
 			{
-				self.contact_handler.release(&self.js);
+				self.contact_handler.release(self.js);
 				break;
 			}
 		}
@@ -1035,10 +1036,10 @@ fn void JsRuntime.dispatch_physics_events(&self)
 *>
 fn qjs::Value JsRuntime.trigger_event_value(&self, TriggerHit hit)
 {
-	qjs::Value event = self.js.object();
-	self.js.set_property(event, "type", self.js.string(hit.entered ? "enter" : "exit"));
-	self.js.set_property(event, "trigger", node_handle_or_null(&self.js, hit.trigger));
-	self.js.set_property(event, "other", node_handle_or_null(&self.js, hit.other));
+	qjs::Value event = self.qjs.object();
+	self.qjs.set_property(event, "type", self.qjs.string(hit.entered ? "enter" : "exit"));
+	self.qjs.set_property(event, "trigger", node_handle_or_null(&self.qjs, hit.trigger));
+	self.qjs.set_property(event, "other", node_handle_or_null(&self.qjs, hit.other));
 	return event;
 }
 
@@ -1048,12 +1049,12 @@ fn qjs::Value JsRuntime.trigger_event_value(&self, TriggerHit hit)
 *>
 fn qjs::Value JsRuntime.contact_event_value(&self, ContactHit hit)
 {
-	qjs::Value event = self.js.object();
-	self.js.set_property(event, "type", self.js.string(hit.started ? "start" : "end"));
-	self.js.set_property(event, "a", node_handle_or_null(&self.js, hit.a));
-	self.js.set_property(event, "b", node_handle_or_null(&self.js, hit.b));
-	self.js.set_property(event, "normal", vec3_value(&self.js, hit.normal));
-	self.js.set_property(event, "point", vec3_value(&self.js, hit.point));
+	qjs::Value event = self.qjs.object();
+	self.qjs.set_property(event, "type", self.qjs.string(hit.started ? "start" : "end"));
+	self.qjs.set_property(event, "a", node_handle_or_null(&self.qjs, hit.a));
+	self.qjs.set_property(event, "b", node_handle_or_null(&self.qjs, hit.b));
+	self.qjs.set_property(event, "normal", vec3_value(&self.qjs, hit.normal));
+	self.qjs.set_property(event, "point", vec3_value(&self.qjs, hit.point));
 	return event;
 }
 
@@ -1067,11 +1068,11 @@ fn qjs::Value JsRuntime.contact_event_value(&self, ContactHit hit)
  treated alike here for the same reason: a handler that cannot finish inside a
  frame is not a handler.
 *>
-fn bool JsRuntime.call_physics_handler(&self, qjs::Value handler, qjs::Value event, String what)
+fn bool JsRuntime.call_physics_handler(&self, js::Value handler, qjs::Value event, String what)
 {
-	defer self.js.release(event);
+	defer self.qjs.release(event);
 	@pool()
 	{
-		return self.call_handler(handler, { event }, string::tformat("the %s handler", what));
+		return self.call_handler(handler, { (js::Value)event }, string::tformat("the %s handler", what));
 	};
 }

@@ -31,6 +31,7 @@ import std::math;
 import std::math::vector;
 import collision;
 import qjs;
+import fastjs::js;
 import std::collections::list;
 
 <*
@@ -41,10 +42,9 @@ import std::collections::list;
 *>
 fn void JsRuntime.install_bindings(&self)
 {
-	qjs::Value global = self.js.global();
-	defer self.js.release(global);
-
-	qjs::Value host = self.js.object();
+	js::Value js_host = self.js.object()!!;
+	// TEMPORARY: the files on the old API register through this.
+	qjs::Value host = (qjs::Value)js_host;
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
@@ -132,7 +132,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_ui_verbs(host);
 
 	// The animation loop (js/frame_loop.c3)
-	self.bind_frame_verbs(host);
+	self.bind_frame_verbs(js_host)!!;
 
 	// The keyboard (js/bind_input.c3)
 	self.bind_input_verbs(host);
@@ -155,7 +155,7 @@ fn void JsRuntime.install_bindings(&self)
 
 	// The frame
 	self.bind(host, "stats", &js_stats, 1);
-	self.bind(host, "debugWrite", &js_debug_write, 1);
+	self.js.set(js_host, "debugWrite", self.js.function(&js_debug_write, "debugWrite", 1, self)!!)!!;
 	self.bind(host, "debugOverlay", &js_debug_overlay, 1);
 	self.bind(host, "unloadUnused", &js_unload_unused, 0);
 	// Hot reload (reload.c3), and closing the window (main.c3)
@@ -227,12 +227,12 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "cameraProject", &js_camera_project, 3);
 	self.bind(host, "frameAll", &js_frame_all, 0);
 
-	self.js.set_property(global, "__three", host);
+	self.js.set(self.js.global(), "__three", js_host)!!;
 }
 
 fn void JsRuntime.bind(&self, qjs::Value host, ZString name, qjs::HostFn body, int arity)
 {
-	self.js.set_property(host, name, self.js.function(body, name, arity, self));
+	self.qjs.set_property(host, name, self.qjs.function(body, name, arity, self));
 }
 
 // ============================================================================

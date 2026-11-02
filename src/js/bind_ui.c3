@@ -45,6 +45,7 @@ module three;
 import std::collections::list;
 import std::math;
 import qjs;
+import fastjs::js;
 
 <*
  The JavaScript functions one node attached, indexed by that node's position in
@@ -1081,18 +1082,18 @@ fn void read_entries(qjs::Context* js, UiLayer* layer, qjs::Value node, uint ind
 *>
 fn qjs::Value JsRuntime.pointer_object(&self, UiEvent event)
 {
-	qjs::Value out = self.js.object();
-	self.js.set_property(out, "phase", self.js.string(ui_phase_name(event.phase)));
-	self.js.set_property(out, "x", qjs::number_value((double)event.at.x));
-	self.js.set_property(out, "y", qjs::number_value((double)event.at.y));
-	self.js.set_property(out, "buttons", qjs::int_value((int)event.buttons));
-	self.js.set_property(out, "button", qjs::int_value((int)event.index));
-	self.js.set_property(out, "wheel", qjs::number_value((double)event.value));
-	self.js.set_property(out, "wheelX", qjs::number_value((double)event.wheel_x));
-	self.js.set_property(out, "shift", qjs::bool_value((event.modifiers & 1) != 0));
-	self.js.set_property(out, "ctrl", qjs::bool_value((event.modifiers & 2) != 0));
-	self.js.set_property(out, "alt", qjs::bool_value((event.modifiers & 4) != 0));
-	self.js.set_property(out, "meta", qjs::bool_value((event.modifiers & 8) != 0));
+	qjs::Value out = self.qjs.object();
+	self.qjs.set_property(out, "phase", self.qjs.string(ui_phase_name(event.phase)));
+	self.qjs.set_property(out, "x", qjs::number_value((double)event.at.x));
+	self.qjs.set_property(out, "y", qjs::number_value((double)event.at.y));
+	self.qjs.set_property(out, "buttons", qjs::int_value((int)event.buttons));
+	self.qjs.set_property(out, "button", qjs::int_value((int)event.index));
+	self.qjs.set_property(out, "wheel", qjs::number_value((double)event.value));
+	self.qjs.set_property(out, "wheelX", qjs::number_value((double)event.wheel_x));
+	self.qjs.set_property(out, "shift", qjs::bool_value((event.modifiers & 1) != 0));
+	self.qjs.set_property(out, "ctrl", qjs::bool_value((event.modifiers & 2) != 0));
+	self.qjs.set_property(out, "alt", qjs::bool_value((event.modifiers & 4) != 0));
+	self.qjs.set_property(out, "meta", qjs::bool_value((event.modifiers & 8) != 0));
 	return out;
 }
 
@@ -1102,7 +1103,7 @@ fn qjs::Value JsRuntime.pointer_object(&self, UiEvent event)
 *>
 fn qjs::Value JsRuntime.graph_object(&self, UiEvent event)
 {
-	qjs::Context* js = &self.js;
+	qjs::Context* js = &self.qjs;
 	qjs::Value out = js.object();
 	js.set_property(out, "type", js.string(ui_graph_name(event.graph)));
 	js.set_property(out, "index", qjs::number_value((double)event.index));
@@ -1161,19 +1162,19 @@ fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 	@pool()
 	{
 		qjs::Value[2] argv = { qjs::number_value((double)event.index), qjs::number_value((double)event.item) };
-		qjs::Value? answer = self.js.call(handlers.query, qjs::undefined_value(), argv[:2]);
+		qjs::Value? answer = self.qjs.call(handlers.query, qjs::undefined_value(), argv[:2]);
 		if (catch err = answer)
 		{
 			self.report_frame_failure(
-				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.js.exception(tmem))
+				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.qjs.exception(tmem))
 			);
-			self.js.release(handlers.query);
+			self.qjs.release(handlers.query);
 			handlers.has_query = false;
 		}
 		else
 		{
-			yes = self.js.truth(answer);
-			self.js.release(answer);
+			yes = self.qjs.truth(answer);
+			self.qjs.release(answer);
 		}
 	};
 	return yes;
@@ -1268,13 +1269,13 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			alive = &handlers.has_change;
 			what = "onChange";
 			argc = 1;
-			argv[0] = self.js.string(event.text);
+			argv[0] = self.qjs.string(event.text);
 		case TEXT_SUBMIT:
 			callback = handlers.submit;
 			alive = &handlers.has_submit;
 			what = "onSubmit";
 			argc = 1;
-			argv[0] = self.js.string(event.text);
+			argv[0] = self.qjs.string(event.text);
 		case CONFIRM:
 			callback = handlers.confirm;
 			alive = &handlers.has_confirm;
@@ -1305,13 +1306,13 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			alive = &handlers.has_choose;
 			what = "onChoose";
 			argc = 1;
-			argv[0] = self.js.string(event.text);
+			argv[0] = self.qjs.string(event.text);
 		case FILE_SELECT:
 			callback = handlers.select;
 			alive = &handlers.has_select;
 			what = "onSelect";
 			argc = 1;
-			argv[0] = self.js.string(event.text);
+			argv[0] = self.qjs.string(event.text);
 		case FILE_DIRECTORY:
 			// `onChange` rather than a fourth name, because where the browser is
 			// IS its value — the thing a breadcrumb beside it displays.
@@ -1319,7 +1320,7 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 			alive = &handlers.has_change;
 			what = "onChange";
 			argc = 1;
-			argv[0] = self.js.string(event.text);
+			argv[0] = self.qjs.string(event.text);
 		case GRAPH:
 			// One handler for the lot, fanned out by name in the prelude, and the
 			// event built only when somebody is there to take it.
@@ -1356,7 +1357,7 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 
 	if (!*alive)
 	{
-		for (int i = 0; i < argc; i++) self.js.release(argv[i]);
+		for (int i = 0; i < argc; i++) self.qjs.release(argv[i]);
 		return;
 	}
 
@@ -1371,12 +1372,12 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	bool kept;
 	@pool()
 	{
-		kept = self.call_handler(callback, argv[:argc], string::tformat("a three.ui %s handler", what));
+		kept = self.call_handler((js::Value)callback, as_values(argv[:argc]), string::tformat("a three.ui %s handler", what));
 	};
-	for (int i = 0; i < argc; i++) self.js.release(argv[i]);
+	for (int i = 0; i < argc; i++) self.qjs.release(argv[i]);
 	if (!kept)
 	{
-		self.js.release(callback);
+		self.qjs.release(callback);
 		*alive = false;
 	}
 }
@@ -1393,9 +1394,15 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 *>
 fn void JsRuntime.hold_ui_tree(&self, qjs::Context* js, qjs::Value tree)
 {
-	if (self.ui_pending_held) js.release(self.ui_pending);
-	self.ui_pending = tree.is_undefined() || tree.is_null() ? qjs::undefined_value() : js.retain(tree);
 	self.ui_pending_held = !tree.is_undefined() && !tree.is_null();
+	if (self.ui_pending_held)
+	{
+		self.js.rehold(&self.ui_pending, (js::Value)tree);
+	}
+	else
+	{
+		self.js.drop(&self.ui_pending);
+	}
 	self.ui_pending_active = true;
 }
 
@@ -1417,19 +1424,20 @@ fn void JsRuntime.flush_ui(&self)
 		return;
 	}
 
-	qjs::Value tree = self.ui_pending;
-	self.ui_pending = qjs::undefined_value();
+	// Taken out of its root first: applying it can set a new one.
+	qjs::Value tree = self.qjs.retain((qjs::Value)self.js.held(self.ui_pending));
+	self.js.drop(&self.ui_pending);
 	self.ui_pending_held = false;
-	defer self.js.release(tree);
+	defer self.qjs.release(tree);
 
 	@pool()
 	{
 		qjs::Value thrown = qjs::undefined_value();
-		self.apply_ui_tree(&self.js, tree, &thrown);
+		self.apply_ui_tree(&self.qjs, tree, &thrown);
 		if (!thrown.is_undefined())
 		{
 			self.report_frame_failure("three.ui.set from a widget handler could not be applied");
-			self.js.release(thrown);
+			self.qjs.release(thrown);
 		}
 	};
 }
@@ -1452,12 +1460,11 @@ fn void JsRuntime.drop_ui_tree(&self)
 *>
 fn void JsRuntime.clear_ui_handlers(&self)
 {
-	foreach (i, handler : self.ui_handlers) self.ui_handlers[i].release(&self.js);
+	foreach (i, handler : self.ui_handlers) self.ui_handlers[i].release(&self.qjs);
 	self.ui_handlers.clear();
 	if (self.ui_pending_held)
 	{
-		self.js.release(self.ui_pending);
-		self.ui_pending = qjs::undefined_value();
+		self.js.drop(&self.ui_pending);
 		self.ui_pending_held = false;
 	}
 	self.ui_pending_active = false;

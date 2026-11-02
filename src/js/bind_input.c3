@@ -73,6 +73,7 @@ module three;
 import std::math;
 import c3w;
 import qjs;
+import fastjs::js;
 
 // Enough for a control scheme, small enough that running out means a script is
 // registering in a loop — a bug worth a message rather than an allocation.
@@ -464,11 +465,11 @@ fn void JsRuntime.dispatch_keys(&self)
 *>
 fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 {
-	qjs::Value name = self.js.string(handler.row.name);
-	defer self.js.release(name);
+	qjs::Value name = self.qjs.string(handler.row.name);
+	defer self.qjs.release(name);
 	@pool()
 	{
-		return self.call_handler(handler.body, { name }, string::tformat("the '%s' key handler", handler.row.name));
+		return self.call_handler((js::Value)handler.body, { (js::Value)name }, string::tformat("the '%s' key handler", handler.row.name));
 	};
 }
 
@@ -481,7 +482,7 @@ fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 fn void JsRuntime.drop_key_handler(&self, usz at)
 {
 	if (at >= self.key_handler_count) return;
-	self.js.release(self.key_handlers[at].body);
+	self.qjs.release(self.key_handlers[at].body);
 	for (usz i = at + 1; i < self.key_handler_count; i++)
 	{
 		self.key_handlers[i - 1] = self.key_handlers[i];
@@ -525,13 +526,13 @@ fn void JsRuntime.dispatch_click(&self)
 		// so a handler written against a window still runs headless, and what it is
 		// told is the truth rather than an error nobody caused.
 		qjs::Value[3] args = {
-			self.pick_at(&self.js, x, y),
+			self.pick_at(&self.qjs, x, y),
 			qjs::number_value((double)x),
 			qjs::number_value((double)y),
 		};
-		defer self.js.release(args[0]);
+		defer self.qjs.release(args[0]);
 
-		kept = self.call_handler(self.click_handler.callback, args[..], "the click handler");
+		kept = self.call_handler(self.click_handler.get(self.js), as_values(args[..]), "the click handler");
 	};
 
 	if (!kept) self.clear_click_handler();
@@ -542,7 +543,7 @@ fn void JsRuntime.dispatch_click(&self)
 *>
 fn void JsRuntime.clear_click_handler(&self)
 {
-	self.click_handler.release(&self.js);
+	self.click_handler.release(self.js);
 }
 
 // ============================================================================
@@ -850,7 +851,7 @@ fn void js_on_click(
 	self.clear_click_handler();
 	if (clearing) return;
 
-	self.click_handler.hold(&js, args[0]);
+	self.click_handler.hold(self.js, (js::Value)args[0]);
 }
 
 <*

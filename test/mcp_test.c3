@@ -74,18 +74,18 @@ macro @with_validating_server(; @body(mcp::Server* server, three::JsRuntime* run
 	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
 
-	qjs::Value global = runtime.js.global();
-	runtime.js.set_property(
+	qjs::Value global = runtime.qjs.global();
+	runtime.qjs.set_property(
 		global,
 		"provokeValidationError",
-		runtime.js.function(&js_provoke_error, "provokeValidationError", 0, renderer)
+		runtime.qjs.function(&js_provoke_error, "provokeValidationError", 0, renderer)
 	);
-	runtime.js.set_property(
+	runtime.qjs.set_property(
 		global,
 		"provokeValidationWarning",
-		runtime.js.function(&js_provoke_warning, "provokeValidationWarning", 0, renderer)
+		runtime.qjs.function(&js_provoke_warning, "provokeValidationWarning", 0, renderer)
 	);
-	runtime.js.release(global);
+	runtime.qjs.release(global);
 
 	three::ToolHost host = { .runtime = &runtime, .renderer = renderer };
 	mcp::Server server = three::new_mcp_server(&host);

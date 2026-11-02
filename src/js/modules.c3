@@ -44,7 +44,7 @@ const String PRELUDE_SCHEME = "three:";
 fn void JsRuntime.install_module_hooks(&self)
 {
 	self.modules.set_embedded(PRELUDE_SCHEME, prelude_parts());
-	self.modules.install(self.js.engine());
+	self.modules.install(self.qjs.engine());
 }
 
 <*

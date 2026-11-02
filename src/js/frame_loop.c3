@@ -17,10 +17,10 @@
  agent is about to read.
  - It starts a fresh GPU validation capture, which would attribute a frame's
  messages to a script that finished minutes ago.
- - It wraps the source in `(async()=>{})()`, allocating a promise sixty times a
+ - It evaluates source as an async body, allocating a promise sixty times a
  second to run a function that already exists.
 
- So a tick calls the retained `qjs::Value` directly. What it shares with `run` is
+ So a tick calls the held callback directly. What it shares with `run` is
  the interrupt handler, and only because there is one of those per context.
 
  ## The three ways a callback stops
@@ -45,7 +45,7 @@ module three;
 import std::io;
 import std::time;
 import std::math::vector;
-import qjs;
+import fastjs::js;
 import std::collections::list;
 
 // What one tick may take before the interrupt handler stops it. Two orders of
@@ -85,7 +85,7 @@ const long JS_GAME_FRAME_SOFT_MS = 8;
 
 <*
  Microseconds a frame hands the garbage collector after its script work
- (`qjs::Context.gc_step`). Marking and sweeping otherwise happen in small slices
+ (`Engine.gc_step`). Marking and sweeping otherwise happen in small slices
  at the script's own safe points; this does them ahead of time instead.
 *>
 const long JS_FRAME_GC_US = 200;
@@ -105,13 +105,13 @@ const usz JS_FRAME_LOG_BYTES   = 8 * 1024;
 // what it costs to overrun is a count rather than a leak.
 const usz JS_FRAME_DEBUG_BYTES = 8 * 1024;
 
-fn void JsRuntime.bind_frame_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_frame_verbs(&self, js::Value host)
 {
-	self.bind(host, "setFrame", &js_set_frame, 1);
-	self.bind(host, "setFixed", &js_set_fixed, 1);
-	self.bind(host, "setLate", &js_set_late, 1);
-	self.bind(host, "frameStats", &js_frame_stats, 0);
-	self.bind(host, "frameWait", &js_frame_wait, 1);
+	self.js.@bind(host, "setFrame", &js_set_frame, self)!;
+	self.js.@bind(host, "setFixed", &js_set_fixed, self)!;
+	self.js.@bind(host, "setLate", &js_set_late, self)!;
+	self.js.@bind(host, "frameStats", &js_frame_stats, self)!;
+	self.js.@bind(host, "frameWait", &js_frame_wait, self)!;
 }
 
 <*
@@ -520,13 +520,13 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 *>
 fn void JsRuntime.call_frame(&self, double time_ms)
 {
-	if (!self.call_loop(self.frame_loop.callback, time_ms, FRAME_CALLBACK)) self.clear_frame();
+	if (!self.call_loop(self.frame_loop.get(self.js), time_ms, FRAME_CALLBACK)) self.clear_frame();
 }
 
 // The late systems, once, after the follow camera. `call_frame`'s contract.
 fn void JsRuntime.call_late(&self, double time_ms)
 {
-	if (!self.call_loop(self.late_loop.callback, time_ms, LATE_CALLBACK)) self.clear_late();
+	if (!self.call_loop(self.late_loop.get(self.js), time_ms, LATE_CALLBACK)) self.clear_late();
 }
 
 <*
@@ -548,7 +548,7 @@ fn void JsRuntime.call_fixed(&self, int steps)
 	for (int i = 0; i < steps; i++)
 	{
 		if (self.timed_out) break;
-		if (!self.call_loop(self.fixed_loop.callback, dt, FIXED_CALLBACK, keep_on_timeout: true))
+		if (!self.call_loop(self.fixed_loop.get(self.js), dt, FIXED_CALLBACK, keep_on_timeout: true))
 		{
 			// **A step that ran out of budget is not a step that misbehaved.** Of
 			// the three ways a callback can fail, a throw and a promise are the
@@ -576,11 +576,9 @@ fn void JsRuntime.call_fixed(&self, int steps)
  @param who : `The callback, as the sentence names it: "the click handler".`
  @return `false when it answered with a promise. The reason is already reported.`
 *>
-fn bool JsRuntime.settle_answer(&self, qjs::Value answer, String who)
+fn bool JsRuntime.settle_answer(&self, js::Value answer, String who)
 {
-	bool promised = self.is_thenable(answer);
-	self.js.release(answer);
-	if (!promised) return true;
+	if (!self.is_thenable(answer)) return true;
 	self.report_frame_failure(string::tformat("%s returned a promise. It has to finish inside the frame, "
 		"so it must be synchronous — do the awaiting in a run_script instead", who));
 	return false;
@@ -591,16 +589,16 @@ fn bool JsRuntime.settle_answer(&self, qjs::Value answer, String who)
  a timeout or a promise stops it, and is reported once in a sentence naming `who`.
  The arguments stay the caller's to release.
 *>
-fn bool JsRuntime.call_handler(&self, qjs::Value handler, qjs::Value[] args, String who)
+fn bool JsRuntime.call_handler(&self, js::Value handler, js::Value[] args, String who)
 {
 	bool survived;
 	@pool()
 	{
-		qjs::Value? answer = self.js.call(handler, qjs::undefined_value(), args);
+		js::Value? answer = self.js.call(handler, js::UNDEFINED, args);
 		if (catch err = answer)
 		{
 			self.report_frame_failure(self.timed_out ? self.frame_timeout_message()
-				: string::tformat("%s threw and was stopped: %s", who, self.js.exception(tmem)));
+				: string::tformat("%s threw and was stopped: %s", who, self.js.take_error(tmem)));
 			survived = false;
 		}
 		else
@@ -623,13 +621,13 @@ fn bool JsRuntime.call_handler(&self, qjs::Value handler, qjs::Value[] args, Str
  @param keep_on_timeout : `The caller will keep the callback if the budget was what stopped it — see call_fixed. The reason is still reported, once.`
  @return `false when the call did not finish. The reason is already reported.`
 *>
-fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what, bool keep_on_timeout = false)
+fn bool JsRuntime.call_loop(&self, js::Value callback, double arg, String what, bool keep_on_timeout = false)
 {
 	bool survived = true;
 	@pool()
 	{
-		qjs::Value[1] args = { qjs::number_value(arg) };
-		qjs::Value? answer = self.js.call(callback, qjs::undefined_value(), args[..]);
+		js::Value[1] args = { js::number(arg) };
+		js::Value? answer = self.js.call(callback, js::UNDEFINED, &args);
 
 		if (catch err = answer)
 		{
@@ -638,7 +636,7 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what,
 				// Drained rather than left pending: the context is being handed
 				// back to a loop that will call into it again next frame, and an
 				// exception nobody took would surface there instead.
-				self.js.exception(tmem);
+				self.js.take_exception();
 				// Once, for the reason above `report_frame_failure`: this one can
 				// happen on every frame of a slow patch, where the other two
 				// happen once and end the loop.
@@ -659,7 +657,7 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what,
 			{
 				self.report_frame_failure(
 					self.timed_out ? self.loop_timeout_message(what)
-						: string::tformat("%s threw and was stopped: %s", what, self.js.exception(tmem))
+						: string::tformat("%s threw and was stopped: %s", what, self.js.take_error(tmem))
 				);
 			}
 			survived = false;
@@ -683,23 +681,21 @@ fn bool JsRuntime.call_loop(&self, qjs::Value callback, double arg, String what,
 fn void JsRuntime.wake_frame_waiters(&self)
 {
 	if (self.frame_waiters.len() == 0) return;
-	List{qjs::Value} waking = self.frame_waiters;
+	List{js::Root} waking = self.frame_waiters;
 	self.frame_waiters = { };
 	self.frame_waiters.init(mem, 4);
 	defer waking.free();
-	foreach (resolve : waking)
+	foreach (&resolve : waking)
 	{
-		qjs::Value[1] arguments = { qjs::undefined_value() };
-		qjs::Value? called = self.js.call(resolve, qjs::undefined_value(), arguments[..]);
-		if (try called) self.js.release(called);
-		self.js.release(resolve);
+		if (catch self.js.call(self.js.held(*resolve))) self.js.take_exception();
+		self.js.drop(resolve);
 	}
 }
 
-// Releases every waiter without settling it — the context is going.
+// Drops every waiter without settling it — the context is going.
 fn void JsRuntime.clear_frame_waiters(&self)
 {
-	foreach (resolve : self.frame_waiters) self.js.release(resolve);
+	foreach (&resolve : self.frame_waiters) self.js.drop(resolve);
 	self.frame_waiters.free();
 }
 
@@ -712,20 +708,20 @@ fn void JsRuntime.clear_frame_waiters(&self)
 *>
 fn void JsRuntime.clear_frame(&self)
 {
-	self.frame_loop.release(&self.js);
+	self.frame_loop.release(self.js);
 }
 
 // The same, for the fixed loop. `close` calls both, and for the same reason: the
 // reference has to go back while there is still a context to give it to.
 fn void JsRuntime.clear_fixed(&self)
 {
-	self.fixed_loop.release(&self.js);
+	self.fixed_loop.release(self.js);
 }
 
 // And for the late systems.
 fn void JsRuntime.clear_late(&self)
 {
-	self.late_loop.release(&self.js);
+	self.late_loop.release(self.js);
 }
 
 <*
@@ -783,14 +779,18 @@ fn String JsRuntime.loop_timeout_message(&self, String what)
  Duck-typed rather than checked against `Promise`, which is what `await` itself
  does: a hand-rolled thenable would hang the frame exactly as a promise would.
 *>
-fn bool JsRuntime.is_thenable(&self, qjs::Value value)
+fn bool JsRuntime.is_thenable(&self, js::Value value)
 {
-	if (value.tag() != qjs::TAG_OBJECT) return false;
+	if (!value.is_object()) return false;
 	// A real promise answers without a property lookup.
-	if (self.js.promise_state(value) != NOT_A_PROMISE) return true;
-	qjs::Value then = self.js.property(value, "then");
-	defer self.js.release(then);
-	return self.js.is_function(then);
+	if (js::promise_state(value) != NOT_A_PROMISE) return true;
+	js::Value? then = self.js.get(value, "then");
+	if (catch then)
+	{
+		self.js.take_exception();
+		return false;
+	}
+	return then.is_function();
 }
 
 <*
@@ -811,7 +811,7 @@ fn void JsRuntime.drain_frame_jobs(&self)
 	uint drained = 0;
 	while (self.js.jobs_waiting() && drained < JS_FRAME_MAX_JOBS)
 	{
-		self.js.step_job();
+		self.step_job();
 		drained++;
 		if (self.timed_out) break;
 	}
@@ -966,159 +966,91 @@ fn void JsRuntime.take_frame_output(&self, DString* out)
 // ============================================================================
 
 <*
- `__three.setFrame(fn)` — register, replace, or with null stop.
+ Replace a loop callback, or stop it with null or undefined.
 
- The type checking a caller sees lives in `prelude.js` beside the name they
- typed; what is left here is the check that cannot be spelled in JavaScript,
- which is that the thing being retained is callable at all. A script can reach
- `__three` directly, and a non-function retained here would throw once a frame
- forever after.
+ The type checking a caller sees lives in the prelude beside the name they typed;
+ what is left here is the check that cannot be spelled in JavaScript, which is
+ that the thing being held is callable at all. `__three` is reachable from a
+ script, and a non-function held here would throw once a frame forever after.
+ The old callback is done either way, so a refused registration does not look
+ accepted.
 *>
-fn void js_set_frame(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? JsRuntime.replace_loop(&self, HeldFn* loop, js::Value f, String refusal) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	loop.release(self.js);
+	if (f.is_nullish()) return;
+	if (!f.is_function()) return self.js.fail("%s", refusal)~;
+	loop.hold(self.js, f);
+}
 
-	// Whatever happens next, the old one is done — including on the error path,
-	// where leaving the previous callback running would make a rejected
-	// registration look like it had been accepted.
-	self.clear_frame();
-
-	if (argc < 1 || args[0].is_undefined() || args[0].is_null()) return;
-
-	if (!js.is_function(args[0]))
-	{
-		*out = js.raise("three.setAnimationLoop(fn) wants a function, or null to stop");
-		return;
-	}
-
-	self.frame_loop.hold(&js, args[0]);
+// `__three.setFrame(fn)`: the animation loop, once a frame, where a script draws.
+fn void? js_set_frame(JsRuntime* self, js::Value f)
+{
+	return self.replace_loop(&self.frame_loop, f, "three.setAnimationLoop(fn) wants a function, or null to stop");
 }
 
 <*
- `__three.setLate(fn)` — register, replace, or with null stop.
-
- `js_set_frame`'s shape exactly. Only `three.systems` calls it: there is no
- `setLateLoop`, because the one thing worth running after the follow camera is
- a system that reads the camera, and those already have a registry.
+ `__three.setFixed(fn)`: the fixed loop, called however many times the clock owes,
+ where a script simulates. A second callback rather than an argument to the first,
+ so frame-rate independence is not an `if` inside one function.
 *>
-fn void js_set_late(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_set_fixed(JsRuntime* self, js::Value f)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	return self.replace_loop(&self.fixed_loop, f, "three.setFixedLoop(fn) wants a function, or null to stop");
+}
 
-	self.clear_late();
+// `__three.setLate(fn)`: after the follow camera moved. Only `three.systems` calls it.
+fn void? js_set_late(JsRuntime* self, js::Value f)
+{
+	return self.replace_loop(&self.late_loop, f, "setLate(fn) wants a function, or null to stop");
+}
 
-	if (argc < 1 || args[0].is_undefined() || args[0].is_null()) return;
-
-	if (!js.is_function(args[0]))
-	{
-		*out = js.raise("setLate(fn) wants a function, or null to stop");
-		return;
-	}
-
-	self.late_loop.hold(&js, args[0]);
+// Where the last finished frame went, in milliseconds. `solver` is outside `total`,
+// as it is outside the budget — see `FrameSpend`.
+struct FrameMs
+{
+	double total;
+	double handlers;
+	double fixed;
+	double frame;
+	double jobs;
+	double solver;
+	double host;
 }
 
 <*
- `__three.frameStats()` — `three.frame`: how the frames have gone and where the
- last one went.
-
- `overruns` is here because the report tells a reader to go and look at it, and
- until this binding the only place it existed was the `frame` block of an MCP
- `run_script` result — so the one boot mode that can produce an overrun,
- `--script` or `--assets` with no server, was the one that could not read the
- count it was being pointed at.
-
- `ms` is one finished frame rather than an average — the last one, so a system
- reading it is told about the frame before, which is complete. The rolling
- averages are `three.systems.report()`, which splits the two callback spans by
- system where this only splits them from each other.
+ `three.frame`: how the frames have gone. `droppedSteps` is fixed steps the clock
+ owed and gave up on, as a running total: the question worth asking is whether the
+ game ever fell behind.
 *>
-fn void js_frame_stats(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+struct FrameStats
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	bool running;
+	double ticks;
+	double overruns;
+	double dropped_steps;
+	FrameMs ms;
+}
 
+// `__three.frameStats()`.
+fn FrameStats js_frame_stats(JsRuntime* self)
+{
 	FrameSpend spend = self.frame_spend;
-
-	qjs::Value ms = js.object();
-	js.set_property(ms, "total", qjs::number_value(spend.script_ns() / 1e6));
-	js.set_property(ms, "handlers", qjs::number_value(spend.handlers_ns / 1e6));
-	js.set_property(ms, "fixed", qjs::number_value(spend.fixed_ns / 1e6));
-	js.set_property(ms, "frame", qjs::number_value(spend.frame_ns / 1e6));
-	js.set_property(ms, "jobs", qjs::number_value(spend.jobs_ns / 1e6));
-	// Outside `total`, as it is outside the budget. See `FrameSpend`.
-	js.set_property(ms, "solver", qjs::number_value(spend.solver_ns / 1e6));
-	js.set_property(ms, "host", qjs::number_value(spend.host_ns / 1e6));
-
-	qjs::Value object = js.object();
-	js.set_property(object, "running", qjs::bool_value(self.frame_loop.active));
-	js.set_property(object, "ticks", qjs::number_value((double)self.frame_ticks));
-	js.set_property(object, "overruns", qjs::number_value((double)self.frame_overruns));
-	// Fixed steps the clock owed and gave up on — `GameClock.take_fixed_steps`.
-	// A running total rather than this frame's, because the number worth reading
-	// is "has this game ever fallen behind", and a per-frame reading would be zero
-	// on every frame anybody happened to look at.
-	js.set_property(object, "droppedSteps", qjs::number_value((double)self.pass.clock.dropped_steps));
-	js.set_property(object, "ms", ms);
-	*out = object;
-}
-
-<*
- `__three.setFixed(fn)` — register, replace, or with null stop.
-
- `js_set_frame`'s shape exactly, and a second callback rather than an argument to
- the first one because the two answer different questions: the animation callback
- runs once a frame and is where a script draws, and this runs however many times
- the clock owes and is where a script *simulates*. A single callback told which
- kind of call it was would be one function with two contracts, and the frame-rate
- independence a fixed step exists for would be an `if` inside it.
-*>
-fn void js_set_fixed(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	self.clear_fixed();
-
-	if (argc < 1 || args[0].is_undefined() || args[0].is_null()) return;
-
-	if (!js.is_function(args[0]))
-	{
-		*out = js.raise("three.setFixedLoop(fn) wants a function, or null to stop");
-		return;
-	}
-
-	self.fixed_loop.hold(&js, args[0]);
+	return {
+		.running = self.frame_loop.active,
+		.ticks = (double)self.frame_ticks,
+		.overruns = (double)self.frame_overruns,
+		.dropped_steps = (double)self.pass.clock.dropped_steps,
+		.ms = {
+			.total = spend.script_ns() / 1e6,
+			.handlers = spend.handlers_ns / 1e6,
+			.fixed = spend.fixed_ns / 1e6,
+			.frame = spend.frame_ns / 1e6,
+			.jobs = spend.jobs_ns / 1e6,
+			.solver = spend.solver_ns / 1e6,
+			.host = spend.host_ns / 1e6,
+		},
+	};
 }
 
 <*
@@ -1173,22 +1105,8 @@ fn void JsRuntime.follow_camera(&self, double dt_ms)
  `three.nextFrame()`'s host half: keeps the promise's resolve function until the
  next tick. See `wake_frame_waiters`.
 *>
-fn void js_frame_wait(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn void? js_frame_wait(JsRuntime* self, js::Value resolve)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	*out = qjs::undefined_value();
-	if (argc < 1 || !js.is_function(args[0]))
-	{
-		*out = js.raise("frameWait wants the promise's resolve function");
-		return;
-	}
-	self.frame_waiters.push(js.retain(args[0]));
+	if (!resolve.is_function()) return self.js.fail("frameWait wants the promise's resolve function")~;
+	self.frame_waiters.push(self.js.hold(resolve));
 }

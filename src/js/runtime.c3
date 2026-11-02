@@ -55,6 +55,7 @@ import std::io;
 import std::time;
 import std::collections::list;
 import qjs;
+import fastjs::js;
 import c3w;
 
 faultdef JS_ENGINE_FAILED, JS_PRELUDE_FAILED;
@@ -63,7 +64,6 @@ faultdef JS_ENGINE_FAILED, JS_PRELUDE_FAILED;
 // allocation is an exception the agent is told about rather than the process
 // being killed by the OS.
 const usz JS_MEMORY_LIMIT = 64 * 1024 * 1024;
-const usz JS_STACK_LIMIT  = 1 * 1024 * 1024;
 
 // How long a script may run before the interrupt handler stops it. Generous for
 // anything that only builds a scene, and short enough that a wedged agent loop is
@@ -261,32 +261,33 @@ fn void RunResult.free(&self)
 
 <*
  A JavaScript function the runtime holds on to and calls back later: a loop, a
- click handler, a physics event. `callback` is a retained reference and is only
- meaningful while `active`.
+ click handler, a physics event. Only meaningful while `active`.
 *>
 struct HeldFn
 {
-	qjs::Value callback;
+	js::Root callback;
 	bool active;
 }
 
-fn HeldFn held_nothing() => { .callback = qjs::undefined_value() };
+fn HeldFn held_nothing() => { };
 
-// Replaces whatever was held with `value`, retained.
-fn void HeldFn.hold(&self, qjs::Context* js, qjs::Value value)
+// Replaces whatever was held with `value`.
+fn void HeldFn.hold(&self, js::Engine* js, js::Value value)
 {
-	self.release(js);
-	self.callback = js.retain(value);
+	js.rehold(&self.callback, value);
 	self.active = true;
 }
 
-// Gives the reference back. Has to happen while the context is still open.
-fn void HeldFn.release(&self, qjs::Context* js)
+fn void HeldFn.release(&self, js::Engine* js)
 {
-	if (!self.active) return;
-	js.release(self.callback);
-	*self = held_nothing();
+	js.drop(&self.callback);
+	self.active = false;
 }
+
+fn js::Value HeldFn.get(&self, js::Engine* js) => js.held(self.callback);
+
+// TEMPORARY: old-API values seen as new ones, for the files not moved yet.
+macro js::Value[] as_values(qjs::Value[] list) => ((js::Value*)list.ptr)[:list.len];
 
 <*
  One engine, and the host state it drives.
@@ -298,7 +299,9 @@ fn void HeldFn.release(&self, qjs::Context* js)
 *>
 struct JsRuntime
 {
-	qjs::Context js;
+	js::Engine* js;
+	// TEMPORARY: the same engine through the old API, for the files not moved yet.
+	qjs::Context qjs;
 	MeshPass* pass;
 
 	Renderer* renderer;
@@ -392,7 +395,7 @@ struct JsRuntime
 	 for `flush_ui` at the top of the next thing the loop does.
 	*>
 	List{UiHandlers} ui_handlers;
-	qjs::Value ui_pending;
+	js::Root ui_pending;
 	bool ui_pending_held;
 	bool ui_pending_active;
 	bool ui_dispatching;
@@ -491,7 +494,7 @@ struct JsRuntime
 	 waiting the runtime counts as animating: the loop must not sleep through the
 	 frame somebody is waiting for.
 	*>
-	List{qjs::Value} frame_waiters;
+	List{js::Root} frame_waiters;
 	<*
 	 Whether a `fileBrowser` may leave the assets root. False for a game, whose
 	 scripts are confined to their directory; a host sets it when its scripts
@@ -569,23 +572,15 @@ struct JsRuntime
 }
 
 <*
- One mesh a script is waiting for, and the promise it is waiting on.
-
- The promise itself is JavaScript's — `new Promise((ok, no) => ...)` on the far
- side — and what crosses is only its two settlement functions. That is why there
- is no promise-capability call in the shim: the engine never has to *make* one,
- it only has to keep a reference to two functions and call one of them later,
- which is the same thing every other retained callback here does.
-
- Both values are retained while the entry lives and released when it settles, or
- by `clear_uploads` when the context goes down under one.
+ One mesh a script is waiting for, and the two settlement functions of the
+ promise it is waiting on (made in JavaScript). Both are held until it settles.
 *>
 struct PendingUpload
 {
 	AssetId asset;
 	uint mesh;
-	qjs::Value resolve;
-	qjs::Value reject;
+	js::Root resolve;
+	js::Root reject;
 }
 
 <*
@@ -594,12 +589,13 @@ struct PendingUpload
  @param pass : `The scene, assets and camera the bindings drive. Must outlive the runtime.`
  @param renderer : `Null for a context with no device: three.load and three.render then throw, and everything else works.`
  @param memory_limit : `The JS heap's ceiling. A host that runs pipelines rather than scenes - token lists, embeddings read back for a check - raises it; zero is no limit.`
- @return ? JS_ENGINE_FAILED : `QuickJS could not be created — out of memory, and nothing else.`
+ @return ? JS_ENGINE_FAILED : `The engine could not be created — out of memory, and nothing else.`
  @return ? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
 *>
 fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz memory_limit = JS_MEMORY_LIMIT)
 {
-	self.js = qjs::open(memory_limit, JS_STACK_LIMIT)!;
+	self.js = js::open(memory_limit) ?? JS_ENGINE_FAILED~!;
+	self.qjs = qjs::wrap(self.js);
 	self.pass = pass;
 	self.renderer = renderer;
 	self.controls = DEFAULT_CONTROLS;
@@ -638,7 +634,6 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	// One entry per node of the interface, and empty for every run that never
 	// draws one — `js/bind_ui.c3`.
 	self.ui_handlers.init(mem, 0);
-	self.ui_pending = qjs::undefined_value();
 	self.frame_loop = held_nothing();
 	self.fixed_loop = held_nothing();
 	self.late_loop = held_nothing();
@@ -701,6 +696,7 @@ fn void JsRuntime.close(&self)
 	// script's `three.compute` objects are handles, and a run that made them and
 	// forgot them must not leave a pipeline pointing at a freed module.
 	self.release_compute();
+	// Every Root goes with the engine.
 	self.js.close();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
@@ -806,22 +802,22 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		// A script runs as the body of an async function (EVAL_ASYNC), so it can
 		// await and return at top level, with its own line numbers. A module's top
 		// level is already async.
-		qjs::Value? started = self.js.eval(source, name, as_module ? qjs::EVAL_MODULE : qjs::EVAL_ASYNC);
+		js::Value? started = self.js.eval(source, name, as_module ? MODULE : ASYNC);
 		if (catch err = started)
 		{
-			// A parse error, or a throw before the first await — the async wrapper
-			// catches neither, because neither happens inside the function body's
-			// execution.
-			String message = self.js.exception(mem);
-			defer message.free(mem);
+			// A parse error, or a throw before the first await — the async body
+			// catches neither, because neither happens inside its execution.
+			String message = self.js.take_error(tmem);
 			self.error.append_string(self.timed_out ? self.timeout_message() : message);
 			self.rejected = true;
 			self.settled = true;
 		}
 		else
 		{
-			defer self.js.release(started);
-			self.await_settled(started);
+			// Held while the jobs that settle it run, any of which can collect.
+			js::Root promise = self.js.hold(started);
+			defer self.js.drop(&promise);
+			self.await_settled(promise);
 		}
 	};
 
@@ -890,8 +886,8 @@ fn bool JsRuntime.step_upload(&self)
 
 	PendingUpload job = self.uploads[0];
 	self.uploads.remove_at(0);
-	defer self.js.release(job.resolve);
-	defer self.js.release(job.reject);
+	defer self.js.drop(&job.resolve);
+	defer self.js.drop(&job.reject);
 
 	// The handle can go stale between the ask and the answer: `three.unloadUnused`
 	// is one line and the queue survives it. Rejecting is what lets the `await`
@@ -899,15 +895,11 @@ fn bool JsRuntime.step_upload(&self)
 	bool alive = self.pass != null && self.pass.assets.slot(job.asset) != null;
 	if (alive) self.pass.assets.ensure_uploaded(job.asset, job.mesh);
 
-	qjs::Value settle   = alive ? job.resolve : job.reject;
-	qjs::Value argument = alive ? qjs::undefined_value()
-		: self.js.string("that asset was unloaded before its mesh finished uploading");
-	defer if (!alive) self.js.release(argument);
-
-	qjs::Value[1] arguments = { argument };
-	qjs::Value? called      = self.js.call(settle, qjs::undefined_value(), arguments[..]);
-	if (catch called) return true;
-	self.js.release(called);
+	js::Value settle   = self.js.held(alive ? job.resolve : job.reject);
+	js::Value argument = alive ? js::UNDEFINED
+		: self.js.string("that asset was unloaded before its mesh finished uploading") ?? js::UNDEFINED;
+	js::Value[1] arguments = { argument };
+	if (catch self.js.call(settle, js::UNDEFINED, &arguments)) self.js.take_exception();
 	return true;
 }
 
@@ -920,10 +912,10 @@ fn bool JsRuntime.step_upload(&self)
 *>
 fn void JsRuntime.clear_uploads(&self)
 {
-	foreach (job : self.uploads)
+	foreach (&job : self.uploads)
 	{
-		self.js.release(job.resolve);
-		self.js.release(job.reject);
+		self.js.drop(&job.resolve);
+		self.js.drop(&job.reject);
 	}
 	self.uploads.free();
 }
@@ -932,9 +924,9 @@ fn void JsRuntime.clear_uploads(&self)
  Runs the microtask queue until the script's promise settles, then reads its
  value or its rejection straight off the promise.
 *>
-fn void JsRuntime.await_settled(&self, qjs::Value promise)
+fn void JsRuntime.await_settled(&self, js::Root promise)
 {
-	if (self.js.promise_state(promise) == NOT_A_PROMISE)
+	if (js::promise_state(self.js.held(promise)) == NOT_A_PROMISE)
 	{
 		// Cannot happen with EVAL_ASYNC, and is a clear message rather than a
 		// silent empty result if it ever does.
@@ -949,7 +941,7 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 	{
 		if (self.js.jobs_waiting())
 		{
-			self.js.step_job();
+			self.step_job();
 		} // Nothing runnable and the script has not finished: it can only be waiting
 		// on a queued upload, so hand it one. **Only while it is still waiting** —
 		// a script that started an upload and returned without awaiting it leaves
@@ -957,14 +949,14 @@ fn void JsRuntime.await_settled(&self, qjs::Value promise)
 		// being a queue. Draining it here regardless would make
 		// `instantiateAsync` in a `main.js` cost exactly what the synchronous
 		// path costs, on the one code path where it matters most.
-		else if (self.js.promise_state(promise) != PENDING || !self.step_upload())
+		else if (js::promise_state(self.js.held(promise)) != PENDING || !self.step_upload())
 		{
 			break;
 		}
 		drained++;
 		if (self.timed_out) break;
 	}
-	self.take_settlement(promise);
+	self.take_settlement(self.js.held(promise));
 
 	if (self.timed_out)
 	{
@@ -1136,7 +1128,7 @@ fn void JsRuntime.collect_advice(&self)
  Must not call back into the context, which is why it only reads a clock and sets
  a flag.
 *>
-fn int on_interrupt(qjs::Runtime runtime, void* opaque) @local
+fn int on_interrupt(void* engine, void* opaque) @local
 {
 	JsRuntime* self = (JsRuntime*)opaque;
 	if (self == null || self.budget_ns <= 0) return 0;
@@ -1149,52 +1141,35 @@ fn int on_interrupt(qjs::Runtime runtime, void* opaque) @local
  What a settled script promise answered: its value as JSON, or its rejection
  described. A pending one leaves `settled` false for `await_settled` to explain.
 *>
-fn void JsRuntime.take_settlement(&self, qjs::Value promise)
+fn void JsRuntime.take_settlement(&self, js::Value promise)
 {
-	qjs::PromiseState state = self.js.promise_state(promise);
+	js::PromiseState state = js::promise_state(promise);
 	if (state == PENDING) return;
-	qjs::Value result = self.js.promise_result(promise);
-	defer self.js.release(result);
+	js::Value result = self.js.promise_result(promise);
 	self.settled = true;
 	self.rejected = state == REJECTED;
-	if (self.rejected)
+	@pool()
 	{
-		String described = describe_throw(&self.js, result, mem);
-		defer described.free(mem);
-		self.error.append_string(described);
-		return;
-	}
-	// `undefined` has no JSON form, which is exactly the answer wanted for a
-	// script that returned nothing: an empty `value`, distinguishable from the
-	// four characters `null`.
-	String json = self.js.json(result, mem);
-	defer json.free(mem);
-	self.value.append_string(json);
+		// A rejection reads as the error and its stack; a value as JSON, where
+		// `undefined` has none — an empty `value`, unlike the four characters `null`.
+		if (self.rejected)
+		{
+			self.error.append_string(self.js.error_text(result, tmem));
+		}
+		else
+		{
+			self.value.append_string(self.js.json(result, tmem));
+		}
+	};
 }
 
 <*
- A thrown value as a sentence, with its stack when it carried one.
-
- `Context.exception` does this for the *pending* exception; a rejection arrives
- as an ordinary argument instead, so the same walk is repeated here rather than
- reached.
+ Run one promise job. One that throws (a queueMicrotask callback) has nobody to
+ tell, so its exception is dropped.
 *>
-fn String describe_throw(qjs::Context* js, qjs::Value thrown, Allocator allocator) @local
+fn void JsRuntime.step_job(&self)
 {
-	String message = js.text(thrown, allocator);
-	if (qjs::qjs_is_error(js.ctx, &thrown) == 0) return message;
-
-	qjs::Value stack = js.property(thrown, "stack");
-	defer js.release(stack);
-	if (stack.is_undefined()) return message;
-
-	String trace = js.text(stack, allocator);
-	defer trace.free(allocator);
-	if (trace.len == 0) return message;
-
-	String joined = string::format(allocator, "%s\n%s", message, trace);
-	message.free(allocator);
-	return joined;
+	if (catch self.js.step_job()) self.js.take_exception();
 }
 
 // ============================================================================
@@ -1217,40 +1192,25 @@ fn String describe_throw(qjs::Context* js, qjs::Value thrown, Allocator allocato
 *>
 fn void JsRuntime.install_console(&self)
 {
-	qjs::Value global = self.js.global();
-	defer self.js.release(global);
-
-	qjs::Value console = self.js.object();
-	self.js.set_property(console, "log", self.js.function(&js_console, "log", 1, self));
-	self.js.set_property(console, "info", self.js.function(&js_console, "info", 1, self));
-	self.js.set_property(console, "warn", self.js.function(&js_console, "warn", 1, self));
-	self.js.set_property(console, "error", self.js.function(&js_console, "error", 1, self));
-	self.js.set_property(console, "debug", self.js.function(&js_console, "debug", 1, self));
-	self.js.set_property(global, "console", console);
+	js::Value console = self.js.object()!!;
+	foreach (name : (String[]){ "log", "info", "warn", "error", "debug" })
+	{
+		self.js.set(console, name, self.js.function(&js_console, name, 1, self)!!)!!;
+	}
+	self.js.set(self.js.global(), "console", console)!!;
 }
 
-fn void js_console(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_console(js::Call* c) @local
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
+	JsRuntime* self = c.host;
 	DString* sink = self.in_frame ? &self.frame_log : &self.log;
-
-	for (int i = 0; i < argc; i++)
+	foreach (i, v : c.args)
 	{
 		if (i > 0) sink.append_char(' ');
-		String text = display(&js, args[i], mem);
-		defer text.free(mem);
-		sink.append_string(text);
+		sink.append_string(display(c.js, v, tmem));
 	}
 	sink.append_char('\n');
+	return js::UNDEFINED;
 }
 
 <*
@@ -1261,13 +1221,12 @@ fn void js_console(
  an agent makes to see its own cost useless. Errors are the exception: their JSON
  is `{}` and their string form is the message.
 *>
-fn String display(qjs::Context* js, qjs::Value value, Allocator allocator) @local
+fn String display(js::Engine* js, js::Value value, Allocator allocator) @local
 {
-	if (value.tag() == qjs::TAG_OBJECT && qjs::qjs_is_error(js.ctx, &value) == 0 && !js.is_function(value))
+	if (value.is_object() && !js::is_error(value) && !value.is_function())
 	{
 		String json = js.json(value, allocator);
 		if (json.len > 0) return json;
-		json.free(allocator);
 	}
 	return js.text(value, allocator);
 }
@@ -1286,21 +1245,11 @@ fn String display(qjs::Context* js, qjs::Value value, Allocator allocator) @loca
 
  Each argument is its own entry, the way `console.log`'s are their own words.
 *>
-fn void js_debug_write(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-)
+fn js::Value? js_debug_write(js::Call* c)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
+	JsRuntime* self = c.host;
 	DString* sink = self.in_frame ? &self.frame_debug : &self.debug;
-
-	for (int i = 0; i < argc; i++)
+	foreach (v : c.args)
 	{
 		// The frame's sink is the one that grows while nobody is reading, so it is
 		// the one with a ceiling. Oldest kept rather than newest: an entry boundary
@@ -1311,18 +1260,14 @@ fn void js_debug_write(
 			self.frame_debug_dropped++;
 			continue;
 		}
-
-		// Authoritative here rather than in the prelude: `__three` is reachable from
-		// a script, and a caller that handed this a string of its own devising would
-		// otherwise put whatever it liked into the caller's JSON. `null` for what has
-		// no JSON form, so the array is always parseable — the prelude turns those
-		// into text before they arrive, so this is the floor and not the common path.
-		String entry = js.json(args[i], mem);
-		defer entry.free(mem);
-
+		// JSON made here rather than trusted from the prelude: `__three` is
+		// reachable from a script. `null` for what has no JSON form, so the array
+		// always parses.
+		String entry = c.js.json(v, tmem);
 		if (sink.len() > 0) sink.append_char(',');
 		sink.append_string(entry.len > 0 ? entry : "null");
 	}
+	return js::UNDEFINED;
 }
 
 <*
