@@ -977,7 +977,7 @@ fn void JsRuntime.take_frame_output(&self, DString* out)
  The old callback is done either way, so a refused registration does not look
  accepted.
 *>
-fn void? JsRuntime.replace_loop(&self, HeldFn* loop, js::Value f, String refusal) @local
+fn void? JsRuntime.replace_loop(&self, HeldFn* loop, js::Value f, String refusal)
 {
 	loop.release(self.js);
 	if (f.is_nullish()) return;

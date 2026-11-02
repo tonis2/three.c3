@@ -1342,6 +1342,63 @@ It walks up the parent chain, because a raycast and a query answer with the leaf
 assembled character is a Group of eleven meshes. The global reverse of `Class.of(object)`, and what a rule
 keyed on "what are these two things" opens with.
 
+## Decorators: `@three.systems.step`, `@three.entity`, `@three.key`, `@three.owned`
+
+Game classes can say what their methods are for where the methods are written. These are standard (TC39)
+decorators:
+
+```js
+@three.entity({ capacity: 64, parent: groups.pack })
+class Critter extends three.Entity {
+    @three.owned bite = three.cooldown(0.6);
+
+    @three.systems.step({ when: () => G.mode === 'playing' })
+    walk(dt) { … }                        // each live critter, every fixed step
+
+    @three.systems.frame
+    static flow(dt) { … }                 // once a frame, for the whole pack
+
+    @three.key('space', 'pounce')
+    static pounce() { … }
+}
+```
+
+`@three.systems.step`, `@three.systems.frame` and `@three.systems.late` make a method a system, named
+`<Class>.<method>` in `three.systems.report()`. They take `three.systems.add`'s options, plus `when`: a
+function answering whether the system runs this tick, which replaces a mode check at the top of the method.
+
+- On a `three.Entity` class, a static method runs once per tick and an instance method runs on every live
+  entity. They register with the class, so `Critter.dispose()` removes them. A class's static systems run
+  before its per-entity ones unless `after`/`before` say otherwise.
+- On any other class, a static method registers when the class is defined, and an instance method when an
+  instance is made. The latest instance owns the name, so a rerun replaces the system rather than adding one.
+
+Called with a name, the same three are the ordinary registry verbs — `three.systems.frame('fade', fn)`.
+
+## three.entity(options)
+
+`@three.entity({ capacity, columns, parent, body, volume, trigger, collides, name })` on a class that
+extends `three.Entity`: the statics written as one object, and the class registered as soon as it is
+defined rather than on its first spawn — so its decorated systems run from the start. A static field in the
+class body wins over the same option.
+
+## three.key(name, description, options)
+
+`@three.key('space', 'jump')` binds a method to a key, as `three.onKeyDown` would; `{ up: true }` binds the
+release instead. A static method is bound when the class is defined, an instance method when an instance is
+made, and the latest binding owns the key. The description defaults to the method's name.
+
+## three.keys()
+
+Every key a `@three.key` bound, and what it does: `{ space: 'jump', p: 'pause' }`. What a help line or
+`three.debug.write({ keys: three.keys() })` wants, so the list of keys is written once, on the methods.
+
+## three.owned
+
+`@three.owned field = value` on an entity's field: when the entity is removed, the field's value is
+disposed (`value.dispose()`). For a cooldown, a texture or a material an entity made, which would otherwise
+outlive it — `three.cooldown` in particular stays registered until it is disposed.
+
 ## three.emit(a, verb, b)
 
 The game raising its own event: `three.emit(player, 'use', door)` reaches `Door.on('use', Player, fn)`

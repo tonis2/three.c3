@@ -38,7 +38,8 @@ import { steer, NavField, makeSceneNav } from './nav.js';
 import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
 import { cooldown, Cooldown } from './cooldown.js';
-import { track, Entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
+import { key, keys, owned } from './decorators.js';
+import { track, Entity, entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { ui } from './ui.js';
 import { Widget, nodes as uiNodes, unmountAll as unmountAllWidgets } from './widget.js';
 
@@ -2272,6 +2273,16 @@ export const three = {
 	// of a bare `new Critter()` lives, which is the one thing the wrapper form
 	// needed a Proxy for.
 	Entity,
+
+	// Decorators for game classes (decorators.js). `@three.entity({ … })`
+	// registers an Entity class from options at once; `@three.key('space',
+	// 'jump')` binds a method to a key, and `three.keys()` lists them;
+	// `@three.owned field = …` disposes the field's value with its entity.
+	// Systems are `@three.systems.step`, `.frame` and `.late` on a method.
+	entity,
+	key,
+	keys,
+	owned,
 
 	// A WIDGET IS A CLASS, the way an entity is, and this is the base to extend.
 	// `render()` describes the interface as it is now, assigning a field marks

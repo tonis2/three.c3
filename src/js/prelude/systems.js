@@ -88,6 +88,7 @@
 // called it `dt`, so every frame-phase system multiplied by the time since the
 // level loaded, and the test that should have caught it asserted that the two
 // arguments AGREED — which the wrong number satisfies exactly.
+import { systemDecorators } from './decorators.js';
 import { clamp01 } from './math.js';
 
 const H = globalThis.__three;
@@ -262,6 +263,8 @@ class Registry {
 	// timers from drifting when one frame runs long — zero or more of them
 	// happen per frame, at `three.clock.fixedRate`.
 	step(name, fn, options = null) {
+		// `@three.systems.step` on a method: see decorators.js.
+		if (typeof name !== 'string') return systemDecorators.step(name, fn);
 		if (options?.phase !== undefined && options.phase !== 'fixed') {
 			throw new RangeError(`three.systems.step(name, fn, options): ${name} is a step system already — the verb is the phase`);
 		}
@@ -275,6 +278,8 @@ class Registry {
 	// follow the screen rather than the clock, and that judder when they are
 	// quantised to a step the screen is not in time with.
 	frame(name, fn, options = null) {
+		// `@three.systems.frame` on a method: see decorators.js.
+		if (typeof name !== 'string') return systemDecorators.frame(name, fn);
 		if (options?.phase !== undefined && options.phase !== 'frame') {
 			throw new RangeError(`three.systems.frame(name, fn, options): ${name} is a frame system already — the verb is the phase`);
 		}
@@ -289,6 +294,8 @@ class Registry {
 	// over a character. As a frame system it reads the camera before the
 	// follow moves it, and trails by a frame for as long as the camera glides.
 	late(name, fn, options = null) {
+		// `@three.systems.late` on a method: see decorators.js.
+		if (typeof name !== 'string') return systemDecorators.late(name, fn);
 		if (options?.phase !== undefined && options.phase !== 'late') {
 			throw new RangeError(`three.systems.late(name, fn, options): ${name} is a late system already — the verb is the phase`);
 		}

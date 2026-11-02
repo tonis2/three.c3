@@ -102,6 +102,7 @@
 // which is invisible for a pickup and for reach. `three.emit(a, verb, b)` is the
 // game raising its own event and dispatches at once, because the game knows when
 // it is safe and the solver does not.
+import { registerDecorated, disposeOwned } from './decorators.js';
 import { systems } from './systems.js';
 import { liveScene, liveObject, objectForHandle } from './scene.js';
 import { Object3D } from './object3d.js';
@@ -543,6 +544,7 @@ class Track {
 			silentHost(() => { if (volume.parent) volume.parent.remove(volume); });
 		}
 		if (typeof instance.onRemove === 'function') instance.onRemove();
+		disposeOwned(instance);
 		return true;
 	}
 
@@ -816,6 +818,8 @@ function register(Class, options, where) {
 
 	systems.frame(`${name}.compact`, () => t.compact(), { order: Infinity });
 	t.systems.push(`${name}.compact`);
+	// `@three.systems.step` and friends on the class's methods.
+	registerDecorated(Class, addSystem);
 	if (t.volume !== null) {
 		// Two below the proximity pass: a `near` rule measures against the
 		// VOLUME, so the volume has to have caught up first.
@@ -952,6 +956,26 @@ function entityTrack(Class, what) {
 		collides: Class.collides,
 		name: Class.name,
 	}, `class ${Class.name} extends three.Entity`);
+}
+
+// `@three.entity({ capacity, parent, columns, body, trigger, … })`: the statics
+// written as one options object, and the class registered as soon as it is
+// defined rather than on its first spawn — so its systems run from the start.
+// A static field in the class body wins over the same option here.
+export function entity(options = null) {
+	if (options !== null && typeof options !== 'object') {
+		throw new TypeError('@three.entity(options) wants an options object: { capacity, parent, columns, body, … }');
+	}
+	return (Class, context) => {
+		if (context.kind !== 'class') throw new TypeError(`@three.entity goes on a class, not on a ${context.kind}`);
+		if (!(Class.prototype instanceof Entity)) {
+			throw new TypeError(`@three.entity goes on a class that extends three.Entity — ${Class.name} does not`);
+		}
+		for (const [key, value] of Object.entries(options ?? {})) {
+			Object.defineProperty(Class, key, { value, configurable: true, writable: true });
+		}
+		context.addInitializer(function () { entityTrack(this, 'entity'); });
+	};
 }
 
 // Which instance owns this object — a drawn node, one of its meshes, or a
