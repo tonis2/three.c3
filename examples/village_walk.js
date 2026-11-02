@@ -700,7 +700,7 @@ class Keys {
 		console.log(`shadow map ${shadow.enabled ? 'on' : 'off'}`);
 	}
 
-	@three.key('s', 'what the frame costs')
+	@three.key('f', 'what the frame costs')
 	static cost() {
 		const s = three.stats();
 		console.log(`draws ${s.drawCalls} (+${s.shadowDraws} shadow) · ${s.triangles} tris · ${s.gpuMs.toFixed(2)} ms · ${reliefMaterials.length} relief materials`);
