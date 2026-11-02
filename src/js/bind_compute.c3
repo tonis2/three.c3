@@ -3,26 +3,28 @@ The `three.compute` verbs: buffers, kernels, dispatch, submit.
 
  ## What crosses
 
- Handles, not pointers. A script holds an integer and the host holds the
- buffer; a handle that has been disposed of is refused by name rather than
- read as whatever now sits at that address. Each handle carries a generation
- for the same reason `NodeId` does - a slot the script gave back and the host
- reused would otherwise be a live handle onto somebody else's data.
+ Handles, not pointers. A script holds a `BufferHandle` or `KernelHandle` object
+ carrying a slot index and a generation, and the host holds the buffer; a handle
+ that has been disposed of is refused by name rather than read as whatever now
+ sits in its slot. The generation is there for the same reason `NodeId` has one -
+ a slot the script gave back and the host reused would otherwise be a live handle
+ onto somebody else's data.
 
- ## Why the argument counts are what they are
+ Images are textures and cross as texture indices, like every other texture.
 
- The prelude does the ergonomics: it turns a typed array into the
- `(buffer, byteOffset, elementCount)` triple the host reads, packs a push block
- out of an object, and converts a work-item count into workgroups. What reaches
- this file is already numbers and views, which is the same split `bind_query.c3`
- draws and for the same reason - a host verb earns its keep by doing the thing
- JavaScript cannot, and JavaScript can unpack its own objects.
+ ## What the prelude does
+
+ The ergonomics: it turns a script's data into bytes, packs a push block out of
+ an object, and converts a work-item count into workgroups. What reaches this
+ file is already numbers, handles and typed arrays, the same split `bind_query.c3`
+ draws - a host verb earns its keep by doing the thing JavaScript cannot.
 *>
 module three;
 
 import std::collections::list;
 import std::io::file;
-import qjs;
+import fastjs::js;
+import fastjs::js::opt;
 
 // A slot in one of the tables below, addressed by index and generation the way
 // a `NodeId` is: the generation is what makes a freed handle distinguishable
@@ -33,22 +35,9 @@ struct ComputeHandle
 	uint generation;
 }
 
-const uint COMPUTE_HANDLE_NONE = 0xFFFF_FFFF;
-
-fn qjs::Value compute_handle_value(ComputeHandle handle)
-{
-	if (handle.index == COMPUTE_HANDLE_NONE) return qjs::int_value(-1);
-	return qjs::int_value((int)((handle.generation << 16) | handle.index));
-}
-
-fn ComputeHandle compute_handle_of(int encoded)
-{
-	if (encoded < 0) return { .index = COMPUTE_HANDLE_NONE };
-	return (ComputeHandle) {
-		.index = (uint)(encoded & 0xFFFF),
-		.generation = (uint)((encoded >> 16) & 0xFFFF),
-	};
-}
+// A buffer or a kernel as a verb hands it to a script: a new handle object.
+typedef BufferHandle = ComputeHandle;
+typedef KernelHandle = ComputeHandle;
 
 struct StorageSlot
 {
@@ -69,30 +58,39 @@ struct KernelSlot
 	uint[3]        threads;
 }
 
-fn void JsRuntime.bind_compute_verbs(&self, qjs::Value host)
+const String BUFFER_NOT_LIVE = "this buffer handle is not live - it was never made here, or it has been freed";
+const String KERNEL_NOT_LIVE = "this kernel handle is not live - it was never made here, or it has been freed";
+
+<*
+ @return? js::THREW
+*>
+fn void? JsRuntime.bind_compute_verbs(&self, js::Value host)
 {
-	self.bind(host, "computeCreateBuffer", &js_compute_create_buffer, 4);
-	self.bind(host, "computeWriteBuffer", &js_compute_write_buffer, 5);
-	self.bind(host, "computeReadBuffer", &js_compute_read_buffer, 4);
-	self.bind(host, "computeFreeBuffer", &js_compute_free_buffer, 1);
-	self.bind(host, "computeCreateKernel", &js_compute_create_kernel, 3);
-	self.bind(host, "computeCreateKernelSpirv", &js_compute_create_kernel_spirv, 3);
-	self.bind(host, "computeKernelThreads", &js_compute_kernel_threads, 1);
-	self.bind(host, "computeSpirv", &js_compute_spirv, 1);
-	self.bind(host, "computeFreeKernel", &js_compute_free_kernel, 1);
-	self.bind(host, "computeDispatch", &js_compute_dispatch, 7);
-	self.bind(host, "computeSubmit", &js_compute_submit, 0);
-	self.bind(host, "computeSubmitAsync", &js_compute_submit_async, 0);
-	self.bind(host, "computeBusy", &js_compute_busy, 0);
-	self.bind(host, "computeCopy", &js_compute_copy, 6);
-	self.bind(host, "computeFill", &js_compute_fill, 5);
-	self.bind(host, "computeBarrier", &js_compute_barrier, 0);
-	self.bind(host, "computeLimits", &js_compute_limits, 0);
-	self.bind(host, "computeCreateImage", &js_compute_create_image, 4);
-	self.bind(host, "computeReadImage", &js_compute_read_image, 2);
-	self.bind(host, "computeWriteImage", &js_compute_write_image, 2);
-	self.bind(host, "computeFreeImage", &js_compute_free_image, 1);
-	self.bind(host, "computeKernelBindings", &js_compute_kernel_bindings, 1);
+	self.compute_buffer_class = self.js.class("BufferHandle")!;
+	self.compute_kernel_class = self.js.class("KernelHandle")!;
+
+	self.js.@bind(host, "computeCreateBuffer", &js_compute_create_buffer, self)!;
+	self.js.@bind(host, "computeWriteBuffer", &js_compute_write_buffer, self)!;
+	self.js.@bind(host, "computeReadBuffer", &js_compute_read_buffer, self)!;
+	self.js.@bind(host, "computeFreeBuffer", &js_compute_free_buffer, self)!;
+	self.js.@bind(host, "computeCreateKernel", &js_compute_create_kernel, self)!;
+	self.js.@bind(host, "computeCreateKernelSpirv", &js_compute_create_kernel_spirv, self)!;
+	self.js.@bind(host, "computeKernelThreads", &js_compute_kernel_threads, self)!;
+	self.js.@bind(host, "computeSpirv", &js_compute_spirv, self)!;
+	self.js.@bind(host, "computeFreeKernel", &js_compute_free_kernel, self)!;
+	self.js.@bind(host, "computeDispatch", &js_compute_dispatch, self)!;
+	self.js.@bind(host, "computeSubmit", &js_compute_submit, self)!;
+	self.js.@bind(host, "computeSubmitAsync", &js_compute_submit_async, self)!;
+	self.js.@bind(host, "computeBusy", &js_compute_busy, self)!;
+	self.js.@bind(host, "computeCopy", &js_compute_copy, self)!;
+	self.js.@bind(host, "computeFill", &js_compute_fill, self)!;
+	self.js.@bind(host, "computeBarrier", &js_compute_barrier, self)!;
+	self.js.@bind(host, "computeLimits", &js_compute_limits, self)!;
+	self.js.@bind(host, "computeCreateImage", &js_compute_create_image, self)!;
+	self.js.@bind(host, "computeReadImage", &js_compute_read_image, self)!;
+	self.js.@bind(host, "computeWriteImage", &js_compute_write_image, self)!;
+	self.js.@bind(host, "computeFreeImage", &js_compute_free_image, self)!;
+	self.js.@bind(host, "computeKernelBindings", &js_compute_kernel_bindings, self)!;
 }
 
 // --- Handles -----------------------------------------------------------------
@@ -126,29 +124,65 @@ macro uint free_slot_in(slots)
 	return (uint)(slots.len() - 1);
 }
 
-fn StorageSlot* storage_slot(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
-{
-	StorageSlot* slot = live_slot(&self.storage_slots, compute_handle_of(encoded));
-	if (slot == null) *out = js.raise("this buffer handle is not live - it was never made here, or it has been freed");
-	return slot;
-}
-
-fn StorageBuffer* storage_buffer(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
-{
-	StorageSlot* slot = storage_slot(self, encoded, js, out);
-	return slot == null ? null : slot.buffer;
-}
-
-fn KernelSlot* kernel_slot(JsRuntime* self, int encoded, qjs::Context* js, qjs::Value* out) @local
-{
-	KernelSlot* slot = live_slot(&self.kernel_slots, compute_handle_of(encoded));
-	if (slot == null) *out = js.raise("this kernel handle is not live - it was never made here, or it has been freed");
-	return slot;
-}
-
 fn uint storage_slot_for(JsRuntime* self) @local => free_slot_in(&self.storage_slots);
 
 fn uint kernel_slot_for(JsRuntime* self) @local => free_slot_in(&self.kernel_slots);
+
+<*
+ @return? js::THREW
+*>
+fn js::Value? BufferHandle.to_js(&self, js::Engine* js)
+{
+	return js.instance(((JsRuntime*)js.user).compute_buffer_class, pack_id(self.index, self.generation));
+}
+
+<*
+ @return? js::THREW
+*>
+fn js::Value? KernelHandle.to_js(&self, js::Engine* js)
+{
+	return js.instance(((JsRuntime*)js.user).compute_kernel_class, pack_id(self.index, self.generation));
+}
+
+// The live slot behind a buffer handle object, or null.
+fn StorageSlot* JsRuntime.storage_slot_of(&self, js::Value handle)
+{
+	void* data = js::data_of(handle, self.compute_buffer_class);
+	if (!data) return null;
+	return live_slot(&self.storage_slots, unpack_id(data, ComputeHandle));
+}
+
+// A buffer handle argument, checked to be live.
+struct StorageRef
+{
+	StorageSlot* slot;
+}
+
+<*
+ @return? js::THREW
+*>
+fn void? StorageRef.from_js(&self, js::Call* c, int at)
+{
+	self.slot = ((JsRuntime*)c.js.user).storage_slot_of(c.get(at));
+	if (!self.slot) return c.fail(BUFFER_NOT_LIVE)~;
+}
+
+// A kernel handle argument, checked to be live.
+struct KernelRef
+{
+	KernelSlot* slot;
+}
+
+<*
+ @return? js::THREW
+*>
+fn void? KernelRef.from_js(&self, js::Call* c, int at)
+{
+	JsRuntime* rt = c.js.user;
+	void* data = js::data_of(c.get(at), rt.compute_kernel_class);
+	if (data) self.slot = live_slot(&rt.kernel_slots, unpack_id(data, ComputeHandle));
+	if (!self.slot) return c.fail(KERNEL_NOT_LIVE)~;
+}
 
 <*
  Hand a buffer the host made to the script, as a handle `three.compute.adopt`
@@ -156,31 +190,32 @@ fn uint kernel_slot_for(JsRuntime* self) @local => free_slot_in(&self.kernel_slo
 
  For an embedding program with data of its own to put on the GPU - a model's
  weights, streamed out of a mapped file - which it fills with `StorageBuffer`'s
- own verbs and then gives to JavaScript to bind. The runtime owns the buffer from
- here: `dispose()` or the end of the context frees it.
+ own verbs and then gives to JavaScript to bind, by returning the handle from a
+ verb of its own. The runtime owns the buffer from here: `dispose()` or the end
+ of the context frees it.
 
  @param [&inout] buffer : `Allocated with mem, created. Ownership moves to the runtime.`
- @return `The handle, as the script's integer.`
+ @return `The handle; a verb returning it gives the script a handle object.`
 *>
-fn int JsRuntime.adopt_storage_buffer(&self, StorageBuffer* buffer)
+fn BufferHandle JsRuntime.adopt_storage_buffer(&self, StorageBuffer* buffer)
 {
 	uint index = storage_slot_for(self);
 	StorageSlot* slot = &self.storage_slots[index];
 	slot.buffer = buffer;
 	slot.live   = true;
-	return (int)((slot.generation << 16) | index);
+	return { index, slot.generation };
 }
 
 <*
- The buffer behind a script's handle, or null when the handle is not live.
+ The buffer behind a script's handle object, or null when it is not a live one.
 
  The host-side half of `adopt_storage_buffer`: a verb an embedding program adds
  takes a `ComputeBuffer`'s handle and writes into, or reads out of, the buffer
  behind it.
 *>
-fn StorageBuffer* JsRuntime.storage_buffer_of(&self, int encoded)
+fn StorageBuffer* JsRuntime.storage_buffer_of(&self, js::Value handle)
 {
-	StorageSlot* slot = live_slot(&self.storage_slots, compute_handle_of(encoded));
+	StorageSlot* slot = self.storage_slot_of(handle);
 	return slot == null ? null : slot.buffer;
 }
 
@@ -196,226 +231,132 @@ fn void flush_compute(JsRuntime* self)
 	self.renderer.gpu.handle.waitIdle();
 }
 
-fn Compute* runtime_compute(JsRuntime* self, qjs::Context* js, qjs::Value* out) @local
+<*
+ @return? js::THREW
+*>
+fn Compute*? runtime_compute(JsRuntime* self) @local
 {
-	if (!self.needs_device(js, "three.compute", out)) return null;
+	if (self.renderer == null) return self.js.fail("%s needs a GPU device and this context has none", "three.compute")~;
 	return &self.renderer.compute;
 }
 
 // --- Buffers -----------------------------------------------------------------
 
 <*
- `computeCreateBuffer(size, data, byteOffset, count)` - one storage buffer.
+ `computeCreateBuffer(size, data)` - one storage buffer of `size` bytes.
 
- `size` is bytes and is what the buffer is; the optional `(data, offset,
- count)` triple is an upload of `count` bytes taken from that view, so a script
- can make a buffer and fill it in one call without a staging copy it would have
- to size itself.
+ `data`, when given and not empty, is its first contents, so a script can make
+ a buffer and fill it in one call without a staging copy it would have to size
+ itself. Without it the buffer holds zeroes.
+
+ @return? js::THREW
 *>
-fn void js_compute_create_buffer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn BufferHandle? js_compute_create_buffer(JsRuntime* self, double size_number, char[] data)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	double size_number = arg_number(&js, argc, args, 0);
-	if (size_number <= 0)
-	{
-		*out = js.raise("three.compute.buffer(size) wants a positive size in bytes");
-		return;
-	}
+	Compute* compute = runtime_compute(self)!;
+	if (size_number <= 0) return self.js.fail("three.compute.buffer(size) wants a positive size in bytes")~;
 	usz size = (usz)size_number;
-
-	// The upload is optional and is the three-part view the other typed-array
-	// verbs take. A count of zero is no upload at all rather than an empty one,
-	// which is both what a script means by it and what an empty view cannot
-	// express: a detached or zero-length array answers with no bytes to point
-	// at, and there is nothing to copy either way.
-	char[] upload = { };
-	if (argc >= 4)
-	{
-		long offset = (long)arg_number(&js, argc, args, 2);
-		long count  = (long)arg_number(&js, argc, args, 3);
-		if (offset < 0 || count < 0)
-		{
-			*out = js.raise("three.compute.buffer(size, data, byteOffset, byteCount) was given a negative view");
-			return;
-		}
-		if (count > 0)
-		{
-			char[] whole = js.bytes(args[1]);
-			if (offset + count > (long)whole.len)
-			{
-				*out = js.raise("three.compute.buffer(size, data, byteOffset, byteCount) was given a view past the end of the array");
-				return;
-			}
-			upload = whole[(usz)offset:(usz)count];
-		}
-	}
 
 	uint index = storage_slot_for(self);
 	StorageSlot* slot = &self.storage_slots[index];
 
-	StorageBuffer* buffer = alloc::new(mem, StorageBuffer);
-	if (catch buffer.create(&self.renderer.gpu, size, upload.len > 0 ? upload.ptr : null))
+	@pool()
 	{
-		alloc::free(mem, buffer);
-		self.storage_slots[index].live = false;
-		*out = js.raise("three.compute.buffer could not allocate that buffer on this device");
-		return;
-	}
+		// The device copy reads the whole buffer, rounded up to whole words, from
+		// the upload; anything shorter is padded with zeroes first.
+		char[] upload = data;
+		usz whole = (size + 3) / 4 * 4;
+		if (upload.len > 0 && upload.len < whole)
+		{
+			upload = alloc::new_array(tmem, char, (sz)whole);
+			upload[:data.len] = data[..];
+		}
 
-	// Zeroes, as a script expects of a buffer it has not written: the memory
-	// may be a freed buffer's, and a kernel that accumulates into it would add to
-	// that buffer's numbers. Recorded, so it costs nothing until the next submit.
-	if (upload.len == 0) compute.clear(buffer);
+		StorageBuffer* buffer = alloc::new(mem, StorageBuffer);
+		if (catch buffer.create(&self.renderer.gpu, size, upload.len > 0 ? upload.ptr : null))
+		{
+			alloc::free(mem, buffer);
+			slot.live = false;
+			return self.js.fail("three.compute.buffer could not allocate that buffer on this device")~;
+		}
 
-	slot.buffer = buffer;
-	slot.live   = true;
-	*out = compute_handle_value({ .index = index, .generation = slot.generation });
+		// Zeroes, as a script expects of a buffer it has not written: the memory
+		// may be a freed buffer's, and a kernel that accumulates into it would add to
+		// that buffer's numbers. Recorded, so it costs nothing until the next submit.
+		if (upload.len == 0) compute.clear(buffer);
+
+		slot.buffer = buffer;
+		slot.live   = true;
+	};
+	return { index, slot.generation };
 }
 
 <*
- `computeWriteBuffer(handle, data, byteOffset, count, at)` - stage `count` bytes
- from the view into the buffer, starting at byte `at` (zero when left out).
+ `computeWriteBuffer(handle, data, at)` - stage the bytes of `data` into the
+ buffer, starting at byte `at` (zero when left out).
 
  The write is submitted and waited for here, so a dispatch recorded afterwards
  reads the new bytes. That is the same rule `StorageBuffer.write` follows and
  the reason the verb does not hand back a "pending" flag: an upload that had
  not landed would be a wrong answer with no symptom.
+
+ @return? js::THREW
 *>
-fn void js_compute_write_buffer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_write_buffer(JsRuntime* self, StorageRef ref, char[] data, double at_number)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	StorageBuffer* buffer = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
-	if (buffer == null) return;
-
-	char[] whole = js.bytes(args[1]);
-	long offset  = (long)arg_number(&js, argc, args, 2);
-	long count   = (long)arg_number(&js, argc, args, 3);
-	long at      = argc >= 5 ? (long)arg_number(&js, argc, args, 4) : 0;
-	if (offset < 0 || count <= 0 || at < 0)
+	StorageBuffer* buffer = ref.slot.buffer;
+	long at = (long)at_number;
+	if (at < 0 || data.len == 0)
 	{
-		*out = js.raise("three.compute.write(handle, data, byteOffset, byteCount) was given a negative or empty view");
-		return;
-	}
-	if (whole.len == 0)
-	{
-		// `js.bytes` reads a Uint8Array or an ArrayBuffer and nothing else. A
-		// Float32Array - the view a buffer of floats naturally hands over -
-		// answers with no bytes at all, and a write that copied nothing would
-		// otherwise look exactly like one that worked.
-		*out = js.raise("three.compute.write wants bytes - a Uint8Array or an ArrayBuffer, not a typed array of another element");
-		return;
-	}
-	if (offset + count > (long)whole.len)
-	{
-		*out = js.raise("three.compute.write(handle, data, byteOffset, byteCount) was given a view past the end of the array");
-		return;
+		return self.js.fail("three.compute.write(handle, data, byteOffset, byteCount) was given a negative or empty view")~;
 	}
 
 	Compute* compute = &self.renderer.compute;
-	if (catch buffer.write(compute, (usz)at, whole.ptr + offset, (usz)count))
+	if (catch buffer.write(compute, (usz)at, data.ptr, data.len))
 	{
-		*out = js.raisef("three.compute.write wanted %d bytes at %d and the buffer holds %d",
-			(long)count, at, (long)buffer.size);
-		return;
+		return self.js.fail("three.compute.write wanted %d bytes at %d and the buffer holds %d",
+			(long)data.len, at, (long)buffer.size)~;
 	}
 }
 
 <*
- `computeReadBuffer(handle, target, byteCount)` - fill a script's typed array
- from the buffer's first bytes.
+ `computeReadBuffer(handle, target, byteCount, at)` - fill a script's typed array
+ with `byteCount` bytes of the buffer from byte `at` (zero when left out).
 
  `submit()` first: this is the verb that turns GPU state into an answer, and
  reading before the dispatch that wrote it has run would copy the buffer as it
  was. The wait is folded in here rather than left to the caller because a
  script that forgot it would get a wrong number rather than an error.
+
+ @return? js::THREW
 *>
-fn void js_compute_read_buffer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_read_buffer(JsRuntime* self, StorageRef ref, char[] target, double count_number, double at_number)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	StorageBuffer* buffer = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
-	if (buffer == null)
-	{
-		return;
-	}
-
-	char[] target = js.bytes(args[1]);
-	long count    = (long)arg_number(&js, argc, args, 2);
-	long at       = argc >= 4 ? (long)arg_number(&js, argc, args, 3) : 0;
-	if (at < 0)
-	{
-		*out = js.raise("three.compute.read(handle, target, byteCount, at) was given a negative offset");
-		return;
-	}
+	StorageBuffer* buffer = ref.slot.buffer;
+	long count = (long)count_number;
+	long at    = (long)at_number;
+	if (at < 0) return self.js.fail("three.compute.read(handle, target, byteCount, at) was given a negative offset")~;
 	if (count <= 0 || count > (long)target.len)
 	{
-		*out = js.raise("three.compute.read(handle, target, byteCount) wants a target at least as long as the count");
-		return;
+		return self.js.fail("three.compute.read(handle, target, byteCount) wants a target at least as long as the count")~;
 	}
 	if ((usz)(count + at) > buffer.size)
 	{
-		*out = js.raisef("three.compute.read wanted %d bytes at %d and the buffer holds %d",
-			(long)count, at, (long)buffer.size);
-		return;
+		return self.js.fail("three.compute.read wanted %d bytes at %d and the buffer holds %d",
+			count, at, (long)buffer.size)~;
 	}
 
 	Compute* compute = &self.renderer.compute;
-	if (catch compute.submit())
-	{
-		*out = js.raise("the compute submission failed before the readback");
-		return;
-	}
+	if (catch compute.submit()) return self.js.fail("the compute submission failed before the readback")~;
 	if (catch buffer.read(compute, (usz)at, target[:(usz)count]))
 	{
-		*out = js.raise("the compute readback could not copy those bytes out");
-		return;
+		return self.js.fail("the compute readback could not copy those bytes out")~;
 	}
 }
 
-fn void js_compute_free_buffer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_compute_free_buffer(JsRuntime* self, StorageRef ref)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	StorageSlot* slot = storage_slot(self, arg_int(&js, argc, args, 0), &js, out);
-	if (slot == null) return;
-
+	StorageSlot* slot = ref.slot;
 	// A dispatch recorded and not yet submitted may still name this buffer, and
 	// `waitIdle` only waits for what has been submitted.
 	flush_compute(self);
@@ -431,35 +372,19 @@ fn void js_compute_free_buffer(
  `computeCreateKernel(source, name, entry)` - compile and build.
 
  The source is the whole program: `@storage` declarations, a `@compute` entry
- point with `@threads`, and whatever else it needs. A refused source answers a
- `TypeError` carrying the compiler's own diagnostic, because that message has a
- line and a column in it and is the only thing that says what to fix.
+ point with `@threads`, and whatever else it needs. A refused source answers an
+ error carrying the compiler's own diagnostic, because that message has a line
+ and a column in it and is the only thing that says what to fix.
+
+ @return? js::THREW
 *>
-fn void js_compute_create_kernel(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn KernelHandle? js_compute_create_kernel(JsRuntime* self, String source, String name, String entry)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	String source = arg_text(&js, argc, args, 0, tmem);
-	String name   = arg_text(&js, argc, args, 1, tmem);
-	String entry  = arg_text(&js, argc, args, 2, tmem);
-	if (source.len == 0)
-	{
-		*out = js.raise("three.compute.kernel(source) wants the shader source");
-		return;
-	}
+	runtime_compute(self)!;
+	if (source.len == 0) return self.js.fail("three.compute.kernel(source) wants the shader source")~;
 	if (name.len == 0) name = "kernel";
-	if (entry.len == 0) entry = "main";
+	// NUL-terminated: Vulkan takes the entry point's name as a C string.
+	entry = entry.len == 0 ? "main" : entry.zstr_tcopy().str_view();
 
 	ShaderModule shader = compile_compute_shader_cached(name, source);
 	defer shader.free();
@@ -469,13 +394,11 @@ fn void js_compute_create_kernel(
 		// The kernel's name goes in front of the compiler's own message: the
 		// diagnostic has the line, the column and the caret, and what it does
 		// not have is which of a script's kernels it was.
-		*out = js.raise(shader.diagnostic.len > 0
-			? string::tformat("%s: %s", name, shader.diagnostic)
-			: string::tformat("%s did not compile", name));
-		return;
+		if (shader.diagnostic.len > 0) return self.js.fail("%s: %s", name, shader.diagnostic)~;
+		return self.js.fail("%s did not compile", name)~;
 	}
 
-	install_kernel(self, &js, &shader, name, entry, out);
+	return install_kernel(self, &shader, name, entry);
 }
 
 <*
@@ -489,32 +412,16 @@ fn void js_compute_create_kernel(
  The workgroup size is the module's own `LocalSize` rather than something the
  script passes: a precompiled kernel has no source to read it out of, and the
  one place that knows is the module.
+
+ @return? js::THREW
 *>
-fn void js_compute_create_kernel_spirv(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn KernelHandle? js_compute_create_kernel_spirv(JsRuntime* self, char[] bytes, String name, String entry)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	char[] bytes = js.bytes(args[0]);
-	String name  = arg_text(&js, argc, args, 1, tmem);
-	String entry = arg_text(&js, argc, args, 2, tmem);
-	if (bytes.len == 0)
-	{
-		*out = js.raise("three.compute.kernel(module) wants the module's bytes");
-		return;
-	}
+	runtime_compute(self)!;
+	if (bytes.len == 0) return self.js.fail("three.compute.kernel(module) wants the module's bytes")~;
 	if (name.len == 0) name = "kernel";
-	if (entry.len == 0) entry = "main";
+	// NUL-terminated: Vulkan takes the entry point's name as a C string.
+	entry = entry.len == 0 ? "main" : entry.zstr_tcopy().str_view();
 
 	// Copied, because the module takes ownership of what it is given and these
 	// bytes belong to the script.
@@ -526,13 +433,11 @@ fn void js_compute_create_kernel_spirv(
 
 	if (!shader.ok)
 	{
-		*out = js.raise(shader.diagnostic.len > 0
-			? shader.diagnostic
-			: string::tformat("%s is not something this can dispatch", name));
-		return;
+		if (shader.diagnostic.len > 0) return self.js.fail("%s", shader.diagnostic)~;
+		return self.js.fail("%s is not something this can dispatch", name)~;
 	}
 
-	install_kernel(self, &js, &shader, name, entry, out);
+	return install_kernel(self, &shader, name, entry);
 }
 
 <*
@@ -543,90 +448,43 @@ fn void js_compute_create_kernel_spirv(
  dispatch cost) should not have to parse it back out of a shader, and a
  precompiled module has no source to parse.
 *>
-fn void js_compute_kernel_threads(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint[<3>] js_compute_kernel_threads(JsRuntime* self, KernelRef ref)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
-	if (slot == null) return;
-
-	qjs::Value array = js.array();
-	for (uint i = 0; i < 3; i++)
-	{
-		js.set_index(array, (uint)i, qjs::number_value((double)slot.threads[i]));
-	}
-	*out = array;
+	return { ref.slot.threads[0], ref.slot.threads[1], ref.slot.threads[2] };
 }
 
 <*
- `computeSpirv(path)` - a module read from disk, as bytes.
+ `computeSpirv(path)` - a module read from disk, as a `Uint8Array`.
 
  The path is the script's to write and is resolved like every other file here,
  so `three.compute.spirv("../shaders/zimage.spv")` and a path from the command
- line are the same thing. What comes back is a `Uint8Array` the script owns: it
- can be handed to `kernel()` and kept for the next one.
-*>
-fn void js_compute_spirv(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+ line are the same thing. What comes back is a copy the script owns: it can be
+ handed to `kernel()` and kept for the next one.
 
-	String asked = arg_text(&js, argc, args, 0, tmem);
-	if (asked.len == 0)
-	{
-		*out = js.raise("three.compute.spirv(path) wants the module's path");
-		return;
-	}
+ @return? js::THREW
+*>
+fn js::Value? js_compute_spirv(JsRuntime* self, String asked)
+{
+	if (asked.len == 0) return self.js.fail("three.compute.spirv(path) wants the module's path")~;
 
 	char[]? bytes = file::load(tmem, asked);
-	if (catch err = bytes)
-	{
-		*out = js.raisef("could not read %s: %s", asked, err);
-		return;
-	}
+	if (catch err = bytes) return self.js.fail("could not read %s: %s", asked, err)~;
 	if (bytes.len < 4 || *(uint*)bytes.ptr != SPIRV_MAGIC)
 	{
-		*out = js.raisef("%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
+		return self.js.fail("%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
 			"goes to three.compute.kernel as text",
-			asked);
-		return;
+			asked)~;
 	}
-
-	// `buffer_copy` so the bytes belong to the script: the file is read into
-	// temporary memory that is gone by the time the script runs. The view holds
-	// the buffer on its own, so the host's own reference to it goes.
-	qjs::Value buffer = js.buffer_copy(bytes.ptr, bytes.len);
-	defer js.release(buffer);
-	*out = js.typed_array(qjs::ARRAY_UINT8, buffer, 0, bytes.len);
+	return self.js.typed_copy(UINT8, bytes);
 }
 
 <*
  The tail both creation paths share: a slot, a pipeline, and the handle a
  script holds.
+
+ @return? js::THREW
 *>
-fn void install_kernel(
-	JsRuntime* self,
-	qjs::Context* js,
-	ShaderModule* shader,
-	String name,
-	String entry,
-	qjs::Value* out
-) @local
+fn KernelHandle? install_kernel(JsRuntime* self, ShaderModule* shader, String name, String entry) @local
 {
 	uint index = kernel_slot_for(self);
 	KernelSlot* slot = &self.kernel_slots[index];
@@ -639,35 +497,34 @@ fn void install_kernel(
 		// with it; every field is null until it is made.
 		kernel.free(self.renderer.gpu.handle);
 		alloc::free(mem, kernel);
-		self.kernel_slots[index].live = false;
+		slot.live = false;
 		GpuLimits* limits = &self.renderer.gpu.limits;
 		switch (err)
 		{
 			case COMPUTE_UNSUPPORTED_SUBGROUP_SIZE:
-				*out = js.raisef("%s is written for a subgroup of %d lanes, and this device %s",
+				return self.js.fail("%s is written for a subgroup of %d lanes, and this device %s",
 					name, shader.subgroup_size, limits.subgroup_size_control
 					? string::tformat("runs %d to %d", limits.min_subgroup_size, limits.max_subgroup_size)
-					: "cannot be asked for a subgroup size");
+					: "cannot be asked for a subgroup size")~;
 			case COMPUTE_KERNEL_NO_ENTRY:
-				*out = js.raisef("%s has no compute entry point `%s`", name, entry);
+				return self.js.fail("%s has no compute entry point `%s`", name, entry)~;
 			case COMPUTE_UNSUPPORTED_BINDING:
-				*out = js.raisef("%s binds something a kernel cannot: storage buffers, storage images (image2d<...>) and "
+				return self.js.fail("%s binds something a kernel cannot: storage buffers, storage images (image2d<...>) and "
 					"sampled textures (Sampler2D) are what a kernel takes, one per binding and all in set 0",
-					name);
+					name)~;
 			case COMPUTE_IMAGE_FEATURE:
-				*out = js.raisef("%s declares a storage image this device cannot have: an extended format needs "
+				return self.js.fail("%s declares a storage image this device cannot have: an extended format needs "
 					"shaderStorageImageExtendedFormats, and an image2d<float4> whose format the host picks needs "
 					"shaderStorageImage%sWithoutFormat - name the format, e.g. image2d<rgba16f>",
-					name, limits.storage_image_read_without_format ? "Write" : "Read");
+					name, limits.storage_image_read_without_format ? "Write" : "Read")~;
 			case COMPUTE_TOO_MANY_IMAGES:
-				*out = js.raisef("%s declares more storage images than the %d this device binds per kernel",
-					name, limits.max_per_stage_storage_images);
+				return self.js.fail("%s declares more storage images than the %d this device binds per kernel",
+					name, limits.max_per_stage_storage_images)~;
 			case COMPUTE_NOT_READY:
-				*out = js.raisef("%s declares more than %d bindings - split it", name, COMPUTE_MAX_BINDINGS);
+				return self.js.fail("%s declares more than %d bindings - split it", name, COMPUTE_MAX_BINDINGS)~;
 			default:
-				*out = js.raisef("%s could not be built: %s", name, err);
+				return self.js.fail("%s could not be built: %s", name, err)~;
 		}
-		return;
 	}
 
 	// The module's own workgroup size, not a number from the script: `@threads`
@@ -677,34 +534,21 @@ fn void install_kernel(
 	{
 		kernel.free(self.renderer.gpu.handle);
 		alloc::free(mem, kernel);
-		self.kernel_slots[index].live = false;
-		*out = js.raisef("%s declares no compute workgroup size - a module whose size is an `OpExecutionModeId` "
+		slot.live = false;
+		return self.js.fail("%s declares no compute workgroup size - a module whose size is an `OpExecutionModeId` "
 			"cannot be dispatched by this host yet",
-			name);
-		return;
+			name)~;
 	}
 
 	slot.kernel  = kernel;
 	slot.live    = true;
 	slot.threads = shader.local_size;
-	*out = compute_handle_value({ .index = index, .generation = slot.generation });
+	return { index, slot.generation };
 }
 
-fn void js_compute_free_kernel(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_compute_free_kernel(JsRuntime* self, KernelRef ref)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
-	if (slot == null) return;
-
+	KernelSlot* slot = ref.slot;
 	flush_compute(self);
 	slot.kernel.free(self.renderer.gpu.handle);
 	alloc::free(mem, slot.kernel);
@@ -715,57 +559,44 @@ fn void js_compute_free_kernel(
 // --- Dispatch ----------------------------------------------------------------
 
 <*
- `computeDispatch(kernel, buffers, push, itemsX, itemsY, groupsZ)` - record one
+ `computeDispatch(kernel, bindings, push, x, y, z, independent)` - record one
  dispatch.
 
- `buffers` is a plain Array of handles in the shader's binding order, and
- `push` is the push block's bytes as a typed array. The last three numbers are
- either a work-item count per axis - the usual case, and split here by the
- entry point's own `@threads` - or, when the third is positive, the group counts
- themselves, which is what a dispatch that wants exactly `(4, 1, 1)` says. One
- call rather than two verbs because the difference is three numbers, and the
- prelude is what decides which reading it meant.
+ `bindings` is a plain Array in the shader's binding order: a buffer handle,
+ `[handle, byteOffset, byteSize]` for a range of one (a size of zero runs to the
+ end of the buffer), or a texture index for an image binding. `push` is the push
+ block's bytes, or undefined. `x, y, z` are either a work-item count per axis -
+ the usual case, split here by the entry point's own `@threads` - or, when `z`
+ is positive, the group counts themselves, which is what a dispatch that wants
+ exactly `(4, 1, 1)` says. `independent` skips the barrier after this dispatch,
+ for a caller that knows the next command does not read it.
+
+ @return? js::THREW
 *>
-fn void js_compute_dispatch(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_dispatch(JsRuntime* self, KernelRef ref, js::Value list, char[] push,
+	double x, double y, double z, bool independent)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
-	if (slot == null) return;
+	KernelSlot* slot = ref.slot;
 	ComputeKernel* kernel = slot.kernel;
-
 	Compute* compute = &self.renderer.compute;
 
-	// The buffers, in binding order: a plain Array whose length is checked
-	// against the kernel's own count, so a script that forgot one is told which
-	// one it forgot rather than dispatching against a stale binding. An element
-	// is a handle, or `[handle, byteOffset, byteSize]` for a range of one - a
-	// size of zero runs to the end of the buffer.
-	qjs::Value list = argc >= 2 ? args[1] : qjs::undefined_value();
-	int given = (int)js.length(list);
+	// The length is checked against the kernel's own count, so a script that
+	// forgot one is told which one it forgot rather than dispatching against a
+	// stale binding.
+	long given = self.js.length(list)!;
 	if (given < 0) given = 0;
-
-	ComputeBinding[COMPUTE_MAX_BINDINGS] views;
 	if ((uint)given != kernel.binding_count)
 	{
-		*out = js.raisef("this kernel binds %d buffers and images and %d were given - they go in the shader's own order",
-			(int)kernel.binding_count, given);
-		return;
+		return self.js.fail("this kernel binds %d buffers and images and %d were given - they go in the shader's own order",
+			(int)kernel.binding_count, given)~;
 	}
+
+	ComputeBinding[COMPUTE_MAX_BINDINGS] views;
 	ulong alignment = self.renderer.gpu.limits.min_storage_buffer_offset_alignment;
 	if (alignment == 0) alignment = 1;
 	for (int i = 0; i < given; i++)
 	{
-		qjs::Value element = js.index(list, (uint)i);
-		defer js.release(element);
+		js::Value element = self.js.get(list, i)!;
 
 		// An image binding is a texture index - the prelude checked it is an
 		// image rather than a buffer, and this checks it is still there and is
@@ -773,84 +604,64 @@ fn void js_compute_dispatch(
 		ComputeBindingInfo* info = &kernel.info[i];
 		if (info.is_image())
 		{
-			int index = (int)js.number(element);
+			int index = (int)self.js.number(element)!;
 			if (self.pass == null || !self.pass.assets.texture_alive(index))
 			{
-				*out = js.raisef("binding %d (%s) is an image that has been disposed", i, kernel.binding_names[i]);
-				return;
+				return self.js.fail("binding %d (%s) is an image that has been disposed", i, kernel.binding_names[i])~;
 			}
 			Texture* image = self.pass.assets.texture_at(index);
 			String wrong = storage_image_mismatch(&self.renderer.gpu, info, image);
 			if (wrong.len > 0)
 			{
-				*out = js.raisef("binding %d (%s) cannot take this image: %s", i, kernel.binding_names[i], wrong);
-				return;
+				return self.js.fail("binding %d (%s) cannot take this image: %s", i, kernel.binding_names[i], wrong)~;
 			}
 			views[i] = { .image = image };
 			continue;
 		}
 
-		long handle = 0;
+		js::Value handle = element;
 		long offset = 0;
 		long size   = 0;
-		if (js.length(element) >= 2)
+		if (!js::data_of(element, self.compute_buffer_class) && self.js.length(element)! >= 2)
 		{
-			qjs::Value h = js.index(element, 0);
-			qjs::Value o = js.index(element, 1);
-			qjs::Value n = js.index(element, 2);
-			handle = (long)js.number(h);
-			offset = (long)js.number(o);
-			size   = (long)js.number(n);
-			js.release(h);
-			js.release(o);
-			js.release(n);
-		}
-		else
-		{
-			handle = (long)js.number(element);
+			handle = self.js.get(element, 0)!;
+			offset = (long)self.js.get_number(element, 1)!;
+			size   = (long)self.js.get_number(element, 2)!;
 		}
 
-		StorageBuffer* buffer = storage_buffer(self, (int)handle, &js, out);
-		if (buffer == null) return;
+		StorageBuffer* buffer = self.storage_buffer_of(handle);
+		if (buffer == null) return self.js.fail(BUFFER_NOT_LIVE)~;
 		if (offset < 0 || size < 0 || (usz)(offset + size) > buffer.size || (usz)offset >= buffer.size)
 		{
-			*out = js.raisef("binding %d (%s) asks for %d bytes at %d of a buffer of %d",
-				i, kernel.binding_names[i], size, offset, (long)buffer.size);
-			return;
+			return self.js.fail("binding %d (%s) asks for %d bytes at %d of a buffer of %d",
+				i, kernel.binding_names[i], size, offset, (long)buffer.size)~;
 		}
 		if ((ulong)offset % alignment != 0)
 		{
-			*out = js.raisef("binding %d (%s) starts at byte %d, and this device binds at multiples of %d",
-				i, kernel.binding_names[i], offset, (long)alignment);
-			return;
+			return self.js.fail("binding %d (%s) starts at byte %d, and this device binds at multiples of %d",
+				i, kernel.binding_names[i], offset, (long)alignment)~;
 		}
 		views[i] = { .buffer = buffer.view((usz)offset, (usz)size) };
 	}
 
-	char[] push = argc >= 3 ? js.bytes(args[2]) : (char[]){ };
 	if (push.len > 0 && push.len < kernel.push_size)
 	{
-		*out = js.raisef("this kernel's push block is %d bytes and %d were given", (int)kernel.push_size, (int)push.len);
-		return;
+		return self.js.fail("this kernel's push block is %d bytes and %d were given", (int)kernel.push_size, (int)push.len)~;
 	}
 
-	// What to cover: either a work-item count per axis, which is split here by
-	// the entry point's own `@threads`, or group counts passed as
-	// `{ workgroups: [x, y, z] }`, which the prelude signals by putting them in
-	// the last three arguments.
 	uint groups_x = 1;
 	uint groups_y = 1;
 	uint groups_z = 1;
-	if (argc >= 6 && arg_number(&js, argc, args, 5) > 0)
+	if (z > 0)
 	{
-		groups_x = (uint)arg_number(&js, argc, args, 3);
-		groups_y = (uint)arg_number(&js, argc, args, 4);
-		groups_z = (uint)arg_number(&js, argc, args, 5);
+		groups_x = (uint)x;
+		groups_y = (uint)y;
+		groups_z = (uint)z;
 	}
 	else
 	{
-		ulong items_x = (ulong)arg_number(&js, argc, args, 3);
-		ulong items_y = (ulong)arg_number(&js, argc, args, 4);
+		ulong items_x = (ulong)x;
+		ulong items_y = (ulong)y;
 		if (items_x > 0) groups_x = (uint)((items_x + slot.threads[0] - 1) / slot.threads[0]);
 		if (items_y > 0) groups_y = (uint)((items_y + slot.threads[1] - 1) / slot.threads[1]);
 	}
@@ -858,171 +669,140 @@ fn void js_compute_dispatch(
 	if (groups_y == 0) groups_y = 1;
 	if (groups_z == 0) groups_z = 1;
 
-	// The seventh argument is `independent`: true skips the barrier after this
-	// dispatch, for a caller that knows the next command does not read it.
-	bool barrier = !arg_truth(&js, argc, args, 6);
-
 	if (catch compute.dispatch_bindings(kernel, views[:kernel.binding_count],
-		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z, barrier))
+		push.len > 0 ? push.ptr : null, groups_x, groups_y, groups_z, !independent))
 	{
-		*out = js.raise("the dispatch could not be recorded");
-		return;
+		return self.js.fail("the dispatch could not be recorded")~;
 	}
 }
 
 <*
  `computeCopy(source, sourceOffset, destination, destinationOffset, byteCount,
  independent)` - a GPU-side copy, recorded in order with the dispatches.
+
+ @return? js::THREW
 *>
-fn void js_compute_copy(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_copy(JsRuntime* self, StorageRef from, double source_at, StorageRef to,
+	double destination_at, double count_number, bool independent)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	StorageBuffer* source = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
-	if (source == null) return;
-	StorageBuffer* destination = storage_buffer(self, arg_int(&js, argc, args, 2), &js, out);
-	if (destination == null) return;
-
-	long source_offset      = (long)arg_number(&js, argc, args, 1);
-	long destination_offset = (long)arg_number(&js, argc, args, 3);
-	long count              = (long)arg_number(&js, argc, args, 4);
-	bool barrier            = !arg_truth(&js, argc, args, 5);
+	Compute* compute = runtime_compute(self)!;
+	StorageBuffer* source = from.slot.buffer;
+	StorageBuffer* destination = to.slot.buffer;
+	long source_offset      = (long)source_at;
+	long destination_offset = (long)destination_at;
+	long count              = (long)count_number;
 
 	if (source_offset < 0 || destination_offset < 0 || count <= 0
 		|| (usz)(source_offset + count) > source.size
 		|| (usz)(destination_offset + count) > destination.size)
 	{
-		*out = js.raisef("three.compute.copy of %d bytes from %d (of %d) to %d (of %d) does not fit",
-			count, source_offset, (long)source.size, destination_offset, (long)destination.size);
-		return;
+		return self.js.fail("three.compute.copy of %d bytes from %d (of %d) to %d (of %d) does not fit",
+			count, source_offset, (long)source.size, destination_offset, (long)destination.size)~;
 	}
 
-	if (catch compute.copy(source, (usz)source_offset, destination, (usz)destination_offset, (usz)count, barrier))
+	if (catch compute.copy(source, (usz)source_offset, destination, (usz)destination_offset, (usz)count, !independent))
 	{
-		*out = js.raise("the copy could not be recorded");
+		return self.js.fail("the copy could not be recorded")~;
 	}
 }
 
 <*
  `computeFill(buffer, byteOffset, byteCount, word, independent)` - a recorded
  fill with one 32-bit word. Offset and count are whole words.
+
+ @return? js::THREW
 *>
-fn void js_compute_fill(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_fill(JsRuntime* self, StorageRef ref, double offset_number, double count_number,
+	uint word, bool independent)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	StorageBuffer* buffer = storage_buffer(self, arg_int(&js, argc, args, 0), &js, out);
-	if (buffer == null) return;
-
-	long offset  = (long)arg_number(&js, argc, args, 1);
-	long count   = (long)arg_number(&js, argc, args, 2);
-	uint word    = (uint)(ulong)arg_number(&js, argc, args, 3);
-	bool barrier = !arg_truth(&js, argc, args, 4);
+	Compute* compute = runtime_compute(self)!;
+	StorageBuffer* buffer = ref.slot.buffer;
+	long offset = (long)offset_number;
+	long count  = (long)count_number;
 
 	if (offset < 0 || count <= 0 || offset % 4 != 0 || count % 4 != 0 || (usz)(offset + count) > buffer.size)
 	{
-		*out = js.raisef("three.compute.fill of %d bytes at %d does not fit a buffer of %d, or is not in whole 4-byte words",
-			count, offset, (long)buffer.size);
-		return;
+		return self.js.fail("three.compute.fill of %d bytes at %d does not fit a buffer of %d, or is not in whole 4-byte words",
+			count, offset, (long)buffer.size)~;
 	}
 
-	if (catch compute.fill(buffer, (usz)offset, (usz)count, word, barrier))
+	if (catch compute.fill(buffer, (usz)offset, (usz)count, word, !independent))
 	{
-		*out = js.raise("the fill could not be recorded");
+		return self.js.fail("the fill could not be recorded")~;
 	}
 }
 
 <*
  `computeBarrier()` - the barrier a run of `independent` commands skipped.
-*>
-fn void js_compute_barrier(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-	compute.barrier();
+ @return? js::THREW
+*>
+fn void? js_compute_barrier(JsRuntime* self)
+{
+	runtime_compute(self)!.barrier();
 }
 
 <*
- `computeLimits()` - what this device lets a kernel do, so a script can choose
- between variants: a cooperative-matrix matmul or a tiled one, a subgroup
- reduction or a shared-memory one.
+ What this device lets a kernel do, so a script can choose between variants: a
+ cooperative-matrix matmul or a tiled one, a subgroup reduction or a
+ shared-memory one.
 *>
-fn void js_compute_limits(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+struct ComputeLimitsInfo
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	String device;
+	bool cooperative_matrix;
+	uint subgroup_size;
+	uint max_shared_memory;
+	uint max_workgroup_invocations;
+	uint max_binding_range;
+	ulong max_allocation;
+	ulong binding_alignment;
+	uint max_push_constants;
+	uint max_bindings;
+	// The one question a script cannot answer from the spec: the core thirteen
+	// are everywhere, and which of the rest a device stores is a per-format
+	// answer the device alone has.
+	js::Value storage_image_formats;
+	bool storage_image_read_without_format;
+	bool storage_image_write_without_format;
+	uint max_storage_images;
+	uint max_image_size;
+}
 
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
+<*
+ `computeLimits()` - see `ComputeLimitsInfo`.
 
+ @return? js::THREW
+*>
+fn ComputeLimitsInfo? js_compute_limits(JsRuntime* self)
+{
+	runtime_compute(self)!;
 	GpuLimits* limits = &self.renderer.gpu.limits;
-	qjs::Value object = js.object();
-	js.set_property(object, "device", js.string(((ZString)&limits.device_name).str_view()));
-	js.set_property(object, "cooperativeMatrix", qjs::bool_value(limits.cooperative_matrix));
-	js.set_property(object, "subgroupSize", qjs::number_value((double)limits.subgroup_size));
-	js.set_property(object, "maxSharedMemory", qjs::number_value((double)limits.max_compute_shared_memory));
-	js.set_property(object, "maxWorkgroupInvocations", qjs::number_value((double)limits.max_compute_workgroup_invocations));
-	js.set_property(object, "maxBindingRange", qjs::number_value((double)limits.max_storage_buffer_range));
-	js.set_property(object, "maxAllocation", qjs::number_value((double)limits.max_memory_allocation_size));
-	js.set_property(object, "bindingAlignment", qjs::number_value((double)limits.min_storage_buffer_offset_alignment));
-	js.set_property(object, "maxPushConstants", qjs::number_value((double)limits.max_push_constants_size));
-	js.set_property(object, "maxBindings", qjs::number_value((double)COMPUTE_MAX_BINDINGS));
 
-	// Storage images. The format list is the one question a script cannot answer
-	// from the spec: the core thirteen are everywhere, and which of the rest a
-	// device stores is a per-format answer the device alone has.
-	qjs::Value formats = js.array();
-	uint stored = 0;
+	js::Value formats = self.js.array()!;
 	foreach (format : STORAGE_IMAGE_FORMATS)
 	{
 		if (!self.renderer.gpu.can_have_storage(format)) continue;
-		js.set_index(formats, stored++, js.string(format.name));
+		self.js.push(formats, self.js.string(format.name)!);
 	}
-	js.set_property(object, "storageImageFormats", formats);
-	js.set_property(object, "storageImageReadWithoutFormat", qjs::bool_value(limits.storage_image_read_without_format));
-	js.set_property(object, "storageImageWriteWithoutFormat", qjs::bool_value(limits.storage_image_write_without_format));
-	js.set_property(object, "maxStorageImages", qjs::number_value((double)limits.max_per_stage_storage_images));
-	js.set_property(object, "maxImageSize", qjs::number_value((double)limits.max_image_dimension_2d));
-	*out = object;
+
+	return {
+		.device = ((ZString)&limits.device_name).str_view(),
+		.cooperative_matrix = limits.cooperative_matrix,
+		.subgroup_size = limits.subgroup_size,
+		.max_shared_memory = limits.max_compute_shared_memory,
+		.max_workgroup_invocations = limits.max_compute_workgroup_invocations,
+		.max_binding_range = limits.max_storage_buffer_range,
+		.max_allocation = limits.max_memory_allocation_size,
+		.binding_alignment = limits.min_storage_buffer_offset_alignment,
+		.max_push_constants = limits.max_push_constants_size,
+		.max_bindings = COMPUTE_MAX_BINDINGS,
+		.storage_image_formats = formats,
+		.storage_image_read_without_format = limits.storage_image_read_without_format,
+		.storage_image_write_without_format = limits.storage_image_write_without_format,
+		.max_storage_images = limits.max_per_stage_storage_images,
+		.max_image_size = limits.max_image_dimension_2d,
+	};
 }
 
 <*
@@ -1030,73 +810,39 @@ fn void js_compute_limits(
 
  The boundary a script draws itself: it is one wait, and it is also where a
  long chain is cut so that no single submission outlives a driver's patience.
+
+ @return? js::THREW
 *>
-fn void js_compute_submit(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_submit(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	if (catch compute.submit()) *out = js.raise("the compute submission failed");
+	Compute* compute = runtime_compute(self)!;
+	if (catch compute.submit()) return self.js.fail("the compute submission failed")~;
 }
 
 <*
  `computeSubmitAsync()` - send what is recorded and return at once.
 
  The script then asks `computeBusy()` once a frame; see `Compute.submit_async`.
+
+ @return? js::THREW
 *>
-fn void js_compute_submit_async(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_submit_async(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
-	if (catch compute.submit_async()) *out = js.raise("the compute submission failed");
+	Compute* compute = runtime_compute(self)!;
+	if (catch compute.submit_async()) return self.js.fail("the compute submission failed")~;
 }
 
 <*
  `computeBusy()` - whether the GPU is still running the last async submission.
+
+ @return? js::THREW
 *>
-fn void js_compute_busy(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool? js_compute_busy(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-
+	Compute* compute = runtime_compute(self)!;
 	bool? busy = compute.busy();
-	if (catch busy)
-	{
-		*out = js.raise("the compute submission failed");
-		return;
-	}
-	*out = qjs::bool_value(busy);
+	if (catch busy) return self.js.fail("the compute submission failed")~;
+	return busy;
 }
 
 <*
@@ -1134,81 +880,80 @@ fn void JsRuntime.release_compute(&self)
 // --- Images ------------------------------------------------------------------
 
 <*
+ A new storage image: the texture fields every texture has, and how it reads
+ back - `store` names the typed array a readback fills (`'f32'`, `'u8'`, ...).
+*>
+struct ComputeImageInfo
+{
+	int index;
+	uint width;
+	uint height;
+	uint levels;
+	uint components;
+	String store;
+	bool sampled;
+}
+
+<*
  `computeCreateImage(width, height, format, nearest)` - an image a kernel
- writes, zeroed, answering a texture as `texture_value` builds one plus how it
- reads back: `[index, width, height, levels, components, store]`, where
- `store` names the typed array a readback fills (`'f32'`, `'u8'`, ...).
+ writes, zeroed.
 
  A texture because it is one: a slot in `Assets.textures`, an index a material
  can be handed, a reference the context's handle holds and gives back on
  close - see `Gpu.create_storage_texture` for the one way it differs.
-*>
-fn void js_compute_create_image(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	if (runtime_compute(self, &js, out) == null) return;
-	if (self.pass == null)
-	{
-		*out = js.raise("three.compute.image needs a scene's asset table and this context has none");
-		return;
-	}
+ @return? js::THREW
+*>
+fn ComputeImageInfo? js_compute_create_image(JsRuntime* self, long width, long height, String name, Opt {bool} nearest)
+{
+	runtime_compute(self)!;
+	if (self.pass == null) return self.js.fail("three.compute.image needs a scene's asset table and this context has none")~;
 
 	Gpu* gpu = &self.renderer.gpu;
-	long width = (long)arg_number(&js, argc, args, 0);
-	long height = (long)arg_number(&js, argc, args, 1);
 	uint largest = gpu.limits.max_image_dimension_2d;
 	if (width < 1 || height < 1 || width > largest || height > largest)
 	{
-		*out = js.raisef("three.compute.image wants a width and a height from 1 to %d, and was given %dx%d",
-			largest, width, height);
-		return;
+		return self.js.fail("three.compute.image wants a width and a height from 1 to %d, and was given %dx%d",
+			largest, width, height)~;
 	}
 
-	@pool()
+	StorageImageFormat? format = storage_format_named(name);
+	if (catch format)
 	{
-		String name = arg_text(&js, argc, args, 2, tmem);
-		StorageImageFormat? format = storage_format_named(name);
-		if (catch format)
+		String hint = storage_format_hint(name);
+		if (hint.len > 0) return self.js.fail("'%s' is not a storage image format - did you mean %s?", name, hint)~;
+		return self.js.fail("'%s' is not a storage image format - rgba16f, rgba8, r32f and r32ui are the "
+			"common ones, and three.compute.limits.storageImageFormats lists this device's", name)~;
+	}
+
+	Texture? made = gpu.create_storage_texture((uint)width, (uint)height, format, nearest.or(false));
+	if (catch err = made)
+	{
+		if (err == STORAGE_FORMAT_UNSUPPORTED)
 		{
-			String hint = storage_format_hint(name);
-			*out = js.raise(hint.len > 0
-				? string::tformat("'%s' is not a storage image format - did you mean %s?", name, hint)
-				: string::tformat("'%s' is not a storage image format - rgba16f, rgba8, r32f and r32ui are the "
-					"common ones, and three.compute.limits.storageImageFormats lists this device's", name));
-			return;
+			return self.js.fail("this device cannot store to %s images%s", format.name,
+				format.extended ? " - it is an extended format, and the device does not have them" : "")~;
 		}
-		bool nearest = arg_truth_or(&js, argc, args, 3, false);
+		return self.js.fail("could not create the %dx%d %s image: %s", width, height, format.name, err)~;
+	}
 
-		Texture? made = gpu.create_storage_texture((uint)width, (uint)height, format, nearest);
-		if (catch err = made)
-		{
-			*out = js.raise(err == STORAGE_FORMAT_UNSUPPORTED
-				? string::tformat("this device cannot store to %s images%s", format.name,
-					format.extended ? " - it is an extended format, and the device does not have them" : "")
-				: string::tformat("could not create the %dx%d %s image: %s", width, height, format.name, err));
-			return;
-		}
+	// Into the table only where a material could sample it: a float format
+	// the device can sample. An r32ui image is still a texture - a kernel and a
+	// readback reach it by index - and its row stays white.
+	bool sampled = format.is_float() && gpu.can_sample(format.vk);
+	int index = self.pass.assets.install_texture(gpu, made, write_table: sampled);
+	Texture* image = self.pass.assets.texture_at(index);
+	// The script's reference, counted the way `texture_value` counts one.
+	self.hold_texture(index);
 
-		// Into the table only where a material could sample it: a float format
-		// the device can sample. An r32ui image is still a texture - a kernel and a
-		// readback reach it by index - and its row stays white.
-		bool sampled = format.is_float() && gpu.can_sample(format.vk);
-		int index = self.pass.assets.install_texture(gpu, made, write_table: sampled);
-
-		qjs::Value fields = texture_value(self, &js, index, self.pass.assets.texture_at(index));
-		js.set_index(fields, 4, qjs::int_value((int)format.read_components()));
-		js.set_index(fields, 5, js.string(texel_store_name(format.store)));
-		js.set_index(fields, 6, qjs::bool_value(sampled));
-		*out = fields;
+	return {
+		.index = index,
+		.width = image.width,
+		.height = image.height,
+		.levels = image.levels,
+		.components = format.read_components(),
+		.store = texel_store_name(format.store),
+		.sampled = sampled,
 	};
 }
 
@@ -1232,90 +977,66 @@ fn String texel_store_name(TexelStore store) @local
 }
 
 <*
- The storage image behind a texture index, or a raised error naming why not.
+ The storage image behind a texture index, or a thrown error naming why not.
+
+ @return? js::THREW
 *>
-fn Texture* compute_image(JsRuntime* self, qjs::Context* js, int index, String verb, qjs::Value* out) @local
+fn Texture*? compute_image(JsRuntime* self, int index, String verb) @local
 {
 	if (self.pass == null || !self.pass.assets.texture_alive(index))
 	{
-		*out = js.raisef("%s: this image has been disposed", verb);
-		return null;
+		return self.js.fail("%s: this image has been disposed", verb)~;
 	}
 	Texture* image = self.pass.assets.texture_at(index);
 	if (image.storage == FORMAT_UNDEFINED)
 	{
-		*out = js.raisef("%s: this is an uploaded texture, not a three.compute.image", verb);
-		return null;
+		return self.js.fail("%s: this is an uploaded texture, not a three.compute.image", verb)~;
 	}
 	return image;
 }
 
 <*
  `computeReadImage(index, into)` - the whole image, as numbers: `into` is the
- bytes of the typed array the prelude made for it, sized by the components and
- the store `computeCreateImage` answered with.
+ typed array the prelude made for it, sized by the components and the store
+ `computeCreateImage` answered with.
+
+ @return? js::THREW
 *>
-fn void js_compute_read_image(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_read_image(JsRuntime* self, int index, char[] into)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	Compute* compute = runtime_compute(self)!;
+	Texture* image = compute_image(self, index, "image.read()")!;
 
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.read()", out);
-	if (image == null) return;
-
-	char[] into = arg_bytes(&js, argc, args, 1);
 	sz need = image.storage_read_size();
 	if (into.len < need)
 	{
-		*out = js.raisef("image.read() needs %d bytes for this image and was given %d", need, into.len);
-		return;
+		return self.js.fail("image.read() needs %d bytes for this image and was given %d", need, into.len)~;
 	}
 	if (catch err = image.read_storage(compute, into))
 	{
-		*out = js.raisef("image.read() could not copy the image back: %s", err);
+		return self.js.fail("image.read() could not copy the image back: %s", err)~;
 	}
 }
 
 <*
- `computeWriteImage(index, bytes)` - the whole image, replaced: the same layout
+ `computeWriteImage(index, values)` - the whole image, replaced: the same layout
  `computeReadImage` fills, so a readback written back is the image it was.
+
+ @return? js::THREW
 *>
-fn void js_compute_write_image(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_compute_write_image(JsRuntime* self, int index, char[] values)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	Compute* compute = runtime_compute(self)!;
+	Texture* image = compute_image(self, index, "image.write()")!;
 
-	Compute* compute = runtime_compute(self, &js, out);
-	if (compute == null) return;
-	Texture* image = compute_image(self, &js, arg_int(&js, argc, args, 0), "image.write()", out);
-	if (image == null) return;
-
-	char[] values = arg_bytes(&js, argc, args, 1);
 	sz need = image.storage_read_size();
 	if (values.len < need)
 	{
-		*out = js.raisef("image.write() needs %d bytes for this image and was given %d", need, values.len);
-		return;
+		return self.js.fail("image.write() needs %d bytes for this image and was given %d", need, values.len)~;
 	}
 	if (catch err = image.write_storage(compute, values))
 	{
-		*out = js.raisef("image.write() could not upload the image: %s", err);
+		return self.js.fail("image.write() could not upload the image: %s", err)~;
 	}
 }
 
@@ -1324,19 +1045,8 @@ fn void js_compute_write_image(
  writing: whatever the kernels owe runs first, so a recorded dispatch never
  names an image that is gone.
 *>
-fn void js_compute_free_image(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_compute_free_image(JsRuntime* self, int index)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	int index = arg_int(&js, argc, args, 0);
 	if (self.pass == null || !self.pass.assets.texture_alive(index)) return;
 	flush_compute(self);
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
@@ -1345,45 +1055,41 @@ fn void js_compute_free_image(
 }
 
 <*
- `computeKernelBindings(kernel)` - `[[name, kind, format], ...]` in binding
- order, `kind` one of `'buffer'`, `'image'` and `'texture'` and `format` the
- declared storage format's name or `''`.
+ One binding as the shader declares it: `kind` is `'buffer'`, `'image'` or
+ `'texture'`, and `format` the declared storage format's name or `''`.
+*>
+struct KernelBindingInfo
+{
+	String name;
+	String kind;
+	String format;
+}
+
+<*
+ `computeKernelBindings(kernel)` - `[{ name, kind, format }, ...]` in binding order.
 
  What lets the prelude bind `run({ field, histogram })` by the shader's own names
  and tell a script which binding wanted an image before the host has to.
+
+ @return? js::THREW
 *>
-fn void js_compute_kernel_bindings(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_compute_kernel_bindings(JsRuntime* self, KernelRef ref)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	KernelSlot* slot = kernel_slot(self, arg_int(&js, argc, args, 0), &js, out);
-	if (slot == null) return;
-	ComputeKernel* kernel = slot.kernel;
-
-	qjs::Value list = js.array();
+	ComputeKernel* kernel = ref.slot.kernel;
+	js::Value list = self.js.array(kernel.binding_count)!;
 	for (uint i = 0; i < kernel.binding_count; i++)
 	{
 		ComputeBindingInfo info = kernel.info[i];
-		String kind = info.type == DESCRIPTOR_TYPE_STORAGE_IMAGE ? "image"
-			: info.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ? "texture" : "buffer";
-		String format = "";
+		KernelBindingInfo row = {
+			.name = kernel.binding_names[i],
+			.kind = info.type == DESCRIPTOR_TYPE_STORAGE_IMAGE ? "image"
+				: info.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ? "texture" : "buffer",
+		};
 		if (info.type == DESCRIPTOR_TYPE_STORAGE_IMAGE && info.storage_format != 0)
 		{
-			if (try declared = storage_format_of(info.storage_format)) format = declared.name;
+			if (try declared = storage_format_of(info.storage_format)) row.format = declared.name;
 		}
-		qjs::Value row = js.array();
-		js.set_index(row, 0, js.string(kernel.binding_names[i]));
-		js.set_index(row, 1, js.string(kind));
-		js.set_index(row, 2, js.string(format));
-		js.set_index(list, i, row);
+		self.js.push(list, self.js.@object_of(row)!);
 	}
-	*out = list;
+	return list;
 }

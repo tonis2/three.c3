@@ -1,7 +1,7 @@
 // three.c3 — three.compute: buffers, kernels and dispatches.
 //
 // This is the whole of the compute API a script sees below `three.compute`.
-// The host verbs it stands on are numbers and views (see bind_compute.c3); what
+// The host verbs it stands on are numbers, handles and typed arrays (see bind_compute.c3); what
 // is here is the part that has to be readable — a buffer that knows its own
 // element type, a kernel that remembers its threads, and a dispatch you can
 // write in one line.
@@ -105,7 +105,7 @@ class UintValue {
 }
 
 function packPush(push, spec) {
-	if (push === null || push === undefined) return null;
+	if (push === null || push === undefined) return undefined;
 	if (ArrayBuffer.isView(push)) return new Uint8Array(push.buffer, push.byteOffset, push.byteLength);
 	if (push instanceof ArrayBuffer) return new Uint8Array(push);
 	if (typeof push !== 'object') {
@@ -256,11 +256,7 @@ export class ComputeBuffer {
 		// how a script asks for the GPU's bytes, and a write of a weights buffer
 		// should not be the thing that allocates its twin in the JS heap.
 		if (this._host !== null) this._host.set(bytes, byteOffset);
-		// Bytes, not the element view: `js.bytes` takes a Uint8Array or an
-		// ArrayBuffer and nothing else — handing it a Float32Array is a silent
-		// no-op, which is a write that appears to work and a buffer that never
-		// changes. `asBytes` has already made that view.
-		H.computeWriteBuffer(this._handle, bytes, 0, bytes.length, byteOffset);
+		H.computeWriteBuffer(this._handle, bytes, byteOffset);
 		return this;
 	}
 
@@ -316,7 +312,7 @@ export class ComputeKernel {
 		this.source = source;
 		this.threads = threads;
 		this.disposed = false;
-		// What each binding is, in binding order — `[name, kind, format]`, the
+		// What each binding is, in binding order — `{ name, kind, format }`, the
 		// kind one of 'buffer', 'image' and 'texture'. Asked once: it is the
 		// module's, and a kernel's module never changes.
 		this._bindings = H.computeKernelBindings(handle);
@@ -327,7 +323,7 @@ export class ComputeKernel {
 	// loads and stores) or 'texture' (a Sampler2D it samples); `format` is a
 	// storage image's declared format, or '' when the host picks it.
 	get bindings() {
-		return this._bindings.map(([name, kind, format]) => ({ name, kind, format }));
+		return this._bindings.map(({ name, kind, format }) => ({ name, kind, format }));
 	}
 
 	// Record a dispatch and wait for it.
@@ -382,11 +378,10 @@ export class ComputeKernel {
 
 	// What crosses for binding `i`: a buffer's handle or range, or an image's
 	// texture index. Checked against what the shader declared there, so an image
-	// handed to a buffer is refused naming both rather than reaching the host as
-	// a number that happens to be a valid handle of the other kind.
+	// handed to a buffer is refused naming both rather than as a dead handle.
 	_bind(value, i) {
 		const declared = this._bindings[i];
-		const [name, kind] = declared || [`#${i}`, 'buffer'];
+		const { name, kind } = declared || { name: `#${i}`, kind: 'buffer' };
 		const isImage = value instanceof Texture;
 		if (kind === 'buffer') {
 			if (isImage || !value || value._binding === undefined) {
@@ -418,7 +413,7 @@ export class ComputeKernel {
 		// lets `run({ out, field })` be written in any order. A key the shader
 		// does not have keeps the order the keys were written in — what this did
 		// before it knew the names, and what a module with no names needs.
-		const names = this._bindings.map(([name]) => name);
+		const names = this._bindings.map(({ name }) => name);
 		const keys = Object.keys(named);
 		const byShader = !declared && names.length === keys.length && names.every((n) => n !== '' && n in named);
 		const fields = declared || (byShader ? names : keys);
@@ -480,12 +475,12 @@ const STORES = {
 //   kernel.run({ field }, { threads: [256, 256] });
 //   const values = field.read();          // Float32Array of 65536
 export class ComputeImage extends Texture {
-	constructor(fields, format) {
-		super(fields, null, LinearSRGBColorSpace);
+	constructor(info, format) {
+		super([info.index, info.width, info.height, info.levels], null, LinearSRGBColorSpace);
 		this.format = format;
-		this._components = fields[4];
-		this._store = STORES[fields[5]];
-		this._sampled = fields[6];
+		this._components = info.components;
+		this._store = STORES[info.store];
+		this._sampled = info.sampled;
 	}
 
 	// How many numbers one texel reads back as.
@@ -506,7 +501,7 @@ export class ComputeImage extends Texture {
 				+ (out && out.length !== undefined ? ` of ${out.length}` : '')
 			);
 		}
-		H.computeReadImage(this._t, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
+		H.computeReadImage(this._t, out);
 		return out;
 	}
 
@@ -525,7 +520,7 @@ export class ComputeImage extends Texture {
 				+ `${count} numbers, and was given ${values === null ? typeof data : values.length}`
 			);
 		}
-		H.computeWriteImage(this._t, new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
+		H.computeWriteImage(this._t, values);
 		return this;
 	}
 
@@ -597,12 +592,7 @@ export const compute = {
 			upload = bytes;
 		}
 
-		const handle = H.computeCreateBuffer(
-			byteLength,
-			upload === null ? new Uint8Array(0) : upload,
-			0,
-			upload === null ? 0 : upload.length
-		);
+		const handle = H.computeCreateBuffer(byteLength, upload ?? undefined);
 		return new ComputeBuffer(handle, code, count);
 	},
 
@@ -618,7 +608,7 @@ export const compute = {
 	// embedding program streamed onto the GPU itself. `code` and `count` say how
 	// the script should read it; the bytes are already there.
 	adopt(handle, code = 'bytes', count) {
-		if (typeof handle !== 'number' || handle < 0) {
+		if (handle === null || typeof handle !== 'object') {
 			throw new TypeError('three.compute.adopt(handle) wants a buffer handle from the host');
 		}
 		return new ComputeBuffer(handle, code, count);

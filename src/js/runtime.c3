@@ -537,6 +537,9 @@ struct JsRuntime
 	*>
 	List{StorageSlot} storage_slots;
 	List{KernelSlot}  kernel_slots;
+	// What a script holds for one: `BufferHandle` and `KernelHandle` objects.
+	js::NativeClass* compute_buffer_class;
+	js::NativeClass* compute_kernel_class;
 
 	<*
 	 A `three.setRenderSize()` made from inside a frame, and not performed yet —
