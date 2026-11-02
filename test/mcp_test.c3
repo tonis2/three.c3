@@ -20,7 +20,7 @@ import three;
 import three_tests::device;
 import vk;
 import mcp;
-import qjs;
+import fastjs::qjs;
 import std::core::test;
 import std::io;
 import std::io::file;

@@ -44,7 +44,7 @@ module three;
 
 import std::collections::list;
 import std::math;
-import qjs;
+import fastjs::qjs;
 
 <*
  The JavaScript functions one node attached, indexed by that node's position in

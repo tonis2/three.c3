@@ -29,7 +29,7 @@ module three_tests::shipping;
 import three;
 import three_tests::device;
 import vk;
-import qjs;
+import fastjs::qjs;
 import std::core::test;
 import std::io::file;
 import std::io::path;

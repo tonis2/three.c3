@@ -24,7 +24,7 @@ import std::collections::list;
 import std::math;
 import std::math::vector;
 import collision;
-import qjs;
+import fastjs::qjs;
 
 fn void JsRuntime.bind_query_verbs(&self, qjs::Value host)
 {

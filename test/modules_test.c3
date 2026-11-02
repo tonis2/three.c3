@@ -9,7 +9,7 @@
 module three_tests::modules;
 
 import three;
-import qjs;
+import fastjs::qjs;
 
 <*
  Resolve, or say what it faulted with. Both are one line at the call site, which

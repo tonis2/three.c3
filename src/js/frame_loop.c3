@@ -45,7 +45,7 @@ module three;
 import std::io;
 import std::time;
 import std::math::vector;
-import qjs;
+import fastjs::qjs;
 import std::collections::list;
 
 // What one tick may take before the interrupt handler stops it. Two orders of

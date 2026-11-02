@@ -22,7 +22,7 @@ module three;
 
 import std::collections::list;
 import std::io::file;
-import qjs;
+import fastjs::qjs;
 
 // A slot in one of the tables below, addressed by index and generation the way
 // a `NodeId` is: the generation is what makes a freed handle distinguishable

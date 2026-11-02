@@ -30,7 +30,7 @@ module three;
 import std::math;
 import std::math::vector;
 import collision;
-import qjs;
+import fastjs::qjs;
 import std::collections::list;
 
 <*

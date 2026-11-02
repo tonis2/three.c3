@@ -35,7 +35,7 @@ import c3w;
 import vk;
 import image;
 import mcp;
-import qjs;
+import fastjs::qjs;
 
 const String VERSION = "0.1.0";
 
