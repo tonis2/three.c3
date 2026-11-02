@@ -5,11 +5,8 @@
 //
 // Every verb here comes in a convenient form that allocates an array of
 // Object3Ds, and a flat form that fills a buffer the caller keeps. That is not
-// indecision: the boundary was measured, and a host call
-// answering with a scalar is CHEAPER than the JavaScript it replaces (55 ns
-// against 70), while one that allocates to answer costs three times as much —
-// so the cost of an answer is the allocation, and whether that matters depends
-// entirely on how often the question is asked.
+// indecision: the cost of an answer is the allocation, and whether that matters
+// depends entirely on how often the question is asked.
 //
 //     const near = three.query.sphere(p, 5);        // an Array — read it and move on
 //
@@ -20,7 +17,7 @@
 // for a hundred agents asking every frame, which is the case the index under
 // all of this was built for.
 import { Vector3, Box3, readVector } from './math.js';
-import { liveObject, objectsForHandles, lazyObject } from './scene.js';
+import { liveObject } from './scene.js';
 
 const H = globalThis.__three;
 
@@ -52,11 +49,15 @@ export class QueryResult {
 	// indistinguishable from a scene that happened to have exactly that many.
 	get full() { return this.count >= this.capacity; }
 
-	// The objects, resolved in one walk of the scene — see objectsForHandles.
-	// Nodes this scene never built an object for come back as null; a scene
-	// opened from the command line is entirely made of those.
+	// The objects the pairs name. Nodes no script built an object for are left
+	// out; a scene opened from the command line is entirely made of those.
 	objects() {
-		return objectsForHandles(this.handles, this.count).filter(o => o !== null);
+		const found = [];
+		for (let i = 0; i < this.count; i++) {
+			const object = H.nodeAt(this.handles[i * 2], this.handles[i * 2 + 1])?.owner;
+			if (object) found.push(object);
+		}
+		return found;
 	}
 
 	toString() { return `QueryResult(${this.count} of ${this.capacity})`; }
@@ -133,14 +134,14 @@ function fillIgnore(value, where) {
 
 function hitObject(raw) {
 	if (raw === null) return null;
-	const hit = {
+	return {
 		name: raw.name,
 		distance: raw.distance,
 		fraction: raw.fraction,
 		point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
 		normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+		object: raw.node?.owner ?? null,
 	};
-	return lazyObject(hit, 'object', Int32Array.from(raw.node), 0);
 }
 
 export const query = {
@@ -157,11 +158,7 @@ export const query = {
 	box(box, into) {
 		const six = readBox(box, 'three.query.box(box)');
 		const result = into ?? scratchResult();
-		result.count = H.queryBox(
-			six[0], six[1], six[2], six[3], six[4], six[5],
-			// The length is in ints, not in node slots: the host takes an
-			// element count and there are two per node.
-			result.handles.buffer, result.handles.byteOffset, result.handles.length);
+		result.count = H.queryBox(six[0], six[1], six[2], six[3], six[4], six[5], result.handles);
 		return finish(result, into);
 	},
 
@@ -174,9 +171,7 @@ export const query = {
 			throw new RangeError(`three.query.sphere(centre, radius) wants a radius of zero or more, not ${radius}`);
 		}
 		const result = into ?? scratchResult();
-		result.count = H.overlapSphere(
-			x, y, z, r,
-			result.handles.buffer, result.handles.byteOffset, result.handles.length);
+		result.count = H.overlapSphere(x, y, z, r, result.handles);
 		return finish(result, into);
 	},
 
@@ -223,9 +218,7 @@ export const query = {
 		const height = +(options?.height ?? 0);
 		const half = Math.max((height - 2 * radius) * 0.5, 0);
 		const ignored = fillIgnore(options?.ignore, `${where}: ignore`);
-		return hitObject(H.sweep(
-			fx, fy, fz, tx, ty, tz, radius, half,
-			ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2));
+		return hitObject(H.sweep(fx, fy, fz, tx, ty, tz, radius, half, ignoreScratch, ignored));
 	},
 };
 
@@ -295,20 +288,10 @@ export function moveAndSlide(position, motion, options = null) {
 		+(options?.slope ?? MOVE_DEFAULTS.slope),
 		+(options?.skin ?? MOVE_DEFAULTS.skin),
 		+(options?.snap ?? MOVE_DEFAULTS.snap),
-		ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2);
+		ignoreScratch, ignored);
 
-	// `ground` and `hit` are LAZY — see lazyObject. A walking character reads
-	// grounded, slope and position every frame and looks at what it is standing
-	// on almost never, and resolving both eagerly is two walks of the scene per
-	// character per frame for numbers nobody asked for.
-	const pairs = new Int32Array(4);
-	pairs[0] = raw.ground ? raw.ground[0] : -1;
-	pairs[1] = raw.ground ? raw.ground[1] : 0;
-	pairs[2] = raw.hit ? raw.hit[0] : -1;
-	pairs[3] = raw.hit ? raw.hit[1] : 0;
-
-	const gv = raw.groundVelocity || [0, 0, 0];
-	const result = {
+	const gv = raw.groundVelocity;
+	return {
 		position: new Vector3(null, raw.position[0], raw.position[1], raw.position[2]),
 		remaining: new Vector3(null, raw.remaining[0], raw.remaining[1], raw.remaining[2]),
 		normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
@@ -317,10 +300,10 @@ export function moveAndSlide(position, motion, options = null) {
 		slope: raw.slope,
 		stepped: raw.stepped,
 		slides: raw.slides,
+		// The Node handles' objects; null for nothing, or a node no script built.
+		ground: raw.ground?.owner ?? null,
+		hit: raw.hit?.owner ?? null,
 	};
-	lazyObject(result, 'ground', pairs, 0);
-	lazyObject(result, 'hit', pairs, 1);
-	return result;
 }
 
 // Where each agent's answer sits inside the `results` array of
@@ -373,13 +356,10 @@ function selfColumn(value, agents, where) {
 // however many characters.
 //
 // **This is the same controller as `three.moveAndSlide` and it exists for one
-// reason: the shape of the answer.** The single form measures 7.53 us per
-// agent, and it comes apart — 3.10 us is the sweep, 1.05 us is the
-// crossing and the raw host answer, and 3.63 us, three fifths of it, is the
-// JavaScript result object: three live `Vector3`s and two lazy node properties,
-// built for a caller who reads four numbers out of them. At two hundred agents
-// that is 1.5 ms of a fixed step, 0.9 ms of which buys an object. This writes
-// into arrays the caller already owns and builds nothing.
+// reason: the shape of the answer.** Much of the single form's cost per agent
+// is the JavaScript result object — three live `Vector3`s and two node
+// properties, built for a caller who reads four numbers out of them. This
+// writes into arrays the caller already owns and builds nothing.
 //
 //     const pos = new Float32Array(n * 3);      // where they are — updated IN PLACE
 //     const motion = new Float32Array(n * 3);   // where they want to go this step
@@ -459,21 +439,16 @@ export function moveAndSlideAll(positions, motions, options = null) {
 	}
 	const ignored = fillIgnore(shared, `${where}: ignore`);
 
+	// The host steps the shortest of the columns, so a longer `results` or
+	// scratch `self` is harmless.
 	return H.moveAndSlideAll(
-		positions.buffer, positions.byteOffset, positions.length,
-		motions.buffer, motions.byteOffset, motions.length,
-		results === null ? positions.buffer : results.buffer,
-		results === null ? 0 : results.byteOffset,
-		results === null ? 0 : agents * moveResult.stride,
-		own.view === null ? selfScratch.buffer : own.view.buffer,
-		own.view === null ? 0 : own.view.byteOffset,
-		own.count * 2,
+		positions, motions, results ?? undefined, own.view ?? undefined,
 		radius, half,
 		+(options?.step ?? MOVE_DEFAULTS.step),
 		+(options?.slope ?? MOVE_DEFAULTS.slope),
 		+(options?.skin ?? MOVE_DEFAULTS.skin),
 		+(options?.snap ?? MOVE_DEFAULTS.snap),
-		ignoreScratch.buffer, ignoreScratch.byteOffset, ignored * 2);
+		ignoreScratch, ignored);
 }
 
 // -----------------------------------------------------------------------
@@ -482,10 +457,8 @@ export function moveAndSlideAll(positions, motions, options = null) {
 // Move many nodes in one crossing.
 //
 // **This is not a faster way to move a dozen things and should not be reached
-// for as one.** Five hundred `mesh.position.set(x,y,z)` measure
-// 0.245 ms a frame — three per cent of the eight-millisecond budget — and
-// set the trigger at about two thousand nodes a frame. Below that the ordinary
-// property write is clearer and costs nothing anybody can see.
+// for as one.** Below a few thousand nodes a frame the ordinary property
+// write is clearer and costs nothing anybody can see.
 //
 // What it is for is the case where the write is ALREADY a loop over numbers: a
 // crowd whose positions come out of three.steer, a particle field, a chunked
@@ -511,10 +484,8 @@ export function moveAndSlideAll(positions, motions, options = null) {
 // one angle each, typed by a person.
 //
 // The Euler form is what makes a crowd of characters one crossing instead of
-// four. A critter writing a group position, a group heading and two leg
-// angles measured four crossings a frame, about 380 ns apiece —
-// and the reason it was four rather than one was that the batch could not
-// express the three angles it wanted to write.
+// four: a critter writing a group position, a group heading and two leg
+// angles needs all three angles in the one batch.
 //
 // **The two seed differently, and that follows from the same argument.** A TRS
 // batch is seeded with an identity rotation and a unit scale, because reading
@@ -656,10 +627,7 @@ export class TransformBatch {
 	}
 
 	flush() {
-		return H.setTransforms(
-			this.handles.buffer, this.handles.byteOffset, this.handles.length,
-			this.data.buffer, this.data.byteOffset, this.data.length,
-			this.mode);
+		return H.setTransforms(this.handles, this.data, this.objects.length, this.mode);
 	}
 }
 
