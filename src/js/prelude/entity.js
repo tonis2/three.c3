@@ -103,7 +103,7 @@
 // game raising its own event and dispatches at once, because the game knows when
 // it is safe and the solver does not.
 import { systems } from './systems.js';
-import { liveScene, liveObject, objectForHandle } from './scene.js';
+import { liveScene, liveObject } from './scene.js';
 import { Object3D } from './object3d.js';
 import { Mesh } from './mesh.js';
 import { Vector3, readVector } from './math.js';
@@ -1250,16 +1250,16 @@ function ensureFeed(which) {
 	bound[which] = true;
 	if (which === 'trigger') {
 		H.onTrigger(raw => {
-			const trigger = objectForHandle(raw.trigger);
-			const other = objectForHandle(raw.other);
+			const trigger = raw.trigger?.owner ?? null;
+			const other = raw.other?.owner ?? null;
 			queue.push({ event: raw.type === 'exit' ? 'exit' : 'enter', a: trigger, b: other, info: { type: raw.type } });
 			const fn = scriptHandler.trigger;
 			return fn === null ? undefined : fn({ type: raw.type, trigger, other });
 		});
 	} else if (which === 'contact') {
 		H.onContact(raw => {
-			const a = objectForHandle(raw.a);
-			const b = objectForHandle(raw.b);
+			const a = raw.a?.owner ?? null;
+			const b = raw.b?.owner ?? null;
 			const normal = new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]);
 			const point = new Vector3(null, raw.point[0], raw.point[1], raw.point[2]);
 			queue.push({ event: raw.type === 'end' ? 'separate' : 'touch', a, b, info: { type: raw.type, normal, point } });

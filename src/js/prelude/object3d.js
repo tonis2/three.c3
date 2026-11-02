@@ -117,11 +117,10 @@ export class Object3D {
 	set rotation(v) { const [x, y, z] = asTriple(v, 'rotation'); this._rotation.set(x, y, z); }
 
 	_syncSolver() {
-		if (!this._solverOwned || this._i < 0) return;
-		const t = H.physicsTransform(this._i, this._g);
-		if (t === null) return;
-		this._position._adopt(t[0], t[1], t[2]);
-		this._rotation._adopt(t[3], t[4], t[5]);
+		if (!this._solverOwned || this._h === null) return;
+		const { position: p, rotation: r } = H.physicsTransform(this._h);
+		this._position._adopt(p[0], p[1], p[2]);
+		this._rotation._adopt(r[0], r[1], r[2]);
 		// The host's rotation is authoritative now, so the exact quaternion
 		// a glTF node arrived with is no longer what this object is at.
 		this._q = null;

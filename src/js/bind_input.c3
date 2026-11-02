@@ -72,7 +72,7 @@ module three;
 
 import std::math;
 import c3w;
-import qjs;
+import collision;
 import fastjs::js;
 
 // Enough for a control scheme, small enough that running out means a script is
@@ -88,40 +88,40 @@ struct KeyHandler
 	// registration replaces.
 	bool on_press;
 	// Named `body` because `fn` is a keyword.
-	qjs::Value body;
+	js::Root body;
 }
 
-fn void JsRuntime.bind_input_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_input_verbs(&self, js::Value host)
 {
-	self.bind(host, "inputDown", &js_input_down, 1);
-	self.bind(host, "inputPressed", &js_input_pressed, 1);
-	self.bind(host, "inputReleased", &js_input_released, 1);
-	self.bind(host, "inputText", &js_input_text, 0);
-	self.bind(host, "inputHold", &js_input_hold, 2);
-	self.bind(host, "inputMove", &js_input_move, 2);
-	self.bind(host, "inputNudge", &js_input_nudge, 2);
-	self.bind(host, "inputButtonHold", &js_input_button_hold, 2);
-	self.bind(host, "inputScroll", &js_input_scroll, 2);
-	self.bind(host, "inputReleaseAll", &js_input_release_all, 0);
-	self.bind(host, "keyNames", &js_key_names, 0);
-	self.bind(host, "onKey", &js_on_key, 3);
-	self.bind(host, "pointer", &js_pointer, 0);
-	self.bind(host, "pointerLockGet", &js_pointer_lock_get, 0);
-	self.bind(host, "pointerLockSet", &js_pointer_lock_set, 1);
-	self.bind(host, "onClick", &js_on_click, 1);
-	self.bind(host, "controlsGet", &js_controls_get, 0);
-	self.bind(host, "controlsSet", &js_controls_set, 1);
-	self.bind(host, "windowSize", &js_window_size, 0);
-	self.bind(host, "windowResize", &js_window_resize, 2);
-	self.bind(host, "windowTitleGet", &js_window_title_get, 0);
-	self.bind(host, "windowTitleSet", &js_window_title_set, 1);
-	self.bind(host, "clipboardRead", &js_clipboard_read, 0);
-	self.bind(host, "clipboardWrite", &js_clipboard_write, 1);
-	self.bind(host, "dropsTake", &js_drops_take, 0);
-	self.bind(host, "windowFullscreenGet", &js_window_fullscreen_get, 0);
-	self.bind(host, "windowFullscreenSet", &js_window_fullscreen_set, 1);
-	self.bind(host, "windowMaxFpsGet", &js_window_max_fps_get, 0);
-	self.bind(host, "windowMaxFpsSet", &js_window_max_fps_set, 1);
+	self.js.@bind(host, "inputDown", &js_input_down, self)!;
+	self.js.@bind(host, "inputPressed", &js_input_pressed, self)!;
+	self.js.@bind(host, "inputReleased", &js_input_released, self)!;
+	self.js.@bind(host, "inputText", &js_input_text, self)!;
+	self.js.@bind(host, "inputHold", &js_input_hold, self)!;
+	self.js.@bind(host, "inputMove", &js_input_move, self)!;
+	self.js.@bind(host, "inputNudge", &js_input_nudge, self)!;
+	self.js.@bind(host, "inputButtonHold", &js_input_button_hold, self)!;
+	self.js.@bind(host, "inputScroll", &js_input_scroll, self)!;
+	self.js.@bind(host, "inputReleaseAll", &js_input_release_all, self)!;
+	self.js.@bind(host, "keyNames", &js_key_names, self)!;
+	self.js.@bind(host, "onKey", &js_on_key, self)!;
+	self.js.@bind(host, "pointer", &js_pointer, self)!;
+	self.js.@bind(host, "pointerLockGet", &js_pointer_lock_get, self)!;
+	self.js.@bind(host, "pointerLockSet", &js_pointer_lock_set, self)!;
+	self.js.@bind(host, "onClick", &js_on_click, self)!;
+	self.js.@bind(host, "controlsGet", &js_controls_get, self)!;
+	self.js.@bind(host, "controlsSet", &js_controls_set, self)!;
+	self.js.@bind(host, "windowSize", &js_window_size, self)!;
+	self.js.@bind(host, "windowResize", &js_window_resize, self)!;
+	self.js.@bind(host, "windowTitleGet", &js_window_title_get, self)!;
+	self.js.@bind(host, "windowTitleSet", &js_window_title_set, self)!;
+	self.js.@bind(host, "clipboardRead", &js_clipboard_read, self)!;
+	self.js.@bind(host, "clipboardWrite", &js_clipboard_write, self)!;
+	self.js.@bind(host, "dropsTake", &js_drops_take, self)!;
+	self.js.@bind(host, "windowFullscreenGet", &js_window_fullscreen_get, self)!;
+	self.js.@bind(host, "windowFullscreenSet", &js_window_fullscreen_set, self)!;
+	self.js.@bind(host, "windowMaxFpsGet", &js_window_max_fps_get, self)!;
+	self.js.@bind(host, "windowMaxFpsSet", &js_window_max_fps_set, self)!;
 }
 
 <*
@@ -156,22 +156,9 @@ fn void JsRuntime.take_input(&self, InputState input)
  It adds to the window rather than replacing it, so a scripted demo works with a
  person still at the keyboard.
 *>
-fn void js_input_hold(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_input_hold(JsRuntime* self, String key, bool down)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	KeyName? row = named_key(self, &js, argc, args, 0, out);
-	if (catch err = row) return;
-
-	self.synthetic.hold(row, arg_truth(&js, argc, args, 1));
+	self.synthetic.hold(named_key(self, key)!, down);
 }
 
 <*
@@ -197,30 +184,16 @@ fn void js_input_hold(
  positions are not a third; the buttons and the wheel below do add. A hand on the
  real mouse takes the cursor straight back — `SyntheticPointer` says how.
 *>
-fn void js_input_move(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_input_move(JsRuntime* self, float x, float y)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	float x = arg_float(&js, argc, args, 0);
-	float y = arg_float(&js, argc, args, 1);
 	// A NaN would place the pointer nowhere at all: every comparison against it is
 	// false, so it is never inside, never over a widget and never the same place
 	// twice — a pointer that silently does nothing, which is the failure
 	// `named_key` refuses a typo for.
 	if (!math::is_finite(x) || !math::is_finite(y))
 	{
-		*out = js.raise("three.input.movePointer(x, y) wants two numbers in image pixels");
-		return;
+		return self.js.fail("three.input.movePointer(x, y) wants two numbers in image pixels")~;
 	}
-
 	self.pointer.place(x, y);
 }
 
@@ -240,29 +213,13 @@ fn void js_input_move(
  `named_key`'s reason: a control that silently does nothing looks like every
  other reason a control might do nothing.
 *>
-fn void js_input_button_hold(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_input_button_hold(JsRuntime* self, int button, bool down)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	int button = arg_int(&js, argc, args, 0);
 	if (button < 0 || button > 2)
 	{
-		@pool()
-		{
-			*out = js.raisef("three.input.pressButton(button) takes 0 (left), 1 (right) or 2 (middle); got %d", button);
-		};
-		return;
+		return self.js.fail("three.input.pressButton(button) takes 0 (left), 1 (right) or 2 (middle); got %d", button)~;
 	}
-
-	self.pointer.hold((uint)button, arg_truth(&js, argc, args, 1));
+	self.pointer.hold((uint)button, down);
 }
 
 <*
@@ -271,26 +228,12 @@ fn void js_input_button_hold(
  One frame's worth, spent by the frame that reads it, like the wheel below. It
  reaches `pointer.dx`/`dy` only; the position stays where it was.
 *>
-fn void js_input_nudge(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_input_nudge(JsRuntime* self, float dx, float dy)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	float dx = arg_float(&js, argc, args, 0);
-	float dy = arg_float(&js, argc, args, 1);
 	if (!math::is_finite(dx) || !math::is_finite(dy))
 	{
-		*out = js.raise("three.input.movePointerBy(dx, dy) wants a distance in image pixels");
-		return;
+		return self.js.fail("three.input.movePointerBy(dx, dy) wants a distance in image pixels")~;
 	}
-
 	self.pointer.nudge(dx, dy);
 }
 
@@ -305,26 +248,12 @@ fn void js_input_nudge(
  `dy` is positive *away* from the user, which is `c3w`'s convention and the
  camera zoom's, and the opposite of the browser's `deltaY` — see `Cursor.scroll`.
 *>
-fn void js_input_scroll(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_input_scroll(JsRuntime* self, float dy, float dx)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	float dy = arg_float(&js, argc, args, 0);
-	float dx = arg_float(&js, argc, args, 1);
 	if (!math::is_finite(dy) || !math::is_finite(dx))
 	{
-		*out = js.raise("three.input.scroll(dy, dx) wants numbers of wheel notches");
-		return;
+		return self.js.fail("three.input.scroll(dy, dx) wants numbers of wheel notches")~;
 	}
-
 	self.pointer.turn(dy, dx);
 }
 
@@ -345,16 +274,8 @@ fn void js_input_scroll(
  button leaves the cursor where it was let go of; a case that wants it elsewhere
  says so with `movePointer`.
 *>
-fn void js_input_release_all(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_input_release_all(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
 	self.synthetic.release_all();
 	self.pointer.release_all();
 }
@@ -465,11 +386,16 @@ fn void JsRuntime.dispatch_keys(&self)
 *>
 fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 {
-	qjs::Value name = self.qjs.string(handler.row.name);
-	defer self.qjs.release(name);
 	@pool()
 	{
-		return self.call_handler((js::Value)handler.body, { (js::Value)name }, string::tformat("the '%s' key handler", handler.row.name));
+		js::Value? name = self.js.string(handler.row.name);
+		// Only out of memory; the edge is lost, the handler is not.
+		if (catch name)
+		{
+			self.js.take_exception();
+			return true;
+		}
+		return self.call_handler(self.js.held(handler.body), { name }, string::tformat("the '%s' key handler", handler.row.name));
 	};
 }
 
@@ -482,7 +408,7 @@ fn bool JsRuntime.call_key_handler(&self, KeyHandler handler)
 fn void JsRuntime.drop_key_handler(&self, usz at)
 {
 	if (at >= self.key_handler_count) return;
-	self.qjs.release(self.key_handlers[at].body);
+	self.js.drop(&self.key_handlers[at].body);
 	for (usz i = at + 1; i < self.key_handler_count; i++)
 	{
 		self.key_handlers[i - 1] = self.key_handlers[i];
@@ -522,20 +448,65 @@ fn void JsRuntime.dispatch_click(&self)
 		float x = self.input.mouse.x;
 		float y = self.input.mouse.y;
 
-		// `pick_at` answers null with no device, which is what a miss answers too —
+		// `pick_hit` answers null with no device, which is what a miss answers too —
 		// so a handler written against a window still runs headless, and what it is
 		// told is the truth rather than an error nobody caused.
-		qjs::Value[3] args = {
-			self.pick_at(&self.qjs, x, y),
-			qjs::number_value((double)x),
-			qjs::number_value((double)y),
-		};
-		defer self.qjs.release(args[0]);
+		js::Value? hit = self.pick_hit(x, y);
+		if (catch hit)
+		{
+			self.js.take_exception();
+			return;
+		}
 
-		kept = self.call_handler(self.click_handler.get(self.js), as_values(args[..]), "the click handler");
+		kept = self.call_handler(self.click_handler.get(self.js), { hit, js::number(x), js::number(y) }, "the click handler");
 	};
 
 	if (!kept) self.clear_click_handler();
+}
+
+<*
+ A hit as a script reads it: the node (a Node handle), its name, how far along the
+ ray, where, and the surface normal there.
+*>
+struct PickHit
+{
+	NodeId node;
+	String name;
+	double distance;
+	Vec3 point;
+	Vec3 normal;
+}
+
+<*
+ One pixel of the rendered image, raycast: a `PickHit`, or null for a miss and
+ for a context with no device — a click with no device is not a mistake anyone
+ made, so it answers what a click on empty space answers.
+
+ @return? js::THREW
+*>
+fn js::Value? JsRuntime.pick_hit(&self, float x, float y)
+{
+	if (self.renderer == null) return js::NULL;
+
+	collision::Ray ray = screen_ray(
+		&self.pass.camera,
+		x,
+		y,
+		self.renderer.target.extent.width,
+		self.renderer.target.extent.height,
+	);
+	Hit hit = self.pass.scene.raycast(&self.pass.assets, ray);
+	if (!hit.hit) return js::NULL;
+
+	Node* node = self.pass.scene.node(hit.node);
+	PickHit found = {
+		.node = hit.node,
+		.name = node == null ? "" : node.name,
+		.distance = hit.distance,
+		.point = hit.point,
+		.normal = hit.normal,
+	};
+	return self.js.@object_of(found);
 }
 
 <*
@@ -558,82 +529,23 @@ fn void JsRuntime.clear_click_handler(&self)
  indistinguishable from every other reason a control might do nothing. The
  message names `three.input.keys()` because the answer is always in that list.
 *>
-fn KeyName? named_key(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* args, int at, qjs::Value* out)
+fn KeyName? named_key(JsRuntime* self, String name)
 {
-	KeyName? row;
-	@pool()
+	KeyName? row = find_key(name);
+	if (catch row)
 	{
-		String name = arg_text(js, argc, args, at, tmem);
-		row = find_key(name);
-		if (catch err = row)
-		{
-			*out = js.raisef("there is no key called '%s' — three.input.keys() lists every name there is", name);
-		}
-	};
+		return self.js.fail("there is no key called '%s' — three.input.keys() lists every name there is", name)~;
+	}
 	return row;
 }
 
-fn void js_input_down(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row    = named_key(self, &js, argc, args, 0, out);
-	if (catch err = row) return;
-	*out = qjs::bool_value(self.input.is_down(row));
-}
+fn bool? js_input_down(JsRuntime* self, String key) => self.input.is_down(named_key(self, key)!);
 
-fn void js_input_pressed(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row    = named_key(self, &js, argc, args, 0, out);
-	if (catch err = row) return;
-	*out = qjs::bool_value(self.input.went_down(row));
-}
+fn bool? js_input_pressed(JsRuntime* self, String key) => self.input.went_down(named_key(self, key)!);
 
-fn void js_input_released(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	KeyName? row    = named_key(self, &js, argc, args, 0, out);
-	if (catch err = row) return;
-	*out = qjs::bool_value(self.input.went_up(row));
-}
+fn bool? js_input_released(JsRuntime* self, String key) => self.input.went_up(named_key(self, key)!);
 
-fn void js_input_text(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	*out = js.string(self.input.text);
-}
+fn String js_input_text(JsRuntime* self) => self.input.text;
 
 <*
  Every name, in table order, as an array of strings.
@@ -642,24 +554,14 @@ fn void js_input_text(
  reason it exists: `three.input.keys()` calls this, so the list a script reads and the
  list `find_key` searches cannot drift.
 *>
-fn void js_key_names(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_key_names(JsRuntime* self)
 {
-	qjs::Context js = qjs::wrap(ctx);
-
-	qjs::Value names = js.array();
-	uint at          = 0;
+	js::Value names = self.js.array((uint)KEY_NAMES.len)!;
 	foreach (KeyName row : KEY_NAMES)
 	{
-		js.set_index(names, at++, js.string(row.name));
+		self.js.push(names, self.js.string(row.name)!);
 	}
-	*out = names;
+	return names;
 }
 
 <*
@@ -669,29 +571,15 @@ fn void js_key_names(
  What is left is the pair of checks that cannot be spelled there: that the key
  exists, and that the table has room.
 *>
-fn void js_on_key(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_on_key(JsRuntime* self, String key, bool on_press, js::Value f)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	bool on_press = arg_truth(&js, argc, args, 1);
-	bool clearing = argc < 3 || args[2].is_undefined() || args[2].is_null();
-
-	if (!clearing && !js.is_function(args[2]))
+	bool clearing = f.is_nullish();
+	if (!clearing && !f.is_function())
 	{
-		*out = js.raise("three.onKeyDown(key, fn) wants a function, or null to unbind");
-		return;
+		return self.js.fail("three.onKeyDown(key, fn) wants a function, or null to unbind")~;
 	}
 
-	KeyName? row = named_key(self, &js, argc, args, 0, out);
-	if (catch err = row) return;
+	KeyName row = named_key(self, key)!;
 
 	// Whatever was on this key and edge is gone, whether it is being replaced or
 	// removed — an old handler left behind by a rejected registration would keep
@@ -708,19 +596,15 @@ fn void js_on_key(
 
 	if (self.key_handler_count >= MAX_KEY_HANDLERS)
 	{
-		@pool()
-		{
-			*out = js.raisef("there is room for %d key handlers and they are all taken — "
-				"unbind one with three.onKeyDown(key, null)",
-				MAX_KEY_HANDLERS);
-		};
-		return;
+		return self.js.fail("there is room for %d key handlers and they are all taken — "
+			"unbind one with three.onKeyDown(key, null)",
+			MAX_KEY_HANDLERS)~;
 	}
 
 	self.key_handlers[self.key_handler_count] = {
 		.row = row,
 		.on_press = on_press,
-		.body = js.retain(args[2]),
+		.body = self.js.hold(f),
 	};
 	self.key_handler_count++;
 }
@@ -733,60 +617,10 @@ fn void js_on_key(
  pixel from a different sample than the flag is a bug that only shows up when the
  mouse is moving.
 *>
-fn void js_pointer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+fn MouseState js_pointer(JsRuntime* self) => self.input.mouse;
 
-	MouseState mouse = self.input.mouse;
-
-	qjs::Value object = js.object();
-	js.set_property(object, "x", qjs::number_value((double)mouse.x));
-	js.set_property(object, "y", qjs::number_value((double)mouse.y));
-	js.set_property(object, "dx", qjs::number_value((double)mouse.dx));
-	js.set_property(object, "dy", qjs::number_value((double)mouse.dy));
-	js.set_property(object, "inside", qjs::bool_value(mouse.inside));
-	js.set_property(object, "down", qjs::bool_value(mouse.down));
-	js.set_property(object, "right", qjs::bool_value(mouse.right));
-	js.set_property(object, "middle", qjs::bool_value(mouse.middle));
-	js.set_property(object, "clicked", qjs::bool_value(mouse.clicked));
-	// Whether `dx`/`dy` came from the platform rather than from a difference of
-	// positions — the same thing as "this look will not stop at the edge of the
-	// screen". Beside the deltas rather than only on `three.input.pointerLock`,
-	// because it is a fact about *these numbers*, and a script correlating them
-	// with a flag read at another moment is the bug this object exists to prevent.
-	js.set_property(object, "locked", qjs::bool_value(mouse.locked));
-	js.set_property(object, "scroll", qjs::number_value((double)mouse.scroll));
-	js.set_property(object, "scrollX", qjs::number_value((double)mouse.scroll_x));
-	*out = object;
-}
-
-<*
- `controlsGet()` — whether the mouse still reaches the camera.
-
- A real boolean rather than the number-in-an-array shape `shadowGet` and
- `lightGet` use: those pack four fields so assigning one is a single crossing,
- and there is only one field here to pack.
-*>
-fn void js_controls_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::bool_value(self.controls.enabled);
-}
+// `controlsGet()` — whether the mouse still reaches the camera.
+fn bool js_controls_get(JsRuntime* self) => self.controls.enabled;
 
 <*
  `controlsSet(enabled)` — hand the mouse to the script, or give it back.
@@ -803,18 +637,9 @@ fn void js_controls_get(
  disabled frame, and turning the controls back on begins from wherever the camera
  was left, waiting for a fresh press.
 *>
-fn void js_controls_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_controls_set(JsRuntime* self, bool enabled)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	self.controls.enabled = arg_truth(&js, argc, args, 0);
+	self.controls.enabled = enabled;
 }
 
 <*
@@ -825,33 +650,20 @@ fn void js_controls_set(
  of thirty-two rows to replace, does not exist here. It is `setAnimationLoop`'s
  shape rather than `onKey`'s.
 *>
-fn void js_on_click(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_on_click(JsRuntime* self, js::Value f)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	bool clearing = argc < 1 || args[0].is_undefined() || args[0].is_null();
-
-	if (!clearing && !js.is_function(args[0]))
+	bool clearing = f.is_nullish();
+	if (!clearing && !f.is_function())
 	{
-		*out = js.raise("three.onClick(fn) wants a function, or null to unbind");
-		return;
+		return self.js.fail("three.onClick(fn) wants a function, or null to unbind")~;
 	}
 
-	// Released before the new one is retained, so replacing cannot leak and cannot
-	// leave the old handler firing under a script that believes it has been
-	// replaced.
+	// Released before the new one is held, so replacing cannot leave the old
+	// handler firing under a script that believes it has been replaced.
 	self.clear_click_handler();
 	if (clearing) return;
 
-	self.click_handler.hold(self.js, (js::Value)args[0]);
+	self.click_handler.hold(self.js, f);
 }
 
 <*
@@ -862,18 +674,7 @@ fn void js_on_click(
  script that needs a look either way reads this back after setting it and falls
  back to a drag-look when it comes back false.
 *>
-fn void js_pointer_lock_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::bool_value(self.window != null && self.window.pointerLocked());
-}
+fn bool js_pointer_lock_get(JsRuntime* self) => self.window != null && self.window.pointerLocked();
 
 <*
  `pointerLockSet(on)` — ask for the pointer, and answer with whether it was
@@ -885,26 +686,11 @@ fn void js_pointer_lock_get(
  reasonable game refuse to start on a platform where the look merely has to be
  worse.
 *>
-fn void js_pointer_lock_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool js_pointer_lock_set(JsRuntime* self, bool on)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (self.window == null)
-	{
-		*out = qjs::bool_value(false);
-		return;
-	}
-
-	self.window.setPointerLock(arg_truth(&js, argc, args, 0));
-	*out = qjs::bool_value(self.window.pointerLocked());
+	if (self.window == null) return false;
+	self.window.setPointerLock(on);
+	return self.window.pointerLocked();
 }
 
 // ============================================================================
@@ -917,7 +703,7 @@ const int WINDOW_MAX_SIDE = 16384;
 
 <*
  `windowSize()` — the drawable and the display density, as
- `[width, height, scale]`.
+ `{ width, height, scale }`.
 
  ## Device pixels, and read off the surface
 
@@ -952,33 +738,21 @@ const int WINDOW_MAX_SIDE = 16384;
  became — and it is the same reason a live resize drag does not sharpen the
  picture there either.
 *>
-fn void js_window_size(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn WindowSize js_window_size(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	if (self.window == null || self.renderer == null || !self.renderer.windowed) return { };
+	return {
+		.width = self.renderer.viewer.extent.width,
+		.height = self.renderer.viewer.extent.height,
+		.scale = self.window.get_scale(),
+	};
+}
 
-	uint width  = 0;
-	uint height = 0;
-	float scale = 0;
-	if (self.window != null && self.renderer != null && self.renderer.windowed)
-	{
-		width = self.renderer.viewer.extent.width;
-		height = self.renderer.viewer.extent.height;
-		scale = self.window.get_scale();
-	}
-
-	qjs::Value triple = js.array();
-	js.set_index(triple, 0, qjs::int_value((int)width));
-	js.set_index(triple, 1, qjs::int_value((int)height));
-	js.set_index(triple, 2, qjs::number_value((double)scale));
-	*out = triple;
+struct WindowSize
+{
+	uint width;
+	uint height;
+	float scale;
 }
 
 <*
@@ -1005,32 +779,15 @@ fn void js_window_size(
  headless run is not a mistake a script made, and a game that resizes its window
  on a machine that has one should still start on a machine that does not.
 *>
-fn void js_window_resize(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool? js_window_resize(JsRuntime* self, int width, int height)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	int width  = arg_int(&js, argc, args, 0);
-	int height = arg_int(&js, argc, args, 1);
 	if (width < 1 || height < 1 || width > WINDOW_MAX_SIDE || height > WINDOW_MAX_SIDE)
 	{
-		*out = js.raisef("three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
-			WINDOW_MAX_SIDE, width, height);
-		return;
+		return self.js.fail("three.window.resize(width, height) wants two sizes between 1 and %d device pixels; got %dx%d",
+			WINDOW_MAX_SIDE, width, height)~;
 	}
 
-	if (self.window == null)
-	{
-		*out = qjs::bool_value(false);
-		return;
-	}
+	if (self.window == null) return false;
 
 	float scale = self.window.get_scale();
 	if (scale <= 0.0f) scale = 1.0f;
@@ -1039,7 +796,7 @@ fn void js_window_resize(
 	self.window.set_size(points_wide < 1 ? 1 : points_wide, points_high < 1 ? 1 : points_high);
 
 	say_window_stretch(self.renderer, (uint)width, (uint)height);
-	*out = qjs::bool_value(true);
+	return true;
 }
 
 <*
@@ -1100,18 +857,7 @@ String window_title @local = WINDOW_DEFAULT_TITLE;
  configured; whether anything is displaying it is `three.window.width`'s
  question, not this one.
 *>
-fn void js_window_title_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	qjs::Context js = qjs::wrap(ctx);
-	*out = js.string(window_title);
-}
+fn String js_window_title_get(JsRuntime* self) => window_title;
 
 <*
  `windowTitleSet(text)` — rename the window, and answer with whether there was
@@ -1122,43 +868,23 @@ fn void js_window_title_get(
  showing this", which is the same shape `three.window.resize` and
  `three.input.pointerLock` already use.
 *>
-fn void js_window_title_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool? js_window_title_set(JsRuntime* self, String wanted)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	if (wanted.len == 0)
 	{
-		String wanted = arg_text(&js, argc, args, 0, tmem);
-		if (wanted.len == 0)
-		{
-			*out = js.raise("three.window.title wants a name; the empty string would leave the title bar blank");
-			return;
-		}
-		if (wanted.len > WINDOW_TITLE_MAX)
-		{
-			*out = js.raisef("three.window.title takes at most %d bytes and was given %d", WINDOW_TITLE_MAX, wanted.len);
-			return;
-		}
+		return self.js.fail("three.window.title wants a name; the empty string would leave the title bar blank")~;
+	}
+	if (wanted.len > WINDOW_TITLE_MAX)
+	{
+		return self.js.fail("three.window.title takes at most %d bytes and was given %d", WINDOW_TITLE_MAX, wanted.len)~;
+	}
 
-		mem::copy(&window_title_storage[0], wanted.ptr, (sz)wanted.len);
-		window_title = (String)window_title_storage[:wanted.len];
+	mem::copy(&window_title_storage[0], wanted.ptr, (sz)wanted.len);
+	window_title = (String)window_title_storage[:wanted.len];
 
-		if (self.window == null)
-		{
-			*out = qjs::bool_value(false);
-			return;
-		}
-		self.window.set_title(window_title);
-		*out = qjs::bool_value(true);
-	};
+	if (self.window == null) return false;
+	self.window.set_title(window_title);
+	return true;
 }
 
 <*
@@ -1173,27 +899,10 @@ String headless_clipboard @local;
  It asks whoever owns the clipboard and waits for the answer, which is a round
  trip to another process: fine for a paste, wrong for every frame.
 *>
-fn void js_clipboard_read(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn String js_clipboard_read(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (self.window == null)
-	{
-		*out = js.string(headless_clipboard);
-		return;
-	}
-	@pool()
-	{
-		*out = js.string(self.window.get_clipboard(tmem));
-	};
+	if (self.window == null) return headless_clipboard;
+	return self.window.get_clipboard(tmem);
 }
 
 <*
@@ -1201,32 +910,22 @@ fn void js_clipboard_read(
  call, oldest first; empty under `--headless` and on backends that do not
  report drops.
 *>
-fn void js_drops_take(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_drops_take(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	qjs::Value paths = js.array();
-	*out = paths;
-	if (self.window == null) return;
+	js::Value paths = self.js.array()!;
+	if (self.window == null) return paths;
 	@pool()
 	{
 		String list = self.window.take_drops(tmem);
-		uint at = 0;
 		usz start = 0;
 		for (usz i = 0; i <= list.len; i++)
 		{
 			if (i < list.len && list[i] != '\n') continue;
-			if (i > start) js.set_index(paths, at++, js.string(list[start:i - start]));
+			if (i > start) self.js.push(paths, self.js.string(list[start:i - start])!);
 			start = i + 1;
 		}
 	};
+	return paths;
 }
 
 <*
@@ -1236,29 +935,15 @@ fn void js_drops_take(
  key or button event, so it belongs in an input handler (ctrl+c), not in a
  timer.
 *>
-fn void js_clipboard_write(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_clipboard_write(JsRuntime* self, String text)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	if (self.window == null)
 	{
-		String text = arg_text(&js, argc, args, 0, tmem);
-		if (self.window == null)
-		{
-			if (headless_clipboard.ptr != null) headless_clipboard.free(mem);
-			headless_clipboard = text.copy(mem);
-			return;
-		}
-		self.window.set_clipboard(text);
-	};
+		if (headless_clipboard.ptr != null) headless_clipboard.free(mem);
+		headless_clipboard = text.copy(mem);
+		return;
+	}
+	self.window.set_clipboard(text);
 }
 
 <*
@@ -1273,18 +958,7 @@ fn void js_clipboard_write(
  window is merely borderless and the size of a monitor — and X11 and Wayland
  because the true answer belongs to a window manager that is free to refuse.
 *>
-fn void js_window_fullscreen_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::bool_value(self.window != null && self.window.fullscreen());
-}
+fn bool js_window_fullscreen_get(JsRuntime* self) => self.window != null && self.window.fullscreen();
 
 <*
  `windowFullscreenSet(on)` — go fullscreen, or come back.
@@ -1301,26 +975,11 @@ fn void js_window_fullscreen_get(
  sharper. `three.setRenderSize` is the other half of that, and a settings screen
  offering a resolution wants both.
 *>
-fn void js_window_fullscreen_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool js_window_fullscreen_set(JsRuntime* self, bool wanted)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	bool wanted = arg_truth(&js, argc, args, 0);
-	if (self.window == null)
-	{
-		*out = qjs::bool_value(false);
-		return;
-	}
+	if (self.window == null) return false;
 	self.window.set_fullscreen(wanted);
-	*out = qjs::bool_value(true);
+	return true;
 }
 
 <*
@@ -1336,18 +995,7 @@ const uint WINDOW_MAX_FPS = 1000;
 
  Remembered under `--headless` too, where the server loop paces its ticks by it.
 *>
-fn void js_window_max_fps_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	*out = qjs::number_value((double)self.max_fps);
-}
+fn uint js_window_max_fps_get(JsRuntime* self) => self.max_fps;
 
 <*
  `windowMaxFpsSet(fps)` — cap the frame rate, or lift the cap with 0.
@@ -1357,27 +1005,15 @@ fn void js_window_max_fps_get(
  the rest of each period. Takes effect on the next frame. Rounded to the
  nearest whole number the loop can pace to, so 59.94 is kept as 60.
 *>
-fn void js_window_max_fps_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_window_max_fps_set(JsRuntime* self, double wanted)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	double wanted = arg_number(&js, argc, args, 0);
 	if (wanted != wanted || wanted < 0.0 || wanted > (double)WINDOW_MAX_FPS)
 	{
-		*out = js.raisef("three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
-			WINDOW_MAX_FPS, wanted);
-		return;
+		return self.js.fail("three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
+			WINDOW_MAX_FPS, wanted)~;
 	}
 	uint fps = (uint)(wanted + 0.5);
 	if (wanted > 0.0 && fps == 0) fps = 1;
 	self.max_fps = fps;
-	*out = qjs::number_value((double)fps);
+	return fps;
 }

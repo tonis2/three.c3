@@ -26,7 +26,7 @@ import { ShaderMaterial } from './shader.js';
 import { LayeredMaterial } from './layers.js';
 import { postSpec, postFinish, bumpPostEpoch } from './post.js';
 import { Mesh } from './mesh.js';
-import { liveScene, Scene, liveObject, objectForHandle, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
+import { Scene, liveObject, objectForHandle, sceneForId, sceneOverview, disposeInactiveScenes } from './scene.js';
 import { MeshRef, Asset } from './asset.js';
 import { level, Level } from './level.js';
 import { Geometry, BoxGeometry, SphereGeometry, PlaneGeometry, CylinderGeometry, ConeGeometry, TorusGeometry, ConvexGeometry, Path, Shape, ExtrudeGeometry, TerrainGeometry, RibbonGeometry, MergedGeometry, merge } from './geometry.js';
@@ -1204,9 +1204,9 @@ const controls = {
 // window became — which also means the picture cannot follow a resize
 // there, because nothing ever reports one. X11, macOS and Windows track it.
 const windowSurface = {
-	get width() { return H.windowSize()[0]; },
-	get height() { return H.windowSize()[1]; },
-	get scale() { return H.windowSize()[2]; },
+	get width() { return H.windowSize().width; },
+	get height() { return H.windowSize().height; },
+	get scale() { return H.windowSize().scale; },
 	// Resize the window. THE PICTURE FOLLOWS: the offscreen target moves to
 	// the window's new drawable on the next frame, so this changes how many
 	// pixels are rendered as well as how big they are shown — unless
@@ -1760,20 +1760,18 @@ const input = {
 	get clicked() { return H.pointer().clicked; },
 };
 
-// The host raycasts in image pixels and answers with a node index; turning
-// that back into the object a script is holding is the Scene's job, and the
-// Scene that does it is the live one. With none — a model opened from the
-// command line, or nothing built yet — the hit still carries its name, which
-// is the only identity such a node has, and `object` is null.
+// The host raycasts in image pixels and answers with the node's handle, whose
+// `owner` is the object a script built. A node no script built — a model opened
+// from the command line — still carries its name, which is the only identity
+// such a node has, and `object` is null.
 function asIntersection(raw) {
 	if (raw === null) return null;
-	if (liveScene !== null && liveScene.isActive) return liveScene._intersection(raw);
 	return {
-		object: null,
 		name: raw.name,
 		distance: raw.distance,
 		point: new Vector3(null, raw.point[0], raw.point[1], raw.point[2]),
 		normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
+		object: raw.node?.owner ?? null,
 	};
 }
 

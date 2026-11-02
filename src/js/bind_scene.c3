@@ -136,13 +136,13 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_frame_verbs(js_host)!!;
 
 	// The keyboard (js/bind_input.c3)
-	self.bind_input_verbs(host);
+	self.bind_input_verbs(js_host)!!;
 
 	// Saving (js/bind_save.c3)
 	self.bind_save_verbs(host);
 
 	// Physics (js/bind_physics.c3)
-	self.bind_physics_verbs(host);
+	self.bind_physics_verbs(js_host)!!;
 
 	// Bulk queries, the character controller and the batched write
 	// (js/bind_query.c3)

@@ -23,6 +23,12 @@ import { liveObject } from './scene.js';
 
 const H = globalThis.__three;
 
+// The object's Node handle, after `liveObject`'s checks and its sentences.
+function liveHandle(object, where) {
+	liveObject(object, where);
+	return object._h;
+}
+
 // The four shorthand words, as the limit lists they stand for. Every one of
 // them is three linear axes and three angular axes accounted for; what makes a
 // hinge a hinge is which one is left out, and `free` is the side that a
@@ -141,7 +147,7 @@ export function makeScenePhysics(scene) {
 		// collider instead of a chain of invisible boxes under a path that
 		// had to be flat to have them.
 		add(object, options) {
-			const target = liveObject(object, 'three.physics.add');
+			const target = liveHandle(object, 'three.physics.add');
 			const desc = Object.assign({}, object.body || {}, options || {});
 
 			const shape = desc.shape === undefined ? 'box' : String(desc.shape);
@@ -175,7 +181,7 @@ export function makeScenePhysics(scene) {
 				: 'dynamic';
 
 			H.physicsAdd(
-				target[0], target[1], kind, shape, mass, friction, restitution,
+				target, kind, shape, mass, friction, restitution,
 				gravityFactor, linearDamping, angularDamping,
 			);
 			object.body = {
@@ -189,10 +195,10 @@ export function makeScenePhysics(scene) {
 		// Take the body away. False when it had none, so removing twice is
 		// not an error.
 		remove(object) {
-			const target = liveObject(object, 'three.physics.remove');
+			const target = liveHandle(object, 'three.physics.remove');
 			if (object.body) object.body = null;
 			object._solverOwned = false;
-			return H.physicsRemove(target[0], target[1]);
+			return H.physicsRemove(target);
 		},
 
 		// [x, y, z], y-up. An array rather than a live Vector3 because it
@@ -231,26 +237,26 @@ export function makeScenePhysics(scene) {
 		// velocities at once because a script that wants one usually wants
 		// the other in the same breath.
 		velocity(object) {
-			const target = liveObject(object, 'three.physics.velocity');
-			return H.physicsVelocityGet(target[0], target[1]);
+			const target = liveHandle(object, 'three.physics.velocity');
+			return H.physicsVelocityGet(target);
 		},
 
 		// World units per second. Only a dynamic body can be given one: a
 		// static body's inverse mass is zero and a kinematic body is driven
 		// by the transform a script writes, so both throw and say which.
 		setVelocity(object, value) {
-			const target = liveObject(object, 'three.physics.setVelocity');
+			const target = liveHandle(object, 'three.physics.setVelocity');
 			const [x, y, z] = asTriple(value, 'three.physics.setVelocity');
-			H.physicsLinearSet(target[0], target[1], x, y, z);
+			H.physicsLinearSet(target, x, y, z);
 			return object;
 		},
 
 		// Radians per second about each world axis; the vector's length is
 		// the rate.
 		setAngularVelocity(object, value) {
-			const target = liveObject(object, 'three.physics.setAngularVelocity');
+			const target = liveHandle(object, 'three.physics.setAngularVelocity');
 			const [x, y, z] = asTriple(value, 'three.physics.setAngularVelocity');
-			H.physicsAngularSet(target[0], target[1], x, y, z);
+			H.physicsAngularSet(target, x, y, z);
 			return object;
 		},
 
@@ -259,12 +265,12 @@ export function makeScenePhysics(scene) {
 		// axes, not a world position: give one and the push also tumbles
 		// the body, leave it out and it is a pure shove.
 		applyImpulse(object, impulse, at) {
-			const target = liveObject(object, 'three.physics.applyImpulse');
+			const target = liveHandle(object, 'three.physics.applyImpulse');
 			const [x, y, z] = asTriple(impulse, 'three.physics.applyImpulse');
 			const [px, py, pz] = at === undefined
 				? [0, 0, 0]
 				: asTriple(at, 'three.physics.applyImpulse(object, impulse, at)');
-			H.physicsImpulse(target[0], target[1], x, y, z, px, py, pz);
+			H.physicsImpulse(target, x, y, z, px, py, pz);
 			return object;
 		},
 
@@ -272,9 +278,9 @@ export function makeScenePhysics(scene) {
 		// because "make this rotate" should not require solving for an
 		// offset and a force that happen to produce the spin you wanted.
 		applyTorqueImpulse(object, impulse) {
-			const target = liveObject(object, 'three.physics.applyTorqueImpulse');
+			const target = liveHandle(object, 'three.physics.applyTorqueImpulse');
 			const [x, y, z] = asTriple(impulse, 'three.physics.applyTorqueImpulse');
-			H.physicsTorqueImpulse(target[0], target[1], x, y, z);
+			H.physicsTorqueImpulse(target, x, y, z);
 			return object;
 		},
 
@@ -336,8 +342,8 @@ export function makeScenePhysics(scene) {
 		// they are turned to right now. So place both objects, then join
 		// them, rather than describing the rest pose in numbers.
 		joint(a, b, options) {
-			const first = liveObject(a, 'three.physics.joint');
-			const second = liveObject(b, 'three.physics.joint');
+			const first = liveHandle(a, 'three.physics.joint');
+			const second = liveHandle(b, 'three.physics.joint');
 			const desc = options || {};
 
 			const [ax, ay, az] = desc.axis === undefined
@@ -362,10 +368,10 @@ export function makeScenePhysics(scene) {
 			}
 
 			return H.physicsJoint(
-				first[0], first[1], second[0], second[1],
+				first, second,
 				hasPivot, px, py, pz, ax, ay, az,
 				!!desc.collide, stiffness, damping,
-				packJointLimits(limits).buffer
+				packJointLimits(limits)
 			);
 		},
 
@@ -404,7 +410,7 @@ export function makeScenePhysics(scene) {
 		// `volume` and `bending` take true or a compliance number of their
 		// own; true is the library's default for each.
 		soft(object, options) {
-			const target = liveObject(object, 'three.physics.soft');
+			const target = liveHandle(object, 'three.physics.soft');
 			const desc = Object.assign({}, object.body || {}, options || {});
 
 			const mass = desc.mass === undefined ? 1 : Number(desc.mass);
@@ -437,7 +443,7 @@ export function makeScenePhysics(scene) {
 			const bendingSoftness = typeof desc.bending === 'number' ? desc.bending : 0.001;
 
 			H.physicsSoftAdd(
-				target[0], target[1], mass, softness, damping,
+				target, mass, softness, damping,
 				volume, volumeSoftness, bending, bendingSoftness, friction, restitution
 			);
 			object.body = { soft: true, mass, softness, damping, friction, restitution };
@@ -448,10 +454,10 @@ export function makeScenePhysics(scene) {
 		// Take the soft body away. The mesh goes back to the shape it was
 		// modelled as, where the last step left it. False when it had none.
 		removeSoft(object) {
-			const target = liveObject(object, 'three.physics.removeSoft');
+			const target = liveHandle(object, 'three.physics.removeSoft');
 			if (object.body && object.body.soft) object.body = null;
 			object._solverOwned = false;
-			return H.physicsSoftRemove(target[0], target[1]);
+			return H.physicsSoftRemove(target);
 		},
 
 		// How many particles a soft body has. ONE PER DISTINCT POINT in the
@@ -461,8 +467,8 @@ export function makeScenePhysics(scene) {
 		// as one or the box falls into six loose squares. 0 for an object
 		// that is not a soft body.
 		softCount(object) {
-			const target = liveObject(object, 'three.physics.softCount');
-			return H.physicsSoftCount(target[0], target[1]);
+			const target = liveHandle(object, 'three.physics.softCount');
+			return H.physicsSoftCount(target);
 		},
 
 		// The particles, in world space, as a Float32Array of count * 3 —
@@ -473,14 +479,14 @@ export function makeScenePhysics(scene) {
 		// `into` is optional and lets you reuse one array across frames,
 		// the way texture.read does; without it one is allocated per call.
 		points(object, into) {
-			const target = liveObject(object, 'three.physics.points');
-			const count = H.physicsSoftCount(target[0], target[1]);
+			const target = liveHandle(object, 'three.physics.points');
+			const count = H.physicsSoftCount(target);
 			if (count === 0) return new Float32Array(0);
 
 			const out = into instanceof Float32Array && into.length === count * 3
 				? into
 				: new Float32Array(count * 3);
-			H.physicsSoftPoints(target[0], target[1], out.buffer);
+			H.physicsSoftPoints(target, out);
 			return out;
 		},
 
@@ -490,20 +496,20 @@ export function makeScenePhysics(scene) {
 		// one by moving its pins. Pinning is absolute and is reapplied
 		// after every substep, so a pin moved each frame carries the body.
 		pin(object, particle, at) {
-			const target = liveObject(object, 'three.physics.pin');
+			const target = liveHandle(object, 'three.physics.pin');
 			const [x, y, z] = at === undefined ? [0, 0, 0] : asTriple(at, 'three.physics.pin(object, i, at)');
-			return H.physicsSoftPin(target[0], target[1], particle | 0, at !== undefined, x, y, z);
+			return H.physicsSoftPin(target, particle | 0, at !== undefined, x, y, z);
 		},
 
 		// Let a pinned particle go. `mass` is what it weighs afterwards and
 		// defaults to the body's own per-particle share.
 		unpin(object, particle, mass) {
-			const target = liveObject(object, 'three.physics.unpin');
-			const count = H.physicsSoftCount(target[0], target[1]);
+			const target = liveHandle(object, 'three.physics.unpin');
+			const count = H.physicsSoftCount(target);
 			const share = mass === undefined
 				? (object.body && object.body.mass ? object.body.mass / Math.max(1, count) : 1)
 				: Number(mass);
-			return H.physicsSoftUnpin(target[0], target[1], particle | 0, share);
+			return H.physicsSoftUnpin(target, particle | 0, share);
 		},
 	};
 }
