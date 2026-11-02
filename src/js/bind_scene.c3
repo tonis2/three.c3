@@ -130,7 +130,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_post_verbs(host);
 
 	// The interface (js/bind_ui.c3)
-	self.bind_ui_verbs(host);
+	self.bind_ui_verbs(js_host)!!;
 
 	// The animation loop (js/frame_loop.c3)
 	self.bind_frame_verbs(js_host)!!;

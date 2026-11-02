@@ -5,14 +5,13 @@
 // one `draw` node filling the frame. `measure(text)` is what makes drawing text
 // by hand possible at all.
 //
-// ## Why the normalising happens here
+// ## What this file does before the host sees a tree
 //
-// The host can read a property by name and cannot enumerate one — the same
-// constraint post.js works under. So this file does the enumerating, the type
-// names, the colour spellings and every error message, and hands `bind_ui.c3` a
-// canonical object whose field names are fixed and whose numbers are numbers.
-// A typo is a TypeError naming the node, not a panel that quietly fails to
-// appear.
+// It checks every node and says what is wrong in a sentence naming it, resolves
+// the aliases (`label` for `text`, `padding` for `insets`, …) and the colour,
+// pair and inset spellings, and hands `bind_ui.c3` a fresh object holding only
+// what the script said. A typo is a TypeError naming the node, not a panel that
+// quietly fails to appear.
 //
 // ## It is retained, and that is the point
 //
@@ -32,26 +31,27 @@ import { readColor } from './math.js';
 
 const H = globalThis.__three;
 
-// The node kinds, in the order `UiNodeKind` declares them. The host reads `k`
-// and never a string: one integer crosses instead of a name to be matched, and
-// the two lists cannot drift because a wrong number is a node the host refuses
-// by index rather than one it silently builds as something else.
-const KIND = {
-	column: 0, row: 1, stack: 2, padding: 3, grid: 4, clip: 5, anchored: 6, scroll: 7,
-	rect: 8, label: 9, draw: 10,
-	button: 11, checkbox: 12, slider: 13, select: 14, tree: 15, textfield: 16,
-	confirmDialog: 17, menu: 18, fileBrowser: 19, dialog: 20,
-	nodeGraph: 21, nodeCard: 22, portRow: 23, contextMenu: 24,
+// The node kinds; `bind_ui.c3` keeps the same list as `UI_KIND_NAMES`.
+const KINDS = new Set([
+	'column', 'row', 'stack', 'padding', 'grid', 'clip', 'anchored', 'scroll',
+	'rect', 'label', 'draw',
+	'button', 'checkbox', 'slider', 'select', 'tree', 'textfield',
+	'confirmDialog', 'menu', 'fileBrowser', 'dialog',
+	'nodeGraph', 'nodeCard', 'portRow', 'contextMenu',
+]);
+
+// The seven Painter primitives and a picture; `UI_OP_NAMES` on the host.
+const OP_NAMES = new Set(['rect', 'circle', 'ellipse', 'line', 'arc', 'text', 'shadow', 'image']);
+
+// Every spelling a script may use, to the one the host reads.
+const MAIN = {
+	start: 'start', center: 'center', centre: 'center', end: 'end',
+	between: 'between', 'space-between': 'between', spaceBetween: 'between',
 };
+const CROSS = { start: 'start', center: 'center', centre: 'center', end: 'end', stretch: 'start' };
 
-// The seven Painter primitives and a picture, in the order `UiOpKind` declares them.
-const OP = { rect: 0, circle: 1, ellipse: 2, line: 3, arc: 4, text: 5, shadow: 6, image: 7 };
-
-const MAIN = { start: 0, center: 1, centre: 1, end: 2, between: 3, 'space-between': 3, spaceBetween: 3 };
-const CROSS = { start: 0, center: 1, centre: 1, end: 2, stretch: 0 };
-
-const TYPES = Object.keys(KIND).join(', ');
-const OPS = Object.keys(OP).join(', ');
+const TYPES = [...KINDS].join(', ');
+const OPS = [...OP_NAMES].join(', ');
 
 function num(value, where, fallback = 0) {
 	if (value === undefined || value === null) return fallback;
@@ -138,15 +138,15 @@ function normaliseOp(op, at) {
 		throw new TypeError(`three.ui op ${at} is not an object — each one is { op: '...', ... }`);
 	}
 	const name = String(op.op ?? op.type ?? '');
-	if (!(name in OP)) {
+	if (!OP_NAMES.has(name)) {
 		throw new TypeError(`three.ui op ${at} has no such op '${name}' — it is one of ${OPS}`);
 	}
 	const where = `three.ui op ${at} (${name})`;
-	const out = { o: OP[name] };
+	const out = { op: name };
 
 	put(out, 'color', colour(op.color, `${where} color`));
 	put(out, 'borderColor', colour(op.borderColor, `${where} borderColor`));
-	put(out, 'bw', op.borderWidth === undefined ? undefined : num(op.borderWidth, `${where} borderWidth`));
+	put(out, 'borderWidth', op.borderWidth === undefined ? undefined : num(op.borderWidth, `${where} borderWidth`));
 	put(out, 'corners', quad(op.radius ?? op.borderRadius, `${where} radius`, 'radii'));
 	put(out, 'font', op.font === undefined ? undefined : num(op.font, `${where} font`));
 
@@ -157,7 +157,7 @@ function normaliseOp(op, at) {
 			break;
 		case 'circle':
 			out.at = pair(op.center ?? op.centre ?? op.at, `${where} center`, [0, 0]);
-			out.r = num(op.radius, `${where} radius`);
+			out.radius = num(op.radius, `${where} radius`);
 			// A circle's `radius` is its size, so it cannot double as the corner
 			// rounding the shared reader above took it for.
 			delete out.corners;
@@ -170,14 +170,14 @@ function normaliseOp(op, at) {
 		case 'line':
 			out.at = pair(op.from ?? op.at, `${where} from`, [0, 0]);
 			out.to = pair(op.to, `${where} to`, [0, 0]);
-			out.th = num(op.thickness ?? 1, `${where} thickness`);
+			out.thickness = num(op.thickness ?? 1, `${where} thickness`);
 			break;
 		case 'arc':
 			out.at = pair(op.center ?? op.centre ?? op.at, `${where} center`, [0, 0]);
-			out.r = num(op.radius, `${where} radius`);
-			out.s = num(op.start, `${where} start`);
-			out.sw = num(op.sweep, `${where} sweep`);
-			out.th = num(op.thickness ?? 1, `${where} thickness`);
+			out.radius = num(op.radius, `${where} radius`);
+			out.start = num(op.start, `${where} start`);
+			out.sweep = num(op.sweep, `${where} sweep`);
+			out.thickness = num(op.thickness ?? 1, `${where} thickness`);
 			delete out.corners;
 			break;
 		case 'text':
@@ -197,7 +197,7 @@ function normaliseOp(op, at) {
 			// caller keeps the aspect by choosing the size.
 			out.at = pair(op.at ?? op.pos, `${where} at`, [0, 0]);
 			out.to = pair(op.size, `${where} size`, [0, 0]);
-			out.tex = num(op.texture, `${where} texture`);
+			out.texture = num(op.texture, `${where} texture`);
 			delete out.color;
 			break;
 	}
@@ -218,7 +218,7 @@ const GRAPH_TARGET = ['background', 'node', 'port', 'wire'];
 const GRAPH_COMMAND = ['delete', 'copy', 'cut', 'paste', 'duplicate', 'selectAll', 'undo', 'redo'];
 
 // The graph's three lists, by index: wires and cards name nodes and ports by
-// their position here. Flags cross as bits, the order `UiGraphNode` reads.
+// their position here. Flags are bits, the order `UiGraphNode` reads.
 function normaliseGraphNodes(nodes, where) {
 	if (nodes === undefined || nodes === null) return [];
 	if (!Array.isArray(nodes)) throw new TypeError(`${where} wants an array of nodes`);
@@ -330,11 +330,11 @@ function normalise(node, path) {
 	}
 
 	const type = String(node.type ?? '');
-	if (!(type in KIND)) {
+	if (!KINDS.has(type)) {
 		throw new TypeError(`three.ui: ${path} has no such type '${type}' — it is one of ${TYPES}`);
 	}
 	const where = `three.ui ${path} (${type})`;
-	const out = { k: KIND[type] };
+	const out = { type };
 
 	if (node.key !== undefined && node.key !== null) out.key = String(node.key);
 
@@ -352,8 +352,8 @@ function normalise(node, path) {
 	put(out, 'radii', quad(node.radius ?? node.radii, `${where} radius`, 'radii'));
 	put(out, 'margin', node.margin === undefined ? undefined : pair(node.margin, `${where} margin`, [0, 0]));
 	put(out, 'cell', node.cell === undefined ? undefined : pair(node.cell, `${where} cell`, [0, 0]));
-	put(out, 'ah', enumOf(CROSS, node.h ?? node.horizontal, `${where} h`));
-	put(out, 'av', enumOf(CROSS, node.v ?? node.vertical, `${where} v`));
+	put(out, 'h', enumOf(CROSS, node.h ?? node.horizontal, `${where} h`));
+	put(out, 'v', enumOf(CROSS, node.v ?? node.vertical, `${where} v`));
 	if (node.solid) out.solid = true;
 	// A `stack` that sizes to its last child instead of filling — see `UiWrap`
 	// in `render/ui.c3`. It is what a card with a background is made of, and it
@@ -553,13 +553,13 @@ function finishChildren(out, node, path, type, where) {
 			if (kid === null || kid === undefined || kid === false) return;
 			built.push(normalise(kid, `${path}.children[${i}]`));
 		});
-		out.ch = built;
+		out.children = built;
 	}
 
 	// cui's Scroll asserts that it has exactly one child, and a script writing
 	// an empty one — a list that has not loaded yet — is not a mistake worth
 	// stopping the process over. It gets an empty stack to scroll instead.
-	if (type === 'scroll' && (out.ch === undefined || out.ch.length === 0)) out.ch = [{ k: KIND.stack }];
+	if (type === 'scroll' && (out.children === undefined || out.children.length === 0)) out.children = [{ type: 'stack' }];
 
 	return out;
 }
@@ -869,9 +869,8 @@ export const ui = {
 		const height = num(image.height, 'three.ui.texture height');
 		const pixels = image.pixels ?? image.data;
 		if (!ArrayBuffer.isView(pixels)) throw new TypeError('three.ui.texture: pixels is a Uint8Array');
-		const bytes = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-		const channels = image.channels ?? (width * height > 0 ? bytes.length / (width * height) : 0);
-		return H.uiTexture(bytes, width, height, channels, handle ?? 0, !options.nearest);
+		const channels = image.channels ?? (width * height > 0 ? pixels.byteLength / (width * height) : 0);
+		return H.uiTexture(pixels, width, height, channels, handle ?? 0, !options.nearest);
 	},
 
 	// Gives a texture back; the next `texture` call may reuse it.
