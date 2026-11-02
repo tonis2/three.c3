@@ -500,93 +500,103 @@ fn float3 post(Post p)
 // ---------------------------------------------------------------------------
 // State, keys, loop
 //
-// Each run_script call has its own scope, so anything a later call or a handler
-// needs has to live here.
+// Each run_script call has its own scope, so anything a later call needs has
+// to live on a global: `vfx` is the scene's handles and state, and its methods
+// are the keys and the per-frame loop.
 // ---------------------------------------------------------------------------
 
-const V = globalThis.vfx = {
-	scene, shield, core, embers, crates, banners,
-	shieldMat, coreMat, dissolveMat, bannerMat,
-	pass: null, post: POST_BODY,
-	now: 0, hit: 0, mark: 0, auto: true,
-	dissolving: false, edge: 0, grade: true, orbit: true, channel: 0,
-};
+class Vfx {
+	scene = scene; shield = shield; core = core; embers = embers; crates = crates; banners = banners;
+	shieldMat = shieldMat; coreMat = coreMat; dissolveMat = dissolveMat; bannerMat = bannerMat;
+	pass = null; post = POST_BODY;
+	now = 0; hit = 0; mark = 0; auto = true;
+	dissolving = false; edge = 0; grade = true; orbit = true; channel = 0;
 
-// The turntable's eye, which the fresnel needs and Surface does not carry.
-// `three.camera` is an orbit: target plus a direction built from yaw and pitch.
-V.eye = () => {
-	const c = three.camera;
-	const yaw = c.yaw * Math.PI / 180, pitch = c.pitch * Math.PI / 180;
-	const h = Math.cos(pitch);
-	return [
-		c.target.x + h * Math.sin(yaw) * c.distance,
-		c.target.y + Math.sin(pitch) * c.distance,
-		c.target.z + h * Math.cos(yaw) * c.distance,
-	];
-};
-
-V.fire = () => {
-	V.hit = 1;
-	V.mark = V.now;
-	if (V.pass) V.pass.uniforms.shock = 1;
-};
-
-V.setGrade = (on) => {
-	V.grade = on;
-	if (V.pass) V.pass.uniforms.amount = on ? 0.85 : 0;
-};
-
-three.onKeyDown('space', () => V.fire());
-three.onKeyDown('d', () => { V.dissolving = !V.dissolving; });
-three.onKeyDown('g', () => V.setGrade(!V.grade));
-three.onKeyDown('o', () => { V.orbit = !V.orbit; });
-three.onKeyDown('1', () => {
-	V.channel = (V.channel + 1) % 4;
-	V.shieldMat.uniforms.channel = V.channel;
-});
-
-three.setAnimationLoop(() => {
-	// Both readings off the game clock: `t` is what the shader uniforms want and
-	// `dt` is what the decays below want. Every decay here used to be a constant
-	// per *frame*, which is a fade that is twice as fast on a machine drawing
-	// twice as often — the bug a clock exists to make unwritable.
-	const t = three.clock.time;
-	const dt = three.clock.dt;
-	V.now = t;
-
-	// Every one of these is a push-block write: no compile, no pipeline, and
-	// nothing re-uploaded. The textures behind them never move.
-	V.shieldMat.uniforms.t = t;
-	V.shieldMat.uniforms.eye = V.eye();
-	V.coreMat.uniforms.t = t;
-	V.bannerMat.uniforms.t = t;
-	V.coreMat.uniforms.gain = 0.85 + 0.15 * Math.sin(t * 3.1);
-
-	// The impact decays over about half a second.
-	V.hit = Math.max(0, V.hit - dt * 2.1);
-	V.shieldMat.uniforms.hit = V.hit;
-
-	if (V.pass) {
-		const shock = Math.max(0, (V.pass.uniforms.shock ?? 0) - dt * 1.32);
-		V.pass.uniforms.shock = shock;
+	// The turntable's eye, which the fresnel needs and Surface does not carry.
+	// `three.camera` is an orbit: target plus a direction built from yaw and pitch.
+	eye() {
+		const c = three.camera;
+		const yaw = c.yaw * Math.PI / 180, pitch = c.pitch * Math.PI / 180;
+		const h = Math.cos(pitch);
+		return [
+			c.target.x + h * Math.sin(yaw) * c.distance,
+			c.target.y + Math.sin(pitch) * c.distance,
+			c.target.z + h * Math.cos(yaw) * c.distance,
+		];
 	}
 
-	// The dissolve front sweeps up and back down, so the crates come back.
-	V.edge = V.dissolving
-		? Math.min(1.02, V.edge + dt * 0.72)
-		: Math.max(0, V.edge - dt * 1.2);
-	V.dissolveMat.uniforms.edge = V.edge;
-
-	// Embers, on two rings turning at different rates.
-	for (const [i, e] of V.embers.entries()) {
-		const a = t * (0.7 + (i % 4) * 0.16) + i * 0.45;
-		const r = 2.1 + (i % 3) * 0.7;
-		e.position.set(Math.cos(a) * r, 3.2 + Math.sin(t * 1.4 + i) * 0.8, Math.sin(a) * r);
+	@three.key('space', 'fire — shield ring and a shockwave through the post pass')
+	fire() {
+		this.hit = 1;
+		this.mark = this.now;
+		if (this.pass) this.pass.uniforms.shock = 1;
 	}
 
-	if (V.orbit) three.camera.orbit(18 + 22 * Math.sin(t * 0.09));
-	if (V.auto && t - V.mark > 4) V.fire();
-});
+	setGrade(on) {
+		this.grade = on;
+		if (this.pass) this.pass.uniforms.amount = on ? 0.85 : 0;
+	}
+
+	@three.key('d', 'dissolve the crates and bring them back')
+	toggleDissolve() { this.dissolving = !this.dissolving; }
+
+	@three.key('g', 'grade on/off')
+	toggleGrade() { this.setGrade(!this.grade); }
+
+	@three.key('o', 'auto-orbit on/off')
+	toggleOrbit() { this.orbit = !this.orbit; }
+
+	@three.key('1', 'shield: all, rim, lattice, ring')
+	nextChannel() {
+		this.channel = (this.channel + 1) % 4;
+		this.shieldMat.uniforms.channel = this.channel;
+	}
+
+	@three.systems.frame
+	tick(dt) {
+		// Both readings off the game clock: `t` is what the shader uniforms want
+		// and `dt` is what the decays below want. Every decay here used to be a
+		// constant per *frame*, which is a fade that is twice as fast on a
+		// machine drawing twice as often — the bug a clock exists to make
+		// unwritable.
+		const t = three.clock.time;
+		this.now = t;
+
+		// Every one of these is a push-block write: no compile, no pipeline, and
+		// nothing re-uploaded. The textures behind them never move.
+		this.shieldMat.uniforms.t = t;
+		this.shieldMat.uniforms.eye = this.eye();
+		this.coreMat.uniforms.t = t;
+		this.bannerMat.uniforms.t = t;
+		this.coreMat.uniforms.gain = 0.85 + 0.15 * Math.sin(t * 3.1);
+
+		// The impact decays over about half a second.
+		this.hit = Math.max(0, this.hit - dt * 2.1);
+		this.shieldMat.uniforms.hit = this.hit;
+
+		if (this.pass) {
+			this.pass.uniforms.shock = Math.max(0, (this.pass.uniforms.shock ?? 0) - dt * 1.32);
+		}
+
+		// The dissolve front sweeps up and back down, so the crates come back.
+		this.edge = this.dissolving
+			? Math.min(1.02, this.edge + dt * 0.72)
+			: Math.max(0, this.edge - dt * 1.2);
+		this.dissolveMat.uniforms.edge = this.edge;
+
+		// Embers, on two rings turning at different rates.
+		for (const [i, e] of this.embers.entries()) {
+			const a = t * (0.7 + (i % 4) * 0.16) + i * 0.45;
+			const r = 2.1 + (i % 3) * 0.7;
+			e.position.set(Math.cos(a) * r, 3.2 + Math.sin(t * 1.4 + i) * 0.8, Math.sin(a) * r);
+		}
+
+		if (this.orbit) three.camera.orbit(18 + 22 * Math.sin(t * 0.09));
+		if (this.auto && t - this.mark > 4) this.fire();
+	}
+}
+
+const V = globalThis.vfx = new Vfx();
 
 V.pass = three.setPost({
 	fragment: POST_BODY,
@@ -603,13 +613,7 @@ three.camera.orbit(22, 12, 26);
 V.shieldMat.uniforms.eye = V.eye();
 
 three.debug.write({
-	keys: {
-		space: 'fire — shield ring and a shockwave through the post pass',
-		d: 'dissolve the crates and bring them back',
-		g: 'grade on/off',
-		o: 'auto-orbit on/off',
-		1: 'shield: all, rim, lattice, ring',
-	},
+	keys: three.keys(),
 	displaces: {
 		shield: 'the dome bulges where it is hit',
 		core: 'boils along its normals, sampling in the vertex stage',
