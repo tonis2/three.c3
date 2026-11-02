@@ -48,38 +48,9 @@ fn void JsRuntime.install_bindings(&self)
 	self.install_handles(js_host)!!;
 
 	// Assets (js/bind_asset.c3)
-	self.bind(host, "load", &js_load, 1);
-	self.bind(host, "texture", &js_texture, 4);
-	self.bind(host, "dataTexture", &js_data_texture, 6);
-	self.bind(host, "textureDispose", &js_texture_dispose, 1);
-	self.bind(host, "textureRead", &js_texture_read, 2);
-	self.bind(host, "textureSave", &js_texture_save, 2);
-	self.bind(host, "primitive", &js_primitive, 9);
-	self.bind(host, "convex", &js_convex, 1);
-	self.bind(host, "extrude", &js_extrude, 4);
-	self.bind(host, "ribbon", &js_ribbon, 5);
-	self.bind(host, "terrain", &js_terrain, 5);
-	self.bind(host, "terrainAt", &js_terrain_at, 4);
-	self.bind(host, "lines", &js_lines, 2);
-	self.bind(host, "wireframe", &js_wireframe, 3);
-	self.bind(host, "checkAsset", &js_check_asset, 2);
-	self.bind(host, "assetPath", &js_asset_path, 2);
-	self.bind(host, "meshNames", &js_mesh_names, 2);
-	self.bind(host, "meshBounds", &js_mesh_bounds, 3);
-	self.bind(host, "assetImages", &js_asset_images, 2);
-	self.bind(host, "assetImage", &js_asset_image, 5);
-	self.bind(host, "uploadMesh", &js_upload_mesh, 5);
-	self.bind(host, "meshLayers", &js_mesh_layers, 3);
-	self.bind(host, "meshMaterial", &js_mesh_material, 3);
-	self.bind(host, "splitMesh", &js_split_mesh, 3);
-	self.bind(host, "merge", &js_merge, 5);
-	self.bind(host, "assetNodes", &js_asset_nodes, 4);
-	self.bind(host, "assetLights", &js_asset_lights, 2);
-	self.bind(host, "assetCameras", &js_asset_cameras, 2);
-	self.bind(host, "assetBodies", &js_asset_bodies, 2);
-	self.bind(host, "assetJoints", &js_asset_joints, 2);
-	self.bind(host, "assetClips", &js_asset_clips, 2);
-	self.bind(host, "assetBones", &js_asset_bones, 2);
+	self.bind_asset_verbs(js_host)!!;
+
+	// Animation
 	self.bind(host, "bindAnimation", &js_bind_animation, 6);
 	self.bind(host, "bindSkin", &js_bind_skin, 4);
 	self.bind(host, "bindSocket", &js_bind_socket, 5);
@@ -90,10 +61,6 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "stopAnimation", &js_stop_animation, 2);
 	self.bind(host, "animationState", &js_animation_state, 2);
 	self.bind(host, "blendAnimation", &js_blend_animation, 16);
-	self.bind(host, "inventory", &js_inventory, 0);
-	self.bind(host, "assetText", &js_asset_text, 1);
-	self.bind(host, "assetWriteText", &js_asset_write_text, 2);
-	self.bind(host, "exportScene", &js_export, 4);
 
 	// The graph
 	self.bind(host, "sceneCreate", &js_scene_create, 0);

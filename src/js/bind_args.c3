@@ -188,6 +188,41 @@ fn AssetId arg_asset(JsRuntime* self, qjs::Context* js, int argc, qjs::Value* ar
 	return id;
 }
 
+// TEMPORARY: old-API doors to bind_asset.c3's helpers, for bind_compute.c3 and
+// bind_scene.c3 until they are converted (`texture_handle`, `writable_path`,
+// `written_image` are the new ones).
+fn qjs::Value texture_value(JsRuntime* self, qjs::Context* js, int index, Texture* uploaded)
+{
+	js::Value? fields = self.texture_handle(index, uploaded);
+	if (catch fields) return qjs::EXCEPTION;
+	return (qjs::Value)fields;
+}
+
+fn String? JsRuntime.open_for_write(
+	&self,
+	qjs::Context* js,
+	String asked,
+	String verb,
+	Allocator allocator,
+	qjs::Value* out
+)
+{
+	String? writing = self.writable_path(asked, verb, allocator);
+	if (catch err = writing)
+	{
+		*out = qjs::EXCEPTION;
+		return err~;
+	}
+	return writing;
+}
+
+fn qjs::Value wrote_image(qjs::Context* js, String path, uint width, uint height) @private
+{
+	js::Value? described = js.engine().@object_of(written_image(path, width, height));
+	if (catch described) return qjs::EXCEPTION;
+	return (qjs::Value)described;
+}
+
 fn qjs::Value vec3_value(qjs::Context* js, Vec3 v) => numbers_value(js, { v.x, v.y, v.z });
 
 <*

@@ -60,22 +60,16 @@ fn Scene*? nav_scene(JsRuntime* self, uint id) @local
 }
 
 <*
- `navLoad(sceneId, assetIndex, assetGeneration, profile)`: replace the bake with a
- profile embedded in a loaded glTF. An empty name prefers "default", then the
- first. Answers like `navStats`, or null when the asset has no profiles.
+ `navLoad(sceneId, asset, profile)`: replace the bake with a profile embedded in
+ a loaded glTF. An empty name prefers "default", then the first. Answers like
+ `navStats`, or null when the asset has no profiles.
 
  @return? js::THREW
 *>
-fn js::Value? js_nav_load(JsRuntime* self, uint scene_id, uint asset_index, uint asset_generation, String wanted)
+fn js::Value? js_nav_load(JsRuntime* self, uint scene_id, AssetId id, String wanted)
 {
 	Scene* scene = nav_scene(self, scene_id)!;
-	AssetId id = { .index = asset_index, .generation = asset_generation };
 	Asset* loaded = self.pass.assets.slot(id);
-	if (loaded == null)
-	{
-		return self.js.fail("that asset is no longer loaded — three.unloadUnused() or scene.unload() freed it, "
-			"and loading the file again gives a fresh handle")~;
-	}
 	if (loaded.nav_profiles.len() == 0) return js::NULL;
 
 	AssetNavigationProfile* profile = null;

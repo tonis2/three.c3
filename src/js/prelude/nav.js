@@ -194,10 +194,10 @@ export function makeSceneNav(scene) {
 	// Replace this scene's current bake with a navigation profile embedded in a
 	// loaded glTF asset. Omit the name to prefer "default", then the first profile.
 	load(asset, profile = '') {
-		if (!asset || !Number.isInteger(asset._a) || !Number.isInteger(asset._g)) {
+		if (!asset || !asset._h) {
 			throw new TypeError('scene.nav.load(asset, profile) wants an Asset from three.load()');
 		}
-		return H.navLoad(scene._sid, asset._a, asset._g, profile);
+		return H.navLoad(scene._sid, asset._h, profile);
 	},
 
 	// What the last bake produced and what it cost, or null if there has not

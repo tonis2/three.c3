@@ -15,15 +15,17 @@ const H = globalThis.__three;
 // Shared by every shape: what it is called, what it was asked for, and the
 // asset the host built or reused.
 export class Geometry {
-	constructor(type, name, parameters, [asset, assetGeneration]) {
+	constructor(type, name, parameters, handle) {
 		this.type = type;
 		this.name = name;
 		this.parameters = parameters;
-		this.asset = asset;
-		// The other half of the handle — see the Asset class. Carried here so
-		// that a generated shape and a reference from asset.mesh(name) are
-		// still the same shape of thing, which is what lets Mesh take either.
-		this.assetGeneration = assetGeneration;
+		// The host's Asset handle — see the Asset class. Carried here so that a
+		// generated shape and a reference from asset.mesh(name) are still the
+		// same shape of thing, which is what lets Mesh take either. `asset` and
+		// `assetGeneration` are its id as two numbers.
+		this._asset = handle;
+		this.asset = handle.index;
+		this.assetGeneration = handle.generation;
 		// A generated shape is one mesh, always. Named `mesh` because that is
 		// what an asset reference calls it, which is what lets Mesh take both.
 		this.mesh = 0;
@@ -311,7 +313,7 @@ export class ConvexGeometry extends Geometry {
 		super(
 			'ConvexGeometry', 'convex',
 			{ points: flat.length / 3 },
-			H.convex(flat),
+			H.convex(new Float32Array(flat)),
 		);
 	}
 }
@@ -519,7 +521,7 @@ export class ExtrudeGeometry extends Geometry {
 		super(
 			'ExtrudeGeometry', 'extrude',
 			{ points: outline.length / 2, holes: holeCounts.length, depth },
-			H.extrude(outline, holeFlat, holeCounts, depth),
+			H.extrude(new Float32Array(outline), new Float32Array(holeFlat), new Uint32Array(holeCounts), depth),
 		);
 	}
 }
@@ -657,19 +659,16 @@ export class TerrainGeometry extends Geometry {
 	//
 	// Outside the field the edges extend outwards, so walking off the map
 	// keeps the ground it last stood on rather than dropping through zero.
-	heightAt(x, z) { return this._at(x, z, 'heightAt')[0]; }
+	heightAt(x, z) { return this._at(x, z, 'heightAt').height; }
 
 	// The surface normal there, unit length, blended exactly as the shading
 	// blends it — so something laid flush with the ground agrees with what
 	// the light does to it.
-	normalAt(x, z) {
-		const [, nx, ny, nz] = this._at(x, z, 'normalAt');
-		return [nx, ny, nz];
-	}
+	normalAt(x, z) { return this._at(x, z, 'normalAt').normal; }
 
 	_at(x, z, what) {
-		const answer = H.terrainAt(this.asset, this.assetGeneration, +x, +z);
-		if (answer.length === 0) {
+		const answer = H.terrainAt(this._asset, +x, +z);
+		if (answer === null) {
 			throw new Error(
 				`terrain.${what}() — this handle no longer names a live terrain, `
 				+ 'which happens after scene.unload() or three.unloadUnused()'
@@ -818,7 +817,7 @@ export class RibbonGeometry extends Geometry {
 		super(
 			'RibbonGeometry', 'ribbon',
 			{ width, samples, columns, rows },
-			H.ribbon(positions, normals, uvs, columns, rows),
+			H.ribbon(new Float32Array(positions), new Float32Array(normals), new Float32Array(uvs), columns, rows),
 		);
 	}
 }
@@ -1020,22 +1019,20 @@ export function merge(input) {
 		}
 	}
 
-	const assetIndices = [];
-	const generations = [];
-	const meshIndices = [];
-	const matrices = [];
-	const colors = [];
-	for (const { mesh, M, T } of gathered) {
+	const count = gathered.length;
+	const assets = new Array(count);
+	const meshIndices = new Uint32Array(count);
+	const matrices = new Float32Array(count * 16);
+	const colors = new Float32Array(count * 4);
+	for (let i = 0; i < count; i++) {
+		const { mesh, M, T } = gathered[i];
 		const ref = mesh._ref();
-		assetIndices.push(ref.asset);
-		generations.push(ref.assetGeneration);
-		meshIndices.push(ref.mesh);
-		const flat = flattenTransform(M, T);
-		for (let k = 0; k < 16; k++) matrices.push(flat[k]);
-		const c = mesh.color;
-		for (let k = 0; k < 4; k++) colors.push(c[k]);
+		assets[i] = ref._asset;
+		meshIndices[i] = ref.mesh;
+		matrices.set(flattenTransform(M, T), i * 16);
+		colors.set(mesh.color, i * 4);
 	}
 
-	const [index, generation, triangles] = H.merge(assetIndices, generations, meshIndices, matrices, colors);
-	return new MergedGeometry(gathered.length, triangles, [index, generation]);
+	const { asset, triangles } = H.merge(assets, meshIndices, matrices, colors);
+	return new MergedGeometry(count, triangles, asset);
 }

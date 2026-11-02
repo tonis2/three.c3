@@ -516,7 +516,7 @@ struct JsRuntime
 	 count per `Assets.textures` slot — `js/bind_asset.c3`.
 
 	 A texture index crossing into a script *takes* a reference, always and only
-	 through `texture_value`, and `three.texture.dispose()` is the one thing that
+	 through `texture_handle`, and `three.texture.dispose()` is the one thing that
 	 gives one back. So a context that ends holding some is a context whose
 	 handles will never dispose, and this is the record of how many that is.
 	 `release_script_textures` is what acts on it.
