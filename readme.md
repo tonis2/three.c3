@@ -78,7 +78,7 @@ PNG of the frame (at most 1568 px on its longest side, and `image: false` leaves
 
 ### Building
 
-Needs [c3c](https://github.com/c3lang/c3c) — v0.8.3 is what the releases are built with.
+Needs [c3c](https://github.com/c3lang/c3c) — v0.8.5_1 is what the releases are built with.
 
 ```sh
 git clone --recursive https://github.com/tonis2/three.c3.git
