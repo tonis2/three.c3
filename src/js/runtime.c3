@@ -395,16 +395,16 @@ struct JsRuntime
 
 	<*
 	 The widget callbacks `three.ui.set` attached, one entry per node of the live
-	 snapshot — `js/bind_ui.c3`. Retained like `frame_loop`, and released before the
-	 context closes for the same reason.
+	 snapshot — `js/bind_ui.c3`. Held like `frame_loop`, and dropped before the
+	 context closes for the same reason. `ui_keys` are the names the tree walk reads.
 
 	 `ui_pending` is a snapshot a widget handler asked for while it was being
-	 dispatched: cui is mid-walk of the tree at that moment, so the rebuild waits
-	 for `flush_ui` at the top of the next thing the loop does.
+	 dispatched (NO_ROOT for a clear): cui is mid-walk of the tree at that moment,
+	 so the rebuild waits for `flush_ui` at the top of the next thing the loop does.
 	*>
 	List{UiHandlers} ui_handlers;
+	UiKeys ui_keys;
 	js::Root ui_pending;
-	bool ui_pending_held;
 	bool ui_pending_active;
 	bool ui_dispatching;
 

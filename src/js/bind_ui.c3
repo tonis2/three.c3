@@ -2,7 +2,7 @@
  `three.ui` — the interface, as a script describes it.
 
  `render/ui.c3` owns the cui tree and everything cui-typed; this file is the
- crossing. It reads a normalised snapshot out of QuickJS, pushes it through
+ crossing. It reads the snapshot `js/prelude/ui.js` checked, pushes it through
  `UiLayer`'s `UiNodeSpec` / `UiOp` vocabulary, and holds the JavaScript functions
  the widgets call back into.
 
@@ -15,27 +15,27 @@
  problem, and the one thing it would otherwise break — the text under somebody's
  fingers, the scroll position, the open popup — is what `key` is for.
 
- ## Normalisation happens in JavaScript
+ ## What crosses
 
- The QuickJS shim this project vendors can read a property by name and cannot
- enumerate one, which is the same constraint `bind_post.c3` works under. So
- `js/prelude/ui.js` does the enumerating, the type names, the colour spellings
- and the error messages, and hands over a canonical object whose field names are
- fixed. Everything below reads by name and never guesses.
+ `ui.js` validates, resolves the aliases (`label` for `text`, `padding` for
+ `insets`, …), turns every colour, pair and inset spelling into an array of
+ numbers and leaves out whatever the script did not say. Names stay names: a
+ node's `type`, an op's `op` and the alignments arrive as strings and are mapped
+ here. An absent field is how "leave this alone" differs from "set it to zero".
 
  ## Callbacks run mid-dispatch
 
  A widget's handler is called from inside `Ui.process_input`, before the tree is
  flushed. A handler that called `three.ui.set` would restructure the tree cui is
  walking, which cui's own documentation says a handler must not do — so a `set`
- arriving during a dispatch is retained and applied by `flush_ui` once
+ arriving during a dispatch is held and applied by `flush_ui` once
  `process_input` has returned. A `patch` needs no such thing: it writes a field
  and asks for paint, and restructures nothing.
 
  ## Strings
 
  Every string a cui widget holds is borrowed and must outlive the element, and
- everything here came out of QuickJS. `UiLayer` copies at the boundary — see
+ everything here came out of the engine. `UiLayer` copies at the boundary — see
  `UiNode.keep` — so nothing below ever hands a widget a pointer into engine
  memory. This is the memory rule that fails quietly: a freed label reads as
  garbage glyphs, never as a crash.
@@ -44,195 +44,420 @@ module three;
 
 import std::collections::list;
 import std::math;
-import qjs;
 import fastjs::js;
+import fastjs::js::opt;
 
 <*
  The JavaScript functions one node attached, indexed by that node's position in
- `UiLayer.nodes`.
+ `UiLayer.nodes`. NO_ROOT is a handler the node does not have.
 
  Parallel to the node table rather than inside it, because `render/ui.c3` is
- written to know nothing about QuickJS — the layer answers with an index and this
- is what the index means.
+ written to know nothing about the engine — the layer answers with an index and
+ this is what the index means.
 *>
 struct UiHandlers
 {
-	qjs::Value click;
-	qjs::Value change;
-	qjs::Value commit;
-	qjs::Value submit;
-	qjs::Value select;
-	qjs::Value toggle;
-	qjs::Value hover;
+	js::Root on_click;
+	js::Root on_change;
+	js::Root on_commit;
+	js::Root on_submit;
+	js::Root on_select;
+	js::Root on_toggle;
+	js::Root on_hover;
 	// The three cui's application widgets need and nothing else does. `confirm`
 	// and `dismiss` are a question's two answers — and `dismiss` is a `dialog`
 	// being put away as well, since to a script that is the same event — and
 	// `choose` is a file browser row being activated as opposed to merely
 	// selected, the distinction that makes a browser usable with single clicks.
-	qjs::Value confirm;
-	qjs::Value dismiss;
-	qjs::Value choose;
+	js::Root on_confirm;
+	js::Root on_dismiss;
+	js::Root on_choose;
 	// The pointer on a `draw` node — position, buttons, modifiers and wheel,
 	// inside the hit test. `onClick` is the same pointer with everything but the
 	// fact of it thrown away, and the two are separate because most panels want
 	// only the small one.
-	qjs::Value pointer;
-	// A `nodeGraph`'s two: everything it reports goes to `graph` as one event
+	js::Root on_pointer;
+	// A `nodeGraph`'s two: everything it reports goes to `on_graph` as one event
 	// object, which `js/prelude/ui.js` fans out to the named handlers, and
-	// `query` answers whether a wire may run between two ports.
-	qjs::Value graph;
-	qjs::Value query;
-	bool has_click;
-	bool has_change;
-	bool has_commit;
-	bool has_submit;
-	bool has_select;
-	bool has_toggle;
-	bool has_hover;
-	bool has_confirm;
-	bool has_dismiss;
-	bool has_choose;
-	bool has_pointer;
-	bool has_graph;
-	bool has_query;
+	// `can_connect` answers whether a wire may run between two ports.
+	js::Root on_graph;
+	js::Root can_connect;
 }
 
-fn void UiHandlers.release(&self, qjs::Context* js)
+fn void UiHandlers.drop(&self, js::Engine* js)
 {
-	if (self.has_click) js.release(self.click);
-	if (self.has_change) js.release(self.change);
-	if (self.has_commit) js.release(self.commit);
-	if (self.has_submit) js.release(self.submit);
-	if (self.has_select) js.release(self.select);
-	if (self.has_toggle) js.release(self.toggle);
-	if (self.has_hover) js.release(self.hover);
-	if (self.has_confirm) js.release(self.confirm);
-	if (self.has_dismiss) js.release(self.dismiss);
-	if (self.has_choose) js.release(self.choose);
-	if (self.has_pointer) js.release(self.pointer);
-	if (self.has_graph) js.release(self.graph);
-	if (self.has_query) js.release(self.query);
-	*self = { };
+	$foreach $m : UiHandlers::members:
+		js.drop(&self.$m);
+	$endforeach
+}
+
+<*
+ Which handler an event goes to, and its name for the sentence that stops it.
+*>
+fn js::Root* UiHandlers.for_event(&self, UiEventKind kind, String* name)
+{
+	switch (kind)
+	{
+		case CLICK:
+			*name = "onClick";
+			return &self.on_click;
+		case HOVER:
+			*name = "onHover";
+			return &self.on_hover;
+		// FILE_DIRECTORY too: where a file browser is IS its value — the thing a
+		// breadcrumb beside it displays — so it is `onChange` and not a fourth name.
+		case TOGGLE:
+		case SLIDE:
+		case PICK:
+		case TEXT_CHANGE:
+		case FILE_DIRECTORY:
+			*name = "onChange";
+			return &self.on_change;
+		case COMMIT:
+			*name = "onCommit";
+			return &self.on_commit;
+		case ROW_SELECT:
+		case MENU_PICK:
+		case FILE_SELECT:
+			*name = "onSelect";
+			return &self.on_select;
+		case ROW_TOGGLE:
+			*name = "onToggle";
+			return &self.on_toggle;
+		case TEXT_SUBMIT:
+			*name = "onSubmit";
+			return &self.on_submit;
+		case CONFIRM:
+			*name = "onConfirm";
+			return &self.on_confirm;
+		// A dialog put away is the same event to a script as a question
+		// dismissed: the panel is gone and nobody pressed anything that means yes.
+		case DISMISS:
+		case DIALOG_DISMISS:
+			*name = "onDismiss";
+			return &self.on_dismiss;
+		case FILE_CHOOSE:
+		case MENU_CHOOSE:
+			*name = "onChoose";
+			return &self.on_choose;
+		case POINTER:
+			*name = "onPointer";
+			return &self.on_pointer;
+		case GRAPH:
+			*name = "nodeGraph";
+			return &self.on_graph;
+	}
+}
+
+<*
+ Every property name the tree walk reads, interned once per engine. A field
+ `gap_y` is the key `gapY`.
+*>
+struct UiKeys
+{
+	// A node
+	js::Key type;
+	js::Key key;
+	js::Key children;
+	js::Key gap;
+	js::Key gap_y;
+	js::Key size;
+	js::Key cell;
+	js::Key main;
+	js::Key cross;
+	js::Key insets;
+	js::Key radii;
+	js::Key margin;
+	js::Key h;
+	js::Key v;
+	js::Key solid;
+	js::Key wrap;
+	js::Key multiline;
+	js::Key modal;
+	js::Key close_outside;
+	js::Key color;
+	js::Key border_color;
+	js::Key border_width;
+	js::Key accent;
+	js::Key hover_color;
+	js::Key press_color;
+	js::Key text_color;
+	js::Key text;
+	js::Key suffix;
+	js::Key title;
+	js::Key confirm;
+	js::Key decline;
+	js::Key font;
+	js::Key text_size;
+	js::Key value;
+	js::Key min;
+	js::Key max;
+	js::Key step;
+	js::Key curve;
+	js::Key offset;
+	js::Key decimals;
+	js::Key checked;
+	js::Key disabled;
+	js::Key selected;
+	js::Key pan;
+	js::Key zoom;
+	js::Key searchable;
+	js::Key plane_color;
+	js::Key grid_color;
+	js::Key card_color;
+	js::Key header_color;
+	js::Key card_border;
+	js::Key graph_view;
+	// Its handlers
+	js::Key on_click;
+	js::Key on_change;
+	js::Key on_commit;
+	js::Key on_submit;
+	js::Key on_select;
+	js::Key on_toggle;
+	js::Key on_hover;
+	js::Key on_confirm;
+	js::Key on_dismiss;
+	js::Key on_choose;
+	js::Key on_pointer;
+	js::Key on_graph;
+	js::Key can_connect;
+	// Its lists
+	js::Key ops;
+	js::Key options;
+	js::Key rows;
+	js::Key menus;
+	js::Key items;
+	js::Key nodes;
+	js::Key ports;
+	js::Key wires;
+	// Their entries
+	js::Key op;
+	js::Key at;
+	js::Key to;
+	js::Key radius;
+	js::Key thickness;
+	js::Key start;
+	js::Key sweep;
+	js::Key blur;
+	js::Key corners;
+	js::Key texture;
+	js::Key label;
+	js::Key shortcut;
+	js::Key separator;
+	js::Key trailing;
+	js::Key depth;
+	js::Key expandable;
+	js::Key expanded;
+	js::Key pos;
+	js::Key width;
+	js::Key tag;
+	js::Key header;
+	js::Key flags;
+	js::Key progress;
+	js::Key node;
+	js::Key output;
+	js::Key square;
+	js::Key hollow;
+	js::Key from;
+	js::Key category;
+	js::Key hint;
+}
+
+<*
+ @return? js::THREW
+*>
+fn void? UiKeys.init(&self, js::Engine* js)
+{
+	@pool()
+	{
+		$foreach $m : UiKeys::members:
+			self.$m = js.key(js::camel_case($m.name))!;
+		$endforeach
+	};
 }
 
 <*
  Registers the interface verbs on the host object.
 
- Called from `install_bindings` beside `bind_post_verbs`, so there is still
- exactly one place that lists what JavaScript can reach.
+ @return? js::THREW
 *>
-fn void JsRuntime.bind_ui_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_ui_verbs(&self, js::Value host)
 {
-	self.bind(host, "uiSet", &js_ui_set, 1);
-	self.bind(host, "uiPatch", &js_ui_patch, 2);
-	self.bind(host, "uiClear", &js_ui_clear, 0);
-	self.bind(host, "uiMeasure", &js_ui_measure, 3);
-	self.bind(host, "uiSlot", &js_ui_slot, 0);
-	self.bind(host, "uiScale", &js_ui_scale, 1);
-	self.bind(host, "uiTexture", &js_ui_texture, 6);
-	self.bind(host, "uiTextureFree", &js_ui_texture_free, 1);
+	self.ui_keys.init(self.js)!;
+	self.js.@bind(host, "uiSet", &js_ui_set, self)!;
+	self.js.@bind(host, "uiPatch", &js_ui_patch, self)!;
+	self.js.@bind(host, "uiClear", &js_ui_clear, self)!;
+	self.js.@bind(host, "uiMeasure", &js_ui_measure, self)!;
+	self.js.@bind(host, "uiSlot", &js_ui_slot, self)!;
+	self.js.@bind(host, "uiScale", &js_ui_scale, self)!;
+	self.js.@bind(host, "uiTexture", &js_ui_texture, self)!;
+	self.js.@bind(host, "uiTextureFree", &js_ui_texture_free, self)!;
 }
 
 // ============================================================================
-// Reading a normalised value
+// Reading a checked value
 // ============================================================================
 
+// The node kinds by name, in the order `UiNodeKind` declares them.
+const String[*] UI_KIND_NAMES = {
+	"column", "row", "stack", "padding", "grid", "clip", "anchored", "scroll",
+	"rect", "label", "draw",
+	"button", "checkbox", "slider", "select", "tree", "textfield",
+	"confirmDialog", "menu", "fileBrowser", "dialog",
+	"nodeGraph", "nodeCard", "portRow", "contextMenu",
+};
+$assert UI_KIND_NAMES.len == UiNodeKind::len;
+
+// The drawing ops by name, in the order `UiOpKind` declares them.
+const String[*] UI_OP_NAMES = { "rect", "circle", "ellipse", "line", "arc", "text", "shadow", "image" };
+$assert UI_OP_NAMES.len == UiOpKind::len;
+
 <*
- Whether the property is there at all.
+ The position of name in names.
 
- The whole of the difference between "leave this alone" and "set it to zero",
- which is what `patch` and the keyed carry-over both turn on. `undefined` is
- JavaScript's own answer for an absent field, so the check is the natural one.
+ @return? UI_BAD_PARENT
 *>
-fn bool has_prop(qjs::Context* js, qjs::Value object, ZString name) @local
+fn usz? ordinal_named(String[] names, String name) @local
 {
-	qjs::Value value = js.property(object, name);
-	defer js.release(value);
-	return !value.is_undefined() && !value.is_null();
-}
-
-fn double prop_number(qjs::Context* js, qjs::Value object, ZString name, double fallback = 0) @local
-{
-	qjs::Value value = js.property(object, name);
-	defer js.release(value);
-	if (value.is_undefined() || value.is_null()) return fallback;
-	double answer = js.number(value);
-	return answer == answer ? answer : fallback;
-}
-
-fn float prop_float(qjs::Context* js, qjs::Value object, ZString name, float fallback = 0) @local
-{
-	return (float)prop_number(js, object, name, (double)fallback);
-}
-
-fn bool prop_truth(qjs::Context* js, qjs::Value object, ZString name) @local
-{
-	qjs::Value value = js.property(object, name);
-	defer js.release(value);
-	return js.truth(value);
+	foreach (i, n : names)
+	{
+		if (n == name) return (usz)i;
+	}
+	return UI_BAD_PARENT~;
 }
 
 <*
- A string property, allocated from `allocator`. Empty when absent.
+ An alignment as cui orders `MainAlign` and `CrossAlign`. `ui.js` has already
+ turned every spelling into one of these, and `stretch` is cui's `start`.
 *>
-fn String prop_text(qjs::Context* js, qjs::Value object, ZString name, Allocator allocator) @local
+fn uint align_ordinal(String name) @local
 {
-	qjs::Value value = js.property(object, name);
-	defer js.release(value);
-	if (value.is_undefined() || value.is_null()) return "".copy(allocator);
-	return js.text(value, allocator);
+	switch (name)
+	{
+		case "center": return 1;
+		case "end": return 2;
+		case "between": return 3;
+		default: return 0;
+	}
 }
 
 <*
- A fixed-width array of numbers, zero-filled when the property is absent.
+ Whether the property is there at all: the whole of the difference between
+ "leave this alone" and "set it to zero".
 
- The prelude has already turned every spelling a script may use — a hex number, a
- `{r, g, b}`, a `Vector3`, a bare number for a square inset — into exactly this,
- so there is one shape to read and no guessing about which one arrived.
+ @return? js::THREW
 *>
-macro read_numbers(qjs::Context* js, qjs::Value object, ZString name, $Type, $count) @local
+fn bool? has_field(js::Engine* js, js::Value obj, js::Key key) @local
+{
+	return !js.get(obj, key)!.is_nullish();
+}
+
+<*
+ @return? js::THREW
+*>
+fn double? field_number(js::Engine* js, js::Value obj, js::Key key, double fallback = 0) @local
+{
+	js::Value v = js.get(obj, key)!;
+	if (v.is_nullish()) return fallback;
+	double n = js.number(v)!;
+	return n == n ? n : fallback;
+}
+
+<*
+ @return? js::THREW
+*>
+fn float? field_float(js::Engine* js, js::Value obj, js::Key key) @local
+{
+	return (float)field_number(js, obj, key)!;
+}
+
+<*
+ A count or an index: negative is 0.
+
+ @return? js::THREW
+*>
+fn uint? field_uint(js::Engine* js, js::Value obj, js::Key key) @local
+{
+	return (uint)math::max(field_number(js, obj, key)!, 0.0);
+}
+
+<*
+ @return? js::THREW
+*>
+fn bool? field_truth(js::Engine* js, js::Value obj, js::Key key) @local
+{
+	return js.truth(js.get(obj, key)!);
+}
+
+<*
+ A string property in temp memory; empty when absent.
+
+ @return? js::THREW
+*>
+fn String? field_text(js::Engine* js, js::Value obj, js::Key key) @local
+{
+	js::Value v = js.get(obj, key)!;
+	if (v.is_nullish()) return "";
+	return js.text(v, tmem);
+}
+
+<*
+ A fixed-width array of numbers, zero-filled when absent. `ui.js` has turned
+ every spelling a script may use into exactly this.
+
+ @return? js::THREW
+*>
+macro field_numbers(js::Engine* js, js::Value obj, js::Key key, $Type) @local
 {
 	$Type out;
-	qjs::Value value = js.property(object, name);
-	defer js.release(value);
-	if (value.is_undefined() || value.is_null()) return out;
-	for (uint i = 0; i < $count; i++)
+	js::Value list = js.get(obj, key)!;
+	if (list.is_nullish()) return out;
+	for (int i = 0; i < $Type::len; i++)
 	{
-		qjs::Value slot = js.index(value, i);
-		defer js.release(slot);
-		double n = js.number(slot);
+		double n = js.number(js.get(list, i)!)!;
 		out[i] = (float)(n == n ? n : 0);
 	}
 	return out;
 }
 
-fn Vec2 prop_vec2(qjs::Context* js, qjs::Value object, ZString name) @local
-{
-	return read_numbers(js, object, name, Vec2, 2);
-}
+<*
+ @return? js::THREW
+*>
+fn Vec2? field_vec2(js::Engine* js, js::Value obj, js::Key key) @local => field_numbers(js, obj, key, Vec2);
 
-fn Vec4 prop_vec4(qjs::Context* js, qjs::Value object, ZString name) @local
+<*
+ @return? js::THREW
+*>
+fn Vec4? field_vec4(js::Engine* js, js::Value obj, js::Key key) @local => field_numbers(js, obj, key, Vec4);
+
+<*
+ A callback property, held when it is a function. Held because a widget calls
+ back on some later frame, from inside `process_input`, long after the tree the
+ script wrote is gone.
+
+ @return? js::THREW
+*>
+fn js::Root? take_handler(js::Engine* js, js::Value obj, js::Key key) @local
 {
-	return read_numbers(js, object, name, Vec4, 4);
+	js::Value v = js.get(obj, key)!;
+	return v.is_function() ? js.hold(v) : js::NO_ROOT;
 }
 
 <*
- A callback property, retained when it is a function.
+ Runs the body for each entry of the array at obj[key]; nothing when absent.
 
- Retained here rather than by the caller because the reference has to outlive the
- call that installed it — a widget calls back on some later frame, from inside
- `process_input`, and by then the tree the script wrote is long gone.
+ @return? js::THREW
 *>
-fn bool take_handler(qjs::Context* js, qjs::Value object, ZString name, qjs::Value* out) @local
+macro void? @each_entry(js::Engine* js, js::Value obj, js::Key key; @body(js::Value entry)) @local
 {
-	qjs::Value value = js.property(object, name);
-	if (!js.is_function(value))
+	js::Value list = js.get(obj, key)!;
+	if (list.is_nullish()) return;
+	long count = js.length(list)!;
+	for (long i = 0; i < count; i++)
 	{
-		js.release(value);
-		return false;
+		@body(js.get(list, i)!);
 	}
-	*out = value;
-	return true;
 }
 
 // ============================================================================
@@ -246,14 +471,15 @@ fn bool take_handler(qjs::Context* js, qjs::Value object, ZString name, qjs::Val
  interface needs a device" and one place the listener is wired — a `reload`
  builds a new runtime against the same `Renderer`, and the layer must end up
  pointing at the new one rather than at the address the old one had.
+
+ @return? js::THREW
 *>
-fn UiLayer*? JsRuntime.ui_layer(&self, qjs::Context* js, qjs::Value* out)
+fn UiLayer*? JsRuntime.ui_layer(&self)
 {
-	if (!self.needs_device(js, "drawing an interface", out)) return UI_NO_DEVICE~;
+	if (self.renderer == null) return self.js.fail("drawing an interface needs a GPU device and this context has none")~;
 	if (catch self.renderer.ui.ensure(&self.renderer.gpu, &self.renderer.target))
 	{
-		*out = js.raise("the interface layer could not start — the font or its pipeline failed to load");
-		return UI_NO_DEVICE~;
+		return self.js.fail("the interface layer could not start — the font or its pipeline failed to load")~;
 	}
 	self.renderer.ui.on_event(&js_ui_event, self);
 	self.renderer.ui.on_query(&js_ui_query);
@@ -266,141 +492,99 @@ fn UiLayer*? JsRuntime.ui_layer(&self, qjs::Context* js, qjs::Value* out)
  Null empties it. A tree that fails to read leaves the live one exactly as it
  was: `begin_tree` builds into a table nothing is looking at, and `abandon_tree`
  throws that away without the interface flickering.
-*>
-fn void js_ui_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
+ @return? js::THREW
+*>
+fn void? js_ui_set(JsRuntime* self, js::Value tree)
+{
 	// A handler that rebuilds the tree it was called from would restructure the
 	// one cui is dispatching on. Held instead, and applied by `flush_ui` the
 	// moment `process_input` returns — which is the same frame, so a button that
 	// swaps the panel still swaps it before anything is drawn.
 	if (self.ui_dispatching)
 	{
-		self.hold_ui_tree(&js, argc > 0 ? args[0] : qjs::undefined_value());
+		self.hold_ui_tree(tree);
 		return;
 	}
-
-	if (argc < 1 || args[0].is_undefined() || args[0].is_null())
+	if (tree.is_nullish())
 	{
 		self.drop_ui_tree();
 		return;
 	}
-
 	@pool()
 	{
-		self.apply_ui_tree(&js, args[0], out);
+		self.apply_ui_tree(tree)!;
 	};
 }
 
-<*
- `three.ui.clear()` — take the interface down, leaving the debug line alone.
-*>
-fn void js_ui_clear(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+// `three.ui.clear()` — take the interface down, leaving the debug line alone.
+fn void js_ui_clear(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
 	if (self.ui_dispatching)
 	{
-		qjs::Context js = qjs::wrap(ctx);
-		self.hold_ui_tree(&js, qjs::undefined_value());
+		self.hold_ui_tree(js::UNDEFINED);
 		return;
 	}
 	self.drop_ui_tree();
 }
 
 <*
- `three.ui.measure(text, font, size)` — what a string will take, in pixels.
+ `three.ui.measure(text, font, size)` — what a string will take, in pixels, as
+ `[width, height]`.
 
  Drawing text by hand is useless without it: centring a readout inside an arc is
  arithmetic on a measured width, and this is the measurement cui itself uses when
  it lays the glyphs down.
+
+ @return? js::THREW
 *>
-fn void js_ui_measure(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn Vec2? js_ui_measure(JsRuntime* self, String text, int font, float size)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	UiLayer* layer = self.ui_layer(&js, out) ?? null;
-	if (layer == null) return;
-
-	@pool()
-	{
-		String text = arg_text(&js, argc, args, 0, tmem);
-		uint font   = (uint)math::max(arg_int(&js, argc, args, 1), 0);
-		float size  = arg_float(&js, argc, args, 2);
-
-		Vec2 taken = layer.measure(&self.renderer.gpu, &self.renderer.target, text, font, size) ?? (Vec2){ 0, 0 };
-		qjs::Value pair = js.array();
-		js.set_index(pair, 0, qjs::number_value((double)taken.x));
-		js.set_index(pair, 1, qjs::number_value((double)taken.y));
-		*out = pair;
-	};
+	UiLayer* layer = self.ui_layer()!;
+	return layer.measure(&self.renderer.gpu, &self.renderer.target, text, (uint)math::max(font, 0), size) ?? (Vec2){ 0, 0 };
 }
 
 <*
  `three.ui.slot` — whether the application has offered a place to draw, and how
  big it is.
 
- The read half of `UiLayer.set_slot`. A snapshot does not survive
- the slot it was grafted into, so a panel written against an editor watches
- `generation` and re-`set`s when it moves — a pane switched away from and back
- is a different element, and the number is how a script hears about it.
+ The read half of `UiLayer.set_slot`. A snapshot does not survive the slot it
+ was grafted into, so a panel written against an editor watches `generation` and
+ re-`set`s when it moves — a pane switched away from and back is a different
+ element, and the number is how a script hears about it.
+*>
+struct UiSlot
+{
+	bool present;
+	// Reported whether or not there is a slot, because the bump that matters
+	// most is the one where an offer was withdrawn.
+	uint generation;
+	// The pane's corner in window points, which is what turns a `three.input`
+	// pointer reading into a position inside a panel — see `UiLayer.slot_origin`.
+	float x;
+	float y;
+	float width;
+	float height;
+}
 
+<*
  Deliberately not routed through `ui_layer`: asking where a panel may go must
  not bring a GPU device up, because the answer for a context without one is
  "nowhere" and that is not an error.
 *>
-fn void js_ui_slot(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn UiSlot js_ui_slot(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
 	bool present = self.renderer != null && self.renderer.ui.slot != null;
 	Vec2 size = present ? self.renderer.ui.slot_size() : (Vec2){ 0, 0 };
-	// The pane's corner in window points, which is what turns a `three.input`
-	// pointer reading into a position inside a panel — see `UiLayer.slot_origin`.
 	Vec2 origin = present ? self.renderer.ui.slot_origin() : (Vec2){ 0, 0 };
-	// Reported whether or not there is a slot, because the bump that matters most
-	// is the one where an offer was withdrawn.
-	uint generation = self.renderer == null ? 0 : self.renderer.ui.slot_generation;
-
-	qjs::Value answer = js.object();
-	js.set_property(answer, "present", qjs::bool_value(present));
-	js.set_property(answer, "generation", qjs::number_value((double)generation));
-	js.set_property(answer, "x", qjs::number_value((double)origin.x));
-	js.set_property(answer, "y", qjs::number_value((double)origin.y));
-	js.set_property(answer, "width", qjs::number_value((double)size.x));
-	js.set_property(answer, "height", qjs::number_value((double)size.y));
-	*out = answer;
+	return {
+		.present = present,
+		.generation = self.renderer == null ? 0 : self.renderer.ui.slot_generation,
+		.x = origin.x,
+		.y = origin.y,
+		.width = size.x,
+		.height = size.y,
+	};
 }
 
 <*
@@ -416,38 +600,20 @@ fn void js_ui_slot(
  Deliberately not routed through `ui_layer`, for `js_ui_slot`'s reason: asking
  how big the interface is drawn must not bring a GPU device up. A context with
  no renderer answers 1 and remembers nothing, because it has nothing to draw.
+
+ @return? js::THREW
 *>
-fn void js_ui_scale(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn double? js_ui_scale(JsRuntime* self, js::Call* c, js::Value wanted)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	if (self.renderer == null)
+	if (self.renderer == null) return 1.0;
+	if (c.args.len > 0)
 	{
-		*out = qjs::number_value(1.0);
-		return;
+		float scale = (float)self.js.number(wanted)!;
+		if (!(scale > 0)) return self.js.fail("three.ui.scale wants a positive number — 1 is the size everything else is written against")~;
+		self.renderer.ui.set_scale(scale);
 	}
-
-	if (argc > 0)
-	{
-		float wanted = arg_float(&js, argc, args, 0);
-		if (!(wanted > 0))
-		{
-			*out = js.raise("three.ui.scale wants a positive number — 1 is the size everything else is written against");
-			return;
-		}
-		self.renderer.ui.set_scale(wanted);
-	}
-
 	float now = self.renderer.ui.scale;
-	*out = qjs::number_value((double)(now > 0 ? now : 1.0));
+	return now > 0 ? now : 1.0;
 }
 
 <*
@@ -456,114 +622,93 @@ fn void js_ui_scale(
  The retained half of the API, keyed by string rather than by handle: a HUD that
  rebuilt its tree to change one number would be spending every frame doing the
  one thing a retained interface exists to avoid.
-*>
-fn void js_ui_patch(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	UiLayer* layer = self.ui_layer(&js, out) ?? null;
-	if (layer == null) return;
-	if (argc < 2)
+ @return? js::THREW
+*>
+fn void? js_ui_patch(JsRuntime* self, js::Call* c, String key, js::Value props)
+{
+	UiLayer* layer = self.ui_layer()!;
+	if (c.args.len < 2) return self.js.fail("three.ui.patch(key, props) wants a key and the fields to write")~;
+
+	uint? node = layer.node_for(key);
+	if (catch node)
 	{
-		*out = js.raise("three.ui.patch(key, props) wants a key and the fields to write");
-		return;
+		return self.js.fail("three.ui.patch: nothing in the interface is keyed '%s'. "
+			"A key only exists between the three.ui.set that named it and the next one",
+			key)~;
 	}
 
-	@pool()
-	{
-		String key = arg_text(&js, argc, args, 0, tmem);
-
-		uint? node = layer.node_for(key);
-		if (catch node)
-		{
-			*out = js.raisef("three.ui.patch: nothing in the interface is keyed '%s'. "
-				"A key only exists between the three.ui.set that named it and the next one",
-				key);
-			return;
-		}
-
-		qjs::Value props = args[1];
-		UiPatch fields = {
-			.has_text = has_prop(&js, props, "text"),
-			.text = prop_text(&js, props, "text", tmem),
-			.has_value = has_prop(&js, props, "value"),
-			.value = prop_float(&js, props, "value"),
-			.has_checked = has_prop(&js, props, "checked"),
-			.checked = prop_truth(&js, props, "checked"),
-			.has_selected = has_prop(&js, props, "selected"),
-			.selected = (usz)math::max(prop_number(&js, props, "selected"), 0.0),
-			.has_offset = has_prop(&js, props, "offset"),
-			.offset = prop_float(&js, props, "offset"),
-			.has_disabled = has_prop(&js, props, "disabled"),
-			.disabled = prop_truth(&js, props, "disabled"),
-			.has_color = has_prop(&js, props, "color"),
-			.color = prop_vec4(&js, props, "color"),
-			.has_min = has_prop(&js, props, "min"),
-			.min = prop_float(&js, props, "min"),
-			.has_max = has_prop(&js, props, "max"),
-			.max = prop_float(&js, props, "max"),
-			.has_size = has_prop(&js, props, "size"),
-			.size = prop_vec2(&js, props, "size"),
-			.has_view = has_prop(&js, props, "pan"),
-			.pan = prop_vec2(&js, props, "pan"),
-			.zoom = prop_float(&js, props, "zoom"),
-			.has_at = has_prop(&js, props, "at"),
-			.at = prop_vec2(&js, props, "at"),
-		};
-		layer.patch(node, fields);
-
-		// The three list-valued fields, which are a replacement rather than a
-		// write: the node's old strings go, the new ones are copied in, and the
-		// widget is re-pointed at an array that has stopped growing.
-		bool relist;
-		if (has_prop(&js, props, "ops"))
-		{
-			layer.reset_list(node);
-			read_ops(&js, layer, props, node);
-			relist = true;
-		}
-		else if (has_prop(&js, props, "options"))
-		{
-			layer.reset_list(node);
-			read_options(&js, layer, props, node);
-			relist = true;
-		}
-		else if (has_prop(&js, props, "rows"))
-		{
-			layer.reset_list(node);
-			read_rows(&js, layer, props, node);
-			relist = true;
-		}
-		else if (has_prop(&js, props, "menus"))
-		{
-			layer.reset_list(node);
-			read_menus(&js, layer, props, node);
-			relist = true;
-		}
-		else if (has_prop(&js, props, "items"))
-		{
-			layer.reset_list(node);
-			read_entries(&js, layer, props, node);
-			relist = true;
-		}
-		else if (has_prop(&js, props, "nodes") || has_prop(&js, props, "ports") || has_prop(&js, props, "wires"))
-		{
-			// The three share the node's strings, so a patch naming one is a
-			// reset of all three — the two it did not name are put back as they
-			// were.
-			relist_graph(&js, layer, props, node);
-			relist = true;
-		}
-		if (relist) layer.relist(node);
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	UiPatch fields = {
+		.has_text = has_field(js, props, k.text)!,
+		.text = field_text(js, props, k.text)!,
+		.has_value = has_field(js, props, k.value)!,
+		.value = field_float(js, props, k.value)!,
+		.has_checked = has_field(js, props, k.checked)!,
+		.checked = field_truth(js, props, k.checked)!,
+		.has_selected = has_field(js, props, k.selected)!,
+		.selected = field_uint(js, props, k.selected)!,
+		.has_offset = has_field(js, props, k.offset)!,
+		.offset = field_float(js, props, k.offset)!,
+		.has_disabled = has_field(js, props, k.disabled)!,
+		.disabled = field_truth(js, props, k.disabled)!,
+		.has_color = has_field(js, props, k.color)!,
+		.color = field_vec4(js, props, k.color)!,
+		.has_min = has_field(js, props, k.min)!,
+		.min = field_float(js, props, k.min)!,
+		.has_max = has_field(js, props, k.max)!,
+		.max = field_float(js, props, k.max)!,
+		.has_size = has_field(js, props, k.size)!,
+		.size = field_vec2(js, props, k.size)!,
+		.has_view = has_field(js, props, k.pan)!,
+		.pan = field_vec2(js, props, k.pan)!,
+		.zoom = field_float(js, props, k.zoom)!,
+		.has_at = has_field(js, props, k.at)!,
+		.at = field_vec2(js, props, k.at)!,
 	};
+	layer.patch(node, fields);
+
+	// The list-valued fields, which are a replacement rather than a write: the
+	// node's old strings go, the new ones are copied in, and the widget is
+	// re-pointed at an array that has stopped growing.
+	bool relist = true;
+	if (has_field(js, props, k.ops)!)
+	{
+		layer.reset_list(node);
+		self.read_ops(props, node)!;
+	}
+	else if (has_field(js, props, k.options)!)
+	{
+		layer.reset_list(node);
+		self.read_options(props, node)!;
+	}
+	else if (has_field(js, props, k.rows)!)
+	{
+		layer.reset_list(node);
+		self.read_rows(props, node)!;
+	}
+	else if (has_field(js, props, k.menus)!)
+	{
+		layer.reset_list(node);
+		self.read_menus(props, node)!;
+	}
+	else if (has_field(js, props, k.items)!)
+	{
+		layer.reset_list(node);
+		self.read_entries(props, node)!;
+	}
+	else if (has_field(js, props, k.nodes)! || has_field(js, props, k.ports)! || has_field(js, props, k.wires)!)
+	{
+		// The three share the node's strings, so a patch naming one is a reset
+		// of all three — the two it did not name are put back as they were.
+		self.relist_graph(props, node)!;
+	}
+	else
+	{
+		relist = false;
+	}
+	if (relist) layer.relist(node);
 }
 
 // ============================================================================
@@ -574,32 +719,30 @@ fn void js_ui_patch(
  Builds the whole snapshot and swaps it in, or leaves the interface untouched.
 
  The handler table is built alongside the nodes and installed only on success,
- which is what makes a half-read tree cost nothing: the retained functions are
- released and the node table is thrown away together.
-*>
-fn void JsRuntime.apply_ui_tree(&self, qjs::Context* js, qjs::Value tree, qjs::Value* out)
-{
-	UiLayer* layer = self.ui_layer(js, out) ?? null;
-	if (layer == null) return;
+ which is what makes a half-read tree cost nothing: the held functions are
+ dropped and the node table is thrown away together.
 
+ @return? js::THREW
+*>
+fn void? JsRuntime.apply_ui_tree(&self, js::Value tree)
+{
+	UiLayer* layer = self.ui_layer()!;
 	if (catch layer.begin_tree(&self.renderer.gpu, &self.renderer.target))
 	{
-		*out = js.raise("the interface layer could not start");
-		return;
+		return self.js.fail("the interface layer could not start")~;
 	}
 
 	List{UiHandlers} handlers;
 	handlers.tinit(8);
 
-	if (catch err = self.read_node(js, tree, -1, &handlers))
+	if (catch self.read_node(tree, -1, &handlers))
 	{
-		foreach (i, handler : handlers) handlers[i].release(js);
+		foreach (&handler : handlers) handler.drop(self.js);
 		layer.abandon_tree();
-		*out = js.raise(
+		return self.js.fail(
 			"three.ui.set was handed a node the interface does not recognise — every node needs a type, "
 			"and a child list has to be an array of nodes"
-		);
-		return;
+		)~;
 	}
 
 	layer.commit_tree();
@@ -667,6 +810,33 @@ fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
 }
 
 <*
+ Every handler a node attached, held. On a failure nothing stays held.
+
+ @return? js::THREW
+*>
+fn UiHandlers? JsRuntime.take_ui_handlers(&self, js::Value value)
+{
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	UiHandlers taken;
+	defer (catch err) taken.drop(js);
+	taken.on_click = take_handler(js, value, k.on_click)!;
+	taken.on_change = take_handler(js, value, k.on_change)!;
+	taken.on_commit = take_handler(js, value, k.on_commit)!;
+	taken.on_submit = take_handler(js, value, k.on_submit)!;
+	taken.on_select = take_handler(js, value, k.on_select)!;
+	taken.on_toggle = take_handler(js, value, k.on_toggle)!;
+	taken.on_hover = take_handler(js, value, k.on_hover)!;
+	taken.on_confirm = take_handler(js, value, k.on_confirm)!;
+	taken.on_dismiss = take_handler(js, value, k.on_dismiss)!;
+	taken.on_choose = take_handler(js, value, k.on_choose)!;
+	taken.on_pointer = take_handler(js, value, k.on_pointer)!;
+	taken.on_graph = take_handler(js, value, k.on_graph)!;
+	taken.can_connect = take_handler(js, value, k.can_connect)!;
+	return taken;
+}
+
+<*
  One node and everything under it, depth first.
 
  Pre-order because that is the order `push_node` hands out the indices children
@@ -674,111 +844,82 @@ fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
  appended to it.
 
  @param parent : `The index this node hangs under, or -1 for the tree's own root.`
+ @return? js::THREW, UI_BAD_PARENT
 *>
-fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int parent, List{UiHandlers}* handlers)
+fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers}* handlers)
 {
 	UiLayer* layer = &self.renderer.ui;
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
 
-	int kind = (int)prop_number(js, value, "k", -1);
-	if (kind < 0 || kind > UiNodeKind.CONTEXT_MENU.ordinal) return UI_BAD_PARENT~;
+	if (!value.is_object()) return UI_BAD_PARENT~;
+	usz kind = ordinal_named(&UI_KIND_NAMES, field_text(js, value, k.type)!)!;
 
 	UiNodeSpec spec = {
-		.kind = UiNodeKind::from_ordinal((usz)kind),
-		.key = prop_text(js, value, "key", tmem),
+		.kind = UiNodeKind::from_ordinal(kind),
+		.key = field_text(js, value, k.key)!,
 
-		.gap = prop_float(js, value, "gap"),
-		.gap_y = prop_float(js, value, "gapY"),
-		.size = prop_vec2(js, value, "size"),
-		.cell = prop_vec2(js, value, "cell"),
-		.main_align = (uint)math::max(prop_number(js, value, "main"), 0.0),
-		.cross_align = (uint)math::max(prop_number(js, value, "cross"), 0.0),
-		.insets = prop_vec4(js, value, "insets"),
-		.radii = prop_vec4(js, value, "radii"),
-		.margin = prop_vec2(js, value, "margin"),
-		.anchor_h = (uint)math::max(prop_number(js, value, "ah"), 0.0),
-		.anchor_v = (uint)math::max(prop_number(js, value, "av"), 0.0),
-		.solid = prop_truth(js, value, "solid"),
-		.wrap = prop_truth(js, value, "wrap"),
-		.multiline = prop_truth(js, value, "multiline"),
-		.modal = prop_truth(js, value, "modal"),
-		.close_outside = prop_truth(js, value, "closeOutside"),
+		.gap = field_float(js, value, k.gap)!,
+		.gap_y = field_float(js, value, k.gap_y)!,
+		.size = field_vec2(js, value, k.size)!,
+		.cell = field_vec2(js, value, k.cell)!,
+		.main_align = align_ordinal(field_text(js, value, k.main)!),
+		.cross_align = align_ordinal(field_text(js, value, k.cross)!),
+		.insets = field_vec4(js, value, k.insets)!,
+		.radii = field_vec4(js, value, k.radii)!,
+		.margin = field_vec2(js, value, k.margin)!,
+		.anchor_h = align_ordinal(field_text(js, value, k.h)!),
+		.anchor_v = align_ordinal(field_text(js, value, k.v)!),
+		.solid = field_truth(js, value, k.solid)!,
+		.wrap = field_truth(js, value, k.wrap)!,
+		.multiline = field_truth(js, value, k.multiline)!,
+		.modal = field_truth(js, value, k.modal)!,
+		.close_outside = field_truth(js, value, k.close_outside)!,
 
-		.color = prop_vec4(js, value, "color"),
-		.border_color = prop_vec4(js, value, "borderColor"),
-		.border_width = prop_float(js, value, "borderWidth"),
-		.accent = prop_vec4(js, value, "accent"),
-		.hover_color = prop_vec4(js, value, "hoverColor"),
-		.press_color = prop_vec4(js, value, "pressColor"),
-		.text_color = prop_vec4(js, value, "textColor"),
+		.color = field_vec4(js, value, k.color)!,
+		.border_color = field_vec4(js, value, k.border_color)!,
+		.border_width = field_float(js, value, k.border_width)!,
+		.accent = field_vec4(js, value, k.accent)!,
+		.hover_color = field_vec4(js, value, k.hover_color)!,
+		.press_color = field_vec4(js, value, k.press_color)!,
+		.text_color = field_vec4(js, value, k.text_color)!,
 
-		.text = prop_text(js, value, "text", tmem),
-		.suffix = prop_text(js, value, "suffix", tmem),
-		.title = prop_text(js, value, "title", tmem),
-		.confirm_label = prop_text(js, value, "confirm", tmem),
-		.decline_label = prop_text(js, value, "decline", tmem),
-		.font = (uint)math::max(prop_number(js, value, "font"), 0.0),
-		.text_size = prop_float(js, value, "textSize"),
+		.text = field_text(js, value, k.text)!,
+		.suffix = field_text(js, value, k.suffix)!,
+		.title = field_text(js, value, k.title)!,
+		.confirm_label = field_text(js, value, k.confirm)!,
+		.decline_label = field_text(js, value, k.decline)!,
+		.font = field_uint(js, value, k.font)!,
+		.text_size = field_float(js, value, k.text_size)!,
 
-		.value = prop_float(js, value, "value"),
-		.min = prop_float(js, value, "min"),
-		.max = prop_float(js, value, "max"),
-		.step = prop_float(js, value, "step"),
-		.curve = prop_float(js, value, "curve"),
-		.offset = prop_float(js, value, "offset"),
-		.decimals = (uint)math::max(prop_number(js, value, "decimals"), 0.0),
-		.checked = prop_truth(js, value, "checked"),
-		.disabled = prop_truth(js, value, "disabled"),
-		.selected = (usz)math::max(prop_number(js, value, "selected"), 0.0),
+		.value = field_float(js, value, k.value)!,
+		.min = field_float(js, value, k.min)!,
+		.max = field_float(js, value, k.max)!,
+		.step = field_float(js, value, k.step)!,
+		.curve = field_float(js, value, k.curve)!,
+		.offset = field_float(js, value, k.offset)!,
+		.decimals = field_uint(js, value, k.decimals)!,
+		.checked = field_truth(js, value, k.checked)!,
+		.disabled = field_truth(js, value, k.disabled)!,
+		.selected = field_uint(js, value, k.selected)!,
 
-		.has_text = has_prop(js, value, "text"),
-		.has_value = has_prop(js, value, "value"),
-		.has_checked = has_prop(js, value, "checked"),
-		.has_selected = has_prop(js, value, "selected"),
-		.has_offset = has_prop(js, value, "offset"),
+		.has_text = has_field(js, value, k.text)!,
+		.has_value = has_field(js, value, k.value)!,
+		.has_checked = has_field(js, value, k.checked)!,
+		.has_selected = has_field(js, value, k.selected)!,
+		.has_offset = has_field(js, value, k.offset)!,
 
-		.pan = prop_vec2(js, value, "pan"),
-		.zoom = prop_float(js, value, "zoom"),
-		.has_view = has_prop(js, value, "pan"),
-		.searchable = prop_truth(js, value, "searchable"),
-		.graph_plane = prop_vec4(js, value, "planeColor"),
-		.graph_grid = prop_vec4(js, value, "gridColor"),
-		.graph_card = prop_vec4(js, value, "cardColor"),
-		.graph_header = prop_vec4(js, value, "headerColor"),
-		.graph_border = prop_vec4(js, value, "cardBorder"),
+		.pan = field_vec2(js, value, k.pan)!,
+		.zoom = field_float(js, value, k.zoom)!,
+		.has_view = has_field(js, value, k.pan)!,
+		.searchable = field_truth(js, value, k.searchable)!,
+		.graph_plane = field_vec4(js, value, k.plane_color)!,
+		.graph_grid = field_vec4(js, value, k.grid_color)!,
+		.graph_card = field_vec4(js, value, k.card_color)!,
+		.graph_header = field_vec4(js, value, k.header_color)!,
+		.graph_border = field_vec4(js, value, k.card_border)!,
 	};
-
-	UiHandlers taken;
-	taken.has_click  = take_handler(js, value, "onClick", &taken.click);
-	taken.has_change = take_handler(js, value, "onChange", &taken.change);
-	taken.has_commit = take_handler(js, value, "onCommit", &taken.commit);
-	taken.has_submit = take_handler(js, value, "onSubmit", &taken.submit);
-	taken.has_select = take_handler(js, value, "onSelect", &taken.select);
-	taken.has_toggle = take_handler(js, value, "onToggle", &taken.toggle);
-	taken.has_hover  = take_handler(js, value, "onHover", &taken.hover);
-	taken.has_confirm = take_handler(js, value, "onConfirm", &taken.confirm);
-	taken.has_dismiss = take_handler(js, value, "onDismiss", &taken.dismiss);
-	taken.has_choose  = take_handler(js, value, "onChoose", &taken.choose);
-	taken.has_pointer = take_handler(js, value, "onPointer", &taken.pointer);
-	taken.has_graph = take_handler(js, value, "onGraph", &taken.graph);
-	taken.has_query = take_handler(js, value, "canConnect", &taken.query);
-
-	spec.on_click  = taken.has_click;
-	spec.on_change = taken.has_change;
-	spec.on_commit = taken.has_commit;
-	spec.on_submit = taken.has_submit;
-	spec.on_select = taken.has_select;
-	spec.on_toggle = taken.has_toggle;
-	spec.on_hover  = taken.has_hover;
-	spec.on_confirm = taken.has_confirm;
-	spec.on_dismiss = taken.has_dismiss;
-	spec.on_choose  = taken.has_choose;
-	spec.on_pointer = taken.has_pointer;
-	spec.on_graph = taken.has_graph;
-	spec.on_query = taken.has_query;
-	// A pan reported only to a graph that asked: it fires every frame of a
-	// drag, and a script that does not keep the view would re-render for
-	// nothing on each one.
-	spec.on_view = taken.has_graph && prop_truth(js, value, "graphView");
+	bool graph_view = field_truth(js, value, k.graph_view)!;
 
 	// Where a `fileBrowser` may look, decided here and enforced in
 	// `render/ui.c3`. This file is the one that knows what an assets directory
@@ -786,15 +927,32 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	// beside the widget it confines.
 	if (spec.kind == UiNodeKind.FILE_BROWSER) self.confine_browser(&spec);
 
-	// A Tree reports the two edges with different verbs; the JS side spells them
-	// onSelect and onToggle, and `UiNodeSpec` keeps them apart for the same
-	// reason a Slider's change and commit are apart — a binding that offered only
-	// one would make the other impossible.
+	// Last of the reads, so nothing that can fail runs while they are held
+	// outside the table.
+	UiHandlers taken = self.take_ui_handlers(value)!;
+	spec.on_click = taken.on_click != js::NO_ROOT;
+	spec.on_change = taken.on_change != js::NO_ROOT;
+	spec.on_commit = taken.on_commit != js::NO_ROOT;
+	spec.on_submit = taken.on_submit != js::NO_ROOT;
+	spec.on_select = taken.on_select != js::NO_ROOT;
+	spec.on_toggle = taken.on_toggle != js::NO_ROOT;
+	spec.on_hover = taken.on_hover != js::NO_ROOT;
+	spec.on_confirm = taken.on_confirm != js::NO_ROOT;
+	spec.on_dismiss = taken.on_dismiss != js::NO_ROOT;
+	spec.on_choose = taken.on_choose != js::NO_ROOT;
+	spec.on_pointer = taken.on_pointer != js::NO_ROOT;
+	spec.on_graph = taken.on_graph != js::NO_ROOT;
+	spec.on_query = taken.can_connect != js::NO_ROOT;
+	// A pan reported only to a graph that asked: it fires every frame of a
+	// drag, and a script that does not keep the view would re-render for
+	// nothing on each one.
+	spec.on_view = spec.on_graph && graph_view;
+
 	uint? index = layer.push_node(spec, parent);
-	if (catch index)
+	if (catch err = index)
 	{
-		taken.release(js);
-		return UI_BAD_PARENT~;
+		taken.drop(js);
+		return err~;
 	}
 
 	// One entry per node, in the order the nodes were pushed. The table has to
@@ -805,96 +963,82 @@ fn void? JsRuntime.read_node(&self, qjs::Context* js, qjs::Value value, int pare
 	switch (spec.kind)
 	{
 		case DRAW:
-			read_ops(js, layer, value, index);
+			self.read_ops(value, index)!;
 		case SELECT:
-			read_options(js, layer, value, index);
+			self.read_options(value, index)!;
 		case TREE:
-			read_rows(js, layer, value, index);
+			self.read_rows(value, index)!;
 		case MENU:
-			read_menus(js, layer, value, index);
+			self.read_menus(value, index)!;
 		case FILE_BROWSER:
 			// The mask rides on `options` because it is the same thing: a
 			// borrowed `String[]` the snapshot fills in, and a second pair of
 			// push verbs for it would differ from `push_option` by nothing.
-			read_options(js, layer, value, index);
+			self.read_options(value, index)!;
 		case NODE_GRAPH:
-			read_graph_nodes(js, layer, value, index);
-			read_graph_ports(js, layer, value, index);
-			read_graph_wires(js, layer, value, index);
+			self.read_graph_nodes(value, index)!;
+			self.read_graph_ports(value, index)!;
+			self.read_graph_wires(value, index)!;
 		case CONTEXT_MENU:
-			read_entries(js, layer, value, index);
+			self.read_entries(value, index)!;
 		default:
 			break;
 	}
 
-	qjs::Value children = js.property(value, "ch");
-	defer js.release(children);
-	long count = children.is_undefined() || children.is_null() ? 0 : js.length(children);
-	for (long i = 0; i < count; i++)
+	@each_entry(js, value, k.children; js::Value child)
 	{
-		qjs::Value child = js.index(children, (uint)i);
-		defer js.release(child);
-		self.read_node(js, child, (int)index, handlers)!;
-	}
+		self.read_node(child, (int)index, handlers)!;
+	}!;
 }
 
 <*
- A `draw` node's op list, in paint order.
+ A `draw` node's op list, in paint order. Every field is read whether or not
+ the op uses it: a missing one reads as zero, which is what the painter wants.
 
- The `o` field is the op kind as `js/prelude/ui.js` numbered it; everything else
- is read by name whether or not the kind uses it, because a zero costs a read and
- a switch per field costs seven.
+ @return? js::THREW
 *>
-fn void read_ops(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_ops(&self, js::Value node, uint index)
 {
-	qjs::Value ops = js.property(node, "ops");
-	defer js.release(ops);
-	long count = ops.is_undefined() || ops.is_null() ? 0 : js.length(ops);
-
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	UiLayer* layer = &self.renderer.ui;
+	@each_entry(js, node, k.ops; js::Value entry)
 	{
-		qjs::Value entry = js.index(ops, (uint)i);
-		defer js.release(entry);
-
-		int kind = (int)prop_number(js, entry, "o", -1);
-		if (kind < 0 || kind > UiOpKind.IMAGE.ordinal) continue;
-
-		layer.push_op(
-			index,
-			{
-				.kind = UiOpKind::from_ordinal((usz)kind),
-				.at = prop_vec2(js, entry, "at"),
-				.to = prop_vec2(js, entry, "to"),
-				.radius = prop_float(js, entry, "r"),
-				.thickness = prop_float(js, entry, "th"),
-				.start = prop_float(js, entry, "s"),
-				.sweep = prop_float(js, entry, "sw"),
-				.blur = prop_float(js, entry, "blur"),
-				.size = prop_float(js, entry, "size"),
-				.font = (uint)math::max(prop_number(js, entry, "font"), 0.0),
-				.color = prop_vec4(js, entry, "color"),
-				.border_color = prop_vec4(js, entry, "borderColor"),
-				.border_width = prop_float(js, entry, "bw"),
-				.corners = prop_vec4(js, entry, "corners"),
-				.text = prop_text(js, entry, "text", tmem),
-				.texture = (uint)math::max(prop_number(js, entry, "tex"), 0.0),
-			}
-		);
-	}
+		// An op this build does not draw is skipped, not refused.
+		usz? kind = ordinal_named(&UI_OP_NAMES, field_text(js, entry, k.op)!);
+		if (try kind)
+		{
+			layer.push_op(index, {
+				.kind = UiOpKind::from_ordinal(kind),
+				.at = field_vec2(js, entry, k.at)!,
+				.to = field_vec2(js, entry, k.to)!,
+				.radius = field_float(js, entry, k.radius)!,
+				.thickness = field_float(js, entry, k.thickness)!,
+				.start = field_float(js, entry, k.start)!,
+				.sweep = field_float(js, entry, k.sweep)!,
+				.blur = field_float(js, entry, k.blur)!,
+				.size = field_float(js, entry, k.size)!,
+				.font = field_uint(js, entry, k.font)!,
+				.color = field_vec4(js, entry, k.color)!,
+				.border_color = field_vec4(js, entry, k.border_color)!,
+				.border_width = field_float(js, entry, k.border_width)!,
+				.corners = field_vec4(js, entry, k.corners)!,
+				.text = field_text(js, entry, k.text)!,
+				.texture = field_uint(js, entry, k.texture)!,
+			});
+		}
+	}!;
 }
 
-fn void read_options(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+<*
+ @return? js::THREW
+*>
+fn void? JsRuntime.read_options(&self, js::Value node, uint index)
 {
-	qjs::Value options = js.property(node, "options");
-	defer js.release(options);
-	long count = options.is_undefined() || options.is_null() ? 0 : js.length(options);
-
-	for (long i = 0; i < count; i++)
+	@each_entry(self.js, node, self.ui_keys.options; js::Value entry)
 	{
-		qjs::Value entry = js.index(options, (uint)i);
-		defer js.release(entry);
-		layer.push_option(index, js.text(entry, tmem));
-	}
+		self.renderer.ui.push_option(index, self.js.text(entry, tmem));
+	}!;
 }
 
 <*
@@ -903,164 +1047,153 @@ fn void read_options(qjs::Context* js, UiLayer* layer, qjs::Value node, uint ind
  One pass rather than two verbs, because the nesting is the whole difference
  between this and `read_options`: an item belongs to the title above it, and the
  layer records that by which `push_menu` was last.
+
+ @return? js::THREW
 *>
-fn void read_menus(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_menus(&self, js::Value node, uint index)
 {
-	qjs::Value menus = js.property(node, "menus");
-	defer js.release(menus);
-	long count = menus.is_undefined() || menus.is_null() ? 0 : js.length(menus);
-
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	UiLayer* layer = &self.renderer.ui;
+	@each_entry(js, node, k.menus; js::Value menu)
 	{
-		qjs::Value menu = js.index(menus, (uint)i);
-		defer js.release(menu);
-		layer.push_menu(index, prop_text(js, menu, "title", tmem));
-
-		qjs::Value items = js.property(menu, "items");
-		defer js.release(items);
-		long entries = items.is_undefined() || items.is_null() ? 0 : js.length(items);
-		for (long at = 0; at < entries; at++)
+		layer.push_menu(index, field_text(js, menu, k.title)!);
+		@each_entry(js, menu, k.items; js::Value item)
 		{
-			qjs::Value item = js.index(items, (uint)at);
-			defer js.release(item);
 			layer.push_menu_item(
 				index,
-				prop_text(js, item, "label", tmem),
-				prop_text(js, item, "shortcut", tmem),
-				prop_truth(js, item, "checked"),
-				prop_truth(js, item, "disabled"),
-				prop_truth(js, item, "separator")
+				field_text(js, item, k.label)!,
+				field_text(js, item, k.shortcut)!,
+				field_truth(js, item, k.checked)!,
+				field_truth(js, item, k.disabled)!,
+				field_truth(js, item, k.separator)!
 			);
-		}
-	}
-}
-
-fn void read_rows(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
-{
-	qjs::Value rows = js.property(node, "rows");
-	defer js.release(rows);
-	long count = rows.is_undefined() || rows.is_null() ? 0 : js.length(rows);
-
-	for (long i = 0; i < count; i++)
-	{
-		qjs::Value entry = js.index(rows, (uint)i);
-		defer js.release(entry);
-		layer.push_row(
-			index,
-			prop_text(js, entry, "label", tmem),
-			prop_text(js, entry, "trailing", tmem),
-			(usz)math::max(prop_number(js, entry, "depth"), 0.0),
-			prop_truth(js, entry, "expandable"),
-			prop_truth(js, entry, "expanded")
-		);
-	}
+		}!;
+	}!;
 }
 
 <*
- A `nodeGraph`'s nodes, as `js/prelude/ui.js` normalised them: `pos`, `width`,
- `title`, `tag`, `header` (a colour), `flags` as bits — selected 1, error 2,
- running 4, muted 8 — and `progress`.
+ @return? js::THREW
 *>
-fn void read_graph_nodes(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
 {
-	qjs::Value list = js.property(node, "nodes");
-	defer js.release(list);
-	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	@each_entry(js, node, k.rows; js::Value entry)
 	{
-		qjs::Value entry = js.index(list, (uint)i);
-		defer js.release(entry);
-		uint flags = (uint)math::max(prop_number(js, entry, "flags"), 0.0);
-		layer.push_graph_node(index, {
-			.pos = prop_vec2(js, entry, "pos"),
-			.width = prop_float(js, entry, "width"),
-			.title = prop_text(js, entry, "title", tmem),
-			.tag = prop_text(js, entry, "tag", tmem),
-			.header = prop_vec4(js, entry, "header"),
-			.flags = flags,
-			.progress = prop_float(js, entry, "progress"),
+		self.renderer.ui.push_row(
+			index,
+			field_text(js, entry, k.label)!,
+			field_text(js, entry, k.trailing)!,
+			(usz)field_uint(js, entry, k.depth)!,
+			field_truth(js, entry, k.expandable)!,
+			field_truth(js, entry, k.expanded)!
+		);
+	}!;
+}
+
+<*
+ A `nodeGraph`'s nodes: `pos`, `width`, `title`, `tag`, `header` (a colour),
+ `flags` as bits — selected 1, error 2, running 4, muted 8 — and `progress`.
+
+ @return? js::THREW
+*>
+fn void? JsRuntime.read_graph_nodes(&self, js::Value node, uint index)
+{
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	@each_entry(js, node, k.nodes; js::Value entry)
+	{
+		self.renderer.ui.push_graph_node(index, {
+			.pos = field_vec2(js, entry, k.pos)!,
+			.width = field_float(js, entry, k.width)!,
+			.title = field_text(js, entry, k.title)!,
+			.tag = field_text(js, entry, k.tag)!,
+			.header = field_vec4(js, entry, k.header)!,
+			.flags = field_uint(js, entry, k.flags)!,
+			.progress = field_float(js, entry, k.progress)!,
 		});
-	}
+	}!;
 }
 
 <*
  A `nodeGraph`'s ports: `node`, `output`, `label`, `color`, `square`, `hollow`.
+
+ @return? js::THREW
 *>
-fn void read_graph_ports(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_graph_ports(&self, js::Value node, uint index)
 {
-	qjs::Value list = js.property(node, "ports");
-	defer js.release(list);
-	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	@each_entry(js, node, k.ports; js::Value entry)
 	{
-		qjs::Value entry = js.index(list, (uint)i);
-		defer js.release(entry);
-		layer.push_graph_port(index, {
-			.node = (usz)math::max(prop_number(js, entry, "node"), 0.0),
-			.output = prop_truth(js, entry, "output"),
-			.label = prop_text(js, entry, "label", tmem),
-			.color = prop_vec4(js, entry, "color"),
-			.square = prop_truth(js, entry, "square"),
-			.hollow = prop_truth(js, entry, "hollow"),
+		self.renderer.ui.push_graph_port(index, {
+			.node = field_uint(js, entry, k.node)!,
+			.output = field_truth(js, entry, k.output)!,
+			.label = field_text(js, entry, k.label)!,
+			.color = field_vec4(js, entry, k.color)!,
+			.square = field_truth(js, entry, k.square)!,
+			.hollow = field_truth(js, entry, k.hollow)!,
 		});
-	}
+	}!;
 }
 
 <*
  A `nodeGraph`'s wires: `from` and `to` port indices, `color`, `selected`.
+
+ @return? js::THREW
 *>
-fn void read_graph_wires(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_graph_wires(&self, js::Value node, uint index)
 {
-	qjs::Value list = js.property(node, "wires");
-	defer js.release(list);
-	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	@each_entry(js, node, k.wires; js::Value entry)
 	{
-		qjs::Value entry = js.index(list, (uint)i);
-		defer js.release(entry);
-		layer.push_graph_wire(index, {
-			.from = (usz)math::max(prop_number(js, entry, "from"), 0.0),
-			.to = (usz)math::max(prop_number(js, entry, "to"), 0.0),
-			.color = prop_vec4(js, entry, "color"),
-			.selected = prop_truth(js, entry, "selected"),
+		self.renderer.ui.push_graph_wire(index, {
+			.from = field_uint(js, entry, k.from)!,
+			.to = field_uint(js, entry, k.to)!,
+			.color = field_vec4(js, entry, k.color)!,
+			.selected = field_truth(js, entry, k.selected)!,
 		});
-	}
+	}!;
 }
 
 <*
  Replaces whichever of a `nodeGraph`'s three lists a patch names, and keeps the
  others — see `UiLayer.reset_graph`.
+
+ @return? js::THREW
 *>
-fn void relist_graph(qjs::Context* js, UiLayer* layer, qjs::Value props, uint node) @local
+fn void? JsRuntime.relist_graph(&self, js::Value props, uint node)
 {
-	bool nodes = has_prop(js, props, "nodes");
-	bool ports = has_prop(js, props, "ports");
-	bool wires = has_prop(js, props, "wires");
-	layer.reset_graph(node, nodes, ports, wires);
-	if (nodes) read_graph_nodes(js, layer, props, node);
-	if (ports) read_graph_ports(js, layer, props, node);
-	if (wires) read_graph_wires(js, layer, props, node);
+	UiKeys* k = &self.ui_keys;
+	bool nodes = has_field(self.js, props, k.nodes)!;
+	bool ports = has_field(self.js, props, k.ports)!;
+	bool wires = has_field(self.js, props, k.wires)!;
+	self.renderer.ui.reset_graph(node, nodes, ports, wires);
+	if (nodes) self.read_graph_nodes(props, node)!;
+	if (ports) self.read_graph_ports(props, node)!;
+	if (wires) self.read_graph_wires(props, node)!;
 }
 
 <*
  A `contextMenu`'s entries: `label`, `category`, `hint`, `disabled`.
+
+ @return? js::THREW
 *>
-fn void read_entries(qjs::Context* js, UiLayer* layer, qjs::Value node, uint index) @local
+fn void? JsRuntime.read_entries(&self, js::Value node, uint index)
 {
-	qjs::Value list = js.property(node, "items");
-	defer js.release(list);
-	long count = list.is_undefined() || list.is_null() ? 0 : js.length(list);
-	for (long i = 0; i < count; i++)
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	@each_entry(js, node, k.items; js::Value entry)
 	{
-		qjs::Value entry = js.index(list, (uint)i);
-		defer js.release(entry);
-		layer.push_context_item(index, {
-			.label = prop_text(js, entry, "label", tmem),
-			.category = prop_text(js, entry, "category", tmem),
-			.hint = prop_text(js, entry, "hint", tmem),
-			.disabled = prop_truth(js, entry, "disabled"),
+		self.renderer.ui.push_context_item(index, {
+			.label = field_text(js, entry, k.label)!,
+			.category = field_text(js, entry, k.category)!,
+			.hint = field_text(js, entry, k.hint)!,
+			.disabled = field_truth(js, entry, k.disabled)!,
 		});
-	}
+	}!;
 }
 
 // ============================================================================
@@ -1080,46 +1213,63 @@ fn void read_entries(qjs::Context* js, UiLayer* layer, qjs::Value node, uint ind
  from the other would be keeping input state of its own, which is the thing this
  event exists to stop it doing.
 *>
-fn qjs::Value JsRuntime.pointer_object(&self, UiEvent event)
+struct UiPointerReport
 {
-	qjs::Value out = self.qjs.object();
-	self.qjs.set_property(out, "phase", self.qjs.string(ui_phase_name(event.phase)));
-	self.qjs.set_property(out, "x", qjs::number_value((double)event.at.x));
-	self.qjs.set_property(out, "y", qjs::number_value((double)event.at.y));
-	self.qjs.set_property(out, "buttons", qjs::int_value((int)event.buttons));
-	self.qjs.set_property(out, "button", qjs::int_value((int)event.index));
-	self.qjs.set_property(out, "wheel", qjs::number_value((double)event.value));
-	self.qjs.set_property(out, "wheelX", qjs::number_value((double)event.wheel_x));
-	self.qjs.set_property(out, "shift", qjs::bool_value((event.modifiers & 1) != 0));
-	self.qjs.set_property(out, "ctrl", qjs::bool_value((event.modifiers & 2) != 0));
-	self.qjs.set_property(out, "alt", qjs::bool_value((event.modifiers & 4) != 0));
-	self.qjs.set_property(out, "meta", qjs::bool_value((event.modifiers & 8) != 0));
-	return out;
+	String phase;
+	float x;
+	float y;
+	uint buttons;
+	uint button;
+	float wheel;
+	float wheel_x;
+	bool shift;
+	bool ctrl;
+	bool alt;
+	bool meta;
 }
 
 <*
  A GRAPH event as the object `js/prelude/ui.js`'s fan-out reads: `type` says
- which, and the rest are the fields that type fills — see `UiGraphEvent`.
+ which, and the rest are the fields that type fills — see `UiGraphEvent`. A box
+ selection adds `list`.
 *>
-fn qjs::Value JsRuntime.graph_object(&self, UiEvent event)
+struct UiGraphReport
 {
-	qjs::Context* js = &self.qjs;
-	qjs::Value out = js.object();
-	js.set_property(out, "type", js.string(ui_graph_name(event.graph)));
-	js.set_property(out, "index", qjs::number_value((double)event.index));
-	js.set_property(out, "item", qjs::number_value((double)event.item));
-	js.set_property(out, "target", qjs::number_value((double)event.target));
-	js.set_property(out, "x", qjs::number_value((double)event.at.x));
-	js.set_property(out, "y", qjs::number_value((double)event.at.y));
-	js.set_property(out, "sx", qjs::number_value((double)event.screen.x));
-	js.set_property(out, "sy", qjs::number_value((double)event.screen.y));
-	js.set_property(out, "value", qjs::number_value((double)event.value));
-	js.set_property(out, "done", qjs::bool_value(event.flag));
+	String type;
+	usz index;
+	usz item;
+	sz target;
+	float x;
+	float y;
+	float sx;
+	float sy;
+	float value;
+	bool done;
+}
+
+<*
+ @return? js::THREW
+*>
+fn js::Value? JsRuntime.graph_object(&self, UiEvent event)
+{
+	UiGraphReport report = {
+		.type = ui_graph_name(event.graph),
+		.index = event.index,
+		.item = event.item,
+		.target = event.target,
+		.x = event.at.x,
+		.y = event.at.y,
+		.sx = event.screen.x,
+		.sy = event.screen.y,
+		.value = event.value,
+		.done = event.flag,
+	};
+	js::Value out = self.js.@object_of(report)!;
 	if (event.graph == UiGraphEvent.BOX)
 	{
-		qjs::Value list = js.array();
-		foreach (i, n : event.list) js.set_index(list, (uint)i, qjs::number_value((double)n));
-		js.set_property(out, "list", list);
+		js::Value list = self.js.array((uint)event.list.len)!;
+		foreach (n : event.list) self.js.push(list, js::number((double)n));
+		self.js.set(out, "list", list)!;
 	}
 	return out;
 }
@@ -1142,6 +1292,78 @@ fn String ui_graph_name(UiGraphEvent kind) @local
 	}
 }
 
+fn String ui_phase_name(UiPointerPhase phase) @local
+{
+	switch (phase)
+	{
+		case DOWN: return "down";
+		case UP: return "up";
+		case WHEEL: return "wheel";
+		default: return "move";
+	}
+}
+
+<*
+ What a handler is called with, written into argv; answers how many.
+
+ Each event hands over the one value its widget changed, except MENU_PICK — a
+ bar is a list of lists, and which title it was is not recoverable from the item
+ — and the two that hand over an object: a pointer, of which a panel reads two
+ or three fields, and a graph event, which the prelude fans out by name.
+
+ @return? js::THREW
+*>
+fn usz? JsRuntime.ui_event_args(&self, UiEvent event, js::Value[] argv)
+{
+	switch (event.kind)
+	{
+		case CLICK:
+		case CONFIRM:
+		case DISMISS:
+		case DIALOG_DISMISS:
+			return 0;
+		case HOVER:
+		case TOGGLE:
+			argv[0] = js::boolean(event.flag);
+		case SLIDE:
+		case COMMIT:
+			argv[0] = js::number((double)event.value);
+		case PICK:
+		case ROW_SELECT:
+		case ROW_TOGGLE:
+		case MENU_CHOOSE:
+			argv[0] = js::integer((int)event.index);
+		case MENU_PICK:
+			argv[0] = js::integer((int)event.index);
+			argv[1] = js::integer((int)event.item);
+			return 2;
+		case TEXT_CHANGE:
+		case TEXT_SUBMIT:
+		case FILE_CHOOSE:
+		case FILE_SELECT:
+		case FILE_DIRECTORY:
+			argv[0] = self.js.string(event.text)!;
+		case GRAPH:
+			argv[0] = self.graph_object(event)!;
+		case POINTER:
+			UiPointerReport report = {
+				.phase = ui_phase_name(event.phase),
+				.x = event.at.x,
+				.y = event.at.y,
+				.buttons = event.buttons,
+				.button = (uint)event.index,
+				.wheel = event.value,
+				.wheel_x = event.wheel_x,
+				.shift = (event.modifiers & 1) != 0,
+				.ctrl = (event.modifiers & 2) != 0,
+				.alt = (event.modifiers & 4) != 0,
+				.meta = (event.modifiers & 8) != 0,
+			};
+			argv[0] = self.js.@object_of(report)!;
+	}
+	return 1;
+}
+
 <*
  A question from a widget, answered by the script: whether a `nodeGraph` wire
  may run from one port to the other. A handler that throws is stopped and every
@@ -1154,41 +1376,28 @@ fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 	if (!self.ready) return true;
 	if ((sz)node >= self.ui_handlers.len()) return true;
 	UiHandlers* handlers = &self.ui_handlers[node];
-	if (!handlers.has_query) return true;
+	if (handlers.can_connect == js::NO_ROOT) return true;
 
 	self.ui_dispatching = true;
 	defer self.ui_dispatching = false;
 	bool yes = true;
 	@pool()
 	{
-		qjs::Value[2] argv = { qjs::number_value((double)event.index), qjs::number_value((double)event.item) };
-		qjs::Value? answer = self.qjs.call(handlers.query, qjs::undefined_value(), argv[:2]);
-		if (catch err = answer)
+		js::Value[2] argv = { js::number((double)event.index), js::number((double)event.item) };
+		js::Value? answer = self.js.call(self.js.held(handlers.can_connect), js::UNDEFINED, &argv);
+		if (catch answer)
 		{
 			self.report_frame_failure(
-				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.qjs.exception(tmem))
+				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.js.take_error(tmem))
 			);
-			self.qjs.release(handlers.query);
-			handlers.has_query = false;
+			self.js.drop(&handlers.can_connect);
 		}
 		else
 		{
-			yes = self.qjs.truth(answer);
-			self.qjs.release(answer);
+			yes = self.js.truth(answer);
 		}
 	};
 	return yes;
-}
-
-fn String ui_phase_name(UiPointerPhase phase) @local
-{
-	switch (phase)
-	{
-		case DOWN: return "down";
-		case UP: return "up";
-		case WHEEL: return "wheel";
-		default: return "move";
-	}
 }
 
 <*
@@ -1208,158 +1417,9 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	if (!self.ready) return;
 	if ((sz)node >= self.ui_handlers.len()) return;
 
-	UiHandlers* handlers = &self.ui_handlers[node];
-
-	qjs::Value callback;
-	bool* alive;
 	String what;
-	int argc;
-	qjs::Value[2] argv;
-
-	switch (event.kind)
-	{
-		case CLICK:
-			callback = handlers.click;
-			alive = &handlers.has_click;
-			what = "onClick";
-		case HOVER:
-			callback = handlers.hover;
-			alive = &handlers.has_hover;
-			what = "onHover";
-			argc = 1;
-			argv[0] = qjs::bool_value(event.flag);
-		case TOGGLE:
-			callback = handlers.change;
-			alive = &handlers.has_change;
-			what = "onChange";
-			argc = 1;
-			argv[0] = qjs::bool_value(event.flag);
-		case SLIDE:
-			callback = handlers.change;
-			alive = &handlers.has_change;
-			what = "onChange";
-			argc = 1;
-			argv[0] = qjs::number_value((double)event.value);
-		case COMMIT:
-			callback = handlers.commit;
-			alive = &handlers.has_commit;
-			what = "onCommit";
-			argc = 1;
-			argv[0] = qjs::number_value((double)event.value);
-		case PICK:
-			callback = handlers.change;
-			alive = &handlers.has_change;
-			what = "onChange";
-			argc = 1;
-			argv[0] = qjs::int_value((int)event.index);
-		case ROW_SELECT:
-			callback = handlers.select;
-			alive = &handlers.has_select;
-			what = "onSelect";
-			argc = 1;
-			argv[0] = qjs::int_value((int)event.index);
-		case ROW_TOGGLE:
-			callback = handlers.toggle;
-			alive = &handlers.has_toggle;
-			what = "onToggle";
-			argc = 1;
-			argv[0] = qjs::int_value((int)event.index);
-		case TEXT_CHANGE:
-			callback = handlers.change;
-			alive = &handlers.has_change;
-			what = "onChange";
-			argc = 1;
-			argv[0] = self.qjs.string(event.text);
-		case TEXT_SUBMIT:
-			callback = handlers.submit;
-			alive = &handlers.has_submit;
-			what = "onSubmit";
-			argc = 1;
-			argv[0] = self.qjs.string(event.text);
-		case CONFIRM:
-			callback = handlers.confirm;
-			alive = &handlers.has_confirm;
-			what = "onConfirm";
-		case DISMISS:
-			callback = handlers.dismiss;
-			alive = &handlers.has_dismiss;
-			what = "onDismiss";
-		case DIALOG_DISMISS:
-			// The same handler name as a confirmation's, because it is the same
-			// event to a script: the panel is gone and nobody pressed anything
-			// that means yes. A second spelling would only make a panel that
-			// swapped one kind for the other rename its handler.
-			callback = handlers.dismiss;
-			alive = &handlers.has_dismiss;
-			what = "onDismiss";
-		case MENU_PICK:
-			// The one handler here that takes two numbers: a bar is a list of
-			// lists, and which title it was is not recoverable from the item.
-			callback = handlers.select;
-			alive = &handlers.has_select;
-			what = "onSelect";
-			argc = 2;
-			argv[0] = qjs::int_value((int)event.index);
-			argv[1] = qjs::int_value((int)event.item);
-		case FILE_CHOOSE:
-			callback = handlers.choose;
-			alive = &handlers.has_choose;
-			what = "onChoose";
-			argc = 1;
-			argv[0] = self.qjs.string(event.text);
-		case FILE_SELECT:
-			callback = handlers.select;
-			alive = &handlers.has_select;
-			what = "onSelect";
-			argc = 1;
-			argv[0] = self.qjs.string(event.text);
-		case FILE_DIRECTORY:
-			// `onChange` rather than a fourth name, because where the browser is
-			// IS its value — the thing a breadcrumb beside it displays.
-			callback = handlers.change;
-			alive = &handlers.has_change;
-			what = "onChange";
-			argc = 1;
-			argv[0] = self.qjs.string(event.text);
-		case GRAPH:
-			// One handler for the lot, fanned out by name in the prelude, and the
-			// event built only when somebody is there to take it.
-			callback = handlers.graph;
-			alive = &handlers.has_graph;
-			what = "nodeGraph";
-			if (handlers.has_graph)
-			{
-				argc = 1;
-				argv[0] = self.graph_object(event);
-			}
-		case MENU_CHOOSE:
-			callback = handlers.choose;
-			alive = &handlers.has_choose;
-			what = "onChoose";
-			argc = 1;
-			argv[0] = qjs::int_value((int)event.index);
-		case POINTER:
-			// One object rather than nine positional arguments. Everything else
-			// here hands over the one number the widget changed; this hands over
-			// a pointer, and a panel reads two or three fields of it and ignores
-			// the rest — which is what a named bag is for. Built only when there
-			// is somebody to give it to, because this fires every frame the
-			// pointer is over the node.
-			callback = handlers.pointer;
-			alive = &handlers.has_pointer;
-			what = "onPointer";
-			if (handlers.has_pointer)
-			{
-				argc = 1;
-				argv[0] = self.pointer_object(event);
-			}
-	}
-
-	if (!*alive)
-	{
-		for (int i = 0; i < argc; i++) self.qjs.release(argv[i]);
-		return;
-	}
+	js::Root* handler = self.ui_handlers[node].for_event(event.kind, &what);
+	if (*handler == js::NO_ROOT) return;
 
 	// Raised for the whole of the call, so a handler calling `three.ui.set` is
 	// held rather than restructuring the tree cui is walking. The layer raises
@@ -1369,17 +1429,22 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	self.ui_dispatching = true;
 	defer self.ui_dispatching = false;
 
-	bool kept;
+	bool kept = true;
 	@pool()
 	{
-		kept = self.call_handler((js::Value)callback, as_values(argv[:argc]), string::tformat("a three.ui %s handler", what));
+		String who = string::tformat("a three.ui %s handler", what);
+		js::Value[2] argv;
+		usz? argc = self.ui_event_args(event, &argv);
+		if (catch argc)
+		{
+			self.report_frame_failure(string::tformat("%s could not be called: %s", who, self.js.take_error(tmem)));
+		}
+		else
+		{
+			kept = self.call_handler(self.js.held(*handler), argv[:argc], who);
+		}
 	};
-	for (int i = 0; i < argc; i++) self.qjs.release(argv[i]);
-	if (!kept)
-	{
-		self.qjs.release(callback);
-		*alive = false;
-	}
+	if (!kept) self.js.drop(handler);
 }
 
 // ============================================================================
@@ -1387,21 +1452,21 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 // ============================================================================
 
 <*
- Holds a snapshot a handler asked for until the dispatch it came from is over.
+ Holds a snapshot a handler asked for until the dispatch it came from is over;
+ null or undefined is a clear.
 
  One slot, not a queue: two `set` calls in one dispatch mean the second is what
  the script wanted, exactly as two calls outside one do.
 *>
-fn void JsRuntime.hold_ui_tree(&self, qjs::Context* js, qjs::Value tree)
+fn void JsRuntime.hold_ui_tree(&self, js::Value tree)
 {
-	self.ui_pending_held = !tree.is_undefined() && !tree.is_null();
-	if (self.ui_pending_held)
+	if (tree.is_nullish())
 	{
-		self.js.rehold(&self.ui_pending, (js::Value)tree);
+		self.js.drop(&self.ui_pending);
 	}
 	else
 	{
-		self.js.drop(&self.ui_pending);
+		self.js.rehold(&self.ui_pending, tree);
 	}
 	self.ui_pending_active = true;
 }
@@ -1418,26 +1483,24 @@ fn void JsRuntime.flush_ui(&self)
 	if (!self.ui_pending_active || !self.ready) return;
 	self.ui_pending_active = false;
 
-	if (!self.ui_pending_held)
+	if (self.ui_pending == js::NO_ROOT)
 	{
 		self.drop_ui_tree();
 		return;
 	}
 
-	// Taken out of its root first: applying it can set a new one.
-	qjs::Value tree = self.qjs.retain((qjs::Value)self.js.held(self.ui_pending));
-	self.js.drop(&self.ui_pending);
-	self.ui_pending_held = false;
-	defer self.qjs.release(tree);
+	// Taken out of the runtime's slot first, because applying it clears the
+	// handler table and the slot with it.
+	js::Root pending = self.ui_pending;
+	self.ui_pending = js::NO_ROOT;
+	defer self.js.drop(&pending);
 
 	@pool()
 	{
-		qjs::Value thrown = qjs::undefined_value();
-		self.apply_ui_tree(&self.qjs, tree, &thrown);
-		if (!thrown.is_undefined())
+		if (catch self.apply_ui_tree(self.js.held(pending)))
 		{
+			(void)self.js.take_exception();
 			self.report_frame_failure("three.ui.set from a widget handler could not be applied");
-			self.qjs.release(thrown);
 		}
 	};
 }
@@ -1452,21 +1515,13 @@ fn void JsRuntime.drop_ui_tree(&self)
 }
 
 <*
- Releases every retained widget callback.
-
- Bound by the same rule as `clear_key_handlers`: before the context goes, never
- after — each of these is a reference into an engine that would no longer be
- there to release it into.
+ Drops every held widget callback, and any snapshot waiting for a dispatch to end.
 *>
 fn void JsRuntime.clear_ui_handlers(&self)
 {
-	foreach (i, handler : self.ui_handlers) self.ui_handlers[i].release(&self.qjs);
+	foreach (&handler : self.ui_handlers) handler.drop(self.js);
 	self.ui_handlers.clear();
-	if (self.ui_pending_held)
-	{
-		self.js.drop(&self.ui_pending);
-		self.ui_pending_held = false;
-	}
+	self.js.drop(&self.ui_pending);
 	self.ui_pending_active = false;
 }
 
@@ -1498,38 +1553,21 @@ fn void JsRuntime.release_ui(&self)
  Answers the handle, or throws with the reason — a buffer that is not the size
  the dimensions say is a script's mistake, and silently drawing garbage from it
  is not a better answer.
+
+ @return? js::THREW
 *>
-fn void js_ui_texture(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn int? js_ui_texture(JsRuntime* self, char[] bytes, int width, int height, int channels, int handle, Opt {bool} linear)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	UiLayer* layer = self.ui_layer()!;
 
-	UiLayer* layer = self.ui_layer(&js, out) ?? null;
-	if (layer == null) return;
-
-	char[] bytes  = arg_bytes(&js, argc, args, 0);
-	int width     = arg_int(&js, argc, args, 1);
-	int height    = arg_int(&js, argc, args, 2);
-	int channels  = arg_int(&js, argc, args, 3);
-	uint handle   = (uint)math::max(arg_int(&js, argc, args, 4), 0);
-	bool linear   = arg_truth_or(&js, argc, args, 5, true);
 	if (width <= 0 || height <= 0 || (channels != 1 && channels != 3 && channels != 4))
 	{
-		*out = js.raise("three.ui.texture: an image is { width, height, channels: 1, 3 or 4, pixels }");
-		return;
+		return self.js.fail("three.ui.texture: an image is { width, height, channels: 1, 3 or 4, pixels }")~;
 	}
 	usz texels = (usz)width * (usz)height;
 	if (bytes.len < texels * (usz)channels)
 	{
-		*out = js.raise("three.ui.texture: pixels holds fewer bytes than width * height * channels");
-		return;
+		return self.js.fail("three.ui.texture: pixels holds fewer bytes than width * height * channels")~;
 	}
 
 	@pool()
@@ -1555,32 +1593,22 @@ fn void js_ui_texture(
 				dst[3] = 255;
 			}
 		}
-		uint? made = layer.texture(rgba, (uint)width, (uint)height, handle, linear);
+		uint? made = layer.texture(rgba, (uint)width, (uint)height, (uint)math::max(handle, 0), linear.or(true));
 		if (catch err = made)
 		{
-			*out = err == UI_NO_SUCH_KEY
-				? js.raise("three.ui.texture: that handle is not a live texture — it was freed, or came from another context")
-				: js.raise("three.ui.texture: the GPU could not take the image");
-			return;
+			if (err == UI_NO_SUCH_KEY)
+			{
+				return self.js.fail("three.ui.texture: that handle is not a live texture — it was freed, or came from another context")~;
+			}
+			return self.js.fail("three.ui.texture: the GPU could not take the image")~;
 		}
-		*out = qjs::int_value((int)made);
+		return (int)made;
 	};
 }
 
 // `three.ui.freeTexture(handle)` — the handle goes back for reuse.
-fn void js_ui_texture_free(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_ui_texture_free(JsRuntime* self, int handle)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	*out = qjs::undefined_value();
 	if (self.renderer == null) return;
-	int handle = arg_int(&js, argc, args, 0);
 	if (handle > 0) self.renderer.ui.release_texture((uint)handle);
 }
