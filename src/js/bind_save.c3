@@ -31,7 +31,7 @@
  log — is using the same two verbs rather than working around a third.
 
  Reading bytes is two calls, `saveSize` then `saveReadInto`, and that is not an
- economy. `Context.buffer` hands the engine memory the *host* owns and does not
+ economy. `Engine.buffer` hands the engine memory the *host* owns and does not
  copy, so a `Uint8Array` made over a file this function loaded would be a view
  into a temp allocation that is gone by the time the script reads it. Filling an
  array the script already owns has no such window, and the prelude hides the
@@ -41,19 +41,19 @@ module three;
 
 import std::io::file;
 import std::io::path;
-import qjs;
+import fastjs::js;
 
-fn void JsRuntime.bind_save_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_save_verbs(&self, js::Value host)
 {
-	self.bind(host, "saveDirSet", &js_save_dir_set, 1);
-	self.bind(host, "saveDirGet", &js_save_dir_get, 0);
-	self.bind(host, "saveWriteText", &js_save_write_text, 2);
-	self.bind(host, "saveReadText", &js_save_read_text, 1);
-	self.bind(host, "saveWriteBytes", &js_save_write_bytes, 2);
-	self.bind(host, "saveSize", &js_save_size, 1);
-	self.bind(host, "saveReadInto", &js_save_read_into, 2);
-	self.bind(host, "saveList", &js_save_list, 0);
-	self.bind(host, "saveRemove", &js_save_remove, 1);
+	self.js.@bind(host, "saveDirSet", &js_save_dir_set, self)!;
+	self.js.@bind(host, "saveDirGet", &js_save_dir_get, self)!;
+	self.js.@bind(host, "saveWriteText", &js_save_write_text, self)!;
+	self.js.@bind(host, "saveReadText", &js_save_read_text, self)!;
+	self.js.@bind(host, "saveWriteBytes", &js_save_write_bytes, self)!;
+	self.js.@bind(host, "saveSize", &js_save_size, self)!;
+	self.js.@bind(host, "saveReadInto", &js_save_read_into, self)!;
+	self.js.@bind(host, "saveList", &js_save_list, self)!;
+	self.js.@bind(host, "saveRemove", &js_save_remove, self)!;
 }
 
 // Long enough for a descriptive slot name and short enough that the whole path
@@ -159,35 +159,47 @@ fn String? JsRuntime.save_path(&self, String name, Allocator allocator)
 	return string::format(allocator, "%s/%s", dir, name);
 }
 
-faultdef SAVE_DIR_UNSET, SAVE_DIR_UNAVAILABLE, SAVE_NAME_REFUSED;
+excuse SAVE_DIR_UNSET, SAVE_DIR_UNAVAILABLE, SAVE_NAME_REFUSED;
 
 <*
- Turns one of the three faults into the sentence a script sees.
+ Throws the sentence a script sees for one of the three faults.
 
  Written out rather than printed from the fault name because each has a
  different next step, and the one a game author hits most — nothing configured —
  has to name the call that fixes it.
 *>
-fn qjs::Value save_fault(qjs::Context* js, fault err, String verb)
+fn fault JsRuntime.save_fault(&self, fault err, String verb)
 {
 	switch (err)
 	{
 		case SAVE_NAME_REFUSED:
-			return js.raisef("%s wants a save name of letters, digits, dash, underscore or dot — at most %d of them, "
+			return self.js.fail("%s wants a save name of letters, digits, dash, underscore or dot — at most %d of them, "
 				"not starting with a dot. A save is a NAME and not a path: there are no subdirectories "
 				"under the save folder and no way to leave it.",
 				verb, SAVE_NAME_MAX);
 		case SAVE_DIR_UNSET:
-			return js.raisef("%s has nowhere to write: no save folder has been named. Call "
+			return self.js.fail("%s has nowhere to write: no save folder has been named. Call "
 				"three.configure({ saveDir: 'my-game' }) at the top of main.js. A game booted with "
 				"--assets takes the directory's own name when it says nothing; a --script or --mcp run "
 				"has no directory to be named after and has to be told.",
 				verb);
 		default:
-			return js.raisef("%s could not open the save folder. There is no writable application-data directory on this "
+			return self.js.fail("%s could not open the save folder. There is no writable application-data directory on this "
 				"machine — no home directory, or one that refused to be written to.",
 				verb);
 	}
+}
+
+<*
+ One save's path, or the thrown sentence when there is none.
+
+ @return? js::THREW
+*>
+fn String? JsRuntime.save_path_for(&self, String name, String verb)
+{
+	String? where = self.save_path(name, tmem);
+	if (catch err = where) return self.save_fault(err, verb)~;
+	return where;
 }
 
 <*
@@ -196,36 +208,16 @@ fn qjs::Value save_fault(qjs::Context* js, fault err, String verb)
  The path comes back rather than a bool so that a game can print it, put it in a
  support message, or show it in a menu. Nobody should have to know this file's
  rules to find their own saves.
+
+ @return? js::THREW
 *>
-fn void js_save_dir_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn String? js_save_dir_set(JsRuntime* self, String name)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	if (!valid_slot(name)) return self.save_fault(SAVE_NAME_REFUSED, "three.configure({ saveDir })")~;
 
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		if (!valid_slot(name))
-		{
-			*out = save_fault(&js, SAVE_NAME_REFUSED, "three.configure({ saveDir })");
-			return;
-		}
-
-		String? where = self.set_save_directory(name);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.configure({ saveDir })");
-			return;
-		}
-		*out = js.string(where);
-	};
+	String? where = self.set_save_directory(name);
+	if (catch err = where) return self.save_fault(err, "three.configure({ saveDir })")~;
+	return where;
 }
 
 <*
@@ -233,58 +225,27 @@ fn void js_save_dir_set(
 
  Null rather than a throw, because this is the verb a settings screen calls to
  decide whether to show a "saves are here" line at all.
-*>
-fn void js_save_dir_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
+ @return? js::THREW
+*>
+fn js::Value? js_save_dir_get(JsRuntime* self)
+{
 	String? dir = self.save_directory();
-	if (catch dir)
-	{
-		*out = qjs::null_value();
-		return;
-	}
-	*out = js.string(dir);
+	if (catch dir) return js::NULL;
+	return self.js.string(dir);
 }
 
-fn void js_save_write_text(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+<*
+ @return? js::THREW
+*>
+fn bool? js_save_write_text(JsRuntime* self, String name, String body)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	String where = self.save_path_for(name, "three.save.write")!;
+	if (catch err = file::save(where, (char[])body))
 	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.write");
-			return;
-		}
-
-		String body = arg_text(&js, argc, args, 1, tmem);
-		if (catch err = file::save(where, (char[])body))
-		{
-			*out = js.raisef("three.save.write could not write %s: %s", where, err);
-			return;
-		}
-		*out = qjs::bool_value(true);
-	};
+		return self.js.fail("three.save.write could not write %s: %s", where, err)~;
+	}
+	return true;
 }
 
 <*
@@ -294,75 +255,30 @@ fn void js_save_write_text(
  has ever been, and a game should not have to guard a `try` around its own cold
  start. A file that exists and cannot be read *does* throw — that is a disk
  saying something, not an absence.
+
+ @return? js::THREW
 *>
-fn void js_save_read_text(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_save_read_text(JsRuntime* self, String name)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	String where = self.save_path_for(name, "three.save.read")!;
+	if (!file::is_file(where)) return js::NULL;
 
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.read");
-			return;
-		}
-
-		if (!file::is_file(where))
-		{
-			*out = qjs::null_value();
-			return;
-		}
-
-		char[]? bytes = file::load(tmem, where);
-		if (catch err = bytes)
-		{
-			*out = js.raisef("three.save.read could not read %s: %s", where, err);
-			return;
-		}
-		*out = js.string((String)bytes);
-	};
+	char[]? bytes = file::load(tmem, where);
+	if (catch err = bytes) return self.js.fail("three.save.read could not read %s: %s", where, err)~;
+	return self.js.string((String)bytes);
 }
 
-fn void js_save_write_bytes(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+<*
+ @return? js::THREW
+*>
+fn bool? js_save_write_bytes(JsRuntime* self, String name, char[] body)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	String where = self.save_path_for(name, "three.save.writeBytes")!;
+	if (catch err = file::save(where, body))
 	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.writeBytes");
-			return;
-		}
-
-		char[] body = arg_bytes(&js, argc, args, 1);
-		if (catch err = file::save(where, body))
-		{
-			*out = js.raisef("three.save.writeBytes could not write %s: %s", where, err);
-			return;
-		}
-		*out = qjs::bool_value(true);
-	};
+		return self.js.fail("three.save.writeBytes could not write %s: %s", where, err)~;
+	}
+	return true;
 }
 
 <*
@@ -370,37 +286,13 @@ fn void js_save_write_bytes(
 
  The first half of `three.save.readBytes`. A number rather than a fault for the
  absent case, for `saveReadText`'s reason.
+
+ @return? js::THREW
 *>
-fn void js_save_size(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn long? js_save_size(JsRuntime* self, String name)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.readBytes");
-			return;
-		}
-
-		long? size = path::file_size((Path)where);
-		if (catch size)
-		{
-			*out = qjs::int_value(-1);
-			return;
-		}
-		*out = qjs::int_value((int)size);
-	};
+	String where = self.save_path_for(name, "three.save.readBytes")!;
+	return path::file_size((Path)where) ?? -1;
 }
 
 <*
@@ -410,47 +302,20 @@ fn void js_save_size(
  bytes are copied into memory JavaScript already holds, so nothing in here has
  to outlive the call. A target shorter than the file takes as much as it has
  room for, and the count comes back so the prelude can trim.
+
+ @return? js::THREW
 *>
-fn void js_save_read_into(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn usz? js_save_read_into(JsRuntime* self, String name, char[] target)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	String where = self.save_path_for(name, "three.save.readBytes")!;
+	if (target.len == 0) return 0;
 
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.readBytes");
-			return;
-		}
+	char[]? bytes = file::load(tmem, where);
+	if (catch err = bytes) return self.js.fail("three.save.readBytes could not read %s: %s", where, err)~;
 
-		char[] target = arg_bytes(&js, argc, args, 1);
-		if (target.len == 0)
-		{
-			*out = qjs::int_value(0);
-			return;
-		}
-
-		char[]? bytes = file::load(tmem, where);
-		if (catch err = bytes)
-		{
-			*out = js.raisef("three.save.readBytes could not read %s: %s", where, err);
-			return;
-		}
-
-		usz moved = bytes.len < target.len ? bytes.len : target.len;
-		if (moved > 0) mem::copy(target.ptr, bytes.ptr, (sz)moved);
-		*out = qjs::int_value((int)moved);
-	};
+	usz moved = bytes.len < target.len ? bytes.len : target.len;
+	if (moved > 0) mem::copy(target.ptr, bytes.ptr, (sz)moved);
+	return moved;
 }
 
 <*
@@ -459,31 +324,20 @@ fn void js_save_read_into(
  An empty array for a folder with nothing in it *and* for a run that never
  named one: listing is the verb a menu calls before anything has been saved, and
  a throw there would make every game's load screen guard a call that means "no".
+
+ @return? js::THREW
 *>
-fn void js_save_list(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn js::Value? js_save_list(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	qjs::Value names = js.array();
-	*out = names;
-
+	js::Value names = self.js.array()!;
 	@pool()
 	{
 		String? dir = self.save_directory();
-		if (catch dir) return;
+		if (catch dir) return names;
 
 		PathList? found = path::ls(tmem, (Path)dir, no_dirs: true);
-		if (catch found) return;
+		if (catch found) return names;
 
-		uint at = 0;
 		foreach (entry : found)
 		{
 			String name = entry.basename();
@@ -491,9 +345,10 @@ fn void js_save_list(
 			// else is in that directory, this lists what `three.save` could have
 			// put there and what it will accept back.
 			if (!valid_slot(name)) continue;
-			js.set_index(names, at++, js.string(name));
+			self.js.push(names, self.js.string(name)!);
 		}
 	};
+	return names;
 }
 
 <*
@@ -501,39 +356,16 @@ fn void js_save_list(
 
  False rather than a throw for a name that was not there, so deleting a slot
  twice is not an error a menu has to handle.
+
+ @return? js::THREW
 *>
-fn void js_save_remove(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn bool? js_save_remove(JsRuntime* self, String name)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	@pool()
+	String where = self.save_path_for(name, "three.save.remove")!;
+	if (!file::is_file(where)) return false;
+	if (catch err = path::delete((Path)where))
 	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		String? where = self.save_path(name, tmem);
-		if (catch err = where)
-		{
-			*out = save_fault(&js, err, "three.save.remove");
-			return;
-		}
-
-		if (!file::is_file(where))
-		{
-			*out = qjs::bool_value(false);
-			return;
-		}
-		if (catch err = path::delete((Path)where))
-		{
-			*out = js.raisef("three.save.remove could not delete %s: %s", where, err);
-			return;
-		}
-		*out = qjs::bool_value(true);
-	};
+		return self.js.fail("three.save.remove could not delete %s: %s", where, err)~;
+	}
+	return true;
 }

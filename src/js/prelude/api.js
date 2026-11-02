@@ -1871,11 +1871,6 @@ const debug = {
 // -----------------------------------------------------------------------
 // The module
 
-// The two tone curves, by the names a script writes. The index is what
-// crosses — `toneMapSet` takes an ordinal, and the spelling is this side's,
-// along with the message a misspelling gets.
-const TONE_MAPPINGS = ['none', 'agx', 'agx-blender'];
-
 export const three = {
 	Scene,
 	Mesh,
@@ -2533,20 +2528,9 @@ export const three = {
 	// knob that costs nothing. Like the post chain, it belongs to the
 	// renderer rather than to the scene: `new three.Scene()` does not reset
 	// it. Needs a GPU device.
-	get toneMapping() { return TONE_MAPPINGS[H.toneMapGet()[0]] ?? 'none'; },
-	set toneMapping(v) {
-		const name = String(v);
-		const index = TONE_MAPPINGS.indexOf(name);
-		// By name here rather than by a number the host would range-check, for
-		// `three.debug.view`'s reason: a typo is the whole failure mode of a
-		// string enum and it should say so rather than quietly render.
-		if (index < 0) {
-			throw new TypeError(
-				`three.toneMapping: unknown mode '${name}' — one of ${TONE_MAPPINGS.join(', ')}`
-			);
-		}
-		H.toneMapSet(index, H.toneMapGet()[1]);
-	},
+	get toneMapping() { return H.toneMapGet().mode; },
+	// The host refuses a name it does not have, with the list of the ones it does.
+	set toneMapping(v) { H.toneMapSet(String(v), H.toneMapGet().exposure); },
 
 	// What the frame is multiplied by before the curve, 1 by default.
 	//
@@ -2559,13 +2543,13 @@ export const three = {
 	// It is a uniform rather than part of the shader, so writing it is a
 	// four-byte push that takes effect on the next frame with no compile —
 	// which is what makes it the one of this pair that can be animated.
-	get toneMappingExposure() { return H.toneMapGet()[1]; },
+	get toneMappingExposure() { return H.toneMapGet().exposure; },
 	set toneMappingExposure(v) {
 		const n = +v;
 		if (!Number.isFinite(n) || n < 0) {
 			throw new TypeError(`three.toneMappingExposure wants a finite number of 0 or more, got ${v}`);
 		}
-		H.toneMapSet(H.toneMapGet()[0], n);
+		H.toneMapSet(H.toneMapGet().mode, n);
 	},
 
 	// Draw the opaque and cut-out geometry depth-only first, so the scene
@@ -2646,7 +2630,7 @@ export const three = {
 		// The first pass of a chain has nothing before it to read, and `setPost`
 		// is always the first pass of a chain. Refused rather than ignored: a
 		// script that wrote `reads` here meant something, and it is not this.
-		if (parsed.args[5] !== -1) {
+		if (parsed.tap !== -1) {
 			throw new TypeError(
 				'three.setPost() replaces the whole chain, so this pass is the first one and there is '
 				+ 'nothing before it to read — `reads` belongs on a three.addPass()'

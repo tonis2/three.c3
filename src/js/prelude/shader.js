@@ -116,25 +116,21 @@ export function uniformsProxy(owner, declared, what) {
 }
 
 // The declared samplers of a shader, as `{ name: texture }`, checked before
-// anything crosses.
-//
-// Two lists come back rather than one object, because that is the shape the
-// host takes — names joined and ids joined, the same crossing the uniforms
-// make and for the same reason (the QuickJS shim reads a property by name and
-// cannot enumerate one).
+// anything crosses. `ids` is what the host takes: `{ name: textureIndex }`.
 //
 // **`null` is a legal value and is not the same as leaving the name out.**
 // Leaving it out means the shader does not declare that sampler at all; `null`
 // means it declares it and starts it white, which is what a body that fills a
 // texture in later wants. `NoTexture` is what says so on the wire.
 export function textureLists(textures, what) {
-	if (textures === null || textures === undefined) return { names: [], ids: [], values: {} };
+	if (textures === null || textures === undefined) return { names: [], ids: {}, values: {} };
 	if (typeof textures !== 'object') {
 		throw new TypeError(`\`textures\` wants an object like { noise_map: three.texture('noise.png') }`);
 	}
 	const names = Object.keys(textures);
 	const values = {};
-	const ids = names.map((name) => {
+	const ids = {};
+	for (const name of names) {
 		const v = textures[name];
 		if (v !== null && v !== undefined && !(v instanceof Texture)) {
 			throw new TypeError(
@@ -143,8 +139,8 @@ export function textureLists(textures, what) {
 			);
 		}
 		values[name] = v ?? null;
-		return v ? v._index() : NoTexture;
-	});
+		ids[name] = v ? v._index() : NoTexture;
+	}
 	return { names, ids, values };
 }
 
@@ -247,10 +243,7 @@ export class ShaderMaterial extends Material {
 		// least of what is wrong with it.
 		const blending = Material._resolveBlending(options);
 
-		// The enumeration happens here because it cannot happen in the host:
-		// the QuickJS shim exposes property *get* by name and nothing that
-		// lists keys. So the names cross as a joined string — see
-		// js/bind_shader.c3.
+		// Each uniform's `[width, rows]`, which is what the host compiles from.
 		const names = Object.keys(uniforms);
 		const shapes = names.map(n => uniformShape(n, uniforms[n]));
 		// Every table in one material is a column of the same table, so the
@@ -271,13 +264,10 @@ export class ShaderMaterial extends Material {
 		// argument: the material index is what the base class is made of.
 		super(H.createMaterial(
 			fragment,
-			names.join(','),
-			shapes.map(s => s[0]).join(','),
-			shapes.map(s => s[1]).join(','),
+			Object.fromEntries(names.map((n, i) => [n, shapes[i]])),
 			side,
 			blending,
-			declared.names.join(','),
-			declared.ids.join(','),
+			declared.ids,
 			vertex,
 			bounds,
 		), side, blending);
@@ -328,11 +318,7 @@ export class ShaderMaterial extends Material {
 			throw new RangeError(`uniform '${name}' has ${rows} row${rows === 1 ? '' : 's'}, so row ${row} is not one of them`);
 		}
 		const n = uniformValues(name, v);
-		H.setUniform(
-			this._index(), name,
-			+n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length,
-			row, rows,
-		);
+		H.setUniform(this._index(), name, n, row, rows);
 		const stored = typeof v === 'number' ? +v : n.map(Number);
 		if (rows > 1) {
 			this._values[name][row] = stored;

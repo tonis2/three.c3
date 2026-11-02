@@ -70,7 +70,7 @@ function postHandle(fragment, names, declared = { names: [], values: {} }, index
 		_set(name, v) {
 			internals._check();
 			const n = uniformValues(name, v);
-			H.setPostUniform(name, +n[0], +(n[1] ?? 0), +(n[2] ?? 0), +(n[3] ?? 0), n.length, index);
+			H.setPostUniform(name, n, index);
 			internals._values[name] = typeof v === 'number' ? +v : n.map(Number);
 		},
 		// What the samplers hold, and the write path for changing one. The
@@ -125,13 +125,11 @@ export function postSpec(spec, wanted) {
 	}
 	const declared = textureLists(textures, 'this post pass\'s');
 
-	// The enumeration happens here for `ShaderMaterial`'s reason: the
-	// QuickJS shim exposes property *get* by name and nothing that lists
-	// keys, so the names cross as a joined string. See js/bind_post.c3.
 	const names = Object.keys(uniforms);
 	const shapes = names.map(n => uniformShape(n, uniforms[n], false));
 	const grid = threadsGrid(threads, kind);
 	const declaredImages = imageList(images);
+	const tap = readsIndex(reads);
 
 	return {
 		fragment: body,
@@ -140,21 +138,16 @@ export function postSpec(spec, wanted) {
 		uniforms,
 		declared,
 		images: declaredImages.map(i => i.name),
+		tap,
 		args: [
 			body,
-			names.join(','),
-			shapes.map(s => s[0]).join(','),
-			declared.names.join(','),
-			declared.ids.join(','),
-			readsIndex(reads),
-			kind === 'compute' ? 1 : 0,
+			Object.fromEntries(names.map((n, i) => [n, shapes[i]])),
+			declared.ids,
+			tap,
+			kind,
 			grid[0],
 			grid[1],
-			declaredImages.map(i => i.name).join(','),
-			declaredImages.map(i => i.format).join(','),
-			declaredImages.map(i => i.size[0]).join(','),
-			declaredImages.map(i => i.size[1]).join(','),
-			declaredImages.map(i => (i.clear === 'frame' ? 1 : 0)).join(','),
+			declaredImages,
 		],
 	};
 }

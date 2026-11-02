@@ -3,9 +3,8 @@
  them at new values.
 
  `bind_shader.c3` for the pass that has no geometry. Everything about the
- crossing is the same — the uniforms arrive as two comma-joined strings because
- the QuickJS shim this project vendors can read a property by name and cannot
- enumerate one, so `prelude.js` does the enumerating in the language that can.
+ crossing is the same: the uniforms arrive as `{ name: [width, 1] }` and the
+ samplers as `{ name: textureIndex }`.
 
  ## Why these are verbs and not a class
 
@@ -37,7 +36,7 @@
 module three;
 
 import std::collections::list;
-import qjs;
+import fastjs::js;
 
 <*
  Registers the post verbs on the host object.
@@ -45,15 +44,37 @@ import qjs;
  Called from `install_bindings` beside `bind_shader_verbs`, so there is still
  exactly one place that lists what JavaScript can reach.
 *>
-fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_post_verbs(&self, js::Value host)
 {
-	self.bind(host, "setPost", &js_set_post, 14);
-	self.bind(host, "addPass", &js_add_pass, 14);
-	self.bind(host, "clearPost", &js_clear_post, 0);
-	self.bind(host, "setPostUniform", &js_set_post_uniform, 7);
-	self.bind(host, "setPostTexture", &js_set_post_texture, 3);
-	self.bind(host, "toneMapGet", &js_tone_map_get, 0);
-	self.bind(host, "toneMapSet", &js_tone_map_set, 2);
+	self.js.@bind(host, "setPost", &js_set_post, self)!;
+	self.js.@bind(host, "addPass", &js_add_pass, self)!;
+	self.js.@bind(host, "clearPost", &js_clear_post, self)!;
+	self.js.@bind(host, "setPostUniform", &js_set_post_uniform, self)!;
+	self.js.@bind(host, "setPostTexture", &js_set_post_texture, self)!;
+	self.js.@bind(host, "toneMapGet", &js_tone_map_get, self)!;
+	self.js.@bind(host, "toneMapSet", &js_tone_map_set, self)!;
+}
+
+// Which kind of pass, by the name `postSpec` gives it: 'fragment' or 'compute'.
+struct PostKindName
+{
+	PostKind kind;
+}
+
+<*
+ @return? js::THREW
+*>
+fn void? PostKindName.from_js(&self, js::Call* c, int at)
+{
+	@pool()
+	{
+		switch (c.text(at))
+		{
+			case "fragment": self.kind = FRAGMENT;
+			case "compute": self.kind = COMPUTE;
+			default: return c.type_error(at, "'fragment' or 'compute'")~;
+		}
+	};
 }
 
 <*
@@ -62,17 +83,22 @@ fn void JsRuntime.bind_post_verbs(&self, qjs::Value host)
 
  Needs a device, for `js_create_material`'s reason and one more: a post pass is a
  pipeline *and* a full-size attachment, and there is neither without one.
+
+ @return? js::THREW
 *>
-fn void js_set_post(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_set_post(
+	JsRuntime* self,
+	String body,
+	js::Value uniform_shapes,
+	js::Value texture_ids,
+	int tap,
+	PostKindName kind,
+	int threads_x,
+	int threads_y,
+	js::Value images
+)
 {
-	((JsRuntime*)opaque).post_verb(qjs::wrap(ctx), argc, args, false, out);
+	return self.post_verb(body, uniform_shapes, texture_ids, tap, kind.kind, { whole(threads_x), whole(threads_y) }, images, false);
 }
 
 <*
@@ -84,226 +110,162 @@ fn void js_set_post(
  a list is the right shape and what would make it the wrong one.
 
  @return `The stage index, which is what a handle carries to address its own uniforms.`
+ @return? js::THREW
 *>
-fn void js_add_pass(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_add_pass(
+	JsRuntime* self,
+	String body,
+	js::Value uniform_shapes,
+	js::Value texture_ids,
+	int tap,
+	PostKindName kind,
+	int threads_x,
+	int threads_y,
+	js::Value images
+)
 {
-	((JsRuntime*)opaque).post_verb(qjs::wrap(ctx), argc, args, true, out);
+	return self.post_verb(body, uniform_shapes, texture_ids, tap, kind.kind, { whole(threads_x), whole(threads_y) }, images, true);
+}
+
+<*
+ `[{ name, format, size: [w, h], clear }]` as the pass's own image declarations.
+ `postSpec` has already refused a malformed entry; a size of zero is the frame's.
+
+ @return? js::THREW
+*>
+fn void? JsRuntime.read_post_images(&self, js::Value list, List{PostImageDecl}* out)
+{
+	long count = self.js.length(list)!;
+	for (long i = 0; i < count; i++)
+	{
+		js::Value image = self.js.get(list, i)!;
+		js::Value format = self.js.get(image, "format")!;
+		js::Value size = self.js.get(image, "size")!;
+		if (format.is_nullish() || self.js.length(size)! != 2)
+		{
+			return self.js.fail("every post image needs a format and a size — one arrived without them")~;
+		}
+		out.push({
+			.name = self.js.text(self.js.get(image, "name")!, tmem),
+			.format = self.js.text(format, tmem),
+			.width = whole((int)self.js.get_number(size, 0)!),
+			.height = whole((int)self.js.get_number(size, 1)!),
+			.per_frame = self.js.text(self.js.get(image, "clear")!, tmem) == "frame",
+		});
+	}
 }
 
 <*
  Both verbs, which differ by `append` and nothing else.
 
- The uniforms cross as `("gain,tint", "1,3")` and no row counts, because a post
- pass has no instances to select a row with — `validate_post` refuses a table by
- name and `prelude.js` refuses one before it gets here.
+ No row counts: a post pass has no instances to select a row with —
+ `validate_post` refuses a table by name and `prelude.js` refuses one before it
+ gets here.
 
+ @param tap : `An earlier pass this one also reads, or -1. postSpec checked the shape; the range is the chain's to check.`
  @param append : `false replaces the chain (setPost), true appends to it (addPass).`
- @param [out] out : `The stage index on success, so a handle knows which pass it is. Untouched by setPost, whose answer is always 0.`
+ @return `The stage index, so a handle knows which pass it is. Always 0 for setPost.`
+ @return? js::THREW
 *>
-fn void JsRuntime.post_verb(&self, qjs::Context js, int argc, qjs::Value* args, bool append, qjs::Value* out)
+fn uint? JsRuntime.post_verb(
+	&self,
+	String fragment,
+	js::Value uniform_shapes,
+	js::Value texture_ids,
+	int tap,
+	PostKind kind,
+	uint[2] threads,
+	js::Value image_list,
+	bool append
+)
 {
-	if (!self.needs_device(&js, "compiling a post shader", out)) return;
+	self.require_gpu("compiling a post shader")!;
 
-	@pool()
+	List{MaterialUniform} uniforms;
+	uniforms.tinit(4);
+	self.read_uniform_shapes(uniform_shapes, &uniforms, tables: false)!;
+
+	List{MaterialTexture} textures;
+	List{int} bound;
+	textures.tinit(4);
+	bound.tinit(4);
+	self.read_texture_ids(texture_ids, &textures, &bound)!;
+
+	List{PostImageDecl} images;
+	images.tinit(4);
+	self.read_post_images(image_list, &images)!;
+
+	// Collected whether the compile failed or only warned, exactly as
+	// `js_create_material` collects it: the warning path logs and the failure
+	// path throws, and an agent who never sees a warning writes the same mistake
+	// twice.
+	String diagnostic;
+	uint stage = 0;
+	// `@catch` rather than `if (catch ...)` around the call itself, because the
+	// diagnostic has to be freed on both paths and a `defer` cannot be placed
+	// inside the `catch` arm that needs it.
+	fault err;
+	if (append)
 	{
-		String fragment = arg_text(&js, argc, args, 0, tmem);
-		String names    = arg_text(&js, argc, args, 1, tmem);
-		String widths   = arg_text(&js, argc, args, 2, tmem);
-
-		List{String} name_list;
-		List{String} width_list;
-		name_list.tinit(4);
-		width_list.tinit(4);
-		split_commas(names, &name_list);
-		split_commas(widths, &width_list);
-
-		if (name_list.len() != width_list.len())
-		{
-			*out = js.raise("every uniform needs a value — a name arrived without one");
-			return;
-		}
-
-		List{MaterialUniform} uniforms;
-		uniforms.tinit(4);
-		foreach (i, name : name_list)
-		{
-			int components = width_list[i].to_int() ?? 0;
-			if (components < 1 || components > 4)
-			{
-				*out = js.raisef("uniform '%s' must be a number or an array of two, three or four numbers", name);
-				return;
-			}
-
-			// Always one row. There is no `rows` argument to these verbs at all,
-			// rather than one that is always 1: a post pass has no instances, so a
-			// row count is not a thing a caller could mean here.
-			uniforms.push({ .name = name, .components = (uint)components, .rows = 1 });
-		}
-
-		// The samplers, as two more joined lists — names the body declares, and the
-		// texture each starts bound to, with `-1` for a sampler that starts white.
-		String texture_names = arg_text(&js, argc, args, 3, tmem);
-		String texture_ids   = arg_text(&js, argc, args, 4, tmem);
-
-		// The third source, as an index into the chain or -1. `postSpec` has already
-		// turned a handle into this number and refused everything that is not one;
-		// what it deliberately did not do is check the range, because the chain is
-		// the host's — `PostPass.add` refuses an index that names no pass.
-		int tap = argc > 5 ? arg_int(&js, argc, args, 5) : -1;
-
-		List{String} texture_name_list;
-		List{String} texture_id_list;
-		texture_name_list.tinit(4);
-		texture_id_list.tinit(4);
-		split_commas(texture_names, &texture_name_list);
-		split_commas(texture_ids, &texture_id_list);
-
-		if (texture_name_list.len() != texture_id_list.len())
-		{
-			*out = js.raise("every texture needs a value — a name arrived without one");
-			return;
-		}
-
-		List{MaterialTexture} textures;
-		textures.tinit(4);
-		foreach (name : texture_name_list) textures.push({ .name = name });
-
-		// Which kind of pass, and for a compute pass the grid it is dispatched
-		// over - zero for the frame's own extent.
-		PostKind kind = argc > 6 && arg_int(&js, argc, args, 6) == 1 ? PostKind.COMPUTE : PostKind.FRAGMENT;
-		uint[2] threads = {
-			argc > 7 ? whole(arg_int(&js, argc, args, 7)) : 0,
-			argc > 8 ? whole(arg_int(&js, argc, args, 8)) : 0,
-		};
-
-		// The pass's own images, as five more joined lists in step: names,
-		// formats, widths and heights (zero for the frame's), and whether each is
-		// cleared every frame. `postSpec` has already refused a malformed entry.
-		List{String} image_names;
-		List{String} image_formats;
-		List{String} image_widths;
-		List{String} image_heights;
-		List{String} image_clears;
-		image_names.tinit(4);
-		image_formats.tinit(4);
-		image_widths.tinit(4);
-		image_heights.tinit(4);
-		image_clears.tinit(4);
-		split_commas(argc > 9 ? arg_text(&js, argc, args, 9, tmem) : "", &image_names);
-		split_commas(argc > 10 ? arg_text(&js, argc, args, 10, tmem) : "", &image_formats);
-		split_commas(argc > 11 ? arg_text(&js, argc, args, 11, tmem) : "", &image_widths);
-		split_commas(argc > 12 ? arg_text(&js, argc, args, 12, tmem) : "", &image_heights);
-		split_commas(argc > 13 ? arg_text(&js, argc, args, 13, tmem) : "", &image_clears);
-		if (image_formats.len() != image_names.len() || image_widths.len() != image_names.len()
-			|| image_heights.len() != image_names.len() || image_clears.len() != image_names.len())
-		{
-			*out = js.raise("every post image needs a format and a size — one arrived without them");
-			return;
-		}
-		List{PostImageDecl} images;
-		images.tinit(4);
-		foreach (i, name : image_names)
-		{
-			images.push({
-				.name = name,
-				.format = image_formats[i],
-				.width = whole(image_widths[i].to_int() ?? 0),
-				.height = whole(image_heights[i].to_int() ?? 0),
-				.per_frame = image_clears[i] == "1",
-			});
-		}
-
-		// Collected whether the compile failed or only warned, exactly as
-		// `js_create_material` collects it: the warning path logs and the failure
-		// path throws, and an agent who never sees a warning writes the same mistake
-		// twice.
-		String diagnostic;
-		uint stage = 0;
-		// `@catch` rather than `if (catch ...)` around the call itself, because the
-		// diagnostic has to be freed on both paths and a `defer` cannot be placed
-		// inside the `catch` arm that needs it.
-		fault err;
-		if (append)
-		{
-			uint? added = self.renderer.post.add(
+		uint? added = self.renderer.post.add(
+			&self.renderer.gpu,
+			&self.renderer.target,
+			fragment,
+			uniforms.array_view(),
+			textures.array_view(),
+			tap,
+			diagnostic: &diagnostic,
+			kind: kind,
+			images: images.array_view(),
+			threads: threads
+		);
+		err = @catch(added);
+		if (!err) stage = added!!;
+	}
+	else
+	{
+		// The table is where the outgoing chain's images go back to. It belongs to
+		// the mesh pass and the chain belongs to the renderer, so this is the
+		// layer that has both.
+		err = @catch(
+			self.renderer.post.set(
 				&self.renderer.gpu,
 				&self.renderer.target,
 				fragment,
 				uniforms.array_view(),
 				textures.array_view(),
-				tap,
+				&self.pass.assets,
 				diagnostic: &diagnostic,
 				kind: kind,
 				images: images.array_view(),
 				threads: threads
-			);
-			err = @catch(added);
-			if (!err) stage = added!!;
-		}
-		else
-		{
-			err = @catch(
-				self.renderer.post.set(
-					&self.renderer.gpu,
-					&self.renderer.target,
-					fragment,
-					uniforms.array_view(),
-					textures
-						.array_view(), // Where the outgoing chain's images go back to. The table belongs to
-						// the mesh pass and the chain belongs to the renderer, so this is
-						// the layer that has both.
-					&self.pass.assets,
-					diagnostic: &diagnostic,
-					kind: kind,
-					images: images.array_view(),
-					threads: threads
-				)
-			);
-		}
-		defer if (diagnostic.ptr != null) diagnostic.free(mem);
+			)
+		);
+	}
+	defer if (diagnostic.ptr != null) diagnostic.free(mem);
 
-		if (err)
-		{
-			*out = js.raise(post_failure(err, diagnostic));
-			return;
-		}
+	if (err) return self.js.fail("%s", post_failure(err, diagnostic))~;
 
-		if (diagnostic.len > 0)
-		{
-			self.log.append_string("post: ");
-			self.log.append_string(diagnostic);
-			if (!diagnostic.ends_with("\n")) self.log.append_char('\n');
-		}
+	if (diagnostic.len > 0)
+	{
+		self.log.append_string("post: ");
+		self.log.append_string(diagnostic);
+		if (!diagnostic.ends_with("\n")) self.log.append_char('\n');
+	}
 
-		// After the compile, because a binding index is something only the compiled
-		// module knows. A failure here does not need to undo anything: the script is
-		// about to be thrown at, and the pass that is running is the one it just
-		// asked for with a sampler still showing white.
-		foreach (i, name : texture_name_list)
+	// After the compile, because a binding index is something only the compiled
+	// module knows. A failure here does not need to undo anything: the script is
+	// about to be thrown at, and the pass that is running is the one it just
+	// asked for with a sampler still showing white.
+	foreach (i, texture : textures)
+	{
+		if (catch bind_err = self.renderer.post.set_texture(&self.renderer.gpu, &self.pass.assets, texture.name, bound[i], stage))
 		{
-			int texture = texture_id_list[i].to_int() ?? NO_TEXTURE;
-			if (catch bind_err = self.renderer.post.set_texture(
-				&self.renderer.gpu,
-				&self.pass.assets,
-				name,
-				texture,
-				stage
-			))
-			{
-				*out = js.raise(texture_failure(bind_err, name, "this post shader", "the pass's"));
-				return;
-			}
+			return self.js.fail("%s", texture_failure(bind_err, texture.name, "this post shader", "the pass's"))~;
 		}
+	}
 
-		*out = qjs::int_value((int)stage);
-	};
+	return stage;
 }
 
 // A count from a script, where a negative one means none.
@@ -314,50 +276,22 @@ fn uint whole(int value) @local => value < 0 ? 0 : (uint)value;
  pass's body declared.
 
  `js_set_material_texture` for the pass with no geometry. The stage index is the
- third argument and not the first, so every existing call site reads the same
- way: it is the handle's own number, and a script that only ever called `setPost`
- always sends 0.
+ handle's own number, and a script that only ever called `setPost` always sends 0.
+
+ @return? js::THREW
 *>
-fn void js_set_post_texture(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_set_post_texture(JsRuntime* self, String name, int texture, int stage)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	if (self.renderer == null) return self.js.fail("there is no post pass in this context — it has no GPU device")~;
 
-	if (self.renderer == null)
+	if (catch err = self.renderer.post.set_texture(&self.renderer.gpu, &self.pass.assets, name, texture, whole(stage)))
 	{
-		*out = js.raise("there is no post pass in this context — it has no GPU device");
-		return;
-	}
-
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		int texture = arg_int(&js, argc, args, 1);
-		int stage   = arg_int(&js, argc, args, 2);
-
-		if (catch err = self.renderer.post.set_texture(
-			&self.renderer.gpu,
-			&self.pass.assets,
-			name,
-			texture,
-			stage < 0 ? 0 : (uint)stage
-		))
+		if (err == MATERIAL_UNKNOWN)
 		{
-			*out = js.raise(
-				err
-					== MATERIAL_UNKNOWN ? "there is no post shader running — three.setPost({ fragment, textures }) first"
-					: texture_failure(err, name, "this post shader", "the pass's")
-			);
-			return;
+			return self.js.fail("there is no post shader running — three.setPost({ fragment, textures }) first")~;
 		}
-	};
+		return self.js.fail("%s", texture_failure(err, name, "this post shader", "the pass's"))~;
+	}
 }
 
 <*
@@ -415,6 +349,7 @@ fn String post_failure(fault err, String diagnostic) @local
 	}
 }
 
+
 <*
  `three.setPost(null)` — stop post-processing.
 
@@ -422,16 +357,8 @@ fn String post_failure(fault err, String diagnostic) @local
  a script can call it unconditionally. `PostPass.clear` makes the same promise
  one layer down.
 *>
-fn void js_clear_post(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void js_clear_post(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
 	if (self.renderer == null) return;
 	// With the table, so the shader's images are given back rather than held by a
 	// pass that is no longer running.
@@ -442,43 +369,58 @@ fn void js_clear_post(
 // The tonemap — the engine's own pass, which is not one of the script's
 // ============================================================================
 
-<*
- `toneMapGet()` — the tonemap, as `[mode, exposure]`.
+// The modes by the names a script writes, in `ToneMap` order.
+const String[3] TONE_MAP_NAMES = { "none", "agx", "agx-blender" };
 
- The mode crosses as a number and not as a string, for the reason every other
- enum on this boundary does: the shim reads numbers and arrays of them, and the
- spelling of a mode is a thing `prelude.js` owns along with the message a bad one
- gets.
+// A tonemap mode argument, by name.
+struct ToneMapName
+{
+	ToneMap mode;
+}
+
+<*
+ A typo is the whole failure mode of a string enum, so an unknown name is refused
+ with the list rather than quietly rendering as the identity.
+
+ @return? js::THREW
+*>
+fn void? ToneMapName.from_js(&self, js::Call* c, int at)
+{
+	@pool()
+	{
+		String name = c.text(at);
+		foreach (i, known : TONE_MAP_NAMES)
+		{
+			if (name != known) continue;
+			self.mode = ToneMap::from_ordinal(i);
+			return;
+		}
+		return c.js.fail_with(TYPE_ERROR, "three.toneMapping: unknown mode '%s' — one of %s", name,
+			"none, agx, agx-blender")~;
+	};
+}
+
+struct ToneMapRead
+{
+	String mode;
+	float exposure;
+}
+
+<*
+ `toneMapGet()` — the tonemap, as `{ mode, exposure }`.
 
  Answers with the defaults on a runtime with no device, rather than raising.
  Reading `three.toneMapping` is harmless where there is nothing to tone map, and
  a getter that throws would make the property unreadable in a script that never
  asked for a device.
 *>
-fn void js_tone_map_get(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn ToneMapRead js_tone_map_get(JsRuntime* self)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	ToneMap mode = ToneMap.NONE;
-	float exposure = 1.0;
-	if (self.renderer != null)
-	{
-		mode     = self.renderer.post.tonemap_mode;
-		exposure = self.renderer.post.tonemap_exposure;
-	}
-
-	qjs::Value list = js.array();
-	js.set_index(list, 0, qjs::number_value((double)mode.ordinal));
-	js.set_index(list, 1, qjs::number_value((double)exposure));
-	*out = list;
+	if (self.renderer == null) return { TONE_MAP_NAMES[0], 1.0 };
+	return {
+		TONE_MAP_NAMES[self.renderer.post.tonemap_mode.ordinal],
+		self.renderer.post.tonemap_exposure,
+	};
 }
 
 <*
@@ -495,97 +437,43 @@ fn void js_tone_map_get(
 
  Needs a device, for `post_verb`'s reason: the tonemap is a pipeline and a
  full-size attachment, and there is neither without one.
-*>
-fn void js_tone_map_set(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
+ @return? js::THREW
+*>
+fn void? js_tone_map_set(JsRuntime* self, ToneMapName mode, float exposure)
+{
 	if (self.renderer == null)
 	{
-		*out = js.raise("the tonemap is a shader over the finished frame, and this context has no GPU device");
-		return;
+		return self.js.fail("the tonemap is a shader over the finished frame, and this context has no GPU device")~;
 	}
-
-	int mode = arg_int(&js, argc, args, 0);
-	// Read defensively rather than as a second copy of the prelude's list: an
-	// ordinal this does not know is the identity, not an out-of-range enum.
-	ToneMap wanted = ToneMap.NONE;
-	switch (mode)
+	self.renderer.post.set_tonemap_exposure(exposure);
+	if (catch err = self.renderer.post.set_tonemap(&self.renderer.gpu, &self.renderer.target, mode.mode))
 	{
-		case 1: wanted = ToneMap.AGX;
-		case 2: wanted = ToneMap.AGX_BLENDER;
-		default: wanted = ToneMap.NONE;
-	}
-
-	self.renderer.post.set_tonemap_exposure((float)arg_float(&js, argc, args, 1));
-	if (catch err = self.renderer.post.set_tonemap(&self.renderer.gpu, &self.renderer.target, wanted))
-	{
-		*out = js.raisef("the tonemap could not be built: %s", err);
+		return self.js.fail("the tonemap could not be built: %s", err)~;
 	}
 }
 
 <*
  `post.uniforms.<name> = value` — write one post uniform's bytes.
 
- Arity seven against `setUniform`'s nine: name, four floats, the count of them
- and which pass in the chain — and no row or row count, because there is no
- table. The count is passed rather than inferred from trailing zeroes for
- `js_set_uniform`'s reason: `[0, 0, 0]` is a perfectly ordinary colour, and
- guessing would make it a one-component write.
+ `setUniform` without the row and row count, because there is no table.
+
+ @param values : `An array of one to four numbers; its length is the width.`
+ @return? js::THREW
 *>
-fn void js_set_post_uniform(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn void? js_set_post_uniform(JsRuntime* self, String name, js::Value values, int stage)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	if (self.renderer == null) return self.js.fail("there is no post pass in this context — it has no GPU device")~;
 
-	if (self.renderer == null)
+	float[4] numbers;
+	usz count = self.uniform_numbers(values, &numbers, name)!;
+
+	if (catch err = self.renderer.post.set_uniform(name, numbers[:count], whole(stage)))
 	{
-		*out = js.raise("there is no post pass in this context — it has no GPU device");
-		return;
+		if (err == MATERIAL_UNIFORM_WIDTH)
+		{
+			return self.js.fail("uniform '%s' was declared with a different number of components", name)~;
+		}
+		return self.js.fail("the post pass has no uniform called '%s'", name)~;
 	}
-
-	@pool()
-	{
-		String name = arg_text(&js, argc, args, 0, tmem);
-		float[4] values = {
-			arg_float(&js, argc, args, 1),
-			arg_float(&js, argc, args, 2),
-			arg_float(&js, argc, args, 3),
-			arg_float(&js, argc, args, 4),
-		};
-		int count = arg_int(&js, argc, args, 5);
-		if (count < 1 || count > 4)
-		{
-			*out = js.raisef("uniform '%s' wants one to four numbers", name);
-			return;
-		}
-		int stage = arg_int(&js, argc, args, 6);
-
-		if (catch err = self.renderer.post.set_uniform(name, values[:count], stage < 0 ? 0 : (uint)stage))
-		{
-			*out = js.raise(
-				err == MATERIAL_UNIFORM_WIDTH ? string::tformat(
-					"uniform '%s' was declared with a different number of components",
-					name
-				)
-					: string::tformat("the post pass has no uniform called '%s'", name)
-			);
-			return;
-		}
-	};
 }

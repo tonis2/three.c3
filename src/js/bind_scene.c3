@@ -124,10 +124,10 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind(host, "raycast", &js_raycast, 6);
 
 	// Materials (js/bind_shader.c3)
-	self.bind_shader_verbs(host);
+	self.bind_shader_verbs(js_host)!!;
 
 	// The one post shader (js/bind_post.c3)
-	self.bind_post_verbs(host);
+	self.bind_post_verbs(js_host)!!;
 
 	// The interface (js/bind_ui.c3)
 	self.bind_ui_verbs(host);
@@ -139,7 +139,7 @@ fn void JsRuntime.install_bindings(&self)
 	self.bind_input_verbs(js_host)!!;
 
 	// Saving (js/bind_save.c3)
-	self.bind_save_verbs(host);
+	self.bind_save_verbs(js_host)!!;
 
 	// Physics (js/bind_physics.c3)
 	self.bind_physics_verbs(js_host)!!;

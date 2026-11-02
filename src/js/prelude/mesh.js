@@ -163,7 +163,7 @@ export class Mesh extends Object3D {
 		// than stored on a mesh that would then draw with nothing.
 		const index = v === null ? 0 : v._index();
 		this._material = v;
-		if (this._i >= 0) H.setMaterial(this._i, this._g, index);
+		if (this._h) H.setMaterial(this._h, index);
 	}
 }
 
