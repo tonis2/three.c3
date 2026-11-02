@@ -54,6 +54,7 @@ module three;
 import std::io;
 import std::time;
 import std::collections::list;
+import std::collections::map;
 import qjs;
 import fastjs::js;
 import c3w;
@@ -302,6 +303,11 @@ struct JsRuntime
 	js::Engine* js;
 	// TEMPORARY: the same engine through the old API, for the files not moved yet.
 	qjs::Context qjs;
+	// Nodes and assets as script objects, one per live id — `bind_args.c3`.
+	js::NativeClass* node_class;
+	js::NativeClass* asset_class;
+	HashMap {ulong, js::Root} node_handles;
+	HashMap {ulong, js::Root} asset_handles;
 	MeshPass* pass;
 
 	Renderer* renderer;
@@ -471,7 +477,7 @@ struct JsRuntime
 	HeldFn trigger_handler;
 	HeldFn contact_handler;
 
-	// `import`, wired up by `js/modules.c3` over `quickjs.c3l`'s loader. An empty
+	// `import`, wired up by `js/modules.c3` over fastjs's loader. An empty
 	// root means no `--assets` boot and no disk imports at all, which is what a
 	// plain `--mcp` run wants; the `three:` space works regardless. Addressed by
 	// the engine and must not move while the context is open.
@@ -595,7 +601,10 @@ struct PendingUpload
 fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz memory_limit = JS_MEMORY_LIMIT)
 {
 	self.js = js::open(memory_limit) ?? JS_ENGINE_FAILED~!;
+	self.js.user = self;
 	self.qjs = qjs::wrap(self.js);
+	self.node_handles.init(mem);
+	self.asset_handles.init(mem);
 	self.pass = pass;
 	self.renderer = renderer;
 	self.controls = DEFAULT_CONTROLS;
@@ -698,6 +707,8 @@ fn void JsRuntime.close(&self)
 	self.release_compute();
 	// Every Root goes with the engine.
 	self.js.close();
+	self.node_handles.free();
+	self.asset_handles.free();
 	// The physics world and the nav bake go with their scene, in `MeshPass.free`.
 	self.log.free();
 	self.advice.free();
@@ -821,6 +832,7 @@ fn RunResult JsRuntime.run_source(&self, String source, String name, bool drain_
 		}
 	};
 
+	self.prune_handles();
 	self.collect_validation();
 	// Only for a run the caller asked for — `collect_advice` has why, and what a
 	// run that skips it leaves in the sink for the next one.

@@ -100,6 +100,8 @@ export class Object3D {
 		// The host node, or -1 for "not in a scene". See the header.
 		this._i = -1;
 		this._g = -1;
+		// Its handle (a host `Node`), or null.
+		this._h = null;
 	}
 
 	// **Accessors rather than fields, for the solver's sake.** Everything a
@@ -445,12 +447,16 @@ export class Object3D {
 	// everything set before the add, then do the same for the subtree.
 	_materialize(parent) {
 		const ref = this._ref();
-		const [i, g] = H.add(
+		const h = H.add(
 			ref ? ref.asset : -1, ref ? ref.assetGeneration : 0, ref ? ref.mesh : -1,
 			parent._i, parent._g, this._name,
 		);
-		this._i = i;
-		this._g = g;
+		// The host's Node: one object per live node, so a hit or an event names
+		// it back and `owner` is the object the script built.
+		this._h = h;
+		h.owner = this;
+		const i = this._i = h.index;
+		const g = this._g = h.generation;
 		this._flush();
 		if (!this._visible) H.setVisible(i, g, false);
 		if (!this._collides) H.setCollides(i, g, false);
@@ -508,6 +514,7 @@ export class Object3D {
 	_demote() {
 		this._i = -1;
 		this._g = -1;
+		this._h = null;
 		// The host dropped the player along with the nodes, so the map has to be
 		// sent again if this subtree is re-added. Without this a character removed
 		// and put back would keep its clips and quietly stop being posed by them.

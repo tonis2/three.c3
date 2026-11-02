@@ -492,6 +492,8 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 
 	// The frame's script work is done: give the collector its slice here, outside
 	// the spans the budget counts, so less of it lands inside a callback.
+	// Handles of nodes removed by the game, now and then rather than every frame.
+	if (self.frame_ticks % 64 == 0) self.prune_handles();
 	self.js.gc_step(JS_FRAME_GC_US);
 
 	// Measured after the frame rather than interrupted during it: a frame that ran

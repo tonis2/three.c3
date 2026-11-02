@@ -45,6 +45,7 @@ fn void JsRuntime.install_bindings(&self)
 	js::Value js_host = self.js.object()!!;
 	// TEMPORARY: the files on the old API register through this.
 	qjs::Value host = (qjs::Value)js_host;
+	self.install_handles(js_host)!!;
 
 	// Assets (js/bind_asset.c3)
 	self.bind(host, "load", &js_load, 1);
@@ -655,7 +656,7 @@ fn void js_add(
 
 		if (index < 0)
 		{
-			*out = handle_value(&js, parent.scene.add_group(parent.id, name));
+			*out = (qjs::Value)self.node_handle(parent.scene.add_group(parent.id, name)) ?? qjs::EXCEPTION;
 			return;
 		}
 
@@ -674,7 +675,7 @@ fn void js_add(
 
 		// No retain here since G2: `Scene.create_slot` takes the reference, so
 		// the count has one implementation rather than one per caller.
-		*out = handle_value(&js, parent.scene.add_mesh(asset, (uint)mesh, parent.id, name));
+		*out = (qjs::Value)self.node_handle(parent.scene.add_mesh(asset, (uint)mesh, parent.id, name)) ?? qjs::EXCEPTION;
 	};
 }
 
