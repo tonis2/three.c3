@@ -62,8 +62,7 @@ export class NavField {
 		const [x, y, z] = readVector(point, 'field.cost(point)');
 		const value = H.navCost(this._sid, this._h, x, y, z);
 		// The host sends -1 for unreachable — see bind_nav.c3. A cost is a
-		// distance and can never be negative, so the sentinel is unambiguous
-		// and C3 has no infinity constant to send in its place.
+		// distance and can never be negative, so the sentinel is unambiguous.
 		return value < 0 ? Infinity : value;
 	}
 
@@ -72,14 +71,10 @@ export class NavField {
 
 	// `direction` and `cost` for a whole crowd, in ONE crossing.
 	//
-	// **The two above are the wrong verbs to call in a loop, and the reason is
-	// not the crossing.** The bare host call that answers a number measures
-	// 143 ns, and `cost(point)` — the same call, through the
-	// `readVector` that allocates a three-element array and runs three
-	// `Number.isFinite` checks to be polite about its argument — at 455 ns. The
-	// ergonomics layer costs twice what the boundary does. That is a good trade
-	// for a verb called once a frame and a bad one for a verb called once per
-	// agent per frame, and both are this verb.
+	// **The two above are the wrong verbs to call in a loop.** Each one goes
+	// through a `readVector` that allocates a three-element array and checks
+	// it: a good trade for a verb called once a frame and a bad one for a verb
+	// called once per agent per frame.
 	//
 	//     const pos = new Float32Array(n * 3);
 	//     const cost = new Float32Array(n);
@@ -111,16 +106,7 @@ export class NavField {
 		if (directions !== null && !(directions instanceof Float32Array)) {
 			throw new TypeError(`${where}: directions is a Float32Array of THREE floats per agent`);
 		}
-		return H.navSample(
-			this._sid,
-			this._h,
-			positions.buffer, positions.byteOffset, positions.length,
-			costs === null ? positions.buffer : costs.buffer,
-			costs === null ? 0 : costs.byteOffset,
-			costs === null ? 0 : costs.length,
-			directions === null ? positions.buffer : directions.buffer,
-			directions === null ? 0 : directions.byteOffset,
-			directions === null ? 0 : directions.length);
+		return H.navSample(this._sid, this._h, positions, costs ?? undefined, directions ?? undefined);
 	}
 
 	dispose() {
@@ -249,7 +235,7 @@ export function makeSceneNav(scene) {
 	// or inside a wall, or outside the baked region.
 	field(goals) {
 		const flat = readGoals(goals, 'three.nav.field(goals)');
-		const handle = H.navField(scene._sid, flat.buffer, flat.byteOffset, flat.length);
+		const handle = H.navField(scene._sid, flat);
 		return handle < 0 ? null : new NavField(scene._sid, handle);
 	},
 
@@ -276,7 +262,7 @@ export function makeSceneNav(scene) {
 		}
 		const limit = requestedLimit;
 		const out = new Float32Array(limit * 3);
-		const count = H.navPath(scene._sid, fx, fy, fz, tx, ty, tz, out.buffer, out.byteOffset, out.length);
+		const count = H.navPath(scene._sid, fx, fy, fz, tx, ty, tz, out);
 		const points = [];
 		for (let i = 0; i < count; i++) points.push(new Vector3(null, out[i * 3], out[i * 3 + 1], out[i * 3 + 2]));
 		return points;
@@ -308,8 +294,7 @@ export function makeSceneNav(scene) {
 		starts.forEach((point, i) => from.set(readVector(point, `${where}: starts[${i}]`), i * 3));
 		const out = new Float32Array(n * limit * 3);
 		const counts = new Int32Array(n);
-		H.navPaths(scene._sid, from.buffer, from.byteOffset, from.length, tx, ty, tz,
-			out.buffer, out.byteOffset, out.length, counts.buffer, counts.byteOffset, counts.length, limit);
+		H.navPaths(scene._sid, from, tx, ty, tz, out, counts, limit);
 		const routes = [];
 		for (let a = 0; a < n; a++) {
 			const points = [];
@@ -327,9 +312,8 @@ export function makeSceneNav(scene) {
 // Fill `velocities` with a desired velocity per agent — the crowd verb.
 //
 // **One crossing however many agents there are**, which is the whole point.
-// The boundary was measured, and the rule it wrote down is that a
-// verb answering with vectors writes into a Float32Array the caller owns; this
-// is that rule at crowd scale. A hundred agents cost one call.
+// A verb answering with vectors writes into a Float32Array the caller owns;
+// this is that rule at crowd scale. A hundred agents cost one call.
 //
 //     const p = new Float32Array(n * 3);   // where they are
 //     const v = new Float32Array(n * 3);   // filled by this
@@ -379,8 +363,7 @@ export function steer(positions, velocities, options = null) {
 	// as good an answer as any.
 	return H.steer(
 		handle < 0 ? H.sceneActive() : field._sid,
-		positions.buffer, positions.byteOffset, positions.length,
-		velocities.buffer, velocities.byteOffset, velocities.length,
+		positions, velocities,
 		handle, gx, gy, gz,
 		+(options?.maxSpeed ?? 1),
 		+(options?.arrive ?? 0),

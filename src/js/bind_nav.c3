@@ -25,97 +25,109 @@ import std::collections::list;
 import std::math;
 import std::math::vector;
 import collision;
-import qjs;
+import fastjs::js;
 
-fn void JsRuntime.bind_nav_verbs(&self, qjs::Value host)
+fn void? JsRuntime.bind_nav_verbs(&self, js::Value host)
 {
 	// Every one of these takes the scene id first. A bake belongs to a scene — it
 	// is voxelized out of that scene's triangles — and a field handle indexes that
 	// scene's own list, so a verb that assumed the active one would solve the wrong
 	// level's paths the moment a script baked ahead of a transition.
-	self.bind(host, "navBake", &js_nav_bake, 13);
-	self.bind(host, "navLoad", &js_nav_load, 4);
-	self.bind(host, "navStats", &js_nav_stats, 1);
-	self.bind(host, "navClear", &js_nav_clear, 1);
-	self.bind(host, "navField", &js_nav_field, 4);
-	self.bind(host, "navFieldFree", &js_nav_field_free, 2);
-	self.bind(host, "navDirection", &js_nav_direction, 5);
-	self.bind(host, "navCost", &js_nav_cost, 5);
-	self.bind(host, "navSample", &js_nav_sample, 11);
-	self.bind(host, "navPath", &js_nav_path, 10);
-	self.bind(host, "navPaths", &js_nav_paths, 14);
-	self.bind(host, "steer", &js_steer, 15);
-}
-
-fn void js_nav_load(qjs::ContextRef ctx, qjs::Value* this_val, int argc, qjs::Value* args, void* opaque, qjs::Value* out) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-	AssetId id = arg_asset(self, &js, argc, args, 1, out);
-	if (id == NO_ASSET) return;
-	Asset* loaded = self.pass.assets.slot(id);
-	if (loaded.nav_profiles.len() == 0) { *out = qjs::null_value(); return; }
-	@pool()
-	{
-		String wanted = argc > 3 ? arg_text(&js, argc, args, 3, tmem) : "";
-		AssetNavigationProfile* profile = null;
-		if (wanted.len == 0)
-		{
-			foreach (&candidate : loaded.nav_profiles) if (candidate.name == "default") { profile = candidate; break; }
-			if (profile == null) profile = &loaded.nav_profiles[0];
-		}
-		else
-		{
-			foreach (&candidate : loaded.nav_profiles) if (candidate.name == wanted) { profile = candidate; break; }
-		}
-		if (profile == null)
-		{
-			*out = js.raisef("that asset has no navigation profile named '%s'", wanted);
-			return;
-		}
-		if (!scene.load_nav(profile)) { *out = qjs::null_value(); return; }
-		*out = nav_stats_value(scene, &js);
-	};
+	self.js.@bind(host, "navBake", &js_nav_bake, self)!;
+	self.js.@bind(host, "navLoad", &js_nav_load, self)!;
+	self.js.@bind(host, "navStats", &js_nav_stats, self)!;
+	self.js.@bind(host, "navClear", &js_nav_clear, self)!;
+	self.js.@bind(host, "navField", &js_nav_field, self)!;
+	self.js.@bind(host, "navFieldFree", &js_nav_field_free, self)!;
+	self.js.@bind(host, "navDirection", &js_nav_direction, self)!;
+	self.js.@bind(host, "navCost", &js_nav_cost, self)!;
+	self.js.@bind(host, "navSample", &js_nav_sample, self)!;
+	self.js.@bind(host, "navPath", &js_nav_path, self)!;
+	self.js.@bind(host, "navPaths", &js_nav_paths, self)!;
+	self.js.@bind(host, "steer", &js_steer, self)!;
 }
 
 <*
- `navBake(cell, radius, height, slope, stepHeight, hasBounds, minX, minY, minZ, maxX, maxY, maxZ)`.
+ The scene a `scene._sid` names.
+
+ @return? js::THREW
+*>
+fn Scene*? nav_scene(JsRuntime* self, uint id) @local
+{
+	Scene* found = self.pass == null ? null : self.pass.scene_by_id(id);
+	if (found == null) return self.js.fail("that Scene was disposed — its objects, its bodies and its nav bake are gone")~;
+	return found;
+}
+
+<*
+ `navLoad(sceneId, assetIndex, assetGeneration, profile)`: replace the bake with a
+ profile embedded in a loaded glTF. An empty name prefers "default", then the
+ first. Answers like `navStats`, or null when the asset has no profiles.
+
+ @return? js::THREW
+*>
+fn js::Value? js_nav_load(JsRuntime* self, uint scene_id, uint asset_index, uint asset_generation, String wanted)
+{
+	Scene* scene = nav_scene(self, scene_id)!;
+	AssetId id = { .index = asset_index, .generation = asset_generation };
+	Asset* loaded = self.pass.assets.slot(id);
+	if (loaded == null)
+	{
+		return self.js.fail("that asset is no longer loaded — three.unloadUnused() or scene.unload() freed it, "
+			"and loading the file again gives a fresh handle")~;
+	}
+	if (loaded.nav_profiles.len() == 0) return js::NULL;
+
+	AssetNavigationProfile* profile = null;
+	if (wanted.len == 0)
+	{
+		foreach (&candidate : loaded.nav_profiles) if (candidate.name == "default") { profile = candidate; break; }
+		if (profile == null) profile = &loaded.nav_profiles[0];
+	}
+	else
+	{
+		foreach (&candidate : loaded.nav_profiles) if (candidate.name == wanted) { profile = candidate; break; }
+	}
+	if (profile == null) return self.js.fail("that asset has no navigation profile named '%s'", wanted)~;
+	if (!scene.load_nav(profile)) return js::NULL;
+	return nav_stats_value(self, scene);
+}
+
+<*
+ `navBake(sceneId, cell, radius, height, slope, stepHeight, hasBounds, minX, minY,
+ minZ, maxX, maxY, maxZ)`.
 
  Answers with the same object `navStats` does, or `null` when the region held no
  standing room — a real answer and not an error: an empty scene, a scene of
  walls, or a slope limit nothing in it is under.
-*>
-fn void js_nav_bake(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
 
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
+ @return? js::THREW
+*>
+fn js::Value? js_nav_bake(
+	JsRuntime* self,
+	uint scene_id,
+	float cell,
+	float radius,
+	float height,
+	float slope,
+	float step_height,
+	bool has_bounds,
+	Vec3 min,
+	Vec3 max
+)
+{
+	Scene* scene = nav_scene(self, scene_id)!;
 
 	NavSettings settings = default_nav_settings();
-	float cell           = arg_float(&js, argc, args, 1);
 	if (cell > 0.0f) settings.cell = cell;
-	settings.agent_radius = math::max(arg_float(&js, argc, args, 2), 0.0f);
-	settings.agent_height = math::max(arg_float(&js, argc, args, 3), 0.0f);
-	settings.slope_limit = arg_float(&js, argc, args, 4);
-	settings.step_height = math::max(arg_float(&js, argc, args, 5), 0.0f);
-	settings.has_bounds = arg_truth(&js, argc, args, 6);
-	if (settings.has_bounds)
+	settings.agent_radius = math::max(radius, 0.0f);
+	settings.agent_height = math::max(height, 0.0f);
+	settings.slope_limit = slope;
+	settings.step_height = math::max(step_height, 0.0f);
+	settings.has_bounds = has_bounds;
+	if (has_bounds)
 	{
-		settings.bounds = {
-			arg_vec3(&js, argc, args, 7),
-			arg_vec3(&js, argc, args, 10),
-		};
+		settings.bounds = { min, max };
 		settings.bounds.fix();
 	}
 
@@ -124,130 +136,103 @@ fn void js_nav_bake(
 
 	// This scene's triangles, which is the point: a level baked while it is off
 	// screen is a level that costs nothing to switch to.
-	if (!scene.bake_nav(&self.pass.assets, settings, &scene.nav))
-	{
-		*out = qjs::null_value();
-		return;
-	}
-	*out = nav_stats_value(scene, &js);
-}
-
-fn qjs::Value nav_stats_value(Scene* scene, qjs::Context* js) @local
-{
-	NavMesh* nav = &scene.nav;
-	if (!nav.usable()) return qjs::null_value();
-
-	qjs::Value value = js.object();
-	js.set_property(value, "cell", qjs::number_value(nav.settings.cell));
-	js.set_property(value, "radius", qjs::number_value(nav.settings.agent_radius));
-	js.set_property(value, "height", qjs::number_value(nav.settings.agent_height));
-	js.set_property(value, "stepHeight", qjs::number_value(nav.settings.step_height));
-	js.set_property(value, "slope", qjs::number_value(nav.settings.slope_limit));
-	if (nav.profile_name.len > 0) js.set_property(value, "profile", js.string(nav.profile_name));
-	if (nav.source_hash.len > 0) js.set_property(value, "sourceHash", js.string(nav.source_hash));
-	// The three counts and the time are what decide whether baking is a
-	// level-boundary operation or a loading-screen one, answerable for the
-	// caller's own level rather than for a reference one.
-	js.set_property(value, "voxels", qjs::number_value((double)nav.voxels));
-	js.set_property(value, "solid", qjs::number_value((double)nav.solid_cells));
-	js.set_property(value, "floor", qjs::number_value((double)nav.floor_cells));
-	js.set_property(value, "walkable", qjs::number_value((double)nav.walkable_cells));
-	// The two that say whether the bake is *usable* rather than what it cost.
-	// Every counter above is a total, and a total cannot tell a level an agent can
-	// cross from the same level cut into islands — see `NavMesh.components`.
-	// `components > 1` is the signal a caller wants at bake time rather than after
-	// the third agent stands still for no reason.
-	js.set_property(value, "components", qjs::number_value((double)nav.components));
-	js.set_property(value, "largest", qjs::number_value((double)nav.largest_component));
-	js.set_property(value, "bakeMs", qjs::number_value(nav.bake_ms));
-	js.set_property(
-		value,
-		"bounds",
-		aabb_value(
-			js,
-			(collision::Aabb3) {
-				nav.grid.origin,
-				nav.grid.origin + (Vec3) {
-					(float)(nav.grid.nx - 1) * nav.grid.cell,
-					(float)(nav.grid.ny - 1) * nav.grid.cell,
-					(float)(nav.grid.nz - 1) * nav.grid.cell,
-				},
-			}
-		)
-	);
-	return value;
-}
-
-fn void js_nav_stats(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	*out = nav_stats_value(scene, &js);
-}
-
-fn void js_nav_clear(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
-{
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	scene.drop_nav();
-	*out = qjs::undefined_value();
+	if (!scene.bake_nav(&self.pass.assets, settings, &scene.nav)) return js::NULL;
+	return nav_stats_value(self, scene);
 }
 
 <*
- `navField(buffer, byteOffset, goalFloats)` — solve towards a set of goals and
- keep the answer.
-
- @return `A handle, or -1 when nothing was solved: no bake, no goals, or no goal on a walkable cell.`
+ What a bake produced and cost. `profile` and `sourceHash` are added only for a
+ loaded profile that has them.
 *>
-fn void js_nav_field(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+struct NavStats
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	float cell;
+	float radius;
+	float height;
+	float step_height;
+	float slope;
+	// The counts and the time decide whether baking is a level-boundary operation
+	// or a loading-screen one, for the caller's own level.
+	double voxels;
+	double solid;
+	double floor;
+	double walkable;
+	// Whether the bake is *usable*: a total cannot tell a level an agent can cross
+	// from the same level cut into islands — see `NavMesh.components`.
+	double components;
+	double largest;
+	double bake_ms;
+	// minX, minY, minZ, maxX, maxY, maxZ.
+	float[<6>] bounds;
+}
 
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
+<*
+ @return? js::THREW
+*>
+fn js::Value? nav_stats_value(JsRuntime* self, Scene* scene) @local
+{
+	NavMesh* nav = &scene.nav;
+	if (!nav.usable()) return js::NULL;
 
-	if (!scene.nav.usable())
-	{
-		*out = js.raise("three.nav.field() needs a baked mesh — call three.nav.bake() first");
-		return;
-	}
+	Vec3 lo = nav.grid.origin;
+	Vec3 hi = lo + (Vec3) {
+		(float)(nav.grid.nx - 1) * nav.grid.cell,
+		(float)(nav.grid.ny - 1) * nav.grid.cell,
+		(float)(nav.grid.nz - 1) * nav.grid.cell,
+	};
+	NavStats stats = {
+		.cell = nav.settings.cell,
+		.radius = nav.settings.agent_radius,
+		.height = nav.settings.agent_height,
+		.step_height = nav.settings.step_height,
+		.slope = nav.settings.slope_limit,
+		.voxels = (double)nav.voxels,
+		.solid = (double)nav.solid_cells,
+		.floor = (double)nav.floor_cells,
+		.walkable = (double)nav.walkable_cells,
+		.components = (double)nav.components,
+		.largest = (double)nav.largest_component,
+		.bake_ms = nav.bake_ms,
+		.bounds = { lo.x, lo.y, lo.z, hi.x, hi.y, hi.z },
+	};
+	js::Value value = self.js.@object_of(stats)!;
+	if (nav.profile_name.len > 0) self.js.set(value, "profile", self.js.string(nav.profile_name)!)!;
+	if (nav.source_hash.len > 0) self.js.set(value, "sourceHash", self.js.string(nav.source_hash)!)!;
+	return value;
+}
 
-	float[] goals = float_view(&js, argc, args, 1);
-	if (goals.len < 3)
-	{
-		*out = js.raise("three.nav.field(goals) wants at least one [x, y, z]");
-		return;
-	}
+<*
+ `navStats(sceneId)`: the last bake, or null if there has not been one.
+
+ @return? js::THREW
+*>
+fn js::Value? js_nav_stats(JsRuntime* self, uint scene_id)
+{
+	return nav_stats_value(self, nav_scene(self, scene_id)!);
+}
+
+<*
+ `navClear(sceneId)`.
+
+ @return? js::THREW
+*>
+fn void? js_nav_clear(JsRuntime* self, uint scene_id)
+{
+	nav_scene(self, scene_id)!.drop_nav();
+}
+
+<*
+ `navField(sceneId, goals)`: solve towards a set of goals, a `Float32Array` of
+ three floats each, and keep the answer.
+
+ @return `A handle, or -1 when nothing was solved: no goal on a walkable cell.`
+ @return? js::THREW
+*>
+fn int? js_nav_field(JsRuntime* self, uint scene_id, float[] goals)
+{
+	Scene* scene = nav_scene(self, scene_id)!;
+	if (!scene.nav.usable()) return self.js.fail("three.nav.field() needs a baked mesh — call three.nav.bake() first")~;
+	if (goals.len < 3) return self.js.fail("three.nav.field(goals) wants at least one [x, y, z]")~;
 
 	float[] values = mem::new_array(float, scene.nav.field_size());
 	@pool()
@@ -259,8 +244,7 @@ fn void js_nav_field(
 		if (!scene.nav.solve(points, values))
 		{
 			mem::free(values);
-			*out = qjs::int_value(-1);
-			return;
+			return -1;
 		}
 	};
 
@@ -270,12 +254,11 @@ fn void js_nav_field(
 	{
 		if (slot.live) continue;
 		*slot = { .values = values, .live = true };
-		*out = qjs::int_value((int)i);
-		return;
+		return (int)i;
 	}
 
 	scene.nav_fields.push({ .values = values, .live = true });
-	*out = qjs::int_value((int)(scene.nav_fields.len() - 1));
+	return (int)(scene.nav_fields.len() - 1);
 }
 
 <*
@@ -293,166 +276,83 @@ fn float[] Scene.nav_field_of(&self, int handle)
 	return slot.values;
 }
 
-fn void js_nav_field_free(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+<*
+ `navFieldFree(sceneId, handle)`: false for a handle that was not live.
+
+ @return? js::THREW
+*>
+fn bool? js_nav_field_free(JsRuntime* self, uint scene_id, int handle)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	int handle = arg_int(&js, argc, args, 1);
-	if (handle < 0 || (sz)handle >= scene.nav_fields.len())
-	{
-		*out = qjs::bool_value(false);
-		return;
-	}
+	Scene* scene = nav_scene(self, scene_id)!;
+	if (handle < 0 || (sz)handle >= scene.nav_fields.len()) return false;
 
 	NavFieldSlot* slot = &scene.nav_fields[(sz)handle];
-	if (!slot.live)
-	{
-		*out = qjs::bool_value(false);
-		return;
-	}
+	if (!slot.live) return false;
 	if (slot.values.len > 0) mem::free(slot.values);
 	*slot = { };
-	*out = qjs::bool_value(true);
+	return true;
 }
 
 <*
- `navDirection(handle, x, y, z)` — the unit XZ direction that walks towards the
- goal, or `[0, 0, 0]` for nowhere to go.
+ `navDirection(sceneId, handle, x, y, z)`: the unit XZ direction that walks
+ towards the goal, or `[0, 0, 0]` for nowhere to go. For one agent; a crowd is
+ `steer`.
 
- Allocates a three-element array, which measures at about 185 ns against 55 for a
- scalar. That is the right trade for *one* agent asking once a frame and the
- wrong one for a crowd — which is what `three.steer` is, and why it exists rather
- than this being called in a loop.
+ @return? js::THREW
 *>
-fn void js_nav_direction(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn Vec3? js_nav_direction(JsRuntime* self, uint scene_id, int handle, Vec3 point)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	Vec3 point    = arg_vec3(&js, argc, args, 2);
-
-	Vec3 direction = field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
-	*out = vec3_value(&js, direction);
+	Scene* scene  = nav_scene(self, scene_id)!;
+	float[] field = scene.nav_field_of(handle);
+	return field.len == 0 ? (Vec3) { 0, 0, 0 } : scene.nav.direction_at(field, point);
 }
 
 <*
- `navCost(handle, x, y, z)` — how far the goal is along the ground.
+ `navCost(sceneId, handle, x, y, z)`: how far the goal is along the ground.
 
- -1 for unreachable, which the prelude turns into `Infinity` before a script sees
- it. A cost is a distance and can never be negative, so the sentinel cannot be
- confused with an answer — and the conversion happens in JavaScript because C3
- has no infinity constant to send, and a large finite number would be
- indistinguishable from "far" at exactly the moment a caller has to decide
- whether to give up.
+ -1 for unreachable, which the prelude turns into `Infinity`. A cost is a distance
+ and never negative, so the sentinel cannot be confused with an answer, and a
+ large finite number would be indistinguishable from "far".
+
+ @return? js::THREW
 *>
-fn void js_nav_cost(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn double? js_nav_cost(JsRuntime* self, uint scene_id, int handle, Vec3 point)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	float[] field = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	if (field.len == 0)
-	{
-		*out = qjs::number_value(-1.0);
-		return;
-	}
-
-	Vec3 point = arg_vec3(&js, argc, args, 2);
+	Scene* scene  = nav_scene(self, scene_id)!;
+	float[] field = scene.nav_field_of(handle);
+	if (field.len == 0) return -1.0;
 	float cost = scene.nav.cost_at(field, point);
-	*out = qjs::number_value(cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost);
+	return cost >= collision::VOXEL_UNREACHED ? -1.0 : (double)cost;
 }
 
 <*
- `navSample(handle, posBuffer, posByteOffset, posFloats, costBuffer,
- costByteOffset, costFloats, dirBuffer, dirByteOffset, dirFloats)` — the two
- verbs above, for a whole crowd, in one crossing.
-
- ## Why it is here and not written as a loop in the script
-
- The bare crossing that answers a number is 143 ns, and `field.cost(point)` — the
- same crossing through the `readVector` that allocates a three-element array and
- runs three `Number.isFinite` checks — is 455 ns. The ergonomics layer costs
- twice what the boundary does: a good trade for a verb called once a frame and a
- bad one for a verb called once per agent per frame, and both are this verb.
- `navDirection` is worse again, because it allocates its answer as well.
-
- Either output may be empty, so a caller asking only "how far is everyone from
- the goal" pays for no directions.
+ `navSample(sceneId, handle, positions, costs, directions)`: the two verbs above
+ for a whole crowd, in one call. `costs` (one float per agent) or `directions`
+ (three) may be undefined, so a caller asking only "how far is everyone" pays for
+ no directions.
 
  ## -1 is unreachable, and it stays -1 here
 
- The single form's -1 becomes `Infinity` in the prelude before a script sees it.
- This one cannot: converting means a JavaScript pass over the array, which is
- precisely the loop being avoided. So the bulk contract is the host's own —
- `cost < 0` is unreachable — and the prelude says so rather than hiding it.
+ The single form's -1 becomes `Infinity` in the prelude. This one cannot:
+ converting means a JavaScript pass over the array, which is the loop being
+ avoided. So `cost < 0` is unreachable, and the prelude says so.
 
- A field handle that is dead, or a bake that has been replaced, fills the costs
- with -1 and the directions with zero rather than raising: "nowhere to go" is
- what every agent's answer would be anyway, and a crowd verb that throws leaves
- the caller with a half-written buffer and no way to tell how far it got.
+ A dead field handle, or a bake that has been replaced, fills the costs with -1
+ and the directions with zero rather than raising: "nowhere to go" is what every
+ agent's answer would be anyway, and a crowd verb that throws leaves the caller
+ with a half-written buffer.
 
  @return `How many agents were sampled.`
+ @return? js::THREW
 *>
-fn void js_nav_sample(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_nav_sample(JsRuntime* self, uint scene_id, int handle, float[] positions, float[] costs, float[] directions)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	float[] field      = scene.nav_field_of(arg_int(&js, argc, args, 1));
-	float[] positions  = float_view(&js, argc, args, 2);
-	float[] costs      = float_view(&js, argc, args, 5);
-	float[] directions = float_view(&js, argc, args, 8);
+	Scene* scene  = nav_scene(self, scene_id)!;
+	float[] field = scene.nav_field_of(handle);
 
 	sz count = positions.len / 3;
 	if (costs.len > 0 && costs.len < count) count = costs.len;
 	if (directions.len > 0 && directions.len / 3 < count) count = directions.len / 3;
-	if (count == 0)
-	{
-		*out = qjs::int_value(0);
-		return;
-	}
 
 	for (sz i = 0; i < count; i++)
 	{
@@ -472,114 +372,56 @@ fn void js_nav_sample(
 			directions[at + 2] = direction.z;
 		}
 	}
-	*out = qjs::int_value((int)count);
+	return (uint)count;
 }
 
 <*
- `navPath(fromX, fromY, fromZ, toX, toY, toZ, buffer, byteOffset, floats)` — one
- agent, one route, shortened against the geometry.
+ `navPath(sceneId, fromX, fromY, fromZ, toX, toY, toZ, out)`: one agent, one
+ route, shortened against the geometry, into the `Float32Array` `out` (three
+ floats a waypoint).
 
  A* from the goal towards the start, through the same solver `three.nav.field()`
  uses: the search stops once the start is settled, so its cost is the cells
- between the two ends rather than the whole bake — on a town-sized grid, a click
- across a square was a 50 ms full solve and is now a fraction of a millisecond.
- Searching from the goal is what lets `walk` descend the result from the start.
- When there is no route the search still exhausts the goal's region.
+ between the two ends rather than the whole bake. Searching from the goal is what
+ lets `walk` descend the result from the start.
 
- The Float32Array's capacity is in waypoints, three floats each. It answers with
- how many were written, including the start, and zero when there is no route.
+ @return `How many waypoints were written, including the start; zero when there is no route.`
+ @return? js::THREW
 *>
-fn void js_nav_path(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_nav_path(JsRuntime* self, uint scene_id, Vec3 start, Vec3 to, float[] out)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	Scene* scene = nav_scene(self, scene_id)!;
+	if (!scene.nav.usable()) return self.js.fail("three.nav.path() needs a baked mesh — call three.nav.bake() first")~;
+	if (out.len < 3) return 0;
 
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	if (!scene.nav.usable())
-	{
-		*out = js.raise("three.nav.path() needs a baked mesh — call three.nav.bake() first");
-		return;
-	}
-
-	Vec3[1] from = { arg_vec3(&js, argc, args, 1) };
-	Vec3 to      = arg_vec3(&js, argc, args, 4);
-
-	float[] slots = float_view(&js, argc, args, 7);
-	if (slots.len < 3)
-	{
-		*out = qjs::int_value(0);
-		return;
-	}
-
+	Vec3[1] from = { start };
 	@pool()
 	{
 		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!scene.nav.solve(&goals, field, &from))
-		{
-			*out = qjs::int_value(0);
-			return;
-		}
-		*out = qjs::int_value((int)scene.route_from(&self.pass.assets, field, from[0], slots));
+		if (!scene.nav.solve(&goals, field, &from)) return 0;
+		return scene.route_from(&self.pass.assets, field, from[0], out);
 	};
 }
 
 <*
- `navPaths(starts, startsByteOffset, startsFloats, toX, toY, toZ, buffer,
- byteOffset, floats, counts, countsByteOffset, countsInts, limit)` — a group,
- one goal, one search.
+ `navPaths(sceneId, starts, toX, toY, toZ, out, counts, limit)`: a group, one
+ goal, one search. The search from the goal runs until every start is settled,
+ and each agent then walks and shortens its own route out of the same field.
 
- What an RTS does with a selection sent across the map: the search from the goal
- runs until every start is settled, and each agent then walks and shortens its
- own route out of the same field. Twenty agents cost about one search and twenty
- shortenings, against twenty searches through `navPath`.
+ `out` holds `limit` waypoints per agent, agent `i` from waypoint `i * limit`;
+ `counts` (an `Int32Array`) gets each agent's waypoint count, zero for no route.
 
- `buffer` holds `limit` waypoints per agent, agent `i` from waypoint `i * limit`;
- `counts` gets each agent's waypoint count, zero for one with no route. It
- answers with how many agents have a route.
+ @return `How many agents have a route.`
+ @return? js::THREW
 *>
-fn void js_nav_paths(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn int? js_nav_paths(JsRuntime* self, uint scene_id, float[] starts, Vec3 to, float[] out, int[] counts, int limit)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
-
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	if (!scene.nav.usable())
-	{
-		*out = js.raise("three.nav.paths() needs a baked mesh — call three.nav.bake() first");
-		return;
-	}
-
-	float[] starts = float_view(&js, argc, args, 1);
-	Vec3 to        = arg_vec3(&js, argc, args, 4);
-	float[] slots  = float_view(&js, argc, args, 7);
-	int[] counts   = int_view(&js, argc, args, 10);
-	int limit      = arg_int(&js, argc, args, 13);
+	Scene* scene = nav_scene(self, scene_id)!;
+	if (!scene.nav.usable()) return self.js.fail("three.nav.paths() needs a baked mesh — call three.nav.bake() first")~;
 
 	sz agents = starts.len / 3;
-	if (agents == 0 || limit < 1 || counts.len < agents || slots.len < agents * (sz)limit * 3)
-	{
-		*out = qjs::int_value(0);
-		return;
-	}
+	if (agents == 0 || limit < 1 || counts.len < agents || out.len < agents * (sz)limit * 3) return 0;
 	counts[:agents] = 0;
 
 	@pool()
@@ -589,20 +431,16 @@ fn void js_nav_paths(
 
 		float[] field = mem::temp_array(float, scene.nav.field_size());
 		Vec3[1] goals = { to };
-		if (!scene.nav.solve(&goals, field, from))
-		{
-			*out = qjs::int_value(0);
-			return;
-		}
+		if (!scene.nav.solve(&goals, field, from)) return 0;
 
 		int routed = 0;
 		for (sz i = 0; i < agents; i++)
 		{
-			sz base  = i * (sz)limit * 3;
-			counts[i] = (int)scene.route_from(&self.pass.assets, field, from[i], slots[base:(sz)limit * 3]);
+			sz base   = i * (sz)limit * 3;
+			counts[i] = (int)scene.route_from(&self.pass.assets, field, from[i], out[base:(sz)limit * 3]);
 			if (counts[i] > 0) routed++;
 		}
-		*out = qjs::int_value(routed);
+		return routed;
 	};
 }
 
@@ -636,51 +474,42 @@ fn uint Scene.route_from(&self, Assets* assets, float[] field, Vec3 from, float[
 }
 
 <*
- `steer(posBuffer, posByteOffset, posFloats, outBuffer, outByteOffset, outFloats,
- fieldHandle, goalX, goalY, goalZ, maxSpeed, arriveRadius, separationRadius,
- separationWeight)`.
+ `steer(sceneId, positions, velocities, fieldHandle, goalX, goalY, goalZ,
+ maxSpeed, arriveRadius, separationRadius, separationWeight)`: fill `velocities`
+ with a desired velocity per agent, in one call however many agents there are.
+ See `scene/steer.c3`.
 
- The crowd verb, and the one place in this API where the whole point is that
- there is exactly one crossing however many agents there are. See
- `scene/steer.c3`.
+ A separation radius of zero turns separation off, which is what a caller
+ steering one agent means.
 
- The last two arguments are the separation radius and its weight; a radius of
- zero turns it off, which is what a caller steering one agent means.
+ @return `How many agents were steered.`
+ @return? js::THREW
 *>
-fn void js_steer(
-	qjs::ContextRef ctx,
-	qjs::Value* this_val,
-	int argc,
-	qjs::Value* args,
-	void* opaque,
-	qjs::Value* out
-) @local
+fn uint? js_steer(
+	JsRuntime* self,
+	uint scene_id,
+	float[] positions,
+	float[] velocities,
+	int handle,
+	Vec3 goal,
+	float max_speed,
+	float arrive_radius,
+	float separation_radius,
+	float separation_weight
+)
 {
-	JsRuntime* self = (JsRuntime*)opaque;
-	qjs::Context js = qjs::wrap(ctx);
+	Scene* scene = nav_scene(self, scene_id)!;
+	if (positions.len < 3 || velocities.len < 3) return 0;
 
-	Scene* scene = arg_scene(self, &js, argc, args, 0, out);
-	if (scene == null) return;
-
-	float[] positions  = float_view(&js, argc, args, 1);
-	float[] velocities = float_view(&js, argc, args, 4);
-	if (positions.len < 3 || velocities.len < 3)
-	{
-		*out = qjs::int_value(0);
-		return;
-	}
-
-	int handle    = arg_int(&js, argc, args, 7);
 	float[] field = scene.nav_field_of(handle);
-
-	SteerOptions options;
-	options.goal = arg_vec3(&js, argc, args, 8);
-	options.has_goal = handle < 0;
-	options.max_speed = arg_float(&js, argc, args, 11);
-	options.arrive_radius = arg_float(&js, argc, args, 12);
-	options.separation_radius = arg_float(&js, argc, args, 13);
-	options.separation_weight = arg_float(&js, argc, args, 14);
-
+	SteerOptions options = {
+		.goal = goal,
+		.has_goal = handle < 0,
+		.max_speed = max_speed,
+		.arrive_radius = arrive_radius,
+		.separation_radius = separation_radius,
+		.separation_weight = separation_weight,
+	};
 	steer_agents(positions, velocities, field.len == 0 ? null : &scene.nav, field, options);
-	*out = qjs::int_value((int)math::min(positions.len / 3, velocities.len / 3));
+	return (uint)math::min(positions.len / 3, velocities.len / 3);
 }

@@ -146,10 +146,10 @@ fn void JsRuntime.install_bindings(&self)
 
 	// Bulk queries, the character controller and the batched write
 	// (js/bind_query.c3)
-	self.bind_query_verbs(host);
+	self.bind_query_verbs(js_host)!!;
 
 	// Navigation and steering (js/bind_nav.c3)
-	self.bind_nav_verbs(host);
+	self.bind_nav_verbs(js_host)!!;
 
 	// Buffers, kernels and dispatches (js/bind_compute.c3)
 	self.bind_compute_verbs(host);

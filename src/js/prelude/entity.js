@@ -360,10 +360,7 @@ class Track {
 	flush() {
 		if (this._transform === null || this.instances.length === 0) return 0;
 		const n = this.instances.length;
-		return H.setTransforms(
-			this._handles.buffer, this._handles.byteOffset, n * 2,
-			this._transform.buffer, this._transform.byteOffset, n * TRANSFORM_STRIDE,
-			BATCH_EULER);
+		return H.setTransforms(this._handles, this._transform, n, BATCH_EULER);
 	}
 
 	// Copy the transform column back onto the Object3Ds, so `object.position`
