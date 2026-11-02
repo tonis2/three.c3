@@ -202,9 +202,9 @@ export class Material {
 	//
 	// Three.js's name, Three.js's range, and Three.js's default. What differs
 	// is `reflectance` below, without which this changes nothing.
-	get roughness() { return H.getSurface(this._index())[0]; }
+	get roughness() { return H.getSurface(this._index()).roughness; }
 
-	set roughness(v) { this._surface(0, v, 'roughness'); }
+	set roughness(v) { this._surface('roughness', v); }
 
 	// How metallic it is, 0 to 1. 0 is the default.
 	//
@@ -217,9 +217,9 @@ export class Material {
 	// here, so a fully metallic surface is its highlights and the ambient floor
 	// and nothing else. That is the honest answer rather than a broken one, and
 	// the sky in `plan.md` §4 is what changes it.
-	get metalness() { return H.getSurface(this._index())[1]; }
+	get metalness() { return H.getSurface(this._index()).metalness; }
 
-	set metalness(v) { this._surface(1, v, 'metalness'); }
+	set metalness(v) { this._surface('metalness', v); }
 
 	// How strongly a *non*-metal reflects, 0 to 1. **0 is the default, and this
 	// is the switch that turns the specular term on at all.**
@@ -234,9 +234,9 @@ export class Material {
 	// here starts without one, because every scene in this project was
 	// authored against a renderer that had no specular term at all and turning
 	// one on for all of them would relight all of them.
-	get reflectance() { return H.getSurface(this._index())[2]; }
+	get reflectance() { return H.getSurface(this._index()).reflectance; }
 
-	set reflectance(v) { this._surface(2, v, 'reflectance'); }
+	set reflectance(v) { this._surface('reflectance', v); }
 
 	// The alpha below which a fragment is not drawn at all, 0 to 1. **0 is the
 	// default and means off**, so nothing that does not ask for a cut-out pays
@@ -257,9 +257,9 @@ export class Material {
 	// The shadow half costs one extra pipeline the first frame a cut-out caster
 	// is in the scene, and a pipeline bind per bucket after that. A scene with
 	// no cut-outs in it pays neither.
-	get alphaTest() { return H.getSurface(this._index())[3]; }
+	get alphaTest() { return H.getSurface(this._index()).alphaTest; }
 
-	set alphaTest(v) { this._surface(3, v, 'alphaTest'); }
+	set alphaTest(v) { this._surface('alphaTest', v); }
 
 	// What this surface gives off regardless of any light, as `[r, g, b]`.
 	// Black by default, which is "does not glow".
@@ -278,17 +278,16 @@ export class Material {
 	// There is no light here. A glowing surface does not light what is around
 	// it; `three.lights.add({ position, range })` is what does that, and the two
 	// together are a lamp.
-	get emissive() { return H.getEmissive(this._index()).slice(0, 3); }
+	get emissive() { return H.getEmissive(this._index()).color; }
 
 	set emissive(v) {
 		const c = readColor(v, 'material.emissive');
-		const was = H.getEmissive(this._index());
 		H.setEmissive(
 			this._index(),
 			Math.min(Math.max(c[0], 0), 1),
 			Math.min(Math.max(c[1], 0), 1),
 			Math.min(Math.max(c[2], 0), 1),
-			was[3],
+			H.getEmissive(this._index()).intensity,
 		);
 	}
 
@@ -299,14 +298,14 @@ export class Material {
 	// same split `three.light.color` and `three.light.intensity` have. Values
 	// above 1 mean something once there is a post pass with a bright pass in it,
 	// and are simply clipped white before then.
-	get emissiveIntensity() { return H.getEmissive(this._index())[3]; }
+	get emissiveIntensity() { return H.getEmissive(this._index()).intensity; }
 
 	set emissiveIntensity(v) {
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
 			throw new TypeError('`emissiveIntensity` wants a number from 0 up, not ' + String(v));
 		}
-		const was = H.getEmissive(this._index());
-		H.setEmissive(this._index(), was[0], was[1], was[2], v);
+		const [r, g, b] = H.getEmissive(this._index()).color;
+		H.setEmissive(this._index(), r, g, b, v);
 	}
 
 	// One of the four, written back with the other three beside it.
@@ -315,14 +314,14 @@ export class Material {
 	// record — so a setter reads the current four, replaces its own, and
 	// writes. Shared because four copies of this is four places for the
 	// range check to drift.
-	_surface(at, v, name) {
+	_surface(name, v) {
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
 			throw new TypeError('`' + name + '` wants a number from 0 to 1, not ' + String(v));
 		}
 		const index = this._index();
 		const s = H.getSurface(index);
-		s[at] = v;
-		H.setSurface(index, s[0], s[1], s[2], s[3]);
+		s[name] = v;
+		H.setSurface(index, s.roughness, s.metalness, s.reflectance, s.alphaTest);
 	}
 
 	// The base colour image, or null.
@@ -364,32 +363,26 @@ export class Material {
 	//
 	// Zero throws. It maps every point of the surface to one texel, which is
 	// never what anyone meant and is exactly what an unset field looks like.
-	get repeat() {
-		const [u, v] = H.getMaterialUv(this._index());
-		return [u, v];
-	}
+	get repeat() { return H.getMaterialUv(this._index()).repeat; }
 
 	set repeat(value) {
 		const [u, v] = asPair(value, 'material.repeat');
 		const index = this._index();
-		const uv = H.getMaterialUv(index);
-		H.setMaterialUv(index, u, v, uv[2], uv[3]);
+		const { offset } = H.getMaterialUv(index);
+		H.setMaterialUv(index, u, v, offset[0], offset[1]);
 	}
 
 	// Where the map starts, as [u, v]. One whole repeat is 1, so 0.5 shifts
 	// the image half a tile — which is what an atlas or a scrolling texture
 	// wants, and what stops two neighbouring walls from having visibly the
 	// same crack in the same place.
-	get offset() {
-		const [, , u, v] = H.getMaterialUv(this._index());
-		return [u, v];
-	}
+	get offset() { return H.getMaterialUv(this._index()).offset; }
 
 	set offset(value) {
 		const [u, v] = asPair(value, 'material.offset');
 		const index = this._index();
-		const uv = H.getMaterialUv(index);
-		H.setMaterialUv(index, uv[0], uv[1], u, v);
+		const { repeat } = H.getMaterialUv(index);
+		H.setMaterialUv(index, repeat[0], repeat[1], u, v);
 	}
 
 	// One uv transform per copy, picked by `mesh.variant` — up to eight rows of
@@ -416,12 +409,7 @@ export class Material {
 	//
 	// `null` or `[]` clears the table, and a variant past the last row is the
 	// last row, exactly as it is for a ShaderMaterial's uniform table.
-	get uvVariants() {
-		const flat = H.getUvVariants(this._index());
-		const rows = [];
-		for (let i = 0; i < flat.length; i += 4) rows.push(flat.slice(i, i + 4));
-		return rows;
-	}
+	get uvVariants() { return H.getUvVariants(this._index()); }
 
 	set uvVariants(value) {
 		const rows = value === null || value === undefined ? [] : value;
@@ -486,7 +474,7 @@ export class Material {
 		if (typeof v !== 'boolean') {
 			throw new TypeError('material.stochastic is true or false — there is no strength to it');
 		}
-		H.setStochastic(this._index(), v ? 1 : 0);
+		H.setStochastic(this._index(), v);
 	}
 
 	// `{ roughness, metalness, reflectance, alphaTest }` off a constructor's
@@ -748,39 +736,39 @@ export class MeshLambertMaterial extends Material {
 	// How deep the height map's relief is, top to bottom, in metres — 0.05 by
 	// default. Half of it stands out of the surface and half sinks in. Read
 	// against the world rather than the uv, so `repeat` does not change it.
-	get heightScale() { return H.getRelief(this._index())[0]; }
+	get heightScale() { return H.getRelief(this._index()).scale; }
 
 	set heightScale(v) {
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
 			throw new TypeError('`heightScale` wants a depth in metres from 0 up, not ' + String(v));
 		}
 		const was = H.getRelief(this._index());
-		H.setRelief(this._index(), v, was[1], was[2]);
+		H.setRelief(this._index(), v, was.steps, was.shadow);
 	}
 
 	// The most steps the march takes, at a grazing angle — 16 by default, at
 	// most 64. Head-on it takes 4 whatever this says.
-	get parallaxSteps() { return H.getRelief(this._index())[1]; }
+	get parallaxSteps() { return H.getRelief(this._index()).steps; }
 
 	set parallaxSteps(v) {
 		if (!Number.isInteger(v) || v < 1 || v > 64) {
 			throw new TypeError('`parallaxSteps` wants a whole number from 1 to 64, not ' + String(v));
 		}
 		const was = H.getRelief(this._index());
-		H.setRelief(this._index(), was[0], v, was[2]);
+		H.setRelief(this._index(), was.scale, v, was.shadow);
 	}
 
 	// How dark the relief shades itself toward the sun, 0 to 1 — 0, off, by
 	// default. A second, shorter march toward the first directional light; it
 	// darkens what the sun's own shadow already reaches and nothing else.
-	get parallaxShadow() { return H.getRelief(this._index())[2]; }
+	get parallaxShadow() { return H.getRelief(this._index()).shadow; }
 
 	set parallaxShadow(v) {
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
 			throw new TypeError('`parallaxShadow` wants a number from 0 to 1, not ' + String(v));
 		}
 		const was = H.getRelief(this._index());
-		H.setRelief(this._index(), was[0], was[1], v);
+		H.setRelief(this._index(), was.scale, was.steps, v);
 	}
 
 	// Three.js has these two as separate images and this renderer does not —

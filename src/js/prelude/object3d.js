@@ -464,7 +464,7 @@ export class Object3D {
 		if (!this._blocks) H.setBlocks(i, g, false);
 
 		const material = this._hostMaterial();
-		if (material >= 0) H.setMaterial(i, g, material);
+		if (material >= 0) H.setMaterial(h, material);
 		// Only when they are not the identity: `_materialize` runs once per
 		// object added, and a scene of ten thousand default-coloured meshes
 		// should not pay twenty thousand crossings to say "white, row zero".

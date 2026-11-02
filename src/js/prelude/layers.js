@@ -1288,11 +1288,7 @@ export class LayeredMaterial extends ShaderMaterial {
 			H.addMaterialLayer(
 				this._index(),
 				l.name,
-				[
-					l.samplers.map ?? '', l.samplers.normal ?? '', l.samplers.emissive ?? '',
-					l.samplers.mask ?? '', l.samplers.params ?? '',
-					l.samplers.metallicRoughness ?? '', l.samplers.height ?? '',
-				].join(','),
+				l.samplers,
 				BLEND_BY_ORDINAL.indexOf(l.blend),
 				l.vertexMask ? MASK_VERTEX_COLOR : (l.channel !== null ? MASK_TEXTURE : MASK_NONE),
 				Math.max(0, CHANNEL_BY_ORDINAL.indexOf(l.channel ?? 'r')),
