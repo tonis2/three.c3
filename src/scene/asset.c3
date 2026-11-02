@@ -356,7 +356,7 @@ struct GpuMesh
 	// beside it, so all three live and die together.
 	Vec3[] hull_positions;
 	collision::Triangle[] hull_triangles;
-	collision::TriBVHNode* bvh;
+	collision::TriBVH* bvh;
 
 	// ---- Lazily uploaded ------------------------------------------------
 	// 
@@ -1247,7 +1247,7 @@ fn usz Assets.texture_compressed_bytes(&self)
  a number that reported only the device half would be answering a question about
  memory with two thirds of the memory.
 
- The tree itself is not counted. `collision::create_indexed_tri_bvh` allocates
+ The tree itself is not counted. `collision::create_tri_bvh` allocates
  its own nodes and does not answer with how many, so counting it would mean
  guessing — and a guess inside a number an agent reads as measured is worse than
  a stated omission. It is bounded by the triangle count, which is here.
@@ -3398,13 +3398,13 @@ fn GpuMesh? Assets.upload_primitive(
 <*
  Build the picking tree, and keep the geometry it points at.
 
- `collision::TriBVHNode` stores raw pointers to the vertex and triangle arrays
+ `collision::TriBVH` stores raw pointers to the vertex and triangle arrays
  rather than copying them, so these two allocations are part of the tree and are
  freed with it. That is the memory cost named in the header: roughly 24 bytes per
  vertex-and-triangle pair, resident for as long as the asset is loaded.
 
  A degenerate primitive — fewer than three indices — gets no tree rather than a
- tree of nothing, because `create_indexed_tri_bvh` requires a positive triangle
+ tree of nothing, because `create_tri_bvh` requires a positive triangle
  count.
 *>
 fn void GpuMesh.build_bvh(&self, Vec3[] positions, uint[] indices)
@@ -3421,7 +3421,7 @@ fn void GpuMesh.build_bvh(&self, Vec3[] positions, uint[] indices)
 		self.hull_triangles[i] = { indices[i * 3], indices[i * 3 + 1], indices[i * 3 + 2] };
 	}
 
-	self.bvh = collision::create_indexed_tri_bvh(self.hull_positions.ptr, self.hull_triangles.ptr, (sz)triangle_count);
+	self.bvh = collision::create_tri_bvh(self.hull_positions.ptr, self.hull_triangles.ptr, (sz)triangle_count);
 }
 
 // Over this the uvs overlap themselves and a light map baked into them would put
@@ -5101,12 +5101,10 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	self.morph = { };
 	self.morph_targets = 0;
 
-	// `free_indexed` rather than `free`: the root owns the sorted-index array
-	// that every node below it points into, and the plain `free` leaves it.
+	// The tree owns its nodes and triangle order, and frees itself.
 	if (self.bvh != null)
 	{
-		self.bvh.free_indexed();
-		mem::free(self.bvh);
+		self.bvh.free();
 		self.bvh = null;
 	}
 	if (self.hull_positions.len > 0) mem::free(self.hull_positions);

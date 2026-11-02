@@ -1,5 +1,6 @@
 <*
- Two tools and no more: `run_script` and `screenshot`.
+ `run_script` and `screenshot`, plus `ui_tree` and `ui_input` (ui_tools.c3) for
+ using the interface itself.
 
  `run_script` *is* the API surface. Every scene verb an agent could want is
  already a JavaScript call, so a `create_mesh` tool beside it would be a second,
@@ -100,6 +101,7 @@ fn mcp::Server new_mcp_server(ToolHost* host)
 		}
 	);
 
+	add_ui_tools(&server, host);
 	return server;
 }
 

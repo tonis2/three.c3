@@ -1013,12 +1013,10 @@ struct JointSpec
 	*>
 	float stiffness;
 	<*
-	 Carried into the joint and **not read by the solver**.
+	 Kept but **not passed to the solver**, which has no joint damping.
 
 	 It is here because glTF's limits have one and a limit read out of a file
 	 should survive being passed straight in — not because it does anything yet.
-	 `collision::Limit.damping` and `GenericJoint3D.dampening` are both declared
-	 and both unread; the day one of them is, this is already wired to it.
 	*>
 	float damping;
 	// Whether the two bodies still collide with each other. Off by default,
@@ -1074,7 +1072,6 @@ fn bool push_limit(collision::Limits* limits, Vec3 axes, JointLimit limit) @loca
 			.min = limit.min,
 			.max = limit.max,
 			.stiffness = limit.stiffness,
-			.damping = limit.damping,
 		}
 	);
 	return true;
@@ -1120,8 +1117,7 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 		.anchor_a = rigid_a.collider.rotation.conjugate() * (pivot - at_a),
 		.anchor_b = rigid_b.collider.rotation.conjugate() * (pivot - at_b),
 		.relative_orientation = rigid_a.collider.rotation.conjugate() * rigid_b.collider.rotation,
-		.stifness = spec.stiffness,
-		.dampening = spec.damping,
+		.stiffness = spec.stiffness,
 	};
 
 	// The joint's own frame, in world space. Axis 0 is what the script named and

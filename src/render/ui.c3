@@ -2160,7 +2160,6 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 						// label does not sit beside a full-size square.
 						.box = cui::widgets::DEFAULT_CHECKBOX_STYLE.box * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
 						.gap = cui::widgets::DEFAULT_CHECKBOX_STYLE.gap * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
-						.thickness = cui::widgets::DEFAULT_CHECKBOX_STYLE.thickness * ui_text_scale(spec.text_size, cui::widgets::DEFAULT_CHECKBOX_STYLE.text_size),
 					},
 				}
 			);
@@ -3427,7 +3426,7 @@ fn void ui_decline(cui::Ui* ui) @local
  does not need to hear that the panel is closed, and a handler that answered by
  writing its own state again would be a re-render provoked by itself. So the one
  case that is not news is dropped, which is exactly what cui does one widget over
- with `ConfirmDialog.answering`.
+ with its question's `withdrawing` flag.
 
  It reaches the node the same way a confirmation's dismissal does — cui defers
  the release to the build pass, so the panel the click came from is still hanging
@@ -3706,6 +3705,29 @@ fn void UiLayer.feed(&self, Cursor cursor, KeyBits keys, String text, float dt_m
 	{
 		if (keys.has(key) && self.ui.key_taken((cui::Key)key.code)) self.taken.set(key);
 	}
+}
+
+<*
+ Synthetic input from an agent or a test (`cui::Ui.click` and the rest), with
+ `dispatching` raised as `feed` raises it. Nothing happens without a Ui.
+*>
+macro void UiLayer.@drive(&self; @body(cui::Ui* ui))
+{
+	if (self.ui == null) return;
+	self.dispatching = true;
+	defer self.dispatching = false;
+	@body(self.ui);
+}
+
+<*
+ Screenshot pixels per interface point, for a frame at most `max_edge` long.
+*>
+fn float UiLayer.image_scale(&self, uint width, uint height, uint max_edge)
+{
+	float k = self.scale > 0 ? self.scale : 1;
+	uint edge = math::max(width, height);
+	if (edge > max_edge) k *= (float)max_edge / edge;
+	return k;
 }
 
 <*

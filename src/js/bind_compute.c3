@@ -117,7 +117,9 @@ macro uint free_slot_in(slots)
 	foreach (i, &slot : *slots)
 	{
 		if (slot.live) continue;
-		slot.generation++;
+		// Kept in 1..0x7FFF: the handle packs it above 16 bits of index into a
+		// positive int, and a long training run reuses a slot tens of thousands of times.
+		slot.generation = slot.generation % 0x7FFF + 1;
 		return (uint)i;
 	}
 	slots.push({ .generation = 1 });
