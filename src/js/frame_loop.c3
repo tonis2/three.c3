@@ -83,6 +83,13 @@ const long JS_FRAME_BUDGET_MS = 100;
 *>
 const long JS_GAME_FRAME_SOFT_MS = 8;
 
+<*
+ Microseconds a frame hands the garbage collector after its script work
+ (`qjs::Context.gc_step`). Marking and sweeping otherwise happen in small slices
+ at the script's own safe points; this does them ahead of time instead.
+*>
+const long JS_FRAME_GC_US = 200;
+
 // A callback that makes a promise gets this many microtask steps to settle it.
 // Small on purpose: the script budget's 100 000 is sized for a whole scene build,
 // and per frame it is a licence to hang.
@@ -482,6 +489,10 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 
 	self.in_frame = false;
 	self.budget_ns = budget;
+
+	// The frame's script work is done: give the collector its slice here, outside
+	// the spans the budget counts, so less of it lands inside a callback.
+	self.js.gc_step(JS_FRAME_GC_US);
 
 	// Measured after the frame rather than interrupted during it: a frame that ran
 	// long has already cost what it cost, and the only useful thing left to do with
