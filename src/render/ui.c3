@@ -1636,10 +1636,18 @@ fn void UiLayer.drop_tree(&self)
  borrowing contract: cui detaches a borrowed child and never frees one, so the
  element goes back to the free-list here or it does not go back at all.
 
- It has to run AFTER whatever was holding the body has been released — and it is
- safe either way round for a dialog that never opened, whose body has no parent
- at all. `Ui.release` on a borrowed element frees it like any other; only the
+ Normally it runs AFTER whatever was holding the body has been released, which
+ detached the body and left it with no parent — as has a dialog that never
+ opened. `Ui.release` on a borrowed element frees it like any other; only the
  recursion through a parent is filtered.
+
+ `UiLayer.free` is the exception: it runs this first, so that a body hanging in
+ an open panel is not left to nobody when `Ui.free` frees the allocations. That
+ body still has its parent, and `Ui.release` does not take an element out of its
+ parent's children — the panel would keep a recycled, zeroed element that the
+ walk from the root then released a second time, panicking on its typeless
+ widget ("No method 'unmount' could be found on target"). So a body with a
+ parent goes through `Ui.unmount`, which takes it out first.
 
  @param table : `The live nodes or the half-built ones, whichever is going away.`
 *>
@@ -1650,7 +1658,14 @@ fn void UiLayer.release_borrowed(&self, List{UiNode}* table)
 	{
 		cui::Element* body = (*table)[i].content;
 		if (body == null) continue;
-		self.ui.release(body);
+		if (body.parent != null)
+		{
+			self.ui.unmount(body);
+		}
+		else
+		{
+			self.ui.release(body);
+		}
 		(*table)[i].content = null;
 	}
 }
