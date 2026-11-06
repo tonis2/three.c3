@@ -56,11 +56,12 @@ fn float4 posed_clip(uint vid, uint iid)
 
 	// A shadow has to be cast by the face the character is wearing, so the same
 	// pose the draw path computes runs here - `shaders/skinning.shady` is that
-	// text, used by both. `normal` is a discard: this pass has none, and the
-	// shared function writes one.
+	// text, used by both. `normal` and `tangent` are discards: this pass has
+	// neither, and the shared function writes both.
 	float3 unused_normal = float3(0.0, 1.0, 0.0);
+	float3 unused_tangent = float3(1.0, 0.0, 0.0);
 	float3 unused_local;
-	pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_local);
+	pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);
 
 	// Model first, light second - the same order the main pass uses with the
 	// camera, and the only order that makes sense: a joint matrix is in the

@@ -395,6 +395,11 @@ struct GeometryBuilder
 	// layer whose mask reads a vertex colour needs the attribute written beside
 	// it, or the mask it names is one the file does not carry.
 	List{Vec4} colors;
+	// glTF's TANGENT — xyz the direction along +u, w the handedness — and only
+	// ever filled by the same path as `colors`, for the same reason: a shape that
+	// three.c3 tessellates has none, and the derivative frame in the fragment
+	// stage stands in for it. Short means absent, as everywhere here.
+	List{Vec4} tangents;
 
 	// glTF's JOINTS_0 and WEIGHTS_0, already in the width the shader reads: four
 	// joint indices as a `uint[4]` and four weights as a `Vec4`, per vertex. The
@@ -428,6 +433,7 @@ fn void GeometryBuilder.init(&self)
 	self.normals.init(mem, 256);
 	self.uvs.init(mem, 256);
 	self.colors.init(mem, 0);
+	self.tangents.init(mem, 0);
 	// Sized like `colors` and for its reason: almost nothing that reaches this
 	// builder is skinned, so an unskinned shape pays a pointer per stream and no
 	// allocation at all.
@@ -442,6 +448,7 @@ fn void GeometryBuilder.free(&self)
 	self.normals.free();
 	self.uvs.free();
 	self.colors.free();
+	self.tangents.free();
 	self.joints.free();
 	self.weights.free();
 	self.indices.free();
@@ -969,12 +976,14 @@ fn void? GpuMesh.upload_streams(&self, Gpu* gpu, GeometryBuilder* geometry)
 	self.has_normals = geometry.normals.len() == vertices;
 	self.has_uvs = geometry.uvs.len() == vertices;
 	self.has_colors = geometry.colors.len() == vertices;
+	self.has_tangents = geometry.tangents.len() == vertices;
 	self.has_skin = geometry.joints.len() == vertices && geometry.weights.len() == vertices;
 
 	self.positions = gpu.upload_stream(geometry.positions.entries, Vec3::size * vertices)!;
 	if (self.has_normals) self.normals = gpu.upload_stream(geometry.normals.entries, Vec3::size * vertices)!;
 	if (self.has_uvs) self.uvs = gpu.upload_stream(geometry.uvs.entries, Vec2::size * vertices)!;
 	if (self.has_colors) self.colors = gpu.upload_stream(geometry.colors.entries, Vec4::size * vertices)!;
+	if (self.has_tangents) self.tangents = gpu.upload_stream(geometry.tangents.entries, Vec4::size * vertices)!;
 	if (self.has_skin)
 	{
 		self.joints = gpu.upload_stream(geometry.joints.entries, uint[4]::size * vertices)!;

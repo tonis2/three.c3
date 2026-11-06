@@ -511,7 +511,7 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("if (base.a * draw.base_color.a < draw.surface.w) discard;"),
 		"and the alpha test is before the body, on the map's alpha times the material's");
 	test::@check(source.contains("if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)")
-		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel);"),
+		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);"),
 		"a normal map bends the shading normal through the shared frame, not the geometric one");
 	test::@check(source.contains("&& (draw.flags & FLAG_HAS_HEIGHT_MAP) != 0 && (draw.flags & FLAG_HAS_UVS) != 0;")
 		&& source.contains("s.uv = parallax_occlusion_uv(s, height_map, flat_uv, uv_dx, uv_dy,"),
@@ -1108,7 +1108,7 @@ fn void the_ported_mesh_module_is_generated() @test
 	// The port itself.
 	test::@check(source.contains("fn void mesh_vertex(VertexIn input, out VertexOutput output)"),
 		"the vertex path survived the port");
-	test::@check(source.contains("pose_vertex(draw, instance, input.vid, input.iid, position, normal, local);"),
+	test::@check(source.contains("pose_vertex(draw, instance, input.vid, input.iid, position, normal, tangent, local);"),
 		"and calls the pose the shadow pass calls");
 	test::@check(source.contains("fn void pose_vertex("), "which is carried as a source block of its own");
 	test::@check(source.contains("output.uv = variant_uv(output.uv, draw.uv_variants[variant]);"),
@@ -1166,7 +1166,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 
 	// The port itself, which both modules share.
 	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid)"), "the body survived the port");
-	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_local);"),
+	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);"),
 		"the pose is the shared block's, not a copy of it");
 	test::@check(source.contains("(pose * float4(position, 1.0)).xyz")
 		&& source.contains("draw.posed[iid * draw.skin_stride + vid]"),

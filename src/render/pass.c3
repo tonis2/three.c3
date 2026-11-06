@@ -1530,12 +1530,18 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		// one vertex.
 		bool morphing = mesh.morph_targets > 0 && !preskinned && !soft && self.morph_address != 0;
 
+		// A tangent is read when there is one and nothing has replaced the geometry it
+		// belongs to: the compute pass and the soft body write positions and normals
+		// only, so those two buckets keep the fragment stage's derivative frame.
+		bool tangents = mesh.has_tangents && !preskinned && !soft;
+
 		records[recorded] = {
 			.positions = (Vec3*)(soft ? soft_positions : mesh.positions.address),
 			.normals = (Vec3*)(soft ? soft_normals : (mesh.has_normals ? mesh.normals.address : 0)),
 			.uvs = (Vec2*)(mesh.has_uvs ? mesh.uvs.address : 0),
 			.lightmap_uvs = (Vec2*)(mesh.lightmap_generated ? mesh.lightmap_uvs.address : mesh.uvs.address),
 			.colors = (Vec4*)(mesh.has_colors ? mesh.colors.address : 0),
+			.tangents = (Vec4*)(tangents ? mesh.tangents.address : 0),
 			.joints = (uint[<4>]*)(skinned ? mesh.joints.address : 0),
 			.weights = (Vec4*)(skinned ? mesh.weights.address : 0),
 			.palette = (Matrix4f*)(skinned ? owner.poses.address
@@ -1549,6 +1555,8 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.flags = ((mesh.has_normals || soft) ? FLAG_HAS_NORMALS
 				: 0) | (mesh.has_uvs ? FLAG_HAS_UVS
 					: 0) | (mesh.has_colors ? FLAG_HAS_COLORS
+						: 0) | (tangents ? FLAG_HAS_TANGENTS
+						: 0) | (mesh.uv_v_down ? FLAG_UV_V_DOWN
 						: 0) // What the file said that stream means: a mask the artist painted, so the
 						// built-in shader leaves it out of the albedo instead of tinting by it.
 						| (mesh.colors_are_mask ? FLAG_COLORS_ARE_MASK

@@ -264,6 +264,11 @@ struct Surface
 	float3 albedo;         // base colour, times the map and the instance colour
 	float3 normal;         // normalized, world space, and already flipped for a back face
 	float3 receiver_normal;// the face this fragment is on, not the shading normal
+	// The mesh's TANGENT in world space: xyz the direction of +u, w the handedness,
+	// already turned with the normal on a back face. **Zero on a mesh that carries
+	// none** - `mapped_normal` is what chooses between this and the derivative
+	// frame, so a body that maps a normal needs no test of its own.
+	float4 tangent;
 	float2 uv;             // after `uv_transform`, which is what a map is sampled with
 	float2 mesh_uv;        // the mesh's own uv, before it
 	float3 position;       // world space
@@ -612,13 +617,15 @@ fn float3 base_albedo(Surface s, float2 uv)
 	return albedo;
 }
 
-// A tangent-space normal map applied to a surface that carries no tangents -
-// the `Surface` spelling of `mapped_normal_frame`. **Fragment stage only**:
-// `ddx`/`ddy` do not exist in a vertex shader, so calling this from a `vertex:`
-// body is a compile error rather than a wrong picture.
+// A tangent-space normal map applied to a surface - the `Surface` spelling of
+// `mapped_normal_frame`, or of `mapped_normal_tangent` when the mesh carries a
+// TANGENT stream and the frame was baked rather than rebuilt. **Fragment stage
+// only**: `ddx`/`ddy` do not exist in a vertex shader, so calling this from a
+// `vertex:` body is a compile error rather than a wrong picture.
 fn float3 mapped_normal(Surface s, float3 texel)
 {
-	return mapped_normal_frame(s.normal, s.position, s.uv, texel);
+	if (s.tangent.w != 0.0) return mapped_normal_tangent(s.normal, s.tangent, texel);
+	return mapped_normal_frame(s.normal, s.position, s.uv, texel, (push.draw[0].flags & FLAG_UV_V_DOWN) != 0);
 }
 
 // Where to sample a surface with a height map on it, so that its relief reads
@@ -924,6 +931,20 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	if (!MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE && !front_facing) geometric = -geometric;
 	s.normal = geometric;
 
+	// The file's tangent, when the bucket has one - the handedness is what says so,
+	// since it is always +1 or -1 and the varying is zero otherwise. **A back face
+	// turns the tangent and the handedness with the normal** (glTF's reference
+	// viewer flips t, b and n together; with n and t both negated, `cross(n, t)`
+	// keeps its sign, so w is what carries the bitangent's flip). Not in a bake,
+	// for the normal's own reason above.
+	s.tangent = float4(0.0, 0.0, 0.0, 0.0);
+	if ((draw.flags & FLAG_HAS_TANGENTS) != 0)
+	{
+		s.tangent = input.tangent;
+		if (!MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE && !front_facing)
+			s.tangent = float4(-input.tangent.xyz, -input.tangent.w);
+	}
+
 	s.position = input.world;
 	s.origin = input.origin;
 	s.color = input.color;
@@ -984,7 +1005,8 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 			float3 texel = map_texel(normal_map, s.uv, uv_dx, uv_dy, scattered).rgb;
 			// The frame from the flat uv: the marched one's derivatives would
 			// tear it at every step.
-			s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel);
+			if (s.tangent.w != 0.0) s.normal = mapped_normal_tangent(geometric, s.tangent, texel);
+			else s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);
 		}
 
 		// glTF's channels: green is roughness, blue is metalness. **Multiplied

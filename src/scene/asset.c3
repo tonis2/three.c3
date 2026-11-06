@@ -280,6 +280,10 @@ struct GpuMesh
 	// shading here has a use for it. `layers.js` is what asked for it: the
 	// extension lets a layer take its mask from a colour attribute.
 	vk::Memory colors;
+	// glTF's TANGENT, as float4 per vertex (xyz direction, w handedness) whatever
+	// width the file stored it at. Uploaded only for a file that carries the
+	// attribute; `FLAG_HAS_TANGENTS` is what tells the shader it is there.
+	vk::Memory tangents;
 	// glTF's JOINTS_0 and WEIGHTS_0: four influences per vertex, naming joints by
 	// their position in the skin's own array. Uploaded as `uint[4]` and `float[4]`
 	// whatever width the file stored them at — 32 bytes a vertex, on geometry every
@@ -298,6 +302,11 @@ struct GpuMesh
 	bool has_normals;
 	bool has_uvs;
 	bool has_colors;
+	bool has_tangents;
+	// The uvs are a glTF's, whose v runs down the image, rather than a generated
+	// shape's, whose v runs up — `FLAG_UV_V_DOWN`, read by the derivative normal-map
+	// frame. Set where a mesh is read out of a file and nowhere else.
+	bool uv_v_down;
 	// The COLOR_0 above is a layer mask rather than a tint, so the built-in shader
 	// must not multiply it into the albedo — `FLAG_COLORS_ARE_MASK`, which is where
 	// the argument is. True when this primitive's material carries
@@ -1261,7 +1270,7 @@ fn usz Assets.geometry_bytes(&self)
 		foreach (&mesh : asset.meshes)
 		{
 			total += (usz)(mesh.positions.size + mesh.normals.size + mesh.uvs.size);
-			total += (usz)(mesh.colors.size + mesh.joints.size + mesh.weights.size);
+			total += (usz)(mesh.colors.size + mesh.tangents.size + mesh.joints.size + mesh.weights.size);
 			total += (usz)mesh.indices.size;
 			total += Vec3::size * mesh.hull_positions.len;
 			total += collision::Triangle::size * mesh.hull_triangles.len;
@@ -1876,6 +1885,7 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 			mesh.has_normals = false;
 			mesh.has_uvs = false;
 			mesh.has_colors = false;
+			mesh.has_tangents = false;
 			mesh.colors_are_mask = false;
 			mesh.index_count = 0;
 			mesh.base_color = { 1, 1, 1, 1 };
@@ -3326,6 +3336,7 @@ fn GpuMesh? Assets.upload_primitive(
 	gltf::Aabb box = stream.gltf.primitive_aabb(primitive);
 	out.bounds = { .min = box.min, .max = box.max };
 	out.upload_streams(gpu, &geometry)!;
+	out.uv_v_down = true;
 
 	read_morph_targets(gpu, stream, primitive, &out)!;
 
@@ -3614,6 +3625,7 @@ fn bool read_primitive_streams(gltf::GltfStream* stream, gltf::Primitive primiti
 		out.uvs.push(uv);
 	};
 	read_colors(stream, primitive, &out.colors);
+	read_tangents(stream, primitive, &out.tangents);
 	stream.@each_joint(primitive, 0 ; ushort[<4>] j, sz i)
 	{
 		out.joints.push({ (uint)j[0], (uint)j[1], (uint)j[2], (uint)j[3] });
@@ -3627,6 +3639,54 @@ fn bool read_primitive_streams(gltf::GltfStream* stream, gltf::Primitive primiti
 		for (uint i = 0; i < out.positions.len(); i++) out.indices.push(i);
 	}
 	return true;
+}
+
+<*
+ TANGENT, widened to float4 whatever the file stored it at.
+
+ Float is the core encoding. A file written with `KHR_mesh_quantization` stores
+ the same vector as normalized signed bytes or shorts, and `@cast_buffer` would
+ read those as the bytes of a float; so the width is read off the accessor and
+ the integers are scaled back to [-1, 1] by glTF's own rule (`max(c / 127, -1)`
+ and `max(c / 32767, -1)`).
+
+ An accessor that is not VEC4 is skipped: xyz with no handedness cannot say which
+ way the bitangent points, and a half-right frame is worse than the derivative one
+ that stands in for an absent stream. The list is left empty, which is how
+ `upload_streams` knows there are none — a stream shorter than the mesh is absent.
+*>
+fn void read_tangents(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out)
+{
+	sz? attr = primitive.attributes.get("TANGENT");
+	if (catch attr) return;
+
+	gltf::Accessor accessor = stream.gltf.accessors[attr];
+	if (accessor.type != gltf::AccessorType.VEC4) return;
+
+	for (sz i = 0; i < accessor.count; i++)
+	{
+		switch (accessor.data_type)
+		{
+			case gltf::DataType.ICHAR:
+				ichar[<4>] c = stream.@cast_buffer(accessor, i, ichar[<4>]);
+				out.push({
+					math::max(c[0] / 127.0f, -1.0f), math::max(c[1] / 127.0f, -1.0f),
+					math::max(c[2] / 127.0f, -1.0f), math::max(c[3] / 127.0f, -1.0f),
+				});
+			case gltf::DataType.SHORT:
+				short[<4>] c = stream.@cast_buffer(accessor, i, short[<4>]);
+				out.push({
+					math::max(c[0] / 32767.0f, -1.0f), math::max(c[1] / 32767.0f, -1.0f),
+					math::max(c[2] / 32767.0f, -1.0f), math::max(c[3] / 32767.0f, -1.0f),
+				});
+			case gltf::DataType.FLOAT:
+				out.push(stream.@cast_buffer(accessor, i, Vec4));
+			default:
+				// An unsigned or 32-bit integer tangent is not a thing glTF permits.
+				out.clear();
+				return;
+		}
+	}
 }
 
 <*
@@ -5085,6 +5145,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 		gpu.retire_memory(self.uvs);
 		gpu.retire_memory(self.lightmap_uvs);
 		gpu.retire_memory(self.colors);
+		gpu.retire_memory(self.tangents);
 		gpu.retire_memory(self.joints);
 		gpu.retire_memory(self.weights);
 		gpu.retire_memory(self.morph);
@@ -5096,6 +5157,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	self.lightmap_uvs = { };
 	self.lightmap_generated = false;
 	self.colors = { };
+	self.tangents = { };
 	self.joints = { };
 	self.weights = { };
 	self.morph = { };

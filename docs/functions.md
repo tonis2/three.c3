@@ -2760,7 +2760,7 @@ of the image built ahead of time, which is a build step rather than a sampler.
 
 ## mapped_normal(s, texel) — normal maps in a ShaderMaterial
 
-A tangent-space normal map applied to a surface that carries no tangents. In a fragment body:
+A tangent-space normal map applied to a surface. In a fragment body:
 
 ```slang
 float3 n = mapped_normal(s, s.textures.bumps.Sample(s.uv).rgb);
@@ -2771,9 +2771,10 @@ return standard(s, s.albedo, n);
 from [0,1] to a direction happens inside, which is why the map has to be loaded with
 `{ colorSpace: three.LinearSRGBColorSpace }`.
 
-No mesh here has a TANGENT stream and there is nowhere to put one, so the frame is rebuilt per pixel from
-screen-space derivatives of the world position and the uv. That is what makes it work on any textured mesh,
-including a generated PlaneGeometry, and it is also its two limits: a mirrored uv island comes out mirrored
+A mesh loaded from a glTF with a TANGENT attribute is mapped in the frame the file carries (`s.tangent`, which
+is zero otherwise), and the result is the one the map was authored against. Any other mesh has no tangents,
+so the frame is rebuilt per pixel from screen-space derivatives of the world position and the uv. That is what
+makes it work on any textured mesh, including a generated PlaneGeometry, and it is also its two limits: a mirrored uv island comes out mirrored
 rather than flipped, and a face with degenerate uvs gets the interpolated normal back unchanged.
 
 Fragment stage only — calling it from a vertex body is a compile error, because there are no derivatives there.

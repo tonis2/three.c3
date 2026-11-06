@@ -37,6 +37,9 @@ struct VertexIn
 struct VertexOutput
 {
 	float3 normal;
+	// xyz the world-space direction of +u, w the handedness; zero on a mesh that
+	// carries no TANGENT stream, which `FLAG_HAS_TANGENTS` is the test for.
+	float4 tangent;
 	float2 uv;
 	float3 world;
 	float4 color;
@@ -113,6 +116,17 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	float3 normal = float3(0.0, 1.0, 0.0);
 	if ((draw.flags & FLAG_HAS_NORMALS) != 0) normal = draw.normals[input.vid];
 
+	// A tangent is the other optional stream: read only under its flag, posed with
+	// the normal, and carried to the fragment stage with its handedness.
+	float3 tangent = float3(0.0, 0.0, 0.0);
+	float tangent_sign = 1.0;
+	if ((draw.flags & FLAG_HAS_TANGENTS) != 0)
+	{
+		float4 packed = draw.tangents[input.vid];
+		tangent = packed.xyz;
+		tangent_sign = packed.w < 0.0 ? -1.0 : 1.0;
+	}
+
 	// White is the identity for the fragment stage's multiply, so a mesh with no
 	// colour attribute and a mesh painted white are the same surface - which is
 	// what lets the fragment stage multiply unconditionally and carry no second
@@ -124,7 +138,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	// `Vertex.local` hands a body, so a displacement sized by the mesh's own
 	// length does not slide across the surface when the character moves.
 	float3 local;
-	pose_vertex(draw, instance, input.vid, input.iid, position, normal, local);
+	pose_vertex(draw, instance, input.vid, input.iid, position, normal, tangent, local);
 
 	Vertex v;
 	v.position = position;
@@ -191,6 +205,11 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	}
 	output.world = world.xyz;
 	output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;
+	// By the model matrix and not the normal matrix: a tangent lies *in* the
+	// surface and follows it under any scale, where a normal is the thing that
+	// has to stay perpendicular to it. Left unnormalised - interpolation is
+	// linear and the fragment stage normalises once after it.
+	output.tangent = float4((instance.model * float4(tangent, 0.0)).xyz, tangent_sign);
 	output.color = v.color;
 	output.vertex_color = v.vertex_color;
 	output.variant = v.variant;

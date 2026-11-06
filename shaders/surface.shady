@@ -50,6 +50,7 @@ const uint FLAG_HAS_METALNESS_ROUGHNESS_MAP = 64;
 const uint FLAG_HAS_OCCLUSION_MAP = 128;
 const uint FLAG_HAS_EMISSIVE_MAP = 512;
 const uint FLAG_HAS_HEIGHT_MAP = 2048;
+const uint FLAG_UV_V_DOWN = 8192;
 
 struct Map
 {
@@ -197,7 +198,7 @@ fn float4 stochastic_sample(Map image, float2 uv, float2 dx, float2 dy)
 // baked tangents: mirrored uv islands come out mirrored rather than flipped,
 // and a face with degenerate uvs has no frame at all, so the interpolated
 // normal comes back unchanged rather than a NaN.
-fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 texel)
+fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 texel, bool v_down)
 {
 	float3 n = normalize(normal);
 
@@ -209,8 +210,14 @@ fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 
 	// The tangent and bitangent that carry those uv derivatives, solved in the
 	// plane perpendicular to the interpolated normal - so the frame agrees with
 	// the normal the mesh already has rather than replacing it.
-	float3 dp_dy_perp = cross(dp_dy, n);
-	float3 dp_dx_perp = cross(n, dp_dx);
+	//
+	// **The cross products are ordered for a framebuffer whose y grows downward**,
+	// which is Vulkan's: the construction this is the standard one of is written
+	// for OpenGL's, where `ddy` points up the screen, and copied over unchanged it
+	// hands back both axes negated - `T = -dP/du`, `B = -dP/dv` - so a map tilted
+	// toward +u lit the surface as though it tilted toward -u.
+	float3 dp_dy_perp = cross(n, dp_dy);
+	float3 dp_dx_perp = cross(dp_dx, n);
 	float3 tangent = dp_dy_perp * duv_dx.x + dp_dx_perp * duv_dy.x;
 	float3 bitangent = dp_dy_perp * duv_dx.y + dp_dx_perp * duv_dy.y;
 	// A lightmap bake rasterises through a negative-height viewport while the
@@ -221,6 +228,11 @@ fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 
 		tangent = -tangent;
 		bitangent = -bitangent;
 	}
+	// glTF's v runs down the image and a normal map's green channel runs up it, so
+	// the bitangent is the direction v *decreases* in. A shape this engine
+	// generates has v running up, where it is the direction v increases in, and
+	// the construction above is already that one.
+	if (v_down) bitangent = -bitangent;
 
 	float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
 	// No uv gradient, so there is no frame to build and nothing sensible to
@@ -237,4 +249,37 @@ fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 
 		+ bitangent * (direction.y * scale)
 		+ n * direction.z
 	);
+}
+
+// A tangent-space normal map applied through the frame the file was baked in.
+//
+// The counterpart of `mapped_normal_frame` for a mesh that carries a TANGENT
+// stream: `tangent.xyz` is the direction of +u in world space and `tangent.w` the
+// handedness, so the bitangent is `cross(n, t) * w` - glTF's definition, and the
+// one the normal map was authored against. Nothing is derived from the screen, so
+// a mirrored uv island is flipped correctly and a face with degenerate uvs still
+// has a frame.
+//
+// The tangent is Gram-Schmidt'd against `normal` first: it was interpolated and
+// then the normal was interpolated on its own, so the two are no longer exactly
+// perpendicular. A tangent that has collapsed onto the normal (a degenerate
+// vertex) returns the normal unchanged rather than a NaN, as the derivative frame
+// does.
+fn float3 mapped_normal_tangent(float3 normal, float4 tangent, float3 texel)
+{
+	float3 n = normalize(normal);
+	float3 t = tangent.xyz - n * dot(n, tangent.xyz);
+	float length_squared = dot(t, t);
+	if (length_squared <= 1e-12) return n;
+
+	t = t * rsqrt(length_squared);
+	float3 b = cross(n, t) * tangent.w;
+	float3 direction = texel * 2.0 - 1.0;
+	return normalize(t * direction.x + b * direction.y + n * direction.z);
+}
+
+// `mapped_normal_frame` for a mesh whose v runs up, which is the engine's own.
+fn float3 mapped_normal_frame(float3 normal, float3 position, float2 uv, float3 texel)
+{
+	return mapped_normal_frame(normal, position, uv, texel, false);
 }

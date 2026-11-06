@@ -503,9 +503,12 @@ sRGB — the default — and a linear one is refused.
 #### normalMap
 
 A tangent-space normal map, or null. The frame is rebuilt per pixel from screen-space derivatives, so
-it works on any mesh with uvs — a generated PlaneGeometry included — and no mesh here has or needs a
-TANGENT attribute. A mirrored uv island comes out mirrored rather than flipped, which is the price of
-that.
+it works on any mesh with uvs — a generated PlaneGeometry included — and needs no TANGENT attribute. A
+mirrored uv island comes out mirrored rather than flipped, which is the price of that. A glTF that does
+carry TANGENT (float, or normalized byte or short under `KHR_mesh_quantization`) is mapped in the file's
+own frame instead, which has no such limit. Skinned meshes the compute pass poses, and soft bodies, keep the
+derivative frame, which follows the mesh's uv convention: glTF's v runs down the image and a generated
+shape's runs up, and the map's green channel points up the picture in both.
 
 Load it linear:
 
@@ -757,9 +760,11 @@ float3 n = mapped_normal(s, s.textures.bumps.Sample(s.uv).rgb);
 return s.albedo * lambert(n);
 ```
 
-The meshes here carry no tangents, so that frame is rebuilt per pixel from screen-space derivatives:
-it works on any textured mesh including a generated primitive, it is fragment-stage only, and it
-cannot see the seam of a mirrored uv island. Load the map with
+A mesh loaded from a glTF that carries a TANGENT attribute is mapped in that frame, which is the one the
+map was baked in (`s.tangent` holds it: xyz the world direction of +u, w the handedness, all zero on a mesh
+without). Every other mesh has no tangents, so the frame is rebuilt per pixel from screen-space
+derivatives: it works on any textured mesh including a generated primitive, it is fragment-stage only, and
+it cannot see the seam of a mirrored uv island. Load the map with
 `{ colorSpace: three.LinearSRGBColorSpace }` — through the default sRGB the stored 0.5 that means "no
 tilt" arrives as 0.21, every surface leans the same way and the bumps go soft.
 

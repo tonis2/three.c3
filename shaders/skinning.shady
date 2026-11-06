@@ -33,6 +33,7 @@ const uint FLAG_HAS_UVS = 2;
 const uint FLAG_HAS_COLORS = 4;
 const uint FLAG_HAS_SKIN = 8;
 const uint FLAG_PRESKINNED = 16;
+const uint FLAG_HAS_TANGENTS = 4096;
 
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
@@ -95,7 +96,7 @@ fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 p
 // `local` is the bind pose the draw path's `Vertex.local` hands a script: the
 // morphed position before either skinning path runs, so a displacement sized by
 // the mesh's own length does not slide across the surface when a character moves.
-fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal, out float3 local)
+fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal, inout float3 tangent, out float3 local)
 {
 	apply_morph(draw, instance, vid, position, normal);
 	local = position;
@@ -111,6 +112,9 @@ fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inou
 		// w = 0 so the matrix's translation cancels: a normal is a direction, and
 		// the original's `(float3x3)` cast was this sentence.
 		normal = (pose * float4(normal, 0.0)).xyz;
+		// A tangent is a direction too. Whatever the caller read it as - zero when the
+		// bucket carries none - it leaves posed the way the normal does.
+		tangent = (pose * float4(tangent, 0.0)).xyz;
 	}
 	else if ((draw.flags & FLAG_PRESKINNED) != 0)
 	{

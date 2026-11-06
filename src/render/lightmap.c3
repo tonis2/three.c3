@@ -1411,6 +1411,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 				| (mesh.has_uvs ? FLAG_HAS_UVS : 0)
 				| (mesh.has_colors ? FLAG_HAS_COLORS : 0)
 				| (mesh.colors_are_mask ? FLAG_COLORS_ARE_MASK : 0)
+				| (mesh.uv_v_down ? FLAG_UV_V_DOWN : 0)
 				| self.map_flags(material),
 			.skin_stride = 0,
 			.morph_targets = 0,

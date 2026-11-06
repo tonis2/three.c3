@@ -127,6 +127,28 @@ const uint FLAG_COLORS_ARE_MASK             = 1024;
 const uint FLAG_HAS_HEIGHT_MAP              = 2048;
 
 <*
+ This bucket's mesh carries a TANGENT stream the vertex stage can use, so the
+ normal map's frame is the one the file was baked in rather than one rebuilt per
+ pixel from derivatives.
+
+ Off the *mesh*, like `FLAG_HAS_COLORS`. Clear on a pre-skinned bucket and on a
+ soft body: the compute pass poses positions and normals only, so there is no
+ tangent to read there and the fragment stage falls back to the derivative frame.
+*>
+const uint FLAG_HAS_TANGENTS                = 4096;
+
+<*
+ This mesh's v runs *down* the image, which is glTF's convention and the one a
+ mesh read out of a file has. A generated shape and anything a script builds are
+ three.js's, where v runs up.
+
+ Only the derivative normal-map frame reads it: that frame is built from the uv's
+ own gradients, so which way v points decides which way the map's green channel
+ does. A mesh with TANGENT has the answer baked and never asks.
+*>
+const uint FLAG_UV_V_DOWN                   = 8192;
+
+<*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so
@@ -570,6 +592,10 @@ struct DrawRecord
 	// self-shadow strength, w unused — `material.heightScale`, `.parallaxSteps`
 	// and `.parallaxShadow`. Read only under `FLAG_HAS_HEIGHT_MAP`.
 	float[4] relief;
+	// glTF's TANGENT — xyz the direction along +u, w the handedness (+1 or -1) —
+	// or zero. Read under `FLAG_HAS_TANGENTS` only. Last in the record so that no
+	// offset a hand-written shader may have counted on has moved.
+	Vec4* tangents;
 }
 
 struct MeshPush
@@ -675,9 +701,10 @@ $assert @layout_matches(
 // every offset in the module rather than fail. `Instance` is in `scene/scene.c3`.
 $assert MeshPush::size == 24 : "the push block no longer matches the layout documented above";
 $assert ShadowPush::size == 96 : "the shadow push block moved off its pinned size";
-// 404 bytes of fields and four of the struct's own tail alignment: the padding is
+// 416 bytes: the last field is a pointer, so it sits at the next eight-byte
+// boundary after `relief` ends at 404 and the four bytes between are padding —
 // not a field and not part of the wire format, which is why the new field is last.
-$assert DrawRecord::size == 408 : "DrawRecord moved off its pinned size";
+$assert DrawRecord::size == 416 : "DrawRecord moved off its pinned size";
 $assert FrameBlock::size == 400 : "FrameBlock moved off its pinned size";
 $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
@@ -808,6 +835,7 @@ const PushFieldLayout[*] DRAW_RECORD_FIELDS = {
 	{ "texture_index", 288, 96 },
 	{ "material_rows", 384, 4 },
 	{ "relief", 388, 16 },
+	{ "tangents", 408, 8 },
 };
 
 <*
