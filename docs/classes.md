@@ -2234,6 +2234,45 @@ system back out of `three.systems` the moment nothing else needs it.
 - `dispose()`
 - `toString()`
 
+## Cutscene
+
+```js
+three.cutscene.create(spec, options)  |  three.cutscene.load(path, options)
+```
+
+A cutscene being played. One pose-at-time serves playback and seeking, so a scrubbed frame and a played
+frame are the same frame. It steps on the game clock — a paused `three.clock` holds it — through a
+`three.systems` entry installed only while something plays.
+
+While a camera key drives the view it detaches the camera and turns `three.controls` off; both come back
+at the end or on `dispose()`. A follow camera is not re-attached — do that in the `end` handler.
+
+### Properties
+
+- `duration`
+- `time`
+- `playing`
+- `done`
+- `spec`
+- `driveCamera`
+- `restoreCamera`
+
+### Methods
+
+- `on(name, fn)`
+- `once(name, fn)`
+- `off(name, fn)`
+- `play()`
+- `pause()`
+- `seek(t)`
+- `skip()`
+- `dispose()`
+- `toString()`
+
+`on` listens for an event name, and `'end'` once the scene finishes; a throwing handler is reported and
+the scene carries on. `seek(t)` counts events before `t` as passed without firing them, and re-arms the
+rest. `skip()` jumps to the end, fires only the unfired events marked `always`, then `end`.
+
 ## TransformBatch
 
 ```js

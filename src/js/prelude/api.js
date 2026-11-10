@@ -38,6 +38,7 @@ import { steer, NavField, makeSceneNav } from './nav.js';
 import { makeScenePhysics } from './physics.js';
 import { systems, systemLoad, ANIMATION_SYSTEM, FIXED_SYSTEM } from './systems.js';
 import { cooldown, Cooldown } from './cooldown.js';
+import { cutscene, Cutscene } from './cutscene.js';
 import { key, keys, owned } from './decorators.js';
 import { track, Entity, entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { ui } from './ui.js';
@@ -2230,6 +2231,11 @@ export const three = {
 	// pass across a multi-step catch-up frame.
 	cooldown,
 	Cooldown,
+
+	// A timeline of actor strips, camera keys and named events, from a
+	// .cutscene.json: three.cutscene.load(path, { level }).on('say', fn).play().
+	cutscene,
+	Cutscene,
 
 	// §23. A class is the entity, and three.track is what makes it one: it owns
 	// the object -> instance map, the spawn ritual, the body, the trigger

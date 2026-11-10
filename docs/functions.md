@@ -1280,6 +1280,46 @@ across a multi-step catch-up frame. A paused clock still freezes it either way.
 See the Cooldown class for `start`, `cancel`, `active`, `ready`, `recovering`, `remaining`, `progress` and
 `elapsed`.
 
+## three.cutscene.create(spec, options) / load(path, options) / save(path, spec)
+
+A timeline of actor strips, camera keys and named events — a cutscene — played on the game clock.
+`create` takes the spec as an object, `load` reads a `.cutscene.json` from the assets directory, and
+`save` checks a spec and writes it back. Both builders answer a Cutscene.
+
+```js
+const cs = three.cutscene.load('cutscenes/intro.cutscene.json', { level });
+cs.on('say', e => ui.say(e.actor, e.text)).on('end', () => G.mode = 'playing');
+cs.play();
+```
+
+The file:
+
+```json
+{ "format": "three-cutscene", "version": 1,
+  "actors": [ { "row": "hero_1", "strips": [
+    { "type": "move", "start": 0, "end": 3, "clip": "walk", "path": [[0,0,0],[2,0,1],[5,0,1]], "ease": "inout" },
+    { "type": "play", "start": 3, "clip": "wave", "loop": false, "fade": 0.2 } ] } ],
+  "camera": [ { "at": 0, "eye": [8,3,8], "target": [2,1,0], "fov": 50, "cut": true },
+              { "at": 3, "eye": [4,1.6,3], "target": [5,1.4,1], "fov": 35 } ],
+  "events": [ { "at": 0, "name": "music", "data": { "track": "tense" }, "always": true },
+              { "at": 3.2, "name": "say", "data": { "actor": "hero_1", "text": "Not today." } },
+              { "at": 8, "name": "end" } ] }
+```
+
+- An actor's `row` is found in `options.actors` (an object or Map of id to object), then
+  `options.level.objects`, then `options.scene.getObjectByName`.
+- A `move` walks its path at even speed over `[start, end]`, eased (`linear`, `in`, `out`, `inout`), facing
+  along it unless `turn: false`, and loops its `clip` while it walks. Path points are in the actor's parent
+  space. After the move the actor stays where it ended.
+- A `play` starts its `clip` at `start` (crossfading over `fade` seconds) and runs until the next strip;
+  `loop: false` holds the last frame.
+- Camera keys ease from one to the next; `cut: true` jumps at the key instead.
+- Events fire once when the playhead crosses them, handed their `data` plus `name` and `at`. An `end`
+  event sets the length; without one it is `duration`, or the last thing on the timeline.
+
+Options: `level`, `actors`, `scene`, `camera` (false leaves the camera alone) and `restoreCamera` (false
+keeps the last shot after the end).
+
 ## three.Entity
 
 The base class, and the shortest way to an entity: `class Critter extends three.Entity`, with no

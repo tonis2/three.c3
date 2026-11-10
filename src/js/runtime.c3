@@ -143,6 +143,7 @@ const char[*] PRELUDE_PHYSICS  = $embed("prelude/physics.js");
 const char[*] PRELUDE_SYSTEMS  = $embed("prelude/systems.js");
 const char[*] PRELUDE_ENTITY   = $embed("prelude/entity.js");
 const char[*] PRELUDE_COOLDOWN = $embed("prelude/cooldown.js");
+const char[*] PRELUDE_CUTSCENE = $embed("prelude/cutscene.js");
 const char[*] PRELUDE_DECORATORS = $embed("prelude/decorators.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
 const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
@@ -160,7 +161,7 @@ const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
 *>
 fn js::EmbeddedModule[] prelude_parts()
 {
-	static js::EmbeddedModule[25] parts;
+	static js::EmbeddedModule[26] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -183,6 +184,7 @@ fn js::EmbeddedModule[] prelude_parts()
 		{ "three:systems.js", (char[])PRELUDE_SYSTEMS[..] },
 		{ "three:entity.js", (char[])PRELUDE_ENTITY[..] },
 		{ "three:cooldown.js", (char[])PRELUDE_COOLDOWN[..] },
+		{ "three:cutscene.js", (char[])PRELUDE_CUTSCENE[..] },
 		{ "three:decorators.js", (char[])PRELUDE_DECORATORS[..] },
 		{ "three:ui.js", (char[])PRELUDE_UI[..] },
 		{ "three:widget.js", (char[])PRELUDE_WIDGET[..] },
