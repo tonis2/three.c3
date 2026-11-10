@@ -411,6 +411,7 @@ function normalise(node, path) {
 		case 'tree':
 			out.rows = normaliseRows(node.rows, `${where} rows`);
 			if (node.selected !== undefined) out.selected = num(node.selected, `${where} selected`);
+			if (node.style !== undefined) out.style = normaliseTreeStyle(node.style, `${where} style`);
 			break;
 		case 'textfield':
 			if (node.text !== undefined && node.text !== null) out.text = String(node.text);
@@ -523,6 +524,9 @@ function normalise(node, path) {
 	put(out, 'onSubmit', handler(node.onSubmit, `${where} onSubmit`));
 	put(out, 'onSelect', handler(node.onSelect, `${where} onSelect`));
 	put(out, 'onToggle', handler(node.onToggle, `${where} onToggle`));
+	// A tree's eye column and its right-press.
+	put(out, 'onRowToggle', handler(node.onRowToggle, `${where} onRowToggle`));
+	put(out, 'onRowContext', handler(node.onRowContext, `${where} onRowContext`));
 	put(out, 'onHover', handler(node.onHover, `${where} onHover`));
 	put(out, 'onConfirm', handler(node.onConfirm, `${where} onConfirm`));
 	put(out, 'onDismiss', handler(node.onDismiss, `${where} onDismiss`));
@@ -606,22 +610,66 @@ function normaliseMenuItems(items, where) {
 	});
 }
 
+// The icons a tree row can name, by position in the host's table. The first
+// eight are the ones the host seeds (`UiLayer.register_tree_icons`, in this
+// order); `three.ui.icon` appends more, and a row may also give a number.
+const ICON_IDS = new Map([
+	['scene', 1], ['model', 2], ['mesh', 3], ['skeleton', 4],
+	['light', 5], ['camera', 6], ['eye', 7], ['eye_shut', 8],
+]);
+
+function iconId(value, where) {
+	if (value === undefined || value === null || value === false) return 0;
+	if (typeof value === 'number') return num(value, where);
+	const id = ICON_IDS.get(String(value));
+	if (id === undefined) {
+		throw new TypeError(
+			`${where} names no icon '${String(value)}' — it has ${[...ICON_IDS.keys()].join(', ')}, and three.ui.icon adds more`);
+	}
+	return id;
+}
+
 function normaliseRows(rows, where) {
 	if (rows === undefined || rows === null) return [];
 	if (!Array.isArray(rows)) throw new TypeError(`${where} wants an array of rows`);
 	return rows.map((row, i) => {
 		if (typeof row === 'string') return { label: row, depth: 0 };
 		if (row === null || typeof row !== 'object') {
-			throw new TypeError(`${where}[${i}] is a string or { label, trailing, depth, expandable, expanded }`);
+			throw new TypeError(`${where}[${i}] is a string or { label, trailing, depth, expandable, expanded, icon, highlighted, toggles }`);
 		}
-		return {
+		const out = {
 			label: String(row.label ?? ''),
 			trailing: row.trailing === undefined ? '' : String(row.trailing),
 			depth: num(row.depth, `${where}[${i}] depth`),
 			expandable: !!row.expandable,
 			expanded: !!row.expanded,
 		};
+		if (row.icon !== undefined) out.icon = iconId(row.icon, `${where}[${i}] icon`);
+		if (row.highlighted) out.highlighted = true;
+		if (row.toggles !== undefined && row.toggles !== null) {
+			// Column 0 is the outermost; a hole (null) leaves its space empty so the
+			// columns of different rows line up.
+			out.toggles = row.toggles.slice(0, 2).map((t, c) => (t === null || t === undefined ? null : {
+				icon: iconId(t.icon, `${where}[${i}] toggles[${c}] icon`),
+				on: t.on === undefined ? true : !!t.on,
+			}));
+		}
+		return out;
 	});
+}
+
+// A tree's `style`: sizes in points and colours as the rest of the API takes
+// them. Only what is named is sent, and a zero means the widget's own default.
+function normaliseTreeStyle(style, where) {
+	if (style === undefined || style === null) return undefined;
+	const out = {};
+	for (const name of ['rowHeight', 'indent', 'iconSize', 'toggleWidth', 'padding']) {
+		if (style[name] !== undefined) out[name] = num(style[name], `${where} ${name}`);
+	}
+	for (const name of ['guide', 'alternate', 'highlight', 'trailing', 'mark', 'selectedText']) {
+		if (style[name] !== undefined) out[name] = colour(style[name], `${where} ${name}`);
+	}
+	return out;
 }
 
 // -----------------------------------------------------------------------
@@ -776,6 +824,28 @@ export const ui = {
 		if ('items' in props) out.items = normaliseEntries(props.items, `${where} items`);
 		if ('at' in props) out.at = pair(props.at, `${where} at`, [0, 0]);
 		H.uiPatch(String(key), out);
+	},
+
+	// Adds an icon a `tree` row can name, and answers its number.
+	//
+	//     three.ui.icon('crate', '<svg viewBox="-9 -9 18 18" ...>', { color: 0xf0a040 });
+	//     new Tree([{ label: 'box', icon: 'crate' }])
+	//
+	// The SVG is drawn on an 18-unit viewBox centred on its origin, tinted
+	// `color` (`currentColor` strokes and fills take the tint). `off` is the SVG a
+	// switch draws while it is off, in `dim`, for an open eye and a shut one;
+	// without it the same SVG is drawn dimmer. The built-in names are scene,
+	// model, mesh, skeleton, light, camera, eye and eye_shut. A name used again
+	// replaces what the name resolves to; rows built before keep the old number.
+	icon(name, svg, options) {
+		const opts = options ?? {};
+		const id = H.uiIcon(
+			String(svg),
+			colour(opts.color ?? [0.92, 0.93, 0.95, 1], 'three.ui.icon color'),
+			colour(opts.dim ?? [0.40, 0.42, 0.50, 1], 'three.ui.icon dim'),
+			opts.off === undefined ? '' : String(opts.off));
+		ICON_IDS.set(String(name), id);
+		return id;
 	},
 
 	// What a string will take, as [width, height] in pixels.

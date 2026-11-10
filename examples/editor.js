@@ -13,6 +13,12 @@
 // toggles the dock; the choice is remembered in `three.persist`, next to
 // the others.
 //
+// On the left, `View > Outliner` is the scene as a tree: Scene > the kit file >
+// one row per piece name (a count beside it) > the rows placed from it. Click
+// picks (shift extends, ctrl toggles), the eye hides a row or a whole group — `h`
+// hides the selection and alt+h shows everything — and a hidden row is saved as
+// `visible: false`.
+//
 // Run it against a kit folder (a directory holding one or more .glb files):
 //
 //     ./build/three --assets /path/to/kit-folder --script examples/editor.js
@@ -390,6 +396,10 @@ class Editor {
 	// — see the header comment; `activeId` is the only reader of that rule.
 	@persisted('selected') accessor selection = [];
 	@persisted('dockOpen') accessor dockOpen = three.persist.dockOpen ?? true;
+	@persisted('outlinerOpen') accessor outlinerOpen = three.persist.outlinerOpen ?? true;
+	// Which outliner rows are open: 'scene', 'kit' and 'g:<piece>'. Not persisted:
+	// the groups of a level are not worth remembering across a reload.
+	outlinerOpenKeys = new Set(['scene', 'kit']);
 
 	stamp = null;            // the browser's piece that ctrl+click places
 	// The two modal gestures, and only ever one of them live: a grab (`g`) and
@@ -443,6 +453,7 @@ class Editor {
 		props.sync();
 		statusBar.sync();
 		chrome.update();
+		outliner.update();
 		dialogs.update();
 		timeline.update();
 		cutHeader.update();
@@ -1156,6 +1167,38 @@ class Editor {
 		this.sync();
 	}
 
+	toggleOutliner() {
+		this.outlinerOpen = !this.outlinerOpen;
+		this.sync();
+	}
+
+	// Hides or shows the rows named. The object's own `visible` is what draws, and
+	// the row's `visible: false` is what is saved — `Level.add` replays it on load
+	// and on undo, so the two cannot drift. A shown row carries no key at all.
+	@undoable
+	setHidden(ids, hidden) {
+		let changed = 0;
+		for (const id of ids) {
+			const object = this.level.objects.get(id);
+			const row = this.rowOf(id);
+			if (!object || !row) continue;
+			if ((object.visible === false) === hidden) continue;
+			object.visible = !hidden;
+			if (hidden) row.visible = false; else delete row.visible;
+			changed++;
+		}
+		if (changed === 0) return UNCHANGED;
+	}
+
+	// Whether this row is hidden.
+	isHidden(id) {
+		const object = this.level.objects.get(id);
+		return !!object && object.visible === false;
+	}
+
+	// Blender's alt+h: everything back.
+	showAll() { this.setHidden(this.level.rows.map(r => r.id), false); }
+
 	// ---- Files ----------------------------------------------------------------
 
 	save(path) {
@@ -1801,6 +1844,7 @@ const DOCK_H = 240;
 const HEADER_H = 30;
 const CATALOG_W = 200;
 const PROPS_W = 260;
+const OUTLINER_W = 280;
 // The most cards one grid mounts — see `Browser.render`.
 const MAX_CARDS = 300;
 const CARD_W = 108;
@@ -2032,6 +2076,169 @@ class Browser extends three.Widget {
 }
 
 // The N-panel-style properties card, top-right under the menu bar.
+// The scene as a Blender-style outliner: Scene > the kit file > one row per piece
+// name (a count beside it) > the rows placed from it. Built on cui's `Tree`, so
+// the drawing, the stripes, the eye column and the culling of rows out of view
+// are C3's; this class only says what the rows are and what a click means.
+//
+// Only the OPEN groups' rows are sent, so a level of hundreds of pieces is a
+// short list until something is opened, and the tree paints what is on screen.
+class SceneTree extends three.Widget {
+	constructor() {
+		super();
+		this.keys = [];
+		this.model = [];
+	}
+
+	// The groups of the level in the order each piece name first appears.
+	groups() {
+		const groups = new Map();
+		for (const row of ed.level.rows) {
+			let g = groups.get(row.piece);
+			if (!g) groups.set(row.piece, g = []);
+			g.push(row.id);
+		}
+		return groups;
+	}
+
+	// 'all hidden', 'all shown' or 'mixed' for a set of ids, as the eye wants it.
+	static state(ids) {
+		let hidden = 0;
+		for (const id of ids) if (ed.isHidden(id)) hidden++;
+		return hidden === 0 ? 'shown' : hidden === ids.length ? 'hidden' : 'mixed';
+	}
+
+	static eye(ids) {
+		return [{ icon: 'eye', on: SceneTree.state(ids) !== 'hidden' }];
+	}
+
+	// Rebuilds the flat list the tree draws, and the key each row stands for.
+	build() {
+		const open = ed.outlinerOpenKeys;
+		const picked = new Set(ed.selection);
+		const rows = [];
+		const keys = [];
+		const all = ed.level.rows.map(r => r.id);
+		const kit = ed.level.kit ? kitLabel(ed.level.kit) : '(no kit)';
+
+		rows.push({
+			label: 'Scene', depth: 0, expandable: true, expanded: open.has('scene'), icon: 'scene',
+			trailing: String(all.length), toggles: SceneTree.eye(all),
+		});
+		keys.push({ kind: 'scene', ids: all });
+		if (open.has('scene')) {
+			rows.push({
+				label: kit, depth: 1, expandable: true, expanded: open.has('kit'), icon: 'model',
+				toggles: SceneTree.eye(all),
+			});
+			keys.push({ kind: 'kit', ids: all });
+			if (open.has('kit')) {
+				for (const [piece, ids] of this.groups()) {
+					const single = ids.length === 1;
+					const key = `g:${piece}`;
+					const lit = ids.some(id => picked.has(id));
+					rows.push({
+						label: piece, depth: 2, icon: 'mesh', toggles: SceneTree.eye(ids),
+						expandable: !single, expanded: open.has(key),
+						trailing: single ? '' : String(ids.length),
+						highlighted: lit && !(open.has(key) && !single),
+					});
+					keys.push({ kind: single ? 'row' : 'group', ids, key, id: ids[0] });
+					if (single || !open.has(key)) continue;
+					for (const id of ids) {
+						rows.push({
+							// The number alone: the group says the name, and a long name cut
+							// to fit would lose the one part that tells the rows apart.
+							label: id.startsWith(`${piece}_`) ? `#${id.slice(piece.length + 1)}` : id,
+							depth: 3, icon: 'mesh', toggles: SceneTree.eye([id]),
+							highlighted: picked.has(id),
+						});
+						keys.push({ kind: 'row', ids: [id], id });
+					}
+				}
+			}
+		}
+		this.model = rows;
+		this.keys = keys;
+	}
+
+	// The row the active piece is on, or past the end for none.
+	activeIndex() {
+		const active = ed.activeId;
+		if (!active) return this.model.length;
+		const at = this.keys.findIndex(k => k.kind === 'row' && k.id === active);
+		return at < 0 ? this.model.length : at;
+	}
+
+	// A click: a plain one picks, ctrl toggles, shift extends from the active row
+	// down to this one over the rows as listed.
+	pick(i, mods) {
+		const key = this.keys[i];
+		if (!key) return;
+		const shift = (mods & 1) !== 0;
+		const ctrl = (mods & 2) !== 0;
+		if (key.kind === 'scene') { ed.select(null); return; }
+		let ids = key.ids;
+		if (shift) {
+			const from = this.activeIndex();
+			const lo = Math.min(from, i), hi = Math.max(from, i);
+			ids = [];
+			for (let at = lo; at <= hi; at++) {
+				const k = this.keys[at];
+				if (k && k.kind === 'row') ids.push(k.id);
+			}
+			if (ids.length === 0) ids = key.ids;
+			ed.select([...new Set([...ed.selection, ...ids])]);
+		} else if (ctrl) {
+			const have = ids.every(id => ed.isSelected(id));
+			ed.select(have ? ed.selection.filter(id => !ids.includes(id)) : [...ed.selection, ...ids]);
+		} else {
+			ed.select(ids);
+		}
+	}
+
+	flip(i) {
+		const key = this.keys[i];
+		const name = !key ? null : key.kind === 'scene' ? 'scene' : key.kind === 'kit' ? 'kit' : key.key;
+		if (!name) return;
+		const open = ed.outlinerOpenKeys;
+		if (open.has(name)) open.delete(name); else open.add(name);
+		this.update();
+	}
+
+	eyeClick(i) {
+		const key = this.keys[i];
+		if (!key) return;
+		ed.setHidden(key.ids, SceneTree.state(key.ids) !== 'hidden');
+	}
+
+	render() {
+		this.build();
+		const { height } = three.renderSize();
+		const scale = three.ui.scale || 1;
+		const room = Math.floor(height / scale) - BAR_H - 16 - STATUS_H - (ed.dockOpen && !cut.open ? DOCK_H : 0);
+		return new Panel({
+			at: 'top-left', margin: [8, BAR_H + 8], width: OUTLINER_W, gap: 0, insets: 4,
+			color: THEME.panel, radius: THEME.radius, borderColor: THEME.border, borderWidth: 1, solid: true,
+		},
+			new Scroll({ key: 'outlinerScroll', size: [0, Math.max(room, 120)] },
+				new Tree(this.model, this.activeIndex(), safe((i, mods) => this.pick(i, mods)), {
+					key: 'outlinerTree',
+					style: OUTLINER_STYLE,
+					onToggle: safe(i => this.flip(i)),
+					onRowToggle: safe(i => this.eyeClick(i)),
+					onRowContext: safe(i => this.pick(i, 0)),
+				})),
+		);
+	}
+}
+
+const OUTLINER_STYLE = {
+	rowHeight: 24, indent: 16, iconSize: 14, toggleWidth: 24, padding: 6,
+	guide: [0.30, 0.32, 0.40, 1], alternate: [1, 1, 1, 0.03],
+	highlight: [0.21, 0.27, 0.40, 1], selectedText: [0.97, 0.98, 1, 1],
+};
+
 class Props extends three.Widget {
 	constructor() {
 		super();
@@ -2513,7 +2720,7 @@ function menuSpec() {
 		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
 		{
 			title: 'View',
-			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: ed.dockOpen },
+			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: ed.dockOpen }, { label: 'Outliner', checked: ed.outlinerOpen },
 				{ label: 'Cutscene', checked: cut.open }],
 		},
 	];
@@ -2551,6 +2758,7 @@ function onMenuSelect(menu, item) {
 		case 'Toggle grid': ed.toggleGrid(); break;
 		case 'Refit': ed.refit(); break;
 		case 'Asset browser': ed.toggleDock(); break;
+		case 'Outliner': ed.toggleOutliner(); break;
 		case 'Cutscene': cut.toggle(); break;
 	}
 }
@@ -2584,6 +2792,7 @@ class Chrome extends three.Widget {
 					),
 				),
 			),
+			ed.outlinerOpen && !cut.open && outliner,
 			cut.open ? cutProps : props,
 			statusBar,
 			new Anchored({ h: 'start', v: 'start' }, new MenuBar(menuSpec(), safe(onMenuSelect))),
@@ -2691,6 +2900,9 @@ class Keys {
 	@three.key('s', 'scale the selection — pull away to grow, in to shrink') @safe static scale() { ed.startScale(); }
 	@three.key('r', 'rotate a quarter turn (shift: the other way)') @safe static rotate() { ed.rotate(held('shift') ? -1 : 1); }
 	@three.key('f', 'frame the selection') @safe static frame() { ed.frameSelection(); }
+	@three.key('h', 'hide the selection · alt: show everything') @safe static hide() {
+		if (held('alt')) ed.showAll(); else ed.setHidden([...ed.selection], true);
+	}
 	@three.key('home', 'frame everything') @safe static home() { frameAllExcludingHelpers(); }
 	@three.key('escape', 'free the axis, then cancel the gesture, then clear the stamp') @safe static escape() {
 		if (cut.open && cut.selected && !ed.gesture) cut.select(null); else ed.cancel();
@@ -2747,6 +2959,7 @@ const ed = new Editor();
 const catalog = new Catalog();
 const browser = new Browser();
 const props = new Props();
+const outliner = new SceneTree();
 const statusBar = new StatusBar();
 const chrome = new Chrome();
 const dialogs = new Dialogs();

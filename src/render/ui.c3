@@ -547,6 +547,25 @@ fn bool UiNodeKind.interactive(self)
 }
 
 <*
+ What a `tree` takes of cui's `TreeStyle` beyond the common theme. Zero keeps the
+ widget's default, field by field, so a script names only what it changes.
+*>
+struct UiTreeStyle
+{
+	float row_height;
+	float indent;
+	float icon_size;
+	float toggle_width;
+	float padding;
+	Vec4 guide;
+	Vec4 alternate;
+	Vec4 highlighted;
+	Vec4 trailing;
+	Vec4 mark;
+	Vec4 selected_text;
+}
+
+<*
  One node of a snapshot, as the binding hands it over.
 
  Flat and by value: every field is a number, an enum or a borrowed string, and
@@ -690,6 +709,11 @@ struct UiNodeSpec
 	bool has_selected;
 	bool has_offset;
 
+	// A `tree`'s look beyond the common theme. `has_tree_style` says the script
+	// named a `style` at all; within it a zero is "keep the default".
+	bool has_tree_style;
+	UiTreeStyle tree_style;
+
 	// Which callbacks the script attached. The widget gets a function pointer
 	// only for the ones it did — an unhandled slider is a readout, and cui skips
 	// the call rather than the binding refusing it.
@@ -699,6 +723,9 @@ struct UiNodeSpec
 	bool on_submit;
 	bool on_select;
 	bool on_toggle;
+	// A `tree`'s switch column and its right-press.
+	bool on_row_toggle;
+	bool on_row_context;
 	bool on_hover;
 	bool on_confirm;
 	bool on_dismiss;
@@ -746,6 +773,10 @@ enum UiEventKind : char
 	GRAPH,
 	// A `contextMenu` item chosen; `index` is which.
 	MENU_CHOOSE,
+	// A `tree`'s right-edge switch (the eye): `index` the row, `item` the column.
+	ROW_SWITCH,
+	// A right-press on a `tree` row: `index` the row, `at` where, in the window.
+	ROW_CONTEXT,
 }
 
 <*
@@ -1057,6 +1088,14 @@ struct UiLayer
 	// the overlay *this frame's* — see there.
 	bool overlay_fresh;
 
+	// A `tree`'s icons by number (`icon - 1`): the outliner set `register_tree_icons`
+	// seeds, then whatever a script adds with `three.ui.icon`. A fixed array, not a
+	// List, because every tree built holds a slice of it and a growing List would
+	// leave them pointing at freed memory; a tree built before an icon was added
+	// simply does not know it until its next build.
+	cui::widgets::TreeIcon* icon_table;
+	usz icon_count;
+
 	// The live snapshot: one record per node, in the order they were pushed, and
 	// the element the whole thing hangs from.
 	List{UiNode} nodes;
@@ -1208,6 +1247,8 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 	self.building.init(mem, 0);
 	self.textures.init(mem, 0);
 	self.spare.init(mem, 0);
+	self.icon_table = mem::new_array(cui::widgets::TreeIcon, TREE_ICON_MAX);
+	self.register_tree_icons();
 
 	self.font = self.ui.load_font_bytes(UI_FONT[..])!;
 
@@ -1328,6 +1369,14 @@ fn void UiLayer.free(&self)
 	self.held.free();
 	self.textures.free();
 	self.spare.free();
+	for (usz i = 0; i < self.icon_count; i++)
+	{
+		free(self.icon_table[i].svg);
+		if (self.icon_table[i].svg_off.len > 0) free(self.icon_table[i].svg_off);
+	}
+	if (self.icon_table) free(self.icon_table);
+	self.icon_table = null;
+	self.icon_count = 0;
 	foreach (i, node : self.nodes) self.nodes[i].free();
 	self.nodes.free();
 	foreach (i, node : self.building) self.building[i].free();
@@ -2217,17 +2266,34 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 				}
 			);
 		case TREE:
+			cui::widgets::TreeStyle base = cui::widgets::DEFAULT_TREE_STYLE;
+			UiTreeStyle ts = spec.tree_style;
 			element = self.ui.@node(
 				(cui::widgets::Tree){
 					.selected = spec.selected,
 					.on_select = spec.on_select ? &ui_row_select : null,
+					.on_pick = spec.on_select ? &ui_row_pick : null,
 					.on_toggle = spec.on_toggle ? &ui_row_toggle : null,
+					.on_row_toggle = spec.on_row_toggle ? &ui_row_switch : null,
+					.on_context = spec.on_row_context ? &ui_row_context : null,
+					.icons = self.icon_table[:self.icon_count],
 					.style = {
-						...cui::widgets::DEFAULT_TREE_STYLE,
-						.text = ui_color(spec.text_color, cui::widgets::DEFAULT_TREE_STYLE.text),
-						.selected = ui_color(spec.accent, cui::widgets::DEFAULT_TREE_STYLE.selected),
-						.hover = ui_color(spec.hover_color, cui::widgets::DEFAULT_TREE_STYLE.hover),
-						.text_size = spec.text_size > 0 ? spec.text_size : cui::widgets::DEFAULT_TREE_STYLE.text_size,
+						...base,
+						.text = ui_color(spec.text_color, base.text),
+						.selected = ui_color(spec.accent, base.selected),
+						.hover = ui_color(spec.hover_color, base.hover),
+						.text_size = spec.text_size > 0 ? spec.text_size : base.text_size,
+						.row_height = ts.row_height > 0 ? ts.row_height : base.row_height,
+						.indent = ts.indent > 0 ? ts.indent : base.indent,
+						.padding = ts.padding > 0 ? ts.padding : base.padding,
+						.icon_size = ts.icon_size,
+						.toggle_width = ts.toggle_width,
+						.guide = (Color)ts.guide,
+						.alternate = (Color)ts.alternate,
+						.highlighted = (Color)ts.highlighted,
+						.trailing = ui_color(ts.trailing, base.trailing),
+						.mark = ui_color(ts.mark, base.mark),
+						.selected_text = ui_color(ts.selected_text, base.selected_text),
 					},
 				}
 			);
@@ -2632,6 +2698,49 @@ fn void UiLayer.push_menu_item(
 	held.menus[last].items = held.items.array_view()[(usz)held.items.len() - count..];
 }
 
+// How many icons a `tree` can name, the built-in set included.
+const usz TREE_ICON_MAX = 256;
+
+<*
+ Adds an icon to the table `tree` rows name by number and answers its number, or
+ 0 when the table is full. The strings are copied: the icon atlas keys on them
+ for as long as the Ui lives, which is longer than the script string they came
+ from.
+
+ @param off : `Drawn in place of svg for a switch that is off. Empty for none.`
+*>
+fn ushort UiLayer.add_tree_icon(&self, String svg, Vec4 color, Vec4 dim, String off)
+{
+	if (self.icon_count >= TREE_ICON_MAX) return 0;
+	self.icon_table[self.icon_count++] = {
+		.svg = svg.copy(mem),
+		.color = (Color)color,
+		.dim = (Color)dim,
+		.svg_off = off.len > 0 ? off.copy(mem) : "",
+	};
+	return (ushort)self.icon_count;
+}
+
+<*
+ The outliner set, numbered 1 to 8 in this order — `js/prelude/ui.js` names them
+ by the same list: scene, model, mesh, skeleton, light, camera, eye, eye_shut.
+ The eye is one icon with its shut form as `svg_off`, so a toggle that is off
+ draws the other; `eye_shut` stays addressable on its own for a plain row.
+*>
+fn void UiLayer.register_tree_icons(&self)
+{
+	Vec4 dim = { 0.40, 0.42, 0.50, 1.0 };
+	self.icon_count = 0;
+	self.add_tree_icon(cui::icons::TREE_SCENE, { 0.62, 0.65, 0.72, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_MODEL, { 0.95, 0.60, 0.20, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_MESH, { 0.40, 0.80, 0.70, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_SKELETON, { 0.90, 0.90, 0.95, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_LIGHT, { 0.95, 0.82, 0.35, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_CAMERA, { 0.55, 0.65, 0.95, 1 }, dim, "");
+	self.add_tree_icon(cui::icons::TREE_EYE, { 0.92, 0.93, 0.95, 1 }, dim, cui::icons::TREE_EYE_SHUT);
+	self.add_tree_icon(cui::icons::TREE_EYE_SHUT, dim, dim, "");
+}
+
 <*
  One row of a `tree`, in order.
 
@@ -2639,7 +2748,17 @@ fn void UiLayer.push_menu_item(
  @param trailing : `Drawn right-aligned, and skipped when empty — a count beside a category.`
  @param depth : `Indent level. Nothing is hidden by expanded; it only points the disclosure mark.`
 *>
-fn void UiLayer.push_row(&self, uint node, String label, String trailing, usz depth, bool expandable, bool expanded)
+fn void UiLayer.push_row(
+	&self,
+	uint node,
+	String label,
+	String trailing,
+	usz depth,
+	bool expandable,
+	bool expanded,
+	ushort icon = 0,
+	bool highlighted = false,
+	cui::widgets::TreeToggle[cui::widgets::TREE_TOGGLES] toggles = {})
 {
 	UiNode* held = self.at(node);
 	if (held == null) return;
@@ -2652,6 +2771,9 @@ fn void UiLayer.push_row(&self, uint node, String label, String trailing, usz de
 			.depth = depth,
 			.expandable = expandable,
 			.expanded = expanded,
+			.icon = icon,
+			.highlighted = highlighted,
+			.toggles = toggles,
 		}
 	);
 }
@@ -3277,6 +3399,24 @@ fn void ui_row_select(cui::Ui* ui, usz row) @local
 fn void ui_row_toggle(cui::Ui* ui, usz row) @local
 {
 	ui_signal(ui, UiNodeKind.TREE, { .kind = UiEventKind.ROW_TOGGLE, .index = row });
+}
+
+// A row picked with the modifier keys, as bits in `modifiers` order: shift 1,
+// ctrl 2, alt 4. Rides on `item`, since ROW_SELECT already has `index`.
+fn void ui_row_pick(cui::Ui* ui, usz row, cui::Modifiers mods) @local
+{
+	usz bits = (usz)((mods.shift ? 1 : 0) | (mods.ctrl ? 2 : 0) | (mods.alt ? 4 : 0));
+	ui_signal(ui, UiNodeKind.TREE, { .kind = UiEventKind.ROW_SELECT, .index = row, .item = bits });
+}
+
+fn void ui_row_switch(cui::Ui* ui, usz row, usz column) @local
+{
+	ui_signal(ui, UiNodeKind.TREE, { .kind = UiEventKind.ROW_SWITCH, .index = row, .item = column });
+}
+
+fn void ui_row_context(cui::Ui* ui, usz row, Vec2 at) @local
+{
+	ui_signal(ui, UiNodeKind.TREE, { .kind = UiEventKind.ROW_CONTEXT, .index = row, .at = at });
 }
 
 fn void ui_typed(cui::Ui* ui, String text) @local

@@ -3639,6 +3639,22 @@ It is a `three.ui.set` — one draw node filling the frame — so it replaces th
 widgets, use `{ type: 'draw', size, ops }` inside the tree, where the coordinates are then the node's own and
 `onClick` makes it clickable.
 
+## three.ui.icon(name, svg, options)
+
+Adds an icon a `tree` row can name, and answers its number. `svg` is drawn on an 18-unit viewBox centred on its
+origin and tinted `options.color`; `currentColor` strokes and fills take the tint. `options.off` is the SVG a
+switch draws while it is off — an open eye and a shut one — in `options.dim`; without it the same SVG is drawn
+dimmer.
+
+```js
+three.ui.icon('crate', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-9 -9 18 18" ...>', { color: 0xf0a040 });
+new Tree([{ label: 'box_1', icon: 'crate' }]);
+```
+
+The host seeds eight, numbered 1 to 8: `scene`, `model`, `mesh`, `skeleton`, `light`, `camera`, `eye` (its shut form
+is the `off` drawing) and `eye_shut`. A row may name an icon or give its number, and a name nothing knows throws
+naming it. The table holds 256; a tree built before an icon was added does not know it until its next build.
+
 ## three.ui.measure(text, options)
 
 What a string will take, as `[width, height]` in pixels. `options` is `{ font, size }`.

@@ -2132,6 +2132,18 @@ The nodes are objects, one class per kind, on `three.ui`: Column, Row, Stack, Pa
 Anchored, Scroll, Panel, Rect, Label, Drawing, Button, Checkbox, Slider, Select, Tree, TextField.
 Destructure them in one line — `const { Panel, Label, Button } = three.ui`.
 
+**Tree is an outliner.** `new Tree(rows, selected, onSelect, props)`, where a row is
+`{ label, trailing, depth, expandable, expanded, icon, highlighted, toggles }`. Rows are flat and carry their own
+depth; collapsing is the caller's, so send only the rows of the open groups. `icon` names one of `three.ui.icon`'s
+icons; `highlighted` lights a row as part of a larger selection while `selected` stays the one active row;
+`toggles` is `[{ icon, on }]`, column 0 outermost — an eye — with `null` leaving a column's space empty so rows line
+up. Handlers: `onSelect(row, modifiers)` (shift 1, ctrl 2, alt 4), `onToggle(row)` for the chevron,
+`onRowToggle(row, column)` for a switch (which picks nothing), `onRowContext(row, x, y)` for a right-press. A long
+label is cut with an ellipsis before the count and the switches. `props.style` is
+`{ rowHeight, indent, iconSize, toggleWidth, padding, guide, alternate, highlight, trailing, mark, selectedText }`,
+any of them optional. Up and down move the selection, left and right close and open a row, and space flips the
+first switch. Inside a Scroll only the rows in view are painted, so a long list costs what is on screen.
+
 Arguments are read by type, so the common spellings need no property names: a string is the text, a
 function is the handler, a boolean is `checked`, a number is the value, an array is the options or the
 rows, a plain object is the rest of the properties, and anything else is a child.

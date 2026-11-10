@@ -46,6 +46,7 @@ import std::collections::list;
 import std::math;
 import fastjs::js;
 import fastjs::js::opt;
+import cui::widgets;
 
 <*
  The JavaScript functions one node attached, indexed by that node's position in
@@ -63,6 +64,9 @@ struct UiHandlers
 	js::Root on_submit;
 	js::Root on_select;
 	js::Root on_toggle;
+	// A `tree`'s eye column and its right-press.
+	js::Root on_row_toggle;
+	js::Root on_row_context;
 	js::Root on_hover;
 	// The three cui's application widgets need and nothing else does. `confirm`
 	// and `dismiss` are a question's two answers — and `dismiss` is a `dialog`
@@ -124,6 +128,12 @@ fn js::Root* UiHandlers.for_event(&self, UiEventKind kind, String* name)
 		case ROW_TOGGLE:
 			*name = "onToggle";
 			return &self.on_toggle;
+		case ROW_SWITCH:
+			*name = "onRowToggle";
+			return &self.on_row_toggle;
+		case ROW_CONTEXT:
+			*name = "onRowContext";
+			return &self.on_row_context;
 		case TEXT_SUBMIT:
 			*name = "onSubmit";
 			return &self.on_submit;
@@ -215,6 +225,8 @@ struct UiKeys
 	js::Key on_submit;
 	js::Key on_select;
 	js::Key on_toggle;
+	js::Key on_row_toggle;
+	js::Key on_row_context;
 	js::Key on_hover;
 	js::Key on_confirm;
 	js::Key on_dismiss;
@@ -222,6 +234,23 @@ struct UiKeys
 	js::Key on_pointer;
 	js::Key on_graph;
 	js::Key can_connect;
+	// A tree's style, and the fields of its rows
+	js::Key style;
+	js::Key row_height;
+	js::Key indent;
+	js::Key icon_size;
+	js::Key toggle_width;
+	js::Key padding;
+	js::Key guide;
+	js::Key alternate;
+	js::Key highlight;
+	js::Key mark;
+	js::Key selected_text;
+	js::Key icon;
+	js::Key highlighted;
+	js::Key toggles;
+	js::Key on;
+	js::Key shown;
 	// Its lists
 	js::Key ops;
 	js::Key options;
@@ -293,6 +322,7 @@ fn void? JsRuntime.bind_ui_verbs(&self, js::Value host)
 	self.js.@bind(host, "uiScale", &js_ui_scale, self)!;
 	self.js.@bind(host, "uiTexture", &js_ui_texture, self)!;
 	self.js.@bind(host, "uiTextureFree", &js_ui_texture_free, self)!;
+	self.js.@bind(host, "uiIcon", &js_ui_icon, self)!;
 }
 
 // ============================================================================
@@ -617,6 +647,24 @@ fn double? js_ui_scale(JsRuntime* self, js::Call* c, js::Value wanted)
 }
 
 <*
+ `three.ui.icon(name, svg, options)` — adds an icon to the table a `tree` row names
+ by number, and answers its number. The name-to-number half lives in
+ `js/prelude/ui.js`; this stores the SVG (copied: the atlas keys on it for the
+ life of the interface), its colour, the dimmer colour a switch that is off
+ takes, and the SVG that switch draws instead.
+
+ @return? js::THREW
+*>
+fn int? js_ui_icon(JsRuntime* self, String svg, Vec4 color, Vec4 dim, String off)
+{
+	UiLayer* layer = self.ui_layer()!;
+	if (svg.len == 0) return self.js.fail("three.ui.icon wants the SVG text of the icon")~;
+	ushort id = layer.add_tree_icon(svg, color, dim, off);
+	if (id == 0) return self.js.fail("three.ui.icon: the icon table is full — %d icons is all a tree can name", (int)TREE_ICON_MAX)~;
+	return (int)id;
+}
+
+<*
  `three.ui.patch(key, props)` — write the named fields of one keyed node.
 
  The retained half of the API, keyed by string rather than by handle: a HUD that
@@ -826,6 +874,8 @@ fn UiHandlers? JsRuntime.take_ui_handlers(&self, js::Value value)
 	taken.on_submit = take_handler(js, value, k.on_submit)!;
 	taken.on_select = take_handler(js, value, k.on_select)!;
 	taken.on_toggle = take_handler(js, value, k.on_toggle)!;
+	taken.on_row_toggle = take_handler(js, value, k.on_row_toggle)!;
+	taken.on_row_context = take_handler(js, value, k.on_row_context)!;
 	taken.on_hover = take_handler(js, value, k.on_hover)!;
 	taken.on_confirm = take_handler(js, value, k.on_confirm)!;
 	taken.on_dismiss = take_handler(js, value, k.on_dismiss)!;
@@ -926,6 +976,7 @@ fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers
 	// is, and that is the whole reason the policy is written here rather than
 	// beside the widget it confines.
 	if (spec.kind == UiNodeKind.FILE_BROWSER) self.confine_browser(&spec);
+	if (spec.kind == UiNodeKind.TREE) self.read_tree_style(value, &spec)!;
 
 	// Last of the reads, so nothing that can fail runs while they are held
 	// outside the table.
@@ -936,6 +987,8 @@ fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers
 	spec.on_submit = taken.on_submit != js::NO_ROOT;
 	spec.on_select = taken.on_select != js::NO_ROOT;
 	spec.on_toggle = taken.on_toggle != js::NO_ROOT;
+	spec.on_row_toggle = taken.on_row_toggle != js::NO_ROOT;
+	spec.on_row_context = taken.on_row_context != js::NO_ROOT;
 	spec.on_hover = taken.on_hover != js::NO_ROOT;
 	spec.on_confirm = taken.on_confirm != js::NO_ROOT;
 	spec.on_dismiss = taken.on_dismiss != js::NO_ROOT;
@@ -1073,6 +1126,37 @@ fn void? JsRuntime.read_menus(&self, js::Value node, uint index)
 }
 
 <*
+ A `tree`'s `style`: the sizes and colours beyond the common theme. Each is
+ optional — a missing one reads as zero, which the widget takes as its default.
+
+ @return? js::THREW
+*>
+fn void? JsRuntime.read_tree_style(&self, js::Value node, UiNodeSpec* spec)
+{
+	js::Engine* js = self.js;
+	UiKeys* k = &self.ui_keys;
+	js::Value style = js.get(node, k.style)!;
+	if (style.is_nullish()) return;
+	spec.has_tree_style = true;
+	spec.tree_style = {
+		.row_height = field_float(js, style, k.row_height)!,
+		.indent = field_float(js, style, k.indent)!,
+		.icon_size = field_float(js, style, k.icon_size)!,
+		.toggle_width = field_float(js, style, k.toggle_width)!,
+		.padding = field_float(js, style, k.padding)!,
+		.guide = field_vec4(js, style, k.guide)!,
+		.alternate = field_vec4(js, style, k.alternate)!,
+		.highlighted = field_vec4(js, style, k.highlight)!,
+		.trailing = field_vec4(js, style, k.trailing)!,
+		.mark = field_vec4(js, style, k.mark)!,
+		.selected_text = field_vec4(js, style, k.selected_text)!,
+	};
+}
+
+<*
+ A `tree`'s rows. A row's `icon` is a number — `ui.js` has turned the names into
+ table positions — and its `toggles` are `{ icon, on }`, column 0 outermost.
+
  @return? js::THREW
 *>
 fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
@@ -1081,13 +1165,31 @@ fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
 	UiKeys* k = &self.ui_keys;
 	@each_entry(js, node, k.rows; js::Value entry)
 	{
+		cui::widgets::TreeToggle[cui::widgets::TREE_TOGGLES] toggles;
+		js::Value shown = js.get(entry, k.toggles)!;
+		if (!shown.is_nullish())
+		{
+			for (usz c = 0; c < cui::widgets::TREE_TOGGLES; c++)
+			{
+				js::Value t = js.get(shown, (int)c)!;
+				if (t.is_nullish()) continue;
+				toggles[c] = {
+					.icon = (ushort)field_uint(js, t, k.icon)!,
+					.on = field_truth(js, t, k.on)!,
+					.shown = true,
+				};
+			}
+		}
 		self.renderer.ui.push_row(
 			index,
 			field_text(js, entry, k.label)!,
 			field_text(js, entry, k.trailing)!,
 			(usz)field_uint(js, entry, k.depth)!,
 			field_truth(js, entry, k.expandable)!,
-			field_truth(js, entry, k.expanded)!
+			field_truth(js, entry, k.expanded)!,
+			(ushort)field_uint(js, entry, k.icon)!,
+			field_truth(js, entry, k.highlighted)!,
+			toggles
 		);
 	}!;
 }
@@ -1329,10 +1431,20 @@ fn usz? JsRuntime.ui_event_args(&self, UiEvent event, js::Value[] argv)
 		case COMMIT:
 			argv[0] = js::number((double)event.value);
 		case PICK:
-		case ROW_SELECT:
 		case ROW_TOGGLE:
 		case MENU_CHOOSE:
 			argv[0] = js::integer((int)event.index);
+		// The row, then the modifier bits (shift 1, ctrl 2, alt 4) or the switch column.
+		case ROW_SELECT:
+		case ROW_SWITCH:
+			argv[0] = js::integer((int)event.index);
+			argv[1] = js::integer((int)event.item);
+			return 2;
+		case ROW_CONTEXT:
+			argv[0] = js::integer((int)event.index);
+			argv[1] = js::number((double)event.at.x);
+			argv[2] = js::number((double)event.at.y);
+			return 3;
 		case MENU_PICK:
 			argv[0] = js::integer((int)event.index);
 			argv[1] = js::integer((int)event.item);
@@ -1433,7 +1545,7 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	@pool()
 	{
 		String who = string::tformat("a three.ui %s handler", what);
-		js::Value[2] argv;
+		js::Value[3] argv;
 		usz? argc = self.ui_event_args(event, &argv);
 		if (catch argc)
 		{

@@ -115,6 +115,7 @@ const HANDLER = new Set([
 	'onConfirm', 'onDismiss', 'onChoose', 'onPointer',
 	'onBox', 'onMove', 'canConnect', 'onConnect', 'onDisconnect', 'onWireSelect', 'onWireDropped',
 	'onContext', 'onCommand', 'onAddRequest', 'onView',
+	'onRowToggle', 'onRowContext',
 ]);
 
 // Not enumerable: a widget is a plain object a game puts its own fields on, and
