@@ -336,7 +336,9 @@ written with `three.writeJSON`:
 to place a piece from another file. `piece` is a node name the way `asset.node(name)` takes it, and
 `id` is a string unique within the file — a duplicate, or a `snap.to` naming no earlier row, throws.
 `position` and `rotation` are what the object's own properties read back as after placement, always
-present; `scale` defaults to `[1, 1, 1]`. `snap` is optional: `{ to, side, axes }`, exactly what
+present; `scale` defaults to `[1, 1, 1]`. `nth` is optional: a whole number from 0 that picks among nodes sharing
+`piece`'s name (`asset.node(name, { nth })`) — a scene exported from Blender repeats one name over hundreds of
+nodes, and the editor's *Import scene* writes it so each row builds its own node. `snap` is optional: `{ to, side, axes }`, exactly what
 `object.snapTo`'s three arguments take, and a freehand row — no `snap` — never moves on its own.
 
 A `.glb` bakes geometry in, so re-exporting a kit does not move a level built from it — and a

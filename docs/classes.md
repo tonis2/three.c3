@@ -1339,7 +1339,7 @@ one-box pieces to answer to `mesh()` as well.
 
 The subtree arrives carrying its own transform and none of its ancestors', so a piece authored at the
 origin comes back at the origin whatever the file wrapped it in. Two nodes may share a name, and the
-first one the file walks is the answer. Calling it twice gives two trees over one upload, as
+first one the file walks is the answer unless `{ nth }` says which. Calling it twice gives two trees over one upload, as
 `instantiate()` does, and the options mean the same things. Animation does too: the tree's root carries
 the file's clips, and a channel naming a node outside the subtree drives nothing rather than failing.
 
@@ -1437,7 +1437,7 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `imageAt(index, { colorSpace, generateMipmaps })`
 - `meshAsync(name)`
 - `meshAtAsync(index)`
-- `node(name, { skeleton, skinning, materials, physics })`
+- `node(name, { skeleton, skinning, materials, physics, nth })` — `nth` picks the nth same-named node, counting from 0, for a file that repeats a name
 - `nodeAsync(name, { skeleton, skinning, materials, physics })`
 - `instantiate(name?, { skeleton, skinning, materials, lights, camera, physics })`
 - `instantiateAsync(name?, { skeleton, skinning, materials, lights, camera, physics })`

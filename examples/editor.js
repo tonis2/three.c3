@@ -269,7 +269,12 @@ function categoryOf(name) {
 // while leaving an already-flat kit flat, and it treats a multi-part piece
 // (a door with a frame and a leaf) as one card, because a flat kit's door
 // is never the ONLY top-level candidate.
-function buildPieceList(tree) {
+//
+// `pieceRows` answers with the rows themselves, repeats and all — a scene
+// exported from Blender scatters one name over hundreds of nodes, and importing
+// it has to place each of them. `buildPieceList` is the palette's view of the
+// same rule: every name once, because a card stands for a name, not for a node.
+function pieceRows(tree) {
 	if (!tree) return [];
 	const { rows, hasMesh } = tree;
 	const childrenOf = new Map();
@@ -286,7 +291,12 @@ function buildPieceList(tree) {
 		if (kids.length === 0) break;
 		candidates = kids;
 	}
-	return candidates.map(i => rows[i].name);
+	return candidates;
+}
+
+function buildPieceList(tree) {
+	if (!tree) return [];
+	return [...new Set(pieceRows(tree).map(i => tree.rows[i].name))];
 }
 
 const isKitPath = (path) => /\.glb$|\.gltf$/i.test(path);
@@ -388,6 +398,8 @@ class Editor {
 
 	// The dialogs.
 	pendingKit = null;       // the kit a "discard changes?" is on the way to
+	pendingImport = false;   // ...and whether it is being imported as a scene or started empty
+	importDialogOpen = false;
 	confirmDeleteIds = [];
 	confirmDeleteOpen = false;
 	confirmNewOpen = false;
@@ -1053,12 +1065,17 @@ class Editor {
 			const object = this.level.objects.get(source);
 			if (!src || !object) continue;
 			const id = this.freshId(src.piece);
-			this.level.add({
+			const row = {
 				id,
 				piece: src.piece,
 				position: [object.position.x + 1, object.position.y, object.position.z],
 				rotation: object.rotation.toArray(),
-			});
+				scale: object.scale.toArray(),
+			};
+			// An imported scene's rows name a node by its place among same-named
+			// ones; a copy without it would build the first of them instead.
+			if (src.nth !== undefined) row.nth = src.nth;
+			this.level.add(row);
 			copies.push(id);
 		}
 		if (copies.length === 0) return UNCHANGED;
@@ -1199,9 +1216,87 @@ class Editor {
 
 	confirmNew() {
 		this.confirmNewOpen = false;
-		if (this.pendingKit) { const kit = this.pendingKit; this.pendingKit = null; this.newLevel(kit); }
-		else this.kitDialogOpen = true;
+		if (this.pendingKit) {
+			const kit = this.pendingKit;
+			const importing = this.pendingImport;
+			this.pendingKit = null;
+			this.pendingImport = false;
+			if (importing) this.importScene(kit); else this.newLevel(kit);
+		} else this.kitDialogOpen = true;
 		this.sync();
+	}
+
+	// File > Import scene…: the same discard-first flow as New, headed for
+	// `importScene` instead of an empty level.
+	requestImport(path) {
+		this.importDialogOpen = false;
+		if (this.dirty) {
+			this.pendingKit = path;
+			this.pendingImport = true;
+			this.confirmNewOpen = true;
+			this.sync();
+		} else this.importScene(path);
+	}
+
+	// Opens a whole `.glb` as a level: one row per top-level piece, at the
+	// transform the file gave that node, over the same file as the kit — so the
+	// scene is on screen, every piece of it can be picked, moved and removed, and
+	// the palette still stamps more of it. `Save` then writes an ordinary level.
+	//
+	// What does not come across: the file's cameras, colliders and lightmap are
+	// not pieces, so none of them becomes a row, and its lights light the editor
+	// but are not saved with the level.
+	//
+	// `nth` is what keeps a repeated name honest: a scene exported from Blender
+	// scatters a handful of names over hundreds of nodes, and `asset.node(name)`
+	// alone would build the first of them every time.
+	importScene(path) {
+		this.clearLevel();
+		const empty = three.level.create(path);
+		empty.parent = scene;
+		this.kitDialogOpen = false;
+		this.adopt(empty, null);
+
+		const tree = this.assetTree;
+		const seen = new Map();
+		let placed = 0;
+		const claimed = new Set(pieceRows(tree));
+		// Walk every row in file order so `nth` counts the way `asset.node` does —
+		// over all the rows of that name, not only the ones that became pieces.
+		// A plain loop and not `rows.forEach`: the VM only collects between native
+		// calls, and each `add` builds a subtree, so a callback of a builtin would
+		// hold every scrap of garbage until the heap limit.
+		for (let i = 0; i < tree.rows.length; i++) {
+			const node = tree.rows[i];
+			const nth = seen.get(node.name) ?? 0;
+			seen.set(node.name, nth + 1);
+			if (!claimed.has(i)) continue;
+			const row = {
+				id: `${node.name}_${nth + 1}`,
+				piece: node.name,
+				position: [...node.position],
+				rotation: [...node.euler],
+				scale: [...node.scale],
+			};
+			if (nth > 0) row.nth = nth;
+			try {
+				this.level.add(row);
+				placed++;
+			} catch (e) {
+				this.setStatus(String(e.message ?? e));
+			}
+		}
+		// The scene's own lighting, so it is not shown black: the sun in slot
+		// zero and the nearest local lights in the rest. Lights are the one part
+		// of the file that is not a piece, and the editor sets none of its own.
+		try { this.asset._placeLights(null); } catch (e) { this.setStatus(String(e.message ?? e)); }
+		this.path = null;
+		this.dirty = true;
+		this.select(null);
+		frameAllExcludingHelpers();
+		this.setStatus(`imported ${placed} pieces from ${path}`);
+		this.sync();
+		return placed;
 	}
 
 	openSaveAs() {
@@ -1222,6 +1317,7 @@ class Editor {
 		if (parent) parent.remove(helpers);
 		try {
 			this.setStatus(`exported ${scene.export(path || 'levels/level.glb').path}`);
+			catalog.invalidateKits();
 		} finally {
 			if (parent) parent.add(helpers);
 		}
@@ -1312,6 +1408,8 @@ const DOCK_H = 240;
 const HEADER_H = 30;
 const CATALOG_W = 200;
 const PROPS_W = 260;
+// The most cards one grid mounts — see `Browser.render`.
+const MAX_CARDS = 300;
 const CARD_W = 108;
 const CARD_H = 128;
 const THUMB = 92;
@@ -1437,10 +1535,13 @@ class Catalog extends three.Widget {
 	constructor() {
 		super();
 		this.kitOptions = [];
+		this.kitsRead = false;
 		this.kitSelected = -1;
 		this.rows = [{ label: 'All', trailing: '0' }];
 		this.activeIndex = 0; // index into `rows`; 0 is 'All'
 	}
+
+	invalidateKits() { this.kitsRead = false; }
 
 	get activeCategory() {
 		return this.activeIndex > 0 && this.rows[this.activeIndex] ? this.rows[this.activeIndex].label : null;
@@ -1450,7 +1551,12 @@ class Catalog extends three.Widget {
 	// changes — recomputes the library options and the category counts,
 	// keeping whatever category was active if it still exists.
 	refresh() {
-		this.kitOptions = three.inventory().filter(e => isKitPath(e.path)).map(e => e.path);
+		// The inventory parses every .glb under the assets directory, so it is read
+		// once and again only after something wrote a new one (`invalidateKits`).
+		if (!this.kitsRead) {
+			this.kitOptions = three.inventory().filter(e => isKitPath(e.path)).map(e => e.path);
+			this.kitsRead = true;
+		}
 		this.kitSelected = ed.level && ed.level.kit ? this.kitOptions.indexOf(ed.level.kit) : -1;
 
 		const counts = new Map();
@@ -1495,7 +1601,11 @@ class Browser extends three.Widget {
 
 	render() {
 		const visible = this.visible();
-		const cards = visible.map(p => ed.cards.get(p.name)).filter(Boolean);
+		// A card is a few dozen draw ops, and the JS heap is 64 MB: a kit with
+		// thousands of pieces mounts them all or none. Past the cap the search
+		// box is how the rest is reached.
+		const cards = visible.slice(0, MAX_CARDS).map(p => ed.cards.get(p.name)).filter(Boolean);
+		const hidden = visible.length - cards.length;
 		const stampText = ed.stamp ? `stamp: ${ed.stamp} · esc clears` : 'click a piece to stamp it';
 
 		return new Column({},
@@ -1507,7 +1617,9 @@ class Browser extends three.Widget {
 							key: 'search', text: this.search, placeholder: 'Search', size: [180, 0],
 							onChange: safe(t => { this.search = t; }),
 						}),
-						new Label(`${visible.length} of ${ed.pieces.length}`, { color: THEME.dim, textSize: 12 }),
+						new Label(hidden > 0
+							? `${cards.length} of ${visible.length} shown · search to narrow`
+							: `${visible.length} of ${ed.pieces.length}`, { color: THEME.dim, textSize: 12 }),
 					),
 				),
 				new Anchored({ h: 'end', v: 'center', margin: [10, 0] },
@@ -1678,7 +1790,7 @@ class StatusBar extends three.Widget {
 
 function menuSpec() {
 	return [
-		{ title: 'File', items: ['New', 'Open…', 'Save', 'Save as…', 'Export .glb…', '-', 'Quit'] },
+		{ title: 'File', items: ['New', 'Open…', 'Import scene…', 'Save', 'Save as…', 'Export .glb…', '-', 'Quit'] },
 		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
 		{
 			title: 'View',
@@ -1701,6 +1813,7 @@ function onMenuSelect(menu, item) {
 	switch (menuLabel(menu, item)) {
 		case 'New': ed.requestNew(); break;
 		case 'Open…': ed.openDialogOpen = true; ed.sync(); break;
+		case 'Import scene…': ed.importDialogOpen = true; ed.sync(); break;
 		case 'Save': ed.save(); break;
 		case 'Save as…': ed.openSaveAs(); break;
 		case 'Export .glb…': ed.openExport(); break;
@@ -1767,7 +1880,7 @@ class Dialogs extends three.Widget {
 				message: 'This level has unsaved changes — discard them and start a new one?',
 				confirm: 'Discard', decline: 'Cancel', open: ed.confirmNewOpen,
 				onConfirm: safe(() => ed.confirmNew()),
-				onDismiss: safe(() => { ed.confirmNewOpen = false; ed.pendingKit = null; ed.sync(); }),
+				onDismiss: safe(() => { ed.confirmNewOpen = false; ed.pendingKit = null; ed.pendingImport = false; ed.sync(); }),
 			}),
 			new Dialog({
 				key: 'openDialog', title: 'Open level', open: ed.openDialogOpen,
@@ -1786,6 +1899,14 @@ class Dialogs extends three.Widget {
 			},
 				new Scroll({ key: 'kitScroll' },
 					new FileBrowser({ key: 'kitBrowser', mask: ['*.glb', '*.gltf'], onChoose: safe(path => { ed.kitDialogOpen = false; ed.newLevel(path); }) })),
+			),
+			new Dialog({
+				key: 'importDialog', title: 'Import scene', open: ed.importDialogOpen,
+				modal: true, closeOutside: true, size: [360, 320],
+				onDismiss: close('importDialogOpen'),
+			},
+				new Scroll({ key: 'importScroll' },
+					new FileBrowser({ key: 'importBrowser', mask: ['*.glb', '*.gltf'], onChoose: safe(path => ed.requestImport(path)) })),
 			),
 			new Dialog({
 				key: 'saveAsDialog', title: 'Save level as', open: ed.saveAsOpen,

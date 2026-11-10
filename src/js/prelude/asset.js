@@ -1007,7 +1007,11 @@ export class Asset {
 	// the kit happened to lay it out.
 	//
 	// `asset.nodes` is the list of names to pass. A file free to name two nodes
-	// the same answers with the first, in the order the file walks.
+	// the same answers with the first, in the order the file walks — unless
+	// `options.nth` says which: `node('moss', { nth: 3 })` is the fourth node of
+	// that name, counting every row the walk carries in order. A scene exported
+	// from Blender scatters one name over hundreds of nodes, and a level that
+	// places each of them has to say which.
 	//
 	// Options are `instantiate()`'s and mean the same things. Animation does too:
 	// the subtree root carries the file's clips, and a channel naming a node
@@ -1015,9 +1019,18 @@ export class Asset {
 	node(name, options = undefined) {
 		const opt = this._instanceOptions(options);
 		const rows = this._rows(opt.skeleton, opt.physics);
-		const at = rows.findIndex((row) => row.name === name);
+		const nth = options && options.nth !== undefined ? options.nth : 0;
+		if (!Number.isInteger(nth) || nth < 0) {
+			throw new TypeError(`node("${name}", { nth }) wants a whole number from 0, not ${String(nth)}`);
+		}
+		let at = -1;
+		for (let i = 0, seen = 0; i < rows.length; i++) {
+			if (rows[i].name === name && seen++ === nth) { at = i; break; }
+		}
 		if (at < 0) {
-			throw new Error(`no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`);
+			throw new Error(nth === 0
+				? `no node named "${name}" in ${this.path} — it has: ${nameList(this.nodes)}`
+				: `no node named "${name}" number ${nth} in ${this.path} — fewer than ${nth + 1} carry that name`);
 		}
 		const root = this._build(rows, at, null, opt);
 		this._carry(root, opt);

@@ -42,7 +42,7 @@ fn void a_directory_is_described_without_being_loaded() @test
 	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
 	defer found.free_entries();
 
-	test::@check(found.len() == 17, "every glTF in test/fixtures (%d)", found.len());
+	test::@check(found.len() == 19, "every glTF in test/fixtures (%d)", found.len());
 
 	three::InventoryEntry* entry = named(&found, "textured.glb");
 	if (entry == null) return;
@@ -126,6 +126,27 @@ fn void the_bounds_are_read_from_the_json() @test
 	test::@check(entry.bounds.max[2] - entry.bounds.min[2] == 0.0f,
 		"and flat, being two quads in one plane (%.2f deep)",
 		entry.bounds.max[2] - entry.bounds.min[2]);
+}
+
+<*
+ A file with an area light is described, and its document freed, without the
+ heap being handed a pointer it never issued.
+
+ `take_inventory` parses into tmem, and `Gltf.free` releases an area light's
+ name with `mem` — the name used to be copied with the parse allocator, so the
+ first inventory of a scene with a `CUSTOM_lights_area` light aborted with
+ `free(): invalid size`. The abort is the failure; the checks are the proof the
+ file was read at all.
+*>
+fn void an_area_light_does_not_break_the_inventory() @test
+{
+	three::Inventory? found = three::take_inventory(FIXTURE_DIR);
+	if (catch found) { test::@check(false, "the fixture directory was read"); return; }
+	defer found.free_entries();
+
+	three::InventoryEntry* entry = named(&found, "arealight.glb");
+	if (entry == null) return;
+	test::@check(entry.nodes == 1, "the lamp's node is counted (%d)", entry.nodes);
 }
 
 <*

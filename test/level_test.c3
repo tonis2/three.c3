@@ -46,6 +46,9 @@ macro @with_level(; @body(three::JsRuntime* run))
 	{
 		char[] bytes = file::load_temp(FIXTURE)!!;
 		file::save(string::tformat("%s/hierarchy.glb", TEST_ASSETS), bytes)!!;
+		// Two top-level nodes both called `twin`, with different children.
+		char[] twins = file::load_temp("test/fixtures/twins.glb")!!;
+		file::save(string::tformat("%s/twins.glb", TEST_ASSETS), twins)!!;
 	};
 
 	three::Renderer* renderer = device::borrow(200, 150);
@@ -287,5 +290,34 @@ fn void unknown_row_fields_survive_a_round_trip() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value == "true",
 			"a field the loader does not know should survive a save/load round trip, got '%s'", result.value);
+	};
+}
+
+<*
+ `nth` picks among same-named nodes, so a scene that repeats a name — a Blender
+ export scatters one name over hundreds of nodes — places each of them, and a
+ row without it still takes the first.
+*>
+fn void nth_picks_among_nodes_that_share_a_name() @test
+{
+	@with_level(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const level = three.level.create('twins.glb');
+			level.parent = scene;
+			level.add({ id: 'a', piece: 'twin', position: [0, 0, 0], rotation: [0, 0, 0] });
+			level.add({ id: 'b', piece: 'twin', nth: 1, position: [0, 0, 0], rotation: [0, 0, 0] });
+			let bad = '';
+			try { level.add({ id: 'c', piece: 'twin', nth: 2, position: [0, 0, 0], rotation: [0, 0, 0] }); }
+			catch (e) { bad = e.message; }
+			return { first: level.objects.get('a').children.length, second: level.objects.get('b').children.length, third: bad.length > 0 };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "placing both twins should run, got '%s'", result.error);
+		test::@check(result.value.contains(`"first":1`) && result.value.contains(`"second":2`),
+			"no nth is the first twin (1 child), nth 1 the second (2), got '%s'", result.value);
+		test::@check(result.value.contains(`"third":true`), "nth 2 of two twins throws, got '%s'", result.value);
 	};
 }

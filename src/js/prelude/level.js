@@ -120,7 +120,8 @@ export class Level {
 				+ pieceList(asset.nodes));
 		}
 
-		const object = asset.node(piece);
+		// `nth` picks among same-named nodes — an imported scene repeats names.
+		const object = asset.node(piece, row.nth === undefined ? undefined : { nth: row.nth });
 		object.name = id;
 		// `scale` has no whole-vector setter — only `position` and `rotation`
 		// do — so every one of the three is set through `.set(...)` here rather
