@@ -131,6 +131,9 @@ export class Level {
 		// the rotation changes, so a piece is turned before it is placed.
 		object.rotation.set(...asTriple(row.rotation ?? [0, 0, 0], `three.level: row ${JSON.stringify(id)}'s rotation`));
 		object.position.set(...asTriple(row.position ?? [0, 0, 0], `three.level: row ${JSON.stringify(id)}'s position`));
+		// `visible: false` keeps a row that is there to be edited out of the picture —
+		// an imported scene's black silhouette backdrop would otherwise hide the rest.
+		if (row.visible === false) object.visible = false;
 		this.parent.add(object);
 
 		if ((options?.refit) && row.snap) {

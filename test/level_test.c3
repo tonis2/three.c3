@@ -321,3 +321,30 @@ fn void nth_picks_among_nodes_that_share_a_name() @test
 		test::@check(result.value.contains(`"third":true`), "nth 2 of two twins throws, got '%s'", result.value);
 	};
 }
+
+<*
+ `visible: false` places a row hidden: the object is in the level and in the
+ saved rows, and is not drawn — what lets an imported scene keep a backdrop
+ piece out of the way without losing it.
+*>
+fn void a_row_can_be_placed_hidden() @test
+{
+	@with_level(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const level = three.level.create('twins.glb');
+			level.parent = scene;
+			level.add({ id: 'a', piece: 'twin', visible: false, position: [0, 0, 0], rotation: [0, 0, 0] });
+			level.add({ id: 'b', piece: 'twin', nth: 1, position: [0, 0, 0], rotation: [0, 0, 0] });
+			return { a: level.objects.get('a').visible, b: level.objects.get('b').visible,
+				kept: level.toJSON().rows[0].visible === false };
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "placing a hidden row should run, got '%s'", result.error);
+		test::@check(result.value.contains(`"a":false`) && result.value.contains(`"b":true`),
+			"only the visible:false row is hidden, got '%s'", result.value);
+		test::@check(result.value.contains(`"kept":true`), "the row keeps visible:false when saved, got '%s'", result.value);
+	};
+}

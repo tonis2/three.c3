@@ -1264,6 +1264,7 @@ class Editor {
 	// scatters a handful of names over hundreds of nodes, and `asset.node(name)`
 	// alone would build the first of them every time.
 	importScene(path) {
+		if (this.importing) return this.importing;
 		this.clearLevel();
 		const empty = three.level.create(path);
 		empty.parent = scene;
@@ -1271,14 +1272,11 @@ class Editor {
 		this.adopt(empty, null);
 
 		const tree = this.assetTree;
-		const seen = new Map();
-		let placed = 0;
 		const claimed = new Set(pieceRows(tree));
-		// Walk every row in file order so `nth` counts the way `asset.node` does —
+		// Row by row in file order so `nth` counts the way `asset.node` does —
 		// over all the rows of that name, not only the ones that became pieces.
-		// A plain loop and not `rows.forEach`: the VM only collects between native
-		// calls, and each `add` builds a subtree, so a callback of a builtin would
-		// hold every scrap of garbage until the heap limit.
+		const seen = new Map();
+		const todo = [];
 		for (let i = 0; i < tree.rows.length; i++) {
 			const node = tree.rows[i];
 			const nth = seen.get(node.name) ?? 0;
@@ -1292,23 +1290,54 @@ class Editor {
 				scale: [...node.scale],
 			};
 			if (nth > 0) row.nth = nth;
-			try {
-				this.level.add(row);
-				placed++;
-			} catch (e) {
-				this.setStatus(String(e.message ?? e));
-			}
+			todo.push(row);
 		}
-		// The scene's own lighting, so it is not shown black: the sun in slot
-		// zero and the nearest local lights in the rest. Lights are the one part
-		// of the file that is not a piece, and the editor sets none of its own.
-		try { this.asset._placeLights(null); } catch (e) { this.setStatus(String(e.message ?? e)); }
 		this.path = null;
 		this.dirty = true;
 		this.select(null);
-		frameAllExcludingHelpers();
-		this.setStatus(`imported ${placed} pieces from ${path}`);
-		this.sync();
+		this.importing = this._placeImported(todo, path).catch(e => {
+			this.importing = null;
+			this.setStatus(String((e && e.message) || 'the import failed'));
+		});
+		return this.importing;
+	}
+
+	// Places the rows a slice at a time, a frame apart. Not one loop: the menu's
+	// file picker calls `importScene` from a native callback, and the VM only
+	// collects between native calls, so a single pass over ~800 rows — each `add`
+	// builds a subtree — holds every scrap of garbage and hits the 64 MB heap
+	// about row 450, leaving the vegetation that comes first in the file and
+	// none of the trunks, ground or hull after it. A slice per frame runs from
+	// the frame loop, where the collector can run, and keeps the window alive.
+	async _placeImported(rows, path) {
+		const SLICE = 40;
+		let placed = 0;
+		let failed = null;
+		try {
+			for (let at = 0; at < rows.length; at += SLICE) {
+				for (let i = at; i < Math.min(at + SLICE, rows.length); i++) {
+					try {
+						this.level.add(rows[i]);
+						placed++;
+					} catch (e) {
+						failed ??= `${rows[i].id}: ${String((e && e.message) || 'out of memory')}`;
+					}
+				}
+				this.lastError = `importing ${placed} of ${rows.length} pieces…`;
+				this.sync();
+				await three.nextFrame();
+			}
+			// The scene's own lighting, so it is not shown black: the sun in slot
+			// zero and the nearest local lights in the rest. Lights are the one part
+			// of the file that is not a piece, and the editor sets none of its own.
+			try { this.asset._placeLights(null); } catch (e) { failed ??= String((e && e.message) || e); }
+			frameAllExcludingHelpers();
+			this.setStatus(failed
+				? `imported ${placed} of ${rows.length} pieces from ${path} — ${failed}`
+				: `imported ${placed} pieces from ${path}`);
+		} finally {
+			this.importing = null;
+		}
 		return placed;
 	}
 
@@ -1921,7 +1950,11 @@ class Catalog extends three.Widget {
 			this.kitOptions = three.inventory().filter(e => isKitPath(e.path)).map(e => e.path);
 			this.kitsRead = true;
 		}
-		this.kitSelected = ed.level && ed.level.kit ? this.kitOptions.indexOf(ed.level.kit) : -1;
+		// With no `--assets` the inventory is empty, and a kit opened by path (Import
+		// scene, Open) is in no list: add it, or the dropdown names nothing.
+		const open = ed.level && ed.level.kit;
+		if (open && !this.kitOptions.includes(open)) this.kitOptions = [...this.kitOptions, open];
+		this.kitSelected = open ? this.kitOptions.indexOf(open) : -1;
 
 		const counts = new Map();
 		for (const p of ed.pieces) counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
