@@ -79,6 +79,9 @@ fn void JsRuntime.install_bindings(&self)
 	// Buffers, kernels and dispatches (js/bind_compute.c3)
 	self.bind_compute_verbs(host)!!;
 
+	// Cutscene files and their one-off clips (js/bind_cutscene.c3)
+	self.bind_cutscene_verbs(host)!!;
+
 	self.js.set(self.js.global(), "__three", host)!!;
 }
 

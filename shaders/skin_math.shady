@@ -13,18 +13,25 @@
 // palette the callers hand in is unchanged: each matrix is split back into the
 // rotation and translation it was composed from, blended, and rebuilt.
 //
+// A joint may also carry a uniform scale — every joint of a rig whose root is
+// scaled does, which is what an armature scaled in Blender exports as. A dual
+// quaternion has no room for it, so it is taken off each influence, averaged by
+// weight on its own, and put back on the rebuilt basis.
+//
 // Nothing here reads a push block or a wire struct, so it is the same in both
 // passes and depends on neither's ABI.
 
-// A rigid palette matrix's rotation as a quaternion (x, y, z, w). shady indexes a
-// matrix by column, so the basis is m[0..2].xyz and the trace method reads it
-// straight. The palette is rotation-and-translation only — no scale — so the
-// columns are orthonormal and the four-case form is exact and stable.
-fn float4 rotation_quat(float4x4 m)
+// A palette matrix's rotation as a quaternion (x, y, z, w). shady indexes a
+// matrix by column, so the basis is m[0..2].xyz and the trace method reads it.
+// `scale` is the matrix's uniform scale; dividing it out leaves the columns
+// orthonormal, so the four-case form is exact and stable. A joint scaled to
+// nothing (a part hidden by its bone) keeps the zero basis it had.
+fn float4 rotation_quat(float4x4 m, float scale)
 {
-	float3 cx = m[0].xyz;
-	float3 cy = m[1].xyz;
-	float3 cz = m[2].xyz;
+	float inv = scale > 0.00000001 ? 1.0 / scale : 0.0;
+	float3 cx = m[0].xyz * inv;
+	float3 cy = m[1].xyz * inv;
+	float3 cz = m[2].xyz * inv;
 	float t;
 	float4 q;
 	if (cz.z < 0.0)
@@ -69,25 +76,28 @@ fn float4 quat_mul(float4 a, float4 b)
 // One influence added into a dual-quaternion sum, its rotation first turned into
 // `pivot`'s hemisphere so the blend takes the short arc: the antipodal quaternion
 // is the same rotation but averages the long way. The dual part carries the
-// translation: 0.5 * (t as a pure quaternion) * r.
-fn void add_influence(float4x4 m, float weight, float4 pivot, inout float4 real, inout float4 dual)
+// translation: 0.5 * (t as a pure quaternion) * r. Its scale goes into `size`.
+fn void add_influence(float4x4 m, float weight, float4 pivot, inout float4 real, inout float4 dual, inout float size)
 {
-	float4 r = rotation_quat(m);
+	float scale = length(m[0].xyz);
+	float4 r = rotation_quat(m, scale);
 	if (dot(pivot, r) < 0.0) r = -r;
 	real = real + weight * r;
 	dual = dual + weight * (0.5 * quat_mul(float4(m[3].xyz, 0.0), r));
+	size = size + weight * scale;
 }
 
-// A summed dual quaternion back to the rotation-and-translation matrix it stands
-// for, normalised once. `fallback` is what a sum of nothing comes back as.
-fn float4x4 rebuild(float4 real, float4 dual, float4x4 fallback)
+// A summed dual quaternion back to the matrix it stands for, normalised once,
+// with the influences' averaged scale `size` on its basis. `fallback` is what a
+// sum of nothing comes back as.
+fn float4x4 rebuild(float4 real, float4 dual, float size, float4x4 fallback)
 {
-	float scale = length(real);
+	float norm = length(real);
 	// Zero only if every weight is zero, which a skinned vertex never is; fall
 	// back to the first influence rather than normalize a zero quaternion.
-	if (scale < 0.00000001) return fallback;
-	real = real / scale;
-	dual = dual / scale;
+	if (norm < 0.00000001) return fallback;
+	real = real / norm;
+	dual = dual / norm;
 
 	float qx = real.x;
 	float qy = real.y;
@@ -106,9 +116,9 @@ fn float4x4 rebuild(float4 real, float4 dual, float4x4 fallback)
 	float wy = qw * y2;
 	float wz = qw * z2;
 
-	float4 col0 = float4(1.0 - (yy + zz), xy + wz, xz - wy, 0.0);
-	float4 col1 = float4(xy - wz, 1.0 - (xx + zz), yz + wx, 0.0);
-	float4 col2 = float4(xz + wy, yz - wx, 1.0 - (xx + yy), 0.0);
+	float4 col0 = size * float4(1.0 - (yy + zz), xy + wz, xz - wy, 0.0);
+	float4 col1 = size * float4(xy - wz, 1.0 - (xx + zz), yz + wx, 0.0);
+	float4 col2 = size * float4(xz + wy, yz - wx, 1.0 - (xx + yy), 0.0);
 	float3 translation = 2.0 * quat_mul(dual, float4(-real.x, -real.y, -real.z, real.w)).xyz;
 	float4 col3 = float4(translation, 1.0);
 
@@ -124,26 +134,30 @@ fn float4x4 rebuild(float4 real, float4 dual, float4x4 fallback)
 fn float4x4 blend_frames(float4x4* palette, uint base, uint next, float t, uint4 joints, float4 weights)
 {
 	float4x4 first = palette[base + joints.x];
-	float4 pivot = rotation_quat(first);
+	float4 pivot = rotation_quat(first, length(first[0].xyz));
 	float4 real = float4(0.0, 0.0, 0.0, 0.0);
 	float4 dual = float4(0.0, 0.0, 0.0, 0.0);
+	float size = 0.0;
 
 	float4 now = weights * (1.0 - t);
-	add_influence(first, now.x, pivot, real, dual);
-	add_influence(palette[base + joints.y], now.y, pivot, real, dual);
-	add_influence(palette[base + joints.z], now.z, pivot, real, dual);
-	add_influence(palette[base + joints.w], now.w, pivot, real, dual);
+	add_influence(first, now.x, pivot, real, dual, size);
+	add_influence(palette[base + joints.y], now.y, pivot, real, dual, size);
+	add_influence(palette[base + joints.z], now.z, pivot, real, dual, size);
+	add_influence(palette[base + joints.w], now.w, pivot, real, dual, size);
 
 	if (t > 0.0)
 	{
 		float4 then = weights * t;
-		add_influence(palette[next + joints.x], then.x, pivot, real, dual);
-		add_influence(palette[next + joints.y], then.y, pivot, real, dual);
-		add_influence(palette[next + joints.z], then.z, pivot, real, dual);
-		add_influence(palette[next + joints.w], then.w, pivot, real, dual);
+		add_influence(palette[next + joints.x], then.x, pivot, real, dual, size);
+		add_influence(palette[next + joints.y], then.y, pivot, real, dual, size);
+		add_influence(palette[next + joints.z], then.z, pivot, real, dual, size);
+		add_influence(palette[next + joints.w], then.w, pivot, real, dual, size);
 	}
 
-	return rebuild(real, dual, first);
+	// The weights of a vertex sum to one, but a file is free to store them
+	// unnormalised; the rotation is normalised in `rebuild`, the scale here.
+	float total = weights.x + weights.y + weights.z + weights.w;
+	return rebuild(real, dual, total > 0.00000001 ? size / total : 1.0, first);
 }
 
 // The four influences of one vertex against one palette, blended into the matrix

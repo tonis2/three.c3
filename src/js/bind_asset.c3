@@ -139,7 +139,7 @@ fn AssetId? js_load(JsRuntime* self, String path)
  Overlong forms, surrogates and truncated tails are all refused by
  `utf8_to_char32` itself — this is only the loop over it.
 *>
-fn bool is_utf8_text(char[] bytes) @local
+fn bool is_utf8_text(char[] bytes) @private
 {
 	usz at = 0;
 	while (at < bytes.len)
@@ -1895,6 +1895,9 @@ struct AssetNodeRecord
 {
 	String name;
 	int parent;
+	// The row the file hangs it under, which differs from `parent` only for a
+	// skinned mesh. See `PlacedNode.owner`.
+	int owner;
 	int mesh;
 	Vec3 position;
 	Vec3 euler;
@@ -1954,6 +1957,7 @@ fn js::Value? js_asset_nodes(JsRuntime* self, AssetId id, bool skeleton, bool ph
 		AssetNodeRecord record = {
 			.name = entry.name,
 			.parent = entry.parent,
+			.owner = entry.owner,
 			.mesh = entry.mesh,
 			.position = entry.position,
 			.euler = euler_from_quat(q),

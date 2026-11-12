@@ -1,11 +1,12 @@
-// three.c3 — three.cutscene: plays a `.cutscene.json` timeline of actor
-// strips, camera keys and named events. See `## Cutscene` in docs/classes.md.
+// three.c3 — three.cutscene: plays a timeline of actor strips, camera keys and
+// named events, loaded from the `.cutscene.glb` the Blender exporter writes or
+// built in code. See `## Cutscene` in docs/classes.md.
 //
 // One pure pose-at-time (`_evaluate`) serves both playback and seeking, so a
 // scrubbed frame and a played frame are the same frame. The frame system is
 // installed only while something plays, as cooldown.js does.
 import { systems } from './systems.js';
-import { CatmullRomCurve3, clamp01, lerp } from './math.js';
+import { CatmullRomCurve3, clamp01, eulerXYZFromQuat, lerp, multiplyQuat, quatFromEulerXYZ } from './math.js';
 
 const H = globalThis.__three;
 
@@ -14,6 +15,13 @@ const OPTION_KEYS = ['level', 'actors', 'scene', 'camera', 'restoreCamera'];
 const STRIP_TYPES = ['move', 'play'];
 const EASES = ['linear', 'in', 'out', 'inout'];
 const SYSTEM = 'cutscene';
+// The root extension a `.cutscene.glb` carries, and the version of it read here.
+const EXTENSION = 'CUSTOM_cutscene';
+const EXTENSION_VERSION = 1;
+const GLTF_FILE = /\.(glb|gltf)$/i;
+// Seconds before its end a held loop is posed at. Wider than the exporter's
+// 0.1 ms rounding of `start` and `end`, and a fortieth of a frame at 24 fps.
+const HOLD_BEFORE = 1e-3;
 
 // Every playing cutscene, stepped by one lazily installed system.
 const _playing = [];
@@ -72,8 +80,22 @@ function _readStrip(raw, where) {
 		loop: raw.loop ?? raw.type === 'move',
 		speed: _num(raw.speed, 1, `${where}.speed`),
 		fade: _num(raw.fade, 0.2, `${where}.fade`),
+		offset: _num(raw.offset, 0, `${where}.offset`),
+		hold: false,
 	};
 	if (strip.clip !== null && typeof strip.clip !== 'string') throw new TypeError(`${where}.clip is a clip name`);
+	// A play strip with an end stops there and holds; one without runs on to the next strip.
+	if (raw.type === 'play' && strip.end !== null) {
+		if (strip.end < strip.start) throw new RangeError(`${where}: end is before start`);
+		strip.hold = true;
+	}
+	if (raw.animation !== undefined) {
+		if (!Number.isInteger(raw.animation) || raw.animation < 0) {
+			throw new TypeError(`${where}.animation is the index of an animation in the cutscene file, not ${JSON.stringify(raw.animation)}`);
+		}
+		if (strip.clip === null) throw new TypeError(`${where}: a one-off animation needs the clip name it plays as`);
+		strip.animation = raw.animation;
+	}
 	if (raw.type === 'move') {
 		if (strip.end === null || !(strip.end > strip.start)) {
 			throw new RangeError(`${where}: a move needs an end after its start`);
@@ -93,23 +115,36 @@ function _readStrip(raw, where) {
 // Turn the spec into checked, sorted tracks. Throws a sentence naming the bad field.
 function _readSpec(spec) {
 	if (spec === null || typeof spec !== 'object') throw new TypeError(`${WHERE} wants a cutscene object`);
-	if (spec.format !== undefined && spec.format !== 'three-cutscene') {
-		throw new TypeError(`${WHERE}: format is 'three-cutscene', not ${JSON.stringify(spec.format)}`);
+	const file = spec.file ?? null;
+	if (file !== null && (typeof file !== 'string' || file === '')) {
+		throw new TypeError(`${WHERE}: file is the path of the cutscene file its one-off clips are in`);
 	}
 	const actors = (spec.actors ?? []).map((a, i) => {
 		const where = `actors[${i}]`;
 		if (typeof a?.row !== 'string' || a.row === '') throw new TypeError(`${where}.row names the object to drive`);
 		const strips = (a.strips ?? []).map((s, k) => _readStrip(s, `${where}.strips[${k}]`));
 		strips.sort((x, y) => x.start - y.start);
-		return { row: a.row, strips };
+		const oneOff = strips.find(s => s.animation !== undefined);
+		if (oneOff && file === null) {
+			throw new TypeError(`${where} plays the one-off clip '${oneOff.clip}', which lives in a cutscene file, and this spec names no file — load the file with three.cutscene.load(path)`);
+		}
+		if (oneOff && !(Number.isInteger(a.node) && a.node >= 0)) {
+			throw new TypeError(`${where}.node is the actor's stub node in ${file}, which its one-off clips are bound through`);
+		}
+		return { row: a.row, node: a.node ?? null, strips };
 	});
-	const camera = (spec.camera ?? []).map((k, i) => ({
-		at: _num(k.at, 0, `camera[${i}].at`),
-		eye: _triple(k.eye, `camera[${i}].eye`),
-		target: _triple(k.target, `camera[${i}].target`),
-		fov: k.fov === undefined ? null : _num(k.fov, 0, `camera[${i}].fov`),
-		cut: !!k.cut,
-	})).sort((a, b) => a.at - b.at);
+	const camera = (spec.camera ?? []).map((k, i) => {
+		const ease = k.ease ?? 'inout';
+		if (!EASES.includes(ease)) throw new RangeError(`camera[${i}].ease is one of ${EASES.join(', ')}`);
+		return {
+			at: _num(k.at, 0, `camera[${i}].at`),
+			eye: _triple(k.eye, `camera[${i}].eye`),
+			target: _triple(k.target, `camera[${i}].target`),
+			fov: k.fov === undefined ? null : _num(k.fov, 0, `camera[${i}].fov`),
+			cut: !!k.cut,
+			ease,
+		};
+	}).sort((a, b) => a.at - b.at);
 	const events = (spec.events ?? []).map((e, i) => {
 		if (typeof e?.name !== 'string' || e.name === '') throw new TypeError(`events[${i}].name is missing`);
 		return { at: _num(e.at, 0, `events[${i}].at`), name: e.name, data: e.data ?? {}, always: !!e.always };
@@ -124,7 +159,65 @@ function _readSpec(spec) {
 		for (const k of camera) duration = Math.max(duration, k.at);
 		for (const e of events) duration = Math.max(duration, e.at);
 	}
-	return { actors, camera, events: events.filter(e => e.name !== 'end'), duration };
+	return { actors, camera, events: events.filter(e => e.name !== 'end'), duration, file };
+}
+
+// A `CUSTOM_cutscene` glTF document as the spec `create` plays. The payload
+// already uses the spec's names; what differs is that a move's `path` is an
+// index into `paths`, and that `file` names the glTF its one-off clips are in.
+function _fromGltf(doc, path) {
+	const where = `three.cutscene.load('${path}')`;
+	const ext = doc?.extensions?.[EXTENSION];
+	if (ext === null || typeof ext !== 'object') {
+		throw new TypeError(`${where}: this glTF has no ${EXTENSION} extension, so it is not a cutscene — write one with the Blender exporter's Export Cutscene`);
+	}
+	if (ext.version !== EXTENSION_VERSION) {
+		throw new RangeError(`${where}: ${EXTENSION} is version ${JSON.stringify(ext.version)}, and this engine reads version ${EXTENSION_VERSION}`);
+	}
+	const paths = Array.isArray(ext.paths) ? ext.paths : [];
+	const animations = Array.isArray(doc.animations) ? doc.animations : [];
+	const actors = (Array.isArray(ext.actors) ? ext.actors : []).map((a, i) => ({
+		...a,
+		strips: (Array.isArray(a?.strips) ? a.strips : []).map((s, k) => {
+			const at = `actors[${i}].strips[${k}]`;
+			const strip = { ...s };
+			if (s?.type === 'move') {
+				const p = Number.isInteger(s.path) ? paths[s.path] : undefined;
+				if (!p) {
+					const count = `${paths.length} path${paths.length === 1 ? '' : 's'}`;
+					throw new RangeError(`${where}: ${at}.path is ${JSON.stringify(s.path)}, and the file has ${count}`);
+				}
+				strip.path = p.points;
+			}
+			if (s?.animation !== undefined && !(Number.isInteger(s.animation) && animations[s.animation])) {
+				throw new RangeError(`${where}: ${at}.animation is ${JSON.stringify(s.animation)}, and the file has ${animations.length} animations`);
+			}
+			return strip;
+		}),
+	}));
+	const spec = { file: path };
+	for (const key of ['name', 'duration', 'fps']) if (ext[key] !== undefined) spec[key] = ext[key];
+	spec.actors = actors;
+	spec.camera = Array.isArray(ext.camera) ? ext.camera : [];
+	spec.events = Array.isArray(ext.events) ? ext.events : [];
+	return spec;
+}
+
+// The spec in a cutscene file. Only the exporter's glTF is one.
+function _readFile(path) {
+	if (typeof path !== 'string' || path === '') {
+		throw new TypeError('three.cutscene.load(path, options) wants a path in the assets directory');
+	}
+	if (!GLTF_FILE.test(path)) {
+		throw new TypeError(`three.cutscene.load('${path}'): a cutscene is a .cutscene.glb (or .gltf) written by the Blender exporter`);
+	}
+	const text = H.gltfJson(path);
+	if (text === null) throw new Error(`three.cutscene.load: '${path}' is not there`);
+	let doc;
+	try { doc = JSON.parse(text); } catch (e) {
+		throw new SyntaxError(`three.cutscene.load('${path}'): not a glTF file — its JSON does not parse (${e.message})`);
+	}
+	return _fromGltf(doc, path);
 }
 
 // eye/target → the host's orbit numbers, inverting `three.camera.position()`.
@@ -136,6 +229,23 @@ function _orbit(eye, target) {
 		pitch: Math.asin(Math.max(-1, Math.min(1, dy / d))) * 180 / Math.PI,
 		distance: d,
 	};
+}
+
+// A turn of `yaw` radians about +Y.
+function _yawQuat(yaw) {
+	return [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
+}
+
+// What is left of an orientation once its heading about +Y is taken off: the
+// lean a character stands with, such as an armature tilted in Blender. A move
+// turns the heading and keeps it, as the addon's walk keys do. The heading is
+// the Y of a YZX decomposition, which is Blender's Euler Z once its Z-up is
+// glTF's Y-up.
+function _lean(euler) {
+	const q = quatFromEulerXYZ(euler);
+	const [x, y, z, w] = q;
+	const heading = Math.atan2(2 * (w * y - x * z), 1 - 2 * (y * y + z * z));
+	return multiplyQuat(_yawQuat(-heading), q);
 }
 
 export class Cutscene {
@@ -167,12 +277,55 @@ export class Cutscene {
 			const object = this._resolve(a.row, options);
 			const r = object.rotation;
 			return {
-				row: a.row, strips: a.strips, object,
+				row: a.row, node: a.node, strips: a.strips, object,
 				home: object.position.toArray(),
 				homeRotation: [r.x, r.y, r.z],
+				lean: _lean([r.x, r.y, r.z]),
 				clip: null,
+				holding: false,
 			};
 		});
+
+		// The one-off clips the file holds, put on the actors' assets until dispose().
+		this._oneOffs = [];
+		try {
+			for (const actor of this._actors) this._adopt(actor, read.file);
+		} catch (error) {
+			this._release();
+			throw error;
+		}
+	}
+
+	// Every one-off clip this actor plays, bound to it by stub name and added to
+	// its asset. A strip then plays it by the name it was given there, which is
+	// its own unless the asset already had a clip called that.
+	_adopt(actor, file) {
+		const strips = actor.strips.filter(s => s.animation !== undefined);
+		if (strips.length === 0) return;
+		const object = actor.object;
+		if (!object._asset || !object._clips) {
+			throw new TypeError(`${WHERE}: actor '${actor.row}' plays the one-off clip '${strips[0].clip}' from ${file}, and only the root of an asset.instantiate() or asset.node() tree can play a clip — this object came from no file`);
+		}
+		const named = new Map();
+		for (const strip of strips) {
+			let name = named.get(strip.animation);
+			if (name === undefined) {
+				const gltfNode = object._gltfNode >= 0 ? object._gltfNode : -1;
+				name = H.cutsceneClip(file, strip.animation, object._asset, gltfNode, actor.node, strip.clip, actor.row);
+				named.set(strip.animation, name);
+				this._oneOffs.push({ object, asset: object._asset, name });
+				object._clips = [...object._clips, name];
+			}
+			strip.clip = name;
+		}
+	}
+
+	_release() {
+		for (const { object, asset, name } of this._oneOffs) {
+			H.cutsceneDropClip(asset, name);
+			if (object._clips) object._clips = object._clips.filter(n => n !== name);
+		}
+		this._oneOffs = [];
 	}
 
 	_resolve(row, options) {
@@ -274,11 +427,14 @@ export class Cutscene {
 		return this;
 	}
 
+	// Also takes the file's one-off clips off the actors' assets, so a character
+	// still holding one goes back to its rest pose.
 	dispose() {
 		if (this._disposed) return;
 		this._playing = false;
 		_stop(this);
 		this._releaseCamera();
+		this._release();
 		this._disposed = true;
 	}
 
@@ -329,7 +485,7 @@ export class Cutscene {
 				const b = move._curve.getPointAt(Math.min(1, u + 1e-3));
 				if (Math.hypot(b.x - a.x, b.z - a.z) > 1e-6) {
 					const r = object.rotation;
-					object.rotation = [r.x, Math.atan2(b.x - a.x, b.z - a.z), r.z];
+					object.rotation = eulerXYZFromQuat(multiplyQuat(_yawQuat(Math.atan2(b.x - a.x, b.z - a.z)), actor.lean));
 				}
 			}
 		}
@@ -348,15 +504,24 @@ export class Cutscene {
 			}
 			return;
 		}
-		const speed = this._playing ? active.speed : 0;
-		const local = (t - active.start) * active.speed;
+		// A play strip with an end stops there and keeps the pose it ends on: a hair
+		// before `end` for a loop, so one that ends on a whole cycle holds the cycle's
+		// last frame, as Blender does, rather than wrapping to its first.
+		const holding = active.hold && t >= active.end;
+		const speed = this._playing && !holding ? active.speed : 0;
+		let local = active.offset + ((holding ? active.end : t) - active.start) * active.speed;
+		if (holding && active.loop && local > HOLD_BEFORE) local -= HOLD_BEFORE;
 		if (exact) {
 			object.play(active.clip, { loop: active.loop, speed, time: local });
 		}
 		else if (actor.clip !== active) {
 			object.play(active.clip, { loop: active.loop, speed, time: local, fade: active.fade });
 		}
+		else if (actor.holding !== holding) {
+			object.play(active.clip, { loop: active.loop, speed, time: local });
+		}
 		actor.clip = active;
+		actor.holding = holding;
 	}
 
 	_aim(t) {
@@ -367,7 +532,8 @@ export class Cutscene {
 		let eye = a.eye, target = a.target, fov = a.fov;
 		const b = keys[i + 1];
 		if (b && !b.cut && t > a.at) {
-			const u = _ease('inout', clamp01((t - a.at) / (b.at - a.at)));
+			// The key arrived at says how: a baked camera's keys are linear.
+			const u = _ease(b.ease, clamp01((t - a.at) / (b.at - a.at)));
 			eye = eye.map((v, k) => lerp(v, b.eye[k], u));
 			target = target.map((v, k) => lerp(v, b.target[k], u));
 			if (fov !== null && b.fov !== null) fov = lerp(fov, b.fov, u);
@@ -404,21 +570,17 @@ export class Cutscene {
 export const cutscene = {
 	create(spec, options = null) { return new Cutscene(spec, options); },
 
+	// The `.cutscene.glb` / `.gltf` the Blender exporter writes.
 	load(path, options = null) {
-		if (typeof path !== 'string' || path === '') {
-			throw new TypeError('three.cutscene.load(path, options) wants a path in the assets directory');
+		const spec = _readFile(path);
+		try {
+			return new Cutscene(spec, options);
+		} catch (error) {
+			// Named after the file, which is the thing to go and fix.
+			if (error instanceof Error) {
+				error.message = `three.cutscene.load('${path}'): ${error.message.replace(`${WHERE}: `, '')}`;
+			}
+			throw error;
 		}
-		const text = H.assetText(path);
-		if (text === null) throw new Error(`three.cutscene.load: '${path}' is not there`);
-		return new Cutscene(JSON.parse(text), options);
-	},
-
-	save(path, spec) {
-		if (typeof path !== 'string' || path === '') {
-			throw new TypeError('three.cutscene.save(path, spec) wants a path in the assets directory');
-		}
-		const plain = spec instanceof Cutscene ? spec.spec : spec;
-		_readSpec(plain);
-		return H.assetWriteText(path, JSON.stringify({ format: 'three-cutscene', version: 1, ...plain }, null, '\t') + '\n');
 	},
 };

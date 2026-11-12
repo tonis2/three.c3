@@ -54,15 +54,6 @@
 // The factor rounds to quarters unless shift is held, each piece scales about
 // its own pivot, and a click commits exactly as a grab's does.
 //
-// ## Cutscenes
-//
-// `View > Cutscene` swaps the asset browser for a timeline over the level's
-// rows: + Actor makes the selected row an actor, + Move walks it along a path
-// clicked into the view, + Clip plays one of its clips, + Key keeps the view as
-// a camera shot and + Event drops a named marker (say, music, spawn, end). Space
-// plays it, and File > Save cutscene writes the `.cutscene.json` that
-// `three.cutscene.load` plays in the game.
-//
 // ## How the file is laid out
 //
 // Pure helpers first (geometry, naming, the kit's node tree), then `Editor`,
@@ -441,7 +432,6 @@ class Editor {
 	follow() {
 		if (this.grabbing) this.updateGrabPreview();
 		else if (this.scaling) this.updateScalePreview();
-		cut.tick();
 		statusBar.sync();
 		props.sync();
 	}
@@ -455,9 +445,6 @@ class Editor {
 		chrome.update();
 		outliner.update();
 		dialogs.update();
-		timeline.update();
-		cutHeader.update();
-		cutProps.update();
 	}
 
 	setStatus(message) {
@@ -1443,7 +1430,6 @@ class Editor {
 	click(hit, x, y) {
 		if (this.grabbing) { this.commitGrab(); return; }
 		if (this.scaling) { this.commitScale(); return; }
-		if (cut.open && cut.click(hit, x, y)) return;
 		const piece = hit && hit.object ? this.pieceOf(hit.object) : null;
 
 		if (held('ctrl')) {
@@ -1466,362 +1452,12 @@ class Editor {
 }
 
 // ---------------------------------------------------------------------------
-// Cutscenes — a timeline over the level's rows, played by three.cutscene
-// ---------------------------------------------------------------------------
-
-const DEFAULT_CUTSCENE = 'cutscenes/cutscene.cutscene.json';
-const EVENT_KINDS = ['say', 'music', 'spawn', 'end', 'custom'];
-const EASES = ['inout', 'linear', 'in', 'out'];
-const PATH_STEP = 0.3;     // metres between the dots drawn along a move
-const PATH_DOT = 0.05;
-
-const round2 = (n) => Math.round(n * 100) / 100;
-const emptyCutscene = () => ({ format: 'three-cutscene', version: 1, actors: [], camera: [], events: [] });
-
-function pathDot(p, r, color) {
-	const box = new three.Box3(p[0] - r, p[1] - r, p[2] - r, p[0] + r, p[1] + r, p[2] + r);
-	const helper = new three.Box3Helper(box, color);
-	helpers.add(helper);
-	return helper;
-}
-
-// The cutscene being edited: its spec, the preview playing it, the selection
-// and its own undo. Every edit goes through `change`, which rebuilds the preview.
-class CutsceneEdit {
-	@persisted('cutsceneOpen') accessor open = three.persist.cutsceneOpen ?? false;
-	@persisted('cutscenePath') accessor path = null;
-	spec = emptyCutscene();
-	cs = null;
-	time = 0;
-	// { kind: 'actor', actor } | { kind: 'strip', actor, index } | { kind: 'key', index } | { kind: 'event', index }
-	selected = null;
-	lookThrough = false;
-	dirty = false;
-	undoStack = [];
-	redoStack = [];
-	pathDots = [];
-	openDialogOpen = false;
-
-	boot() {
-		if (this.path && !this.load(this.path)) this.path = null;
-		else if (this.open) this.rebuild();
-	}
-
-	get duration() { return this.cs ? this.cs.duration : 0; }
-	get playing() { return !!this.cs && this.cs.playing; }
-
-	toggle() {
-		this.open = !this.open;
-		if (this.open) this.rebuild();
-		else { this.stop(); this.clearPath(); }
-		ed.sync();
-	}
-
-	// ---- Reading the selection ----------------------------------------------
-
-	get strip() {
-		const s = this.selected;
-		return s?.kind === 'strip' ? this.spec.actors[s.actor]?.strips[s.index] ?? null : null;
-	}
-	get key() { const s = this.selected; return s?.kind === 'key' ? this.spec.camera[s.index] ?? null : null; }
-	get event() { const s = this.selected; return s?.kind === 'event' ? this.spec.events[s.index] ?? null : null; }
-
-	// The actor new strips go on: the selected one, else the first.
-	get actorIndex() {
-		const s = this.selected;
-		if (s && (s.kind === 'strip' || s.kind === 'actor')) return s.actor;
-		return this.spec.actors.length > 0 ? 0 : -1;
-	}
-
-	clipsOf(i) {
-		const actor = this.spec.actors[i];
-		const object = actor && ed.level.objects.get(actor.row);
-		return object ? object.animations : [];
-	}
-
-	select(selection) {
-		this.selected = selection;
-		this.drawPath();
-		ed.sync();
-	}
-
-	// Drop a selection the last edit or undo took away.
-	checkSelection() {
-		const s = this.selected;
-		const gone = !s
-			|| (s.kind === 'actor' && !this.spec.actors[s.actor])
-			|| (s.kind === 'strip' && !this.strip)
-			|| (s.kind === 'key' && !this.key)
-			|| (s.kind === 'event' && !this.event);
-		if (gone) this.selected = null;
-	}
-
-	// ---- The preview ----------------------------------------------------------
-
-	// Actors back where their rows put them, so a fresh preview starts from there.
-	restoreActors() {
-		for (const a of this.spec.actors) {
-			const object = ed.level.objects.get(a.row);
-			const row = ed.rowOf(a.row);
-			if (!object || !row) continue;
-			object.rotation.set(...(row.rotation ?? [0, 0, 0]));
-			object.position.set(...(row.position ?? [0, 0, 0]));
-			if (object.animation) object.stop();
-		}
-	}
-
-	stop() {
-		if (this.cs) { this.cs.dispose(); this.cs = null; }
-		this.restoreActors();
-	}
-
-	// A new preview from the spec, posed at the playhead. Actors whose rows are
-	// gone are left out rather than failing the whole scene.
-	rebuild() {
-		this.stop();
-		if (!this.open) return;
-		const live = { ...this.spec, actors: this.spec.actors.filter(a => ed.level.objects.has(a.row)) };
-		try {
-			this.cs = three.cutscene.create(live, { level: ed.level, camera: this.lookThrough });
-			this.cs.on('end', () => { this.time = this.cs.time; ed.sync(); });
-			this.cs.seek(Math.min(this.time, this.cs.duration));
-		} catch (e) {
-			this.cs = null;
-			ed.setStatus(String(e && e.message ? e.message : e));
-		}
-		this.drawPath();
-	}
-
-	seek(t) {
-		this.time = Math.max(0, +t);
-		if (this.cs) {
-			if (this.cs.playing) this.cs.pause();
-			this.cs.seek(this.time);
-		}
-		timeline.update();
-	}
-
-	togglePlay() {
-		if (!this.cs) this.rebuild();
-		if (!this.cs) return;
-		if (this.cs.playing) {
-			this.cs.pause();
-			this.time = this.cs.time;
-		} else {
-			if (this.time >= this.cs.duration) this.cs.seek(0);
-			this.cs.play();
-		}
-		ed.sync();
-	}
-
-	setLookThrough(on) {
-		this.lookThrough = !!on;
-		this.rebuild();
-		ed.sync();
-	}
-
-	// Called every frame: the playhead follows a playing preview.
-	tick() {
-		if (this.playing) {
-			this.time = this.cs.time;
-			timeline.update();
-		}
-	}
-
-	// ---- Editing --------------------------------------------------------------
-
-	snapshot() { return JSON.parse(JSON.stringify(this.spec)); }
-
-	// One undo step around `fn`, unless it answers UNCHANGED.
-	change(fn) {
-		const before = this.snapshot();
-		if (fn() === UNCHANGED) return;
-		this.remember(before);
-	}
-
-	remember(before) {
-		pushSnapshot(this.undoStack, before);
-		this.redoStack = [];
-		this.dirty = true;
-		this.checkSelection();
-		this.rebuild();
-		ed.sync();
-	}
-
-	undo() { this.travel(this.undoStack, this.redoStack); }
-	redo() { this.travel(this.redoStack, this.undoStack); }
-
-	travel(from, to) {
-		if (from.length === 0) return;
-		pushSnapshot(to, this.snapshot());
-		this.spec = from.pop();
-		this.dirty = true;
-		this.checkSelection();
-		this.rebuild();
-		ed.sync();
-	}
-
-	addActor() {
-		const id = ed.activeId;
-		if (!id) { ed.setStatus('select a placed character, then + Actor'); return; }
-		if (this.spec.actors.some(a => a.row === id)) { ed.setStatus(`${id} is already an actor`); return; }
-		this.change(() => { this.spec.actors.push({ row: id, strips: [] }); });
-		this.select({ kind: 'actor', actor: this.spec.actors.length - 1 });
-	}
-
-	// A two-metre walk from where the actor stands at the playhead, the way it faces.
-	addMove() {
-		const i = this.actorIndex;
-		if (i < 0) { ed.setStatus('add an actor first'); return; }
-		const object = ed.level.objects.get(this.spec.actors[i].row);
-		if (!object) return;
-		const from = object.position.toArray().map(round2);
-		const heading = object.rotation.y;
-		const to = [round2(from[0] + 2 * Math.sin(heading)), from[1], round2(from[2] + 2 * Math.cos(heading))];
-		const walk = this.clipsOf(i).find(c => /walk/i.test(c)) ?? null;
-		const start = round2(this.time);
-		const strips = this.spec.actors[i].strips;
-		this.change(() => { strips.push({ type: 'move', start, end: round2(start + 2), clip: walk, path: [from, to], ease: 'inout' }); });
-		this.select({ kind: 'strip', actor: i, index: strips.length - 1 });
-	}
-
-	addPlay(clip) {
-		const i = this.actorIndex;
-		if (i < 0) { ed.setStatus('add an actor first'); return; }
-		const strips = this.spec.actors[i].strips;
-		this.change(() => { strips.push({ type: 'play', start: round2(this.time), clip, loop: false, fade: 0.2 }); });
-		this.select({ kind: 'strip', actor: i, index: strips.length - 1 });
-	}
-
-	addEvent(kind) {
-		const actor = this.spec.actors[this.actorIndex]?.row ?? '';
-		const data = kind === 'say' ? { actor, text: '' } : kind === 'music' ? { track: '' } : kind === 'spawn' ? { piece: '' } : {};
-		const name = kind === 'custom' ? 'event' : kind;
-		this.change(() => {
-			this.spec.events.push({ at: round2(this.time), name, data, always: kind === 'music' || kind === 'spawn' });
-		});
-		this.select({ kind: 'event', index: this.spec.events.length - 1 });
-	}
-
-	// The view as it is now, as a camera key at the playhead.
-	addKey() {
-		const eye = three.camera.position().toArray().map(round2);
-		const target = three.camera.target.toArray().map(round2);
-		const fov = round2(three.camera.fov);
-		this.change(() => {
-			this.spec.camera.push({ at: round2(this.time), eye, target, fov, cut: this.spec.camera.length === 0 });
-		});
-		this.select({ kind: 'key', index: this.spec.camera.length - 1 });
-	}
-
-	setKeyFromView() {
-		const key = this.key;
-		if (!key) return;
-		this.change(() => {
-			key.eye = three.camera.position().toArray().map(round2);
-			key.target = three.camera.target.toArray().map(round2);
-			key.fov = round2(three.camera.fov);
-		});
-	}
-
-	removeSelected() {
-		const s = this.selected;
-		if (!s) return;
-		this.change(() => {
-			if (s.kind === 'actor') this.spec.actors.splice(s.actor, 1);
-			else if (s.kind === 'strip') this.spec.actors[s.actor].strips.splice(s.index, 1);
-			else if (s.kind === 'key') this.spec.camera.splice(s.index, 1);
-			else if (s.kind === 'event') this.spec.events.splice(s.index, 1);
-		});
-		this.select(null);
-	}
-
-	// One field of the selected item; an empty or unparsable number is refused.
-	setField(item, name, value) {
-		if (!item) return;
-		if (typeof value === 'number' && !Number.isFinite(value)) { ed.setStatus(`${name} wants a number`); return; }
-		if (item[name] === value) return;
-		this.change(() => {
-			if (value === null) delete item[name]; else item[name] = value;
-		});
-	}
-
-	// The selected move's ends, joined by the scene's navmesh.
-	routeSelected() {
-		const strip = this.strip;
-		if (!strip || strip.type !== 'move') { ed.setStatus('select a move to route'); return; }
-		let route = [];
-		try { route = scene.nav.path(strip.path[0], strip.path[strip.path.length - 1]); } catch (e) { route = []; }
-		if (route.length < 2) { ed.setStatus('no route — this level has no navmesh between those points'); return; }
-		this.change(() => { strip.path = route.map(p => [round2(p.x), round2(p.y), round2(p.z)]); });
-	}
-
-	// A click in the view adds a point to the selected move; shift+click takes the last one back.
-	click(hit, x, y) {
-		const strip = this.strip;
-		if (!strip || strip.type !== 'move') return false;
-		if (held('shift')) {
-			if (strip.path.length > 2) this.change(() => { strip.path.pop(); });
-			return true;
-		}
-		const last = strip.path[strip.path.length - 1];
-		const p = hit?.point ?? groundHit(x, y, last[1]);
-		if (p) this.change(() => { strip.path.push([round2(p.x), round2(p.y), round2(p.z)]); });
-		return true;
-	}
-
-	// ---- The selected move's path, drawn in the view ---------------------------
-
-	clearPath() {
-		for (const dot of this.pathDots) if (dot.parent) dot.parent.remove(dot);
-		this.pathDots = [];
-	}
-
-	drawPath() {
-		this.clearPath();
-		const strip = this.strip;
-		if (!this.open || !strip || strip.type !== 'move' || strip.path.length < 2) return;
-		const curve = new three.CatmullRomCurve3(strip.path);
-		const count = Math.max(2, Math.ceil(curve.getLength() / PATH_STEP));
-		for (const p of curve.getSpacedPoints(count)) this.pathDots.push(pathDot([p.x, p.y, p.z], PATH_DOT, 0x4dd0ff));
-		for (const p of strip.path) this.pathDots.push(pathDot(p, PATH_DOT * 2.5, 0xffcc33));
-	}
-
-	// ---- Files ----------------------------------------------------------------
-
-	save(path) {
-		const target = path ?? this.path ?? DEFAULT_CUTSCENE;
-		three.cutscene.save(target, this.spec);
-		this.path = target;
-		this.dirty = false;
-		ed.setStatus(`saved ${target}`);
-		return target;
-	}
-
-	load(path) {
-		const spec = three.readJSON(path);
-		if (!spec) { ed.setStatus(`no cutscene at ${path}`); return false; }
-		this.spec = { ...emptyCutscene(), ...spec };
-		this.path = path;
-		this.time = 0;
-		this.selected = null;
-		this.dirty = false;
-		this.undoStack = [];
-		this.redoStack = [];
-		this.open = true;
-		this.rebuild();
-		ed.sync();
-		return true;
-	}
-}
-
-// ---------------------------------------------------------------------------
 // The interface — a handful of widget classes; see the header comment.
 // ---------------------------------------------------------------------------
 
 const {
 	Panel, Stack, Row, Column, Padding, Grid, Anchored, Scroll,
-	Rect, Label, Drawing, Select, TextField, Tree, Button, Checkbox,
+	Rect, Label, Drawing, Select, TextField, Tree, Button,
 	ConfirmDialog, MenuBar, FileBrowser, Dialog,
 } = three.ui;
 
@@ -2216,7 +1852,7 @@ class SceneTree extends three.Widget {
 		this.build();
 		const { height } = three.renderSize();
 		const scale = three.ui.scale || 1;
-		const room = Math.floor(height / scale) - BAR_H - 16 - STATUS_H - (ed.dockOpen && !cut.open ? DOCK_H : 0);
+		const room = Math.floor(height / scale) - BAR_H - 16 - STATUS_H - (ed.dockOpen ? DOCK_H : 0);
 		return new Panel({
 			at: 'top-left', margin: [8, BAR_H + 8], width: OUTLINER_W, gap: 0, insets: 4,
 			color: THEME.panel, radius: THEME.radius, borderColor: THEME.border, borderWidth: 1, solid: true,
@@ -2374,11 +2010,6 @@ class StatusBar extends three.Widget {
 				? `scaling ${scaling.axis.toUpperCase()} ${factor} · click commits · esc frees the axis`
 				: `scaling ${factor} · x / y / z locks an axis · click commits · esc cancels`;
 		}
-		if (cut.open) {
-			return cut.strip?.type === 'move'
-				? 'click the view to add a path point · shift+click takes one back'
-				: 'space plays · drag strips, keys and events · wheel zooms the timeline';
-		}
 		if (ed.stamp) return 'ctrl+click to place · +shift freehand · esc clears';
 		if (ed.selection.length > 0) return 'g grab · s scale · r rotate · x delete';
 		return 'click selects · shift+click adds · ctrl+click places the stamp';
@@ -2397,331 +2028,13 @@ class StatusBar extends three.Widget {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The cutscene dock — a header of verbs over a timeline, and its own N-panel
-// ---------------------------------------------------------------------------
-
-const TL_NAME_W = 120;
-const TL_RULER_H = 20;
-const TL_ROW_H = 24;
-const TL_EDGE = 6;         // how close to a strip's end a press trims it
-const TL_GRIP = 7;         // how close to a key or marker a press takes it
-const TL_COLORS = {
-	move: [0.25, 0.55, 0.45],
-	play: [0.30, 0.42, 0.70],
-	key: [0.95, 0.75, 0.30],
-	event: [0.85, 0.45, 0.55],
-	head: [1.0, 0.35, 0.30],
-};
-
-// The dock's width in interface points, for laying out the timeline's time axis.
-function dockWidth() {
-	const pixels = three.window.width || three.renderSize().width;
-	return Math.max(400, pixels / three.ui.scale);
-}
-
-class Timeline extends three.Widget {
-	constructor() {
-		super();
-		this.pxPerSec = 80;
-		this.drag = null;
-	}
-
-	x(t) { return TL_NAME_W + t * this.pxPerSec; }
-	t(x) { return Math.max(0, (x - TL_NAME_W) / this.pxPerSec); }
-
-	// The rows under the ruler, top to bottom.
-	rows() {
-		const rows = cut.spec.actors.map((a, i) => ({ kind: 'actor', actor: i, label: a.row }));
-		rows.push({ kind: 'camera', label: 'Camera' }, { kind: 'events', label: 'Events' });
-		return rows.map((r, i) => ({ ...r, y: TL_RULER_H + i * TL_ROW_H }));
-	}
-
-	// Where each strip of an actor ends on screen: a move at its end, a play at
-	// the next strip or the end of the scene.
-	spans(actor) {
-		const strips = cut.spec.actors[actor].strips.map((s, index) => ({ s, index })).sort((a, b) => a.s.start - b.s.start);
-		const last = Math.max(cut.duration, 1);
-		return strips.map(({ s, index }, k) => {
-			const next = strips[k + 1]?.s.start ?? Math.max(last, s.start + 1);
-			return { s, index, from: s.start, to: s.type === 'move' ? s.end : next };
-		});
-	}
-
-	render() {
-		const width = dockWidth();
-		const height = DOCK_H - HEADER_H;
-		const ops = [{ op: 'rect', at: [0, 0], size: [width, height], color: THEME.body }];
-		const seconds = Math.ceil((width - TL_NAME_W) / this.pxPerSec);
-		const step = this.pxPerSec >= 120 ? 0.5 : this.pxPerSec >= 40 ? 1 : 5;
-
-		// The ruler.
-		ops.push({ op: 'rect', at: [0, 0], size: [width, TL_RULER_H], color: THEME.header });
-		for (let t = 0; t <= seconds; t += step) {
-			const x = this.x(t);
-			ops.push({ op: 'line', from: [x, TL_RULER_H - 6], to: [x, TL_RULER_H], color: THEME.dim });
-			if (Number.isInteger(t)) ops.push({ op: 'text', at: [x + 3, 3], text: `${t}s`, size: 10, color: THEME.dim });
-		}
-		if (cut.duration > 0) {
-			const end = this.x(cut.duration);
-			ops.push({ op: 'rect', at: [end, 0], size: [Math.max(0, width - end), height], color: [0, 0, 0, 0.25] });
-		}
-
-		const sel = cut.selected;
-		for (const row of this.rows()) {
-			const picked = (sel?.kind === 'actor' || sel?.kind === 'strip') && row.kind === 'actor' && sel.actor === row.actor;
-			ops.push({ op: 'rect', at: [0, row.y], size: [TL_NAME_W - 2, TL_ROW_H - 1], color: picked ? THEME.hover : THEME.panel });
-			ops.push({ op: 'text', at: [8, row.y + 6], text: ellipsise(row.label, TL_NAME_W - 14, 11), size: 11, color: THEME.text });
-			ops.push({ op: 'line', from: [TL_NAME_W, row.y + TL_ROW_H - 1], to: [width, row.y + TL_ROW_H - 1], color: THEME.border });
-
-			if (row.kind === 'actor') {
-				for (const span of this.spans(row.actor)) {
-					const x0 = this.x(span.from);
-					const w = Math.max(4, this.x(span.to) - x0);
-					const on = sel?.kind === 'strip' && sel.actor === row.actor && sel.index === span.index;
-					ops.push({
-						op: 'rect', at: [x0, row.y + 3], size: [w, TL_ROW_H - 7], radius: 3, color: TL_COLORS[span.s.type],
-						borderColor: on ? [1, 1, 1] : THEME.border, borderWidth: on ? 2 : 1,
-					});
-					const label = span.s.type === 'move' ? `move${span.s.clip ? ` · ${span.s.clip}` : ''}` : span.s.clip;
-					ops.push({ op: 'text', at: [x0 + 5, row.y + 7], text: ellipsise(label, w - 8, 10), size: 10, color: [1, 1, 1] });
-				}
-			}
-			if (row.kind === 'camera') {
-				cut.spec.camera.forEach((k, i) => {
-					const on = sel?.kind === 'key' && sel.index === i;
-					const x = this.x(k.at);
-					ops.push({ op: 'rect', at: [x - 5, row.y + 7], size: [10, 10], radius: k.cut ? 1 : 5, color: TL_COLORS.key,
-						borderColor: on ? [1, 1, 1] : [0, 0, 0, 0], borderWidth: 2 });
-				});
-			}
-			if (row.kind === 'events') {
-				cut.spec.events.forEach((e, i) => {
-					const on = sel?.kind === 'event' && sel.index === i;
-					const x = this.x(e.at);
-					ops.push({ op: 'line', from: [x, row.y + 3], to: [x, row.y + TL_ROW_H - 4], color: TL_COLORS.event, thickness: on ? 3 : 2 });
-					ops.push({ op: 'text', at: [x + 4, row.y + 7], text: e.name, size: 10, color: on ? [1, 1, 1] : TL_COLORS.event });
-				});
-			}
-		}
-
-		const head = this.x(cut.time);
-		ops.push({ op: 'line', from: [head, 0], to: [head, height], color: TL_COLORS.head, thickness: 2 });
-		return new Drawing({ key: 'timeline', size: [width, height], ops, onPointer: safe(e => this.pointer(e)) });
-	}
-
-	// What is under a press: a strip (and which part), a key, a marker, a row, or the ruler.
-	hitAt(x, y) {
-		if (y < TL_RULER_H) return { what: 'ruler' };
-		const row = this.rows().find(r => y >= r.y && y < r.y + TL_ROW_H);
-		if (!row) return { what: 'none' };
-		if (x < TL_NAME_W) return row.kind === 'actor' ? { what: 'actor', actor: row.actor } : { what: 'none' };
-		if (row.kind === 'actor') {
-			for (const span of this.spans(row.actor).reverse()) {
-				const x0 = this.x(span.from), x1 = this.x(span.to);
-				if (x < x0 || x > x1) continue;
-				const part = span.s.type === 'move' && x1 - x < TL_EDGE ? 'end' : x - x0 < TL_EDGE ? 'start' : 'body';
-				return { what: 'strip', actor: row.actor, index: span.index, part };
-			}
-			return { what: 'row', actor: row.actor };
-		}
-		const list = row.kind === 'camera' ? cut.spec.camera : cut.spec.events;
-		let best = -1, gap = TL_GRIP;
-		list.forEach((item, i) => {
-			const d = Math.abs(this.x(item.at) - x);
-			if (d <= gap) { best = i; gap = d; }
-		});
-		if (best >= 0) return { what: row.kind === 'camera' ? 'key' : 'event', index: best };
-		return { what: 'none' };
-	}
-
-	pointer(e) {
-		if (e.phase === 'wheel') {
-			this.pxPerSec = Math.max(20, Math.min(400, this.pxPerSec * (e.wheel > 0 ? 1.15 : 1 / 1.15)));
-			this.update();
-			return;
-		}
-		if (e.phase === 'down' && e.button === 0) this.press(e);
-		else if (e.phase === 'move' && this.drag && (e.buttons & 1)) this.move(e);
-		else if (e.phase === 'up' && this.drag) this.release();
-	}
-
-	press(e) {
-		const hit = this.hitAt(e.x, e.y);
-		const grab = this.t(e.x);
-		switch (hit.what) {
-			case 'ruler':
-			case 'row':
-			case 'none':
-				if (hit.what === 'row') cut.select({ kind: 'actor', actor: hit.actor });
-				this.drag = { what: 'scrub' };
-				cut.seek(grab);
-				return;
-			case 'actor':
-				cut.select({ kind: 'actor', actor: hit.actor });
-				return;
-			case 'strip': {
-				const strip = cut.spec.actors[hit.actor].strips[hit.index];
-				cut.select({ kind: 'strip', actor: hit.actor, index: hit.index });
-				this.drag = { what: 'strip', part: hit.part, item: strip, grab, start: strip.start, end: strip.end, before: cut.snapshot() };
-				return;
-			}
-			case 'key':
-			case 'event': {
-				const item = hit.what === 'key' ? cut.spec.camera[hit.index] : cut.spec.events[hit.index];
-				cut.select({ kind: hit.what, index: hit.index });
-				this.drag = { what: 'at', item, grab, at: item.at, before: cut.snapshot() };
-				return;
-			}
-		}
-	}
-
-	// Times snap to a twentieth of a second unless shift is held.
-	snap(t) { return held('shift') ? round2(t) : Math.round(t * 20) / 20; }
-
-	move(e) {
-		const d = this.drag;
-		const now = this.t(e.x);
-		if (d.what === 'scrub') { cut.seek(now); return; }
-		const delta = now - d.grab;
-		if (d.what === 'at') d.item.at = Math.max(0, this.snap(d.at + delta));
-		else if (d.part === 'end') d.item.end = Math.max(d.start + 0.1, this.snap(d.end + delta));
-		else if (d.part === 'start' && d.item.type === 'move') d.item.start = Math.min(d.end - 0.1, Math.max(0, this.snap(d.start + delta)));
-		else {
-			const start = Math.max(0, this.snap(d.start + delta));
-			if (d.item.type === 'move') d.item.end = round2(d.end + (start - d.start));
-			d.item.start = start;
-		}
-		d.moved = true;
-		this.update();
-	}
-
-	// A drag that moved anything is one undo step.
-	release() {
-		const d = this.drag;
-		this.drag = null;
-		if (d.what !== 'scrub' && d.moved) cut.remember(d.before);
-		else this.update();
-	}
-}
-
-// The verbs along the top of the dock.
-class CutHeader extends three.Widget {
-	render() {
-		const clips = cut.clipsOf(cut.actorIndex);
-		const time = `${cut.time.toFixed(2)} / ${cut.duration.toFixed(2)} s`;
-		const name = cut.path ? kitLabel(cut.path) : '(unsaved)';
-		return new Stack({ size: [0, HEADER_H] },
-			new Rect({ color: THEME.header, solid: true }),
-			new Anchored({ h: 'start', v: 'center', margin: [8, 0] },
-				new Row({ gap: 6, cross: 'center' },
-					new Button(cut.playing ? 'Pause' : 'Play', safe(() => cut.togglePlay())),
-					new Button('|<', safe(() => cut.seek(0))),
-					new Label(time, { color: THEME.text, textSize: 11 }),
-					new Button('+ Actor', safe(() => cut.addActor())),
-					new Button('+ Move', safe(() => cut.addMove())),
-					new Label('+ Clip', { color: THEME.dim, textSize: 11 }),
-					new Select(clips, -1, safe(i => cut.addPlay(clips[i])), { key: `cutClip${cut.actorIndex}` }),
-					new Label('+ Event', { color: THEME.dim, textSize: 11 }),
-					new Select(EVENT_KINDS, -1, safe(i => cut.addEvent(EVENT_KINDS[i])), { key: 'cutEvent' }),
-					new Button('+ Key', safe(() => cut.addKey())),
-					new Checkbox('Look through', { checked: cut.lookThrough, onChange: safe(on => cut.setLookThrough(on)) }),
-				),
-			),
-			new Anchored({ h: 'end', v: 'center', margin: [10, 0] },
-				new Label(`${name}${cut.dirty ? ' *' : ''}`, { color: THEME.dim, textSize: 11 })),
-		);
-	}
-}
-
-// The selected timeline item's fields, in place of the piece panel.
-class CutProps extends three.Widget {
-	render() {
-		const two = (caption, value) => new Row({ gap: 6 },
-			new Stack({ size: [64, 16] }, new Label(caption, { color: THEME.dim, textSize: 11 })),
-			value,
-		);
-		const s = cut.selected;
-		const id = s ? `${s.kind}${s.actor ?? ''}-${s.index ?? ''}` : 'none';
-		const number = (item, field, caption, fallback = '') => two(caption, new TextField({
-			key: `cp-${field}-${id}`, text: item[field] === undefined ? '' : String(item[field]), size: [110, 0],
-			placeholder: fallback,
-			onSubmit: safe(t => cut.setField(item, field, t.trim() === '' ? null : +t)),
-		}));
-		const children = [new Label('Cutscene', { textSize: 13 })];
-
-		if (!s) {
-			children.push(new Label(cut.spec.actors.length === 0
-				? 'select a placed character, then + Actor'
-				: 'click the timeline to pick a strip, key or event', { color: THEME.dim, textSize: 11 }));
-		} else if (s.kind === 'actor') {
-			const actor = cut.spec.actors[s.actor];
-			children.push(two('actor', new Label(actor.row, { textSize: 12 })),
-				two('strips', new Label(String(actor.strips.length), { textSize: 12 })),
-				new Button('Remove actor', safe(() => cut.removeSelected())));
-		} else if (s.kind === 'strip') {
-			const strip = cut.strip;
-			const clips = cut.clipsOf(s.actor);
-			children.push(two('strip', new Label(strip.type, { textSize: 12 })), number(strip, 'start', 'start'));
-			if (strip.type === 'move') children.push(number(strip, 'end', 'end'));
-			const options = strip.type === 'move' ? ['(none)', ...clips] : clips;
-			const at = strip.type === 'move' ? (strip.clip ? clips.indexOf(strip.clip) + 1 : 0) : clips.indexOf(strip.clip);
-			children.push(two('clip', new Select(options, at, safe(i => {
-				const clip = strip.type === 'move' && i === 0 ? null : options[i];
-				cut.setField(strip, 'clip', clip);
-			}), { key: `cp-clip-${id}` })));
-			children.push(number(strip, 'speed', 'speed', '1'), number(strip, 'fade', 'fade', '0.2'));
-			children.push(new Checkbox('loop', {
-				checked: strip.loop ?? strip.type === 'move', onChange: safe(on => cut.setField(strip, 'loop', on)),
-			}));
-			if (strip.type === 'move') {
-				children.push(two('ease', new Select(EASES, Math.max(0, EASES.indexOf(strip.ease ?? 'inout')),
-					safe(i => cut.setField(strip, 'ease', EASES[i])), { key: `cp-ease-${id}` })));
-				children.push(two('path', new Label(`${strip.path.length} points`, { textSize: 12 })));
-				children.push(new Label('click the view: add a point', { color: THEME.dim, textSize: 10 }),
-					new Label('shift+click: take the last back', { color: THEME.dim, textSize: 10 }));
-				children.push(new Button('Route on navmesh', safe(() => cut.routeSelected())));
-			}
-			children.push(new Button('Delete strip', safe(() => cut.removeSelected())));
-		} else if (s.kind === 'key') {
-			const key = cut.key;
-			children.push(number(key, 'at', 'at'), number(key, 'fov', 'fov'),
-				new Checkbox('cut (no ease in)', { checked: !!key.cut, onChange: safe(on => cut.setField(key, 'cut', on)) }),
-				new Button('Set from view', safe(() => cut.setKeyFromView())),
-				new Button('Delete key', safe(() => cut.removeSelected())));
-		} else if (s.kind === 'event') {
-			const event = cut.event;
-			children.push(number(event, 'at', 'at'),
-				two('name', new TextField({
-					key: `cp-name-${id}`, text: event.name, size: [110, 0],
-					onSubmit: safe(t => { if (t.trim()) cut.setField(event, 'name', t.trim()); }),
-				})),
-				two('data', new TextField({
-					key: `cp-data-${id}`, text: JSON.stringify(event.data ?? {}), size: [150, 0],
-					onSubmit: safe(t => {
-						let data;
-						try { data = JSON.parse(t); } catch (e) { ed.setStatus('data is JSON, e.g. {"text": "Hello"}'); return; }
-						cut.setField(event, 'data', data);
-					}),
-				})),
-				new Checkbox('fires on skip', { checked: !!event.always, onChange: safe(on => cut.setField(event, 'always', on)) }),
-				new Button('Delete event', safe(() => cut.removeSelected())));
-		}
-		return new Panel({
-			at: 'top-right', margin: [8, BAR_H + 8], width: PROPS_W, gap: 6, insets: 10,
-			color: THEME.panel, radius: THEME.radius, borderColor: THEME.border, borderWidth: 1, solid: true,
-		}, ...children);
-	}
-}
-
 function menuSpec() {
 	return [
-		{ title: 'File', items: ['New', 'Open…', 'Import scene…', 'Save', 'Save as…', 'Export .glb…', '-', 'Open cutscene…', 'Save cutscene', '-', 'Quit'] },
+		{ title: 'File', items: ['New', 'Open…', 'Import scene…', 'Save', 'Save as…', 'Export .glb…', '-', 'Quit'] },
 		{ title: 'Edit', items: ['Undo', 'Redo', '-', 'Duplicate', 'Delete'] },
 		{
 			title: 'View',
-			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: ed.dockOpen }, { label: 'Outliner', checked: ed.outlinerOpen },
-				{ label: 'Cutscene', checked: cut.open }],
+			items: ['Frame all', 'Toggle grid', 'Refit', '-', { label: 'Asset browser', checked: ed.dockOpen }, { label: 'Outliner', checked: ed.outlinerOpen }],
 		},
 	];
 }
@@ -2736,9 +2049,6 @@ function menuLabel(menu, item) {
 	return typeof entry === 'string' ? entry : entry.label;
 }
 
-// While the cutscene dock is open, undo is the cutscene's.
-const undoTarget = () => (cut.open ? cut : ed);
-
 function onMenuSelect(menu, item) {
 	switch (menuLabel(menu, item)) {
 		case 'New': ed.requestNew(); break;
@@ -2747,11 +2057,9 @@ function onMenuSelect(menu, item) {
 		case 'Save': ed.save(); break;
 		case 'Save as…': ed.openSaveAs(); break;
 		case 'Export .glb…': ed.openExport(); break;
-		case 'Open cutscene…': cut.openDialogOpen = true; ed.sync(); break;
-		case 'Save cutscene': cut.save(); break;
 		case 'Quit': three.quit(); break;
-		case 'Undo': undoTarget().undo(); break;
-		case 'Redo': undoTarget().redo(); break;
+		case 'Undo': ed.undo(); break;
+		case 'Redo': ed.redo(); break;
 		case 'Duplicate': ed.duplicate(); break;
 		case 'Delete': ed.requestRemove(); break;
 		case 'Frame all': frameAllExcludingHelpers(); break;
@@ -2759,7 +2067,6 @@ function onMenuSelect(menu, item) {
 		case 'Refit': ed.refit(); break;
 		case 'Asset browser': ed.toggleDock(); break;
 		case 'Outliner': ed.toggleOutliner(); break;
-		case 'Cutscene': cut.toggle(); break;
 	}
 }
 
@@ -2773,13 +2080,7 @@ class Chrome extends three.Widget {
 	render() {
 		Chrome.renders++;
 		return new Stack({},
-			cut.open && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
-				new Stack({ size: [0, DOCK_H] },
-					new Rect({ color: THEME.body, solid: true }),
-					new Column({}, cutHeader, timeline),
-				),
-			),
-			!cut.open && ed.dockOpen && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
+			ed.dockOpen && new Anchored({ h: 'start', v: 'end', margin: [0, STATUS_H] },
 				new Stack({ size: [0, DOCK_H] },
 					new Rect({ color: THEME.header, solid: true }),
 					new Row({},
@@ -2792,8 +2093,8 @@ class Chrome extends three.Widget {
 					),
 				),
 			),
-			ed.outlinerOpen && !cut.open && outliner,
-			cut.open ? cutProps : props,
+			ed.outlinerOpen && outliner,
+			props,
 			statusBar,
 			new Anchored({ h: 'start', v: 'start' }, new MenuBar(menuSpec(), safe(onMenuSelect))),
 		);
@@ -2833,14 +2134,6 @@ class Dialogs extends three.Widget {
 				// the panel instead of painting down over the scene.
 				new Scroll({ key: 'openScroll' },
 					new FileBrowser({ key: 'openBrowser', start: 'levels/', mask: ['*.json'], onChoose: safe(path => { ed.openDialogOpen = false; ed.open(path); }) })),
-			),
-			new Dialog({
-				key: 'cutOpenDialog', title: 'Open cutscene', open: cut.openDialogOpen,
-				modal: true, closeOutside: true, size: [360, 320],
-				onDismiss: safe(() => { cut.openDialogOpen = false; ed.sync(); }),
-			},
-				new Scroll({ key: 'cutOpenScroll' },
-					new FileBrowser({ key: 'cutOpenBrowser', start: 'cutscenes/', mask: ['*.json'], onChoose: safe(path => { cut.openDialogOpen = false; cut.load(path); }) })),
 			),
 			new Dialog({
 				key: 'kitDialog', title: 'Choose a kit', open: ed.kitDialogOpen,
@@ -2904,16 +2197,8 @@ class Keys {
 		if (held('alt')) ed.showAll(); else ed.setHidden([...ed.selection], true);
 	}
 	@three.key('home', 'frame everything') @safe static home() { frameAllExcludingHelpers(); }
-	@three.key('escape', 'free the axis, then cancel the gesture, then clear the stamp') @safe static escape() {
-		if (cut.open && cut.selected && !ed.gesture) cut.select(null); else ed.cancel();
-	}
-	@three.key('delete', 'remove, after a confirm · cutscene: the selected item') @safe static remove() { Keys.removeWhat(); }
-	@three.key('space', 'cutscene: play / pause') @safe static space() { if (cut.open) cut.togglePlay(); }
-
-	// With the cutscene dock open and something picked on it, delete is about that.
-	static removeWhat() {
-		if (cut.open && cut.selected) cut.removeSelected(); else ed.requestRemove();
-	}
+	@three.key('escape', 'free the axis, then cancel the gesture, then clear the stamp') @safe static escape() { ed.cancel(); }
+	@three.key('delete', 'remove, after a confirm') @safe static remove() { ed.requestRemove(); }
 
 	// x / y / z belong to the gesture while one is live, and to what they always
 	// did otherwise. The modifier is the tell: a bare press during a gesture is
@@ -2926,15 +2211,15 @@ class Keys {
 	}
 
 	@three.key('x', 'remove, after a confirm · mid-gesture: lock to x')
-	@safe static x() { if (!Keys.lockAxis('x')) Keys.removeWhat(); }
+	@safe static x() { if (!Keys.lockAxis('x')) ed.requestRemove(); }
 
 	@three.key('y', 'ctrl: redo · mid-gesture: lock to y')
-	@safe static y() { if (!Keys.lockAxis('y') && held('ctrl')) undoTarget().redo(); }
+	@safe static y() { if (!Keys.lockAxis('y') && held('ctrl')) ed.redo(); }
 
 	@three.key('z', 'ctrl: undo, ctrl+shift: redo · mid-gesture: lock to z')
 	@safe static z() {
 		if (Keys.lockAxis('z') || !held('ctrl')) return;
-		if (held('shift')) undoTarget().redo(); else undoTarget().undo();
+		if (held('shift')) ed.redo(); else ed.undo();
 	}
 
 	@three.key('d', 'shift: duplicate and grab the copies')
@@ -2963,13 +2248,8 @@ const outliner = new SceneTree();
 const statusBar = new StatusBar();
 const chrome = new Chrome();
 const dialogs = new Dialogs();
-const cut = new CutsceneEdit();
-const timeline = new Timeline();
-const cutHeader = new CutHeader();
-const cutProps = new CutProps();
 
 ed.boot();
-cut.boot();
 // Make sure the very first frame is already correct rather than waiting for
 // the editor's first tick.
 props.sync();
@@ -3017,35 +2297,6 @@ const editor = {
 	save(path) { return ed.save(path); },
 	open(path) { return ed.open(path); },
 	newLevel(kit) { return ed.newLevel(kit); },
-	// The cutscene dock, verb for verb.
-	cutscene: {
-		toggle() { cut.toggle(); },
-		addActor() { cut.addActor(); },
-		addMove() { cut.addMove(); },
-		addPlay(clip) { cut.addPlay(clip); },
-		addEvent(kind) { cut.addEvent(kind); },
-		addKey() { cut.addKey(); },
-		select(selection) { cut.select(selection); },
-		set(field, value) {
-			const item = cut.strip ?? cut.key ?? cut.event;
-			cut.setField(item, field, value);
-		},
-		clickAt(x, y, z) { return cut.click({ point: { x, y, z } }, 0, 0); },
-		route() { cut.routeSelected(); },
-		remove() { cut.removeSelected(); },
-		seek(t) { cut.seek(t); },
-		play() { cut.togglePlay(); },
-		undo() { cut.undo(); },
-		redo() { cut.redo(); },
-		save(path) { return cut.save(path); },
-		load(path) { return cut.load(path); },
-		state() {
-			return {
-				open: cut.open, path: cut.path, time: cut.time, duration: cut.duration, playing: cut.playing,
-				dirty: cut.dirty, selected: cut.selected, spec: cut.snapshot(), pathDots: cut.pathDots.length,
-			};
-		},
-	},
 	state() {
 		return {
 			path: ed.path,

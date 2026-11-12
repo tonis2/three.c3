@@ -1197,6 +1197,70 @@ fn void skin_poses_the_expected_vertices() @test
 }
 
 <*
+ A rig scaled at its root poses at that scale.
+
+ Every joint matrix carries a uniform scale when something above the joints is
+ scaled, which is how an armature scaled in Blender exports. A dual quaternion
+ has no room for it, so the shader takes it off each influence and puts it back;
+ without that the mesh draws at its unscaled size at rest and comes apart in
+ motion, its translations scaled and its rotations not. `Root` stands at the
+ origin, so doubling it doubles the tip's (0.2, 2, 0).
+*>
+fn void a_scaled_root_scales_the_skin() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+
+	three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+	three::NodeId live = renderer.pass.scene.instantiate(id, name: "", skeleton: true, compute_skin: true);
+
+	three::NodeId root = node_at(renderer.pass.scene, live, "Root");
+	test::@check(root.is_set(), "the live copy materialised its `Root` bone");
+	if (!root.is_set()) return;
+	renderer.pass.scene.node(root).scale = { 2.0f, 2.0f, 2.0f };
+	renderer.pass.scene.mark_moved(root);
+
+	// Zeroed readback copies, as in the test above.
+	const sz CAPACITY = 64;
+	sz capacity_bytes = CAPACITY * three::SkinnedVertex::size;
+	char[] zeros = alloc::new_array(mem, char, capacity_bytes);
+	mem::clear(zeros.ptr, capacity_bytes);
+	defer alloc::free(mem, zeros);
+	for (uint i = 0; i < three::MAX_FRAMES_IN_FLIGHT; i++)
+	{
+		renderer.pass.posed_buffers[i] = vk::new_buffer(
+			&renderer.gpu.allocator,
+			usage: vk::BufferUsageFlagBits.BUFFER_USAGE_STORAGE_BUFFER_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			data: zeros.ptr,
+			data_size: capacity_bytes
+		)!!;
+		renderer.pass.posed_capacity[i] = CAPACITY;
+	}
+
+	uint slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+
+	PosedRegion region = posed_region(renderer);
+	test::@check(region.bytes > 0, "the scene posed %d bytes", region.bytes);
+	if (region.bytes == 0) return;
+	char[] posed = device::read_device_bytes(
+		renderer, &renderer.pass.posed_buffers[slot], region.bytes);
+	defer alloc::free(mem, posed);
+
+	sz tip = 5 * three::SkinnedVertex::size;
+	test::@check(
+		near(*(float*)&posed[tip], 0.4f)
+			&& near(*(float*)&posed[tip + 4], 4.0f)
+			&& near(*(float*)&posed[tip + 8], 0.0f),
+		"the tip of a doubled rig is at (0.4, 4, 0), got (%f, %f, %f)",
+		*(float*)&posed[tip], *(float*)&posed[tip + 4], *(float*)&posed[tip + 8]
+	);
+}
+
+<*
  A scene with no compute-routed character builds no compute pipeline.
 
  The other half of the check above, and the reason the path is lazy: a project

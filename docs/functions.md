@@ -1280,30 +1280,39 @@ across a multi-step catch-up frame. A paused clock still freezes it either way.
 See the Cooldown class for `start`, `cancel`, `active`, `ready`, `recovering`, `remaining`, `progress` and
 `elapsed`.
 
-## three.cutscene.create(spec, options) / load(path, options) / save(path, spec)
+## three.cutscene.load(path, options) / create(spec, options)
 
-A timeline of actor strips, camera keys and named events — a cutscene — played on the game clock.
-`create` takes the spec as an object, `load` reads a `.cutscene.json` from the assets directory, and
-`save` checks a spec and writes it back. Both builders answer a Cutscene.
+A timeline of actor strips, camera keys and named events — a cutscene — played on the game clock. Cutscenes
+are authored in Blender: `load` reads the `.cutscene.glb` (or `.gltf` + `.bin`) the Blender exporter writes,
+from the assets directory, and refuses any other file. `create` builds one from a spec in code. Both answer a
+Cutscene.
 
 ```js
-const cs = three.cutscene.load('cutscenes/intro.cutscene.json', { level });
-cs.on('say', e => ui.say(e.actor, e.text)).on('end', () => G.mode = 'playing');
+const hero = three.load('characters/hero.glb').instantiate('hero', { materials: true });
+scene.add(hero);
+const cs = three.cutscene.load('cutscenes/intro.cutscene.glb', { actors: { hero } });
+cs.on('say', e => ui.say(e.text)).on('end', () => G.mode = 'playing');
 cs.play();
 ```
 
-The file:
+**The file** is a mesh-less glTF whose `CUSTOM_cutscene` root extension holds the timeline; see
+`extensions/cutscene.md` in the Blender add-on for the format. `load` refuses a file without the
+extension, of another extension version, or whose strips name a path or animation it does not have.
 
-```json
-{ "format": "three-cutscene", "version": 1,
-  "actors": [ { "row": "hero_1", "strips": [
-    { "type": "move", "start": 0, "end": 3, "clip": "walk", "path": [[0,0,0],[2,0,1],[5,0,1]], "ease": "inout" },
-    { "type": "play", "start": 3, "clip": "wave", "loop": false, "fade": 0.2 } ] } ],
-  "camera": [ { "at": 0, "eye": [8,3,8], "target": [2,1,0], "fov": 50, "cut": true },
-              { "at": 3, "eye": [4,1.6,3], "target": [5,1.4,1], "fov": 35 } ],
-  "events": [ { "at": 0, "name": "music", "data": { "track": "tense" }, "always": true },
-              { "at": 3.2, "name": "say", "data": { "actor": "hero_1", "text": "Not today." } },
-              { "at": 8, "name": "end" } ] }
+**The spec** is what `create` takes and what `load` produces from the file — `cs.spec` on a loaded cutscene
+is it, with each move's `path` index replaced by that path's points and `file` naming the glTF:
+
+```js
+three.cutscene.create({
+  actors: [ { row: 'hero', strips: [
+    { type: 'move', start: 0, end: 3, clip: 'walk', path: [[0,0,0],[2,0,1],[5,0,1]], ease: 'inout' },
+    { type: 'play', start: 3, end: 3.5, clip: 'wave', loop: false, fade: 0.2 } ] } ],
+  camera: [ { at: 0, eye: [8,3,8], target: [2,1,0], fov: 50, cut: true },
+            { at: 3, eye: [4,1.6,3], target: [5,1.4,1], fov: 35, ease: 'linear' } ],
+  events: [ { at: 0, name: 'music', data: { track: 'tense' }, always: true },
+            { at: 3.2, name: 'say', data: { text: 'Not today.' } } ],
+  duration: 8,
+}, { actors: { hero } });
 ```
 
 - An actor's `row` is found in `options.actors` (an object or Map of id to object), then
@@ -1311,11 +1320,25 @@ The file:
 - A `move` walks its path at even speed over `[start, end]`, eased (`linear`, `in`, `out`, `inout`), facing
   along it unless `turn: false`, and loops its `clip` while it walks. Path points are in the actor's parent
   space. After the move the actor stays where it ended.
-- A `play` starts its `clip` at `start` (crossfading over `fade` seconds) and runs until the next strip;
-  `loop: false` holds the last frame.
-- Camera keys ease from one to the next; `cut: true` jumps at the key instead.
+- A `play` starts its `clip` at `start`, crossfading over `fade` seconds. With an `end` it stops there and
+  holds the pose it ended on, which is what Blender shows; without one it runs until the next strip.
+  `loop: false` holds the clip's last frame.
+- Any strip may carry `speed` (1) and `offset`, the clip time in seconds it starts at (0).
+- Camera keys ease from one to the next; `cut: true` jumps at the key instead, and `ease: "linear"` (or `in`,
+  `out`) changes how the camera arrives at that key from the one before.
 - Events fire once when the playhead crosses them, handed their `data` plus `name` and `at`. An `end`
   event sets the length; without one it is `duration`, or the last thing on the timeline.
+
+A strip with `animation: i` plays a **one-off clip**: acting stored in the cutscene file itself, as its
+glTF animation `i`, rather than in the character's own `.glb`, so a spec with one needs the `file` it is in
+and the actor's stub `node` there — which `load` always fills in. When the cutscene is built, each one is
+bound to its actor by name — the file's stub node for the actor to the actor's object, its bone stubs to the
+nodes of the same names under it — and added to the actor's asset under the strip's `clip` name (suffixed
+`#2`, `#3` … if the asset already has a clip by that name), so `object.animations` lists it and `play`
+finds it. `dispose()` takes it off again. Such an actor has to be the root of an `asset.instantiate()` or
+`asset.node()` tree; baked and `skeleton: true` characters both play one, a baked character composing it on
+the CPU because its pose table has no frames of it. A bone the file names and the actor does not have
+refuses the whole cutscene, naming the bone.
 
 Options: `level`, `actors`, `scene`, `camera` (false leaves the camera alone) and `restoreCamera` (false
 keeps the last shot after the end).

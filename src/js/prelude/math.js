@@ -321,6 +321,43 @@ export function invertMatrix3(m) {
 	];
 }
 
+// Quaternions as [x, y, z, w]: the product of two, a vector rotated by one,
+// and the XYZ Euler triple an `Object3D.rotation` holds, both ways.
+export function multiplyQuat([ax, ay, az, aw], [bx, by, bz, bw]) {
+	return [
+		aw * bx + ax * bw + ay * bz - az * by,
+		aw * by - ax * bz + ay * bw + az * bx,
+		aw * bz + ax * by - ay * bx + az * bw,
+		aw * bw - ax * bx - ay * by - az * bz,
+	];
+}
+
+export function rotateByQuat([x, y, z, w], [vx, vy, vz]) {
+	const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+	return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
+}
+
+export function quatFromEulerXYZ([ex, ey, ez]) {
+	const c1 = Math.cos(ex / 2), c2 = Math.cos(ey / 2), c3 = Math.cos(ez / 2);
+	const s1 = Math.sin(ex / 2), s2 = Math.sin(ey / 2), s3 = Math.sin(ez / 2);
+	return [
+		s1 * c2 * c3 + c1 * s2 * s3,
+		c1 * s2 * c3 - s1 * c2 * s3,
+		c1 * c2 * s3 + s1 * s2 * c3,
+		c1 * c2 * c3 - s1 * s2 * s3,
+	];
+}
+
+// As the host's `euler_from_quat` reads it.
+export function eulerXYZFromQuat([x, y, z, w]) {
+	const m11 = 1 - 2 * (y * y + z * z), m12 = 2 * (x * y - w * z), m13 = 2 * (x * z + w * y);
+	const m22 = 1 - 2 * (x * x + z * z), m23 = 2 * (y * z - w * x);
+	const m32 = 2 * (y * z + w * x), m33 = 1 - 2 * (x * x + y * y);
+	const ry = Math.asin(Math.max(-1, Math.min(1, m13)));
+	if (Math.abs(m13) < 0.9999999) return [Math.atan2(-m23, m33), ry, Math.atan2(-m12, m11)];
+	return [Math.atan2(m32, m22), ry, 0];
+}
+
 // What `scene.background = null` restores. Kept in step with `DEFAULT_CLEAR`
 // in gpu/frame.c3 by `the_default_background_is_the_renderer_clear` rather
 // than by a comment, because two spellings of one constant is exactly the

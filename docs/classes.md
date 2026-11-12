@@ -1320,7 +1320,9 @@ independent trees over one upload. Its `name` argument names the tree it answers
 pick anything out of the file — `node(name)` is the one that picks.
 
 `node(name)` is a kit in one file: the node that name belongs to, and everything under it, as a tree
-of its own. `asset.nodes` is the list of names it takes.
+of its own. `asset.nodes` is the list of names it takes. A character placed in a level comes out
+whole, its armature's node bringing the skinned mesh the file hangs under it, and plays the file's
+clips like any `instantiate()` root.
 
 ```js
 const kit = three.load('buildings.glb');
@@ -2249,11 +2251,12 @@ system back out of `three.systems` the moment nothing else needs it.
 ## Cutscene
 
 ```js
-three.cutscene.create(spec, options)  |  three.cutscene.load(path, options)
+three.cutscene.load(path, options)  |  three.cutscene.create(spec, options)
 ```
 
-A cutscene being played. One pose-at-time serves playback and seeking, so a scrubbed frame and a played
-frame are the same frame. It steps on the game clock — a paused `three.clock` holds it — through a
+A cutscene being played, loaded from a Blender-exported `.cutscene.glb` or built from a spec in code; `spec`
+is what `create` took or what `load` produced. One pose-at-time serves playback and seeking, so a scrubbed
+frame and a played frame are the same frame. It steps on the game clock — a paused `three.clock` holds it — through a
 `three.systems` entry installed only while something plays.
 
 While a camera key drives the view it detaches the camera and turns `three.controls` off; both come back
@@ -2284,6 +2287,10 @@ at the end or on `dispose()`. A follow camera is not re-attached — do that in 
 `on` listens for an event name, and `'end'` once the scene finishes; a throwing handler is reported and
 the scene carries on. `seek(t)` counts events before `t` as passed without firing them, and re-arms the
 rest. `skip()` jumps to the end, fires only the unfired events marked `always`, then `end`.
+
+`dispose()` also takes the one-off clips a `.cutscene.glb` put on its actors' assets back off them; a
+character still holding one goes back to its rest pose. A cutscene that is never disposed keeps them until
+the character's file is unloaded.
 
 ## TransformBatch
 

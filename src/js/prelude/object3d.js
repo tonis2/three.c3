@@ -396,14 +396,19 @@ export class Object3D {
 			if (!bone) throw new Error(`no bone named "${name}" — ${this._boneList()}`);
 			return bone;
 		}
+		// On the skinned mesh that carries the bone, because the pose is in that
+		// mesh's space. In a whole file that is the root's own, and in
+		// `asset.node()` of a character placed in a level it is not.
+		const meshes = [];
+		this.traverse((o) => { if (o._skin >= 0) meshes.push(o); });
 		const holder = new Object3D();
 		holder.name = String(name);
-		this.add(holder);
-		if (!holder._h.bindSocket(this._h, String(name))) {
-			this.remove(holder);
-			throw new Error(`no bone named "${name}" — ${this._boneList()}`);
+		for (const mesh of meshes.length ? meshes : [this]) {
+			mesh.add(holder);
+			if (holder._h.bindSocket(mesh._h, String(name))) return holder;
+			mesh.remove(holder);
 		}
-		return holder;
+		throw new Error(`no bone named "${name}" — ${this._boneList()}`);
 	}
 
 	// What the rig does have, for the sentence above. `_bones` is set by

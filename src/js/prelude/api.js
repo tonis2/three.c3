@@ -2232,8 +2232,8 @@ export const three = {
 	cooldown,
 	Cooldown,
 
-	// A timeline of actor strips, camera keys and named events, from a
-	// .cutscene.json: three.cutscene.load(path, { level }).on('say', fn).play().
+	// A timeline of actor strips, camera keys and named events, from the
+	// .cutscene.glb Blender exports: three.cutscene.load(path, { level }).on('say', fn).play().
 	cutscene,
 	Cutscene,
 

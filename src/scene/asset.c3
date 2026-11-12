@@ -926,6 +926,10 @@ struct PlacedNode
 
 	// Index into the flattened list, or -1 for a root.
 	int parent;
+	// Where the file hangs it: `parent`, except for a skinned mesh, which the
+	// walk lifts to the root (see `flatten_node`) and which still belongs with
+	// the node above it. `asset.node(name)` keeps a character's mesh by this.
+	int owner;
 	// Index into `Asset.meshes`, or -1 for a group.
 	int mesh;
 	// The glTF node this came from, or -1 for an entry the walk *synthesized* — the
@@ -1078,6 +1082,72 @@ fn int Asset.find_clip(&self, String name)
 		if (clip.name == name) return (int)i;
 	}
 	return -1;
+}
+
+<*
+ The first node called `name` below `from`, depth first, or anywhere in the file
+ when `from` is negative. -1 when there is none.
+*>
+fn int Asset.node_named(&self, String name, int from = -1)
+{
+	if (from < 0)
+	{
+		foreach (i, &node : self.nodes)
+		{
+			if (node.name == name) return (int)i;
+		}
+		return -1;
+	}
+	if (from >= self.nodes.len()) return -1;
+	foreach (child : self.nodes[from].children)
+	{
+		if (child >= self.nodes.len()) continue;
+		if (self.nodes[child].name == name) return (int)child;
+		int deeper = self.node_named(name, (int)child);
+		if (deeper >= 0) return deeper;
+	}
+	return -1;
+}
+
+<*
+ Puts a clip whose curves the caller read on a loaded asset, after the file's own.
+
+ The asset owns it from here: `remove_clip` frees it, and so does the asset going.
+ It is marked `added`, which keeps it out of the bake and out of an export.
+
+ @param clip : "Named, with its channels' nodes already this asset's"
+ @return "Its index, or -1 when the asset is gone (and the clip freed)"
+*>
+fn int Assets.add_clip(&self, AssetId id, AnimationClip clip)
+{
+	Asset* owner = self.slot(id);
+	if (owner == null)
+	{
+		clip.free();
+		return -1;
+	}
+	// A file with no animations never initialised the list, and one left to
+	// itself would take the temp allocator of whatever pool this runs in.
+	if (owner.clips.allocator == null) owner.clips.init(mem, 1);
+	clip.added = true;
+	clip.loaded = true;
+	owner.clips.push(clip);
+	return (int)owner.clips.len() - 1;
+}
+
+<*
+ Takes a clip `add_clip` put on an asset off it again and frees it. A file's own
+ clip is refused. Players must let go of it first — `AnimationPlayer.forget_clip`.
+
+ @return "Whether it was there to take off"
+*>
+fn bool Assets.remove_clip(&self, AssetId id, uint clip)
+{
+	Asset* owner = self.slot(id);
+	if (owner == null || clip >= owner.clips.len() || !owner.clips[clip].added) return false;
+	owner.clips[clip].free();
+	owner.clips.remove_at(clip);
+	return true;
 }
 
 <*
@@ -1481,6 +1551,7 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 				{
 					.name = mesh.name,
 					.parent = -1,
+					.owner = -1,
 					.mesh = (int)i,
 					.gltf_node = -1,
 					.position = { 0, 0, 0 },
@@ -1638,6 +1709,7 @@ fn void Assets.flatten_node(
 		{
 			.name = source.name,
 			.parent = skinned ? -1 : parent,
+			.owner = parent,
 			.mesh = draws_itself ? (int)source.first_mesh : -1,
 			.gltf_node = (int)index,
 			.position = skinned ? (Vec3) { 0, 0, 0 } : source.position,
@@ -1709,6 +1781,7 @@ fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int pare
 	return {
 		.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
 		.parent = parent,
+		.owner = parent,
 		.mesh = (int)(source.first_mesh + i),
 		.gltf_node = -1,
 		.position = { 0, 0, 0 },
@@ -1733,6 +1806,7 @@ fn PlacedNode collider_proxy(AssetBody* body, int mesh, int parent, Vec3 positio
 	return {
 		.name = body.name,
 		.parent = parent,
+		.owner = parent,
 		.mesh = mesh,
 		.gltf_node = -1,
 		.position = position,
@@ -2979,8 +3053,23 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 	if (catch owner.stream.load_animation_buffers(source_index)) return;
 
 	owner.clips[clip].channels.init(mem, 8);
+	read_channels(&owner.stream, source_index, &owner.clips[clip].channels);
+}
 
-	gltf::Animation source = owner.stream.gltf.animations[source_index];
+<*
+ One glTF animation's curves, copied into three.c3's own channels — the body of
+ `ensure_clip`, and what a cutscene reads its one-off clips with.
+
+ Channels three.c3 cannot apply, or whose accessors disagree with their own
+ interpolation, are left out.
+
+ @param [&inout] stream : "Its animation buffers already loaded"
+ @param [&inout] out : "Appended to, and initialised by the caller"
+ @require source_index < stream.gltf.animations.len() : "No such animation"
+*>
+fn void read_channels(gltf::GltfStream* stream, uint source_index, List{AnimationChannel}* out)
+{
+	gltf::Animation source = stream.gltf.animations[source_index];
 	foreach (&channel : source.channels)
 	{
 		AnimatedPath path;
@@ -2995,11 +3084,11 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 
 		if (channel.sampler >= source.samplers.len()) continue;
 		gltf::AnimationSampler sampler = source.samplers[channel.sampler];
-		if (sampler.input >= owner.stream.gltf.accessors.len()) continue;
-		if (sampler.output >= owner.stream.gltf.accessors.len()) continue;
+		if (sampler.input >= stream.gltf.accessors.len()) continue;
+		if (sampler.output >= stream.gltf.accessors.len()) continue;
 
-		gltf::Accessor times  = owner.stream.gltf.accessors[sampler.input];
-		gltf::Accessor values = owner.stream.gltf.accessors[sampler.output];
+		gltf::Accessor times  = stream.gltf.accessors[sampler.input];
+		gltf::Accessor values = stream.gltf.accessors[sampler.output];
 		if (times.count == 0 || values.count == 0) continue;
 
 		// LINEAR and STEP store one value per key; CUBICSPLINE stores three.
@@ -3043,13 +3132,13 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 
 		for (sz k = 0; k < times.count; k++)
 		{
-			built.times[k] = owner.stream.@cast_buffer(times, k, float);
+			built.times[k] = stream.@cast_buffer(times, k, float);
 		}
 		if (scalar)
 		{
 			for (sz k = 0; k < values.count; k++)
 			{
-				built.values[k] = owner.stream.@cast_buffer(values, k, float);
+				built.values[k] = stream.@cast_buffer(values, k, float);
 			}
 		}
 		else
@@ -3059,12 +3148,12 @@ fn void Assets.ensure_clip(&self, AssetId asset, uint clip)
 				// Read as a Vec4 regardless: a VEC3 accessor's stride is what
 				// `@cast_buffer` uses to step, so this reads three floats and one
 				// past them, and only `stride` of them are kept.
-				Vec4 value = owner.stream.@cast_buffer(values, k, Vec4);
+				Vec4 value = stream.@cast_buffer(values, k, Vec4);
 				for (uint c = 0; c < stride; c++) built.values[(usz)k * stride + c] = value[c];
 			}
 		}
 
-		owner.clips[clip].channels.push(built);
+		out.push(built);
 	}
 }
 

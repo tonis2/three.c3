@@ -1568,6 +1568,8 @@ fn void Exporter.write_clips(&self, AssetId id)
 
 	for (sz index = 0; index < asset.clips.len(); index++)
 	{
+		// A cutscene's one-off is the cutscene file's, not this character's.
+		if (asset.clips[index].added) continue;
 		self.pass.assets.ensure_clip(id, (uint)index);
 		AnimationClip* clip = &asset.clips[index];
 		if (!self.drives_a_bone(id, clip)) continue;

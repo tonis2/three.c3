@@ -1,6 +1,6 @@
 // three.c3 — Asset and MeshRef: a loaded file and the pieces inside it.
 
-import { refBounds } from './math.js';
+import { eulerXYZFromQuat, multiplyQuat, refBounds, rotateByQuat } from './math.js';
 import { Geometry } from './geometry.js';
 import { Object3D, Group } from './object3d.js';
 import { Mesh } from './mesh.js';
@@ -511,6 +511,35 @@ function nameList(names) {
 	return `${names.slice(0, NAMES_SHOWN).join(', ')} … and ${names.length - NAMES_SHOWN} more`;
 }
 
+// Where the file puts row `at`: its transform composed with its parents', as
+// position, quaternion and scale.
+function fileWorld(rows, at) {
+	const chain = [];
+	for (let i = at; i >= 0; i = rows[i].parent) chain.push(rows[i]);
+	let world = { position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: [1, 1, 1] };
+	for (const row of chain.reverse()) {
+		const scaled = row.position.map((v, k) => v * world.scale[k]);
+		const moved = rotateByQuat(world.quaternion, scaled);
+		world = {
+			position: moved.map((v, k) => v + world.position[k]),
+			quaternion: multiplyQuat(world.quaternion, row.quaternion),
+			scale: row.scale.map((v, k) => v * world.scale[k]),
+		};
+	}
+	return world;
+}
+
+// The transform that undoes `t`. Exact for a uniform scale, which is what a
+// character's armature carries; a non-uniform one under a rotation has no
+// position, quaternion and scale that undo it.
+function inverseTrs(t) {
+	const [x, y, z, w] = t.quaternion;
+	const quaternion = [-x, -y, -z, w];
+	const scale = t.scale.map((v) => (v === 0 ? 0 : 1 / v));
+	const back = rotateByQuat(quaternion, t.position);
+	return { position: back.map((v, k) => -v * scale[k]), quaternion, scale };
+}
+
 // The distance from a point to the far corner of a box — how far a light
 // standing there has to reach to still light everything in the file, and no
 // further. Works with the point outside the box as well.
@@ -1016,6 +1045,11 @@ export class Asset {
 	// Options are `instantiate()`'s and mean the same things. Animation does too:
 	// the subtree root carries the file's clips, and a channel naming a node
 	// outside the subtree drives nothing rather than failing.
+	//
+	// A character placed in a level comes out whole: `node('hero_armature')`
+	// brings the skinned mesh the file hangs under it, though the walk lifts
+	// that mesh to the file's root. A clip that moves the armature node itself
+	// would move it twice, once on the node and once in the baked pose.
 	node(name, options = undefined) {
 		const opt = this._instanceOptions(options);
 		const rows = this._rows(opt.skeleton, opt.physics);
@@ -1411,12 +1445,17 @@ export class Asset {
 		const materialCache = opt.materials ? new Map() : null;
 		const built = new Array(rows.length);
 		let root = into;
+		let undo = null;
 		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
 			const {
-				name: label, parent, mesh, position: [px, py, pz], euler: [ex, ey, ez], scale: [sx, sy, sz],
+				name: label, parent, owner, mesh, position: [px, py, pz], euler: [ex, ey, ez], scale: [sx, sy, sz],
 				quaternion: [qx, qy, qz, qw], gltfNode, color: [r, g, b, a], skin, collides, collisionOnly,
 			} = rows[i];
-			if (from >= 0 && i !== from && !(parent >= 0 && built[parent])) continue;
+			// A skinned mesh is a root of the walk wherever the file hangs it (see
+			// `Assets.flatten_node`), so a subtree takes it along by where it hangs:
+			// `node('hero_armature')` is the character and not a bare skeleton.
+			const lifted = from >= 0 && i !== from && parent < 0 && owner >= 0 && !!built[owner];
+			if (from >= 0 && i !== from && !(parent >= 0 && built[parent]) && !lifted) continue;
 			// **A `MeshRef` rather than the bare `{ asset, mesh }` this used to
 			// build.** A Mesh only needs the three numbers, so the plain object drew
 			// exactly the same picture — but it is also what a script reads back off
@@ -1459,9 +1498,19 @@ export class Asset {
 				const imported = this._importedMaterial(node.geometry, materialCache);
 				if (imported) node.material = imported;
 			}
+			// Its pose is in the file's space, which already puts it where the file
+			// put the subtree's root, so under that root it takes the inverse of it.
+			if (lifted) {
+				undo ??= inverseTrs(fileWorld(rows, from));
+				node.position.set(...undo.position);
+				node.rotation.set(...eulerXYZFromQuat(undo.quaternion));
+				node._q = undo.quaternion;
+				node.scale.set(...undo.scale);
+			}
 			// The starting row is the tree; everything else hangs off whatever
 			// built its parent.
 			if (i === from) root = node;
+			else if (lifted) root.add(node);
 			else (parent < 0 ? into : built[parent]).add(node);
 			built[i] = node;
 		}

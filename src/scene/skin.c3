@@ -229,6 +229,9 @@ fn uint plan_segments(Asset* asset) @local
 
 		foreach (c, &clip : asset.clips)
 		{
+			// A clip a cutscene added is played composed and may leave again, so it
+			// gets no frames here and no segment that would outlive it.
+			if (clip.added) continue;
 			uint frames = frame_count_of(clip.duration);
 			// Spread so the last frame is the clip's end exactly. At a flat thirty a
 			// second a 1.05 s walk's last frame would be sampled past its end and

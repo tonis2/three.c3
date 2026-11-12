@@ -111,6 +111,11 @@ struct AnimationClip
 
 	List{AnimationChannel} channels;
 	bool loaded;
+
+	// Put on the asset after load by `Assets.add_clip` — a cutscene's one-off.
+	// Never baked, so a baked character plays it composed on the CPU, and always
+	// after the file's own clips, so taking it off moves none of their indices.
+	bool added;
 }
 
 <*
@@ -830,7 +835,8 @@ fn void AnimationPlayer.pose(&self, Scene* scene, Asset* owner)
 {
 	if (self.layer_count == 0) return;
 	AnimationLayer* only = &self.layers[0];
-	if (self.layer_count == 1 && only.weight >= 1.0f && only.clip >= 0 && only.clip < owner.clips.len())
+	if (self.layer_count == 1 && only.weight >= 1.0f && only.clip >= 0 && only.clip < owner.clips.len()
+		&& !self.composes(&owner.clips[only.clip]))
 	{
 		self.write_clip(scene, &owner.clips[only.clip], only.time, 1.0f);
 		self.composed = false;
@@ -840,6 +846,65 @@ fn void AnimationPlayer.pose(&self, Scene* scene, Asset* owner)
 		self.blend_layers(scene, owner);
 	}
 	self.key_pose(scene, owner);
+}
+
+<*
+ Whether one clip at the whole of the picture still has to be composed on the CPU:
+ a clip added after the bake has no frames in a baked character's table.
+*>
+fn bool AnimationPlayer.composes(&self, AnimationClip* clip) => clip.added && !self.live_skin && self.skinned.len() > 0;
+
+<*
+ Lets go of a clip that is about to leave the asset: its layers go, the nodes it
+ drove go back to rest, and every clip after it moves down one index.
+
+ A character left with nothing on its stack goes back to its rest pose, or a
+ baked one would keep drawing the palette this clip composed.
+
+ @return `Whether a layer was dropped, so the caller poses what is left once the clip is gone.`
+*>
+fn bool AnimationPlayer.forget_clip(&self, Scene* scene, Asset* owner, uint clip)
+{
+	bool dropped = false;
+	for (uint i = self.layer_count; i > 0; i--)
+	{
+		AnimationLayer* layer = &self.layers[i - 1];
+		if (layer.clip == (int)clip)
+		{
+			if (clip < owner.clips.len())
+			{
+				AnimationClip* leaving = &owner.clips[clip];
+				self.reset_targets(scene, owner, leaving);
+				foreach (&channel : leaving.channels)
+				{
+					if (channel.node < self.targets.len()) scene.mark_moved(self.targets[channel.node]);
+				}
+			}
+			self.remove_layer(i - 1);
+			dropped = true;
+		}
+		else if (layer.clip > (int)clip)
+		{
+			layer.clip--;
+		}
+	}
+	if (!dropped) return false;
+
+	bool locked = false;
+	for (uint i = 0; i < self.layer_count; i++) locked = locked || self.layers[i].offset >= 0;
+	self.phased = self.phased && locked;
+	if (self.layer_count > 0) return true;
+
+	self.composed = false;
+	foreach (&target : self.skinned)
+	{
+		Node* node = scene.node(target.node);
+		if (node == null || target.skin >= owner.skins.len()) continue;
+		node.pose = owner.skins[target.skin].rest_offset;
+		node.pose_next = node.pose;
+		node.pose_t = 0;
+	}
+	return true;
 }
 
 <*
