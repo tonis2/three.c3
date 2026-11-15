@@ -787,6 +787,107 @@ fn void walking_on_the_floor_is_not_a_slide() @test
 }
 
 <*
+ `floor` is the ground under the axis, not the bottom of the capsule.
+
+ The capsule rests on its skin, so on level ground its bottom is 2 cm up and the
+ floor is not. In the air there is no floor at all, which is what tells a script
+ to stop drawing the feet on one.
+*>
+fn void the_floor_is_under_the_axis_and_not_under_the_skin() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.BoxGeometry(40, 1, 40));
+			ground.position.y = -0.5;
+			scene.add(ground);
+
+			const MOVE = { radius: 0.3, height: 1.8 };
+			let r = three.moveAndSlide([0, 1.2, 0], [0, -0.5, 0], MOVE);
+			for (let i = 0; i < 3; i++) r = three.moveAndSlide(r.position, [0, 0, 0], MOVE);
+			const air = three.moveAndSlide([0, 5, 0], [0, 0, 0], MOVE);
+			return [r.grounded, +(r.position.y - 0.9).toFixed(3), +r.floor.y.toFixed(4) + 0, air.floor];
+		`, "the floor script ran");
+
+		test::@check(value == "[true,0.02,0,null]",
+			"the capsule rests on its skin and the floor does not; got %s", value);
+	};
+}
+
+<*
+ On a slope the floor is what a ray straight down the axis finds.
+
+ A capsule on a 20° ramp rests on the side of its hemisphere, so its bottom hangs
+ 4 cm over the ground under its axis. `floor` has to be that ground, which is what
+ `scene.raycast` from above says it is — the scene holds no character to hit.
+*>
+fn void on_a_ramp_the_floor_is_what_a_ray_down_the_axis_finds() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const ramp = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+			const tilt = 20 * Math.PI / 180;
+			ramp.rotation.z = tilt;
+			ramp.position.set(0.5 * Math.sin(tilt), -0.5 * Math.cos(tilt), 0);
+			scene.add(ramp);
+
+			const MOVE = { radius: 0.3, height: 1.8 };
+			let r = three.moveAndSlide([0, 2, 0], [0, -0.5, 0], MOVE);
+			for (let i = 0; i < 8 && !r.grounded; i++) r = three.moveAndSlide(r.position, [0, -0.5, 0], MOVE);
+			for (let i = 0; i < 3; i++) r = three.moveAndSlide(r.position, [0, 0, 0], MOVE);
+
+			const p = r.position;
+			const hit = scene.raycast([p.x, 10, p.z], [0, -1, 0]);
+			const bottom = p.y - 0.9;
+			return [
+				r.grounded,
+				Math.abs(r.floor.y - hit.point.y) < 1e-3,
+				Math.abs(r.floor.x - p.x) < 1e-6 && Math.abs(r.floor.z - p.z) < 1e-6,
+				bottom - r.floor.y > 0.03,
+			];
+		`, "the ramp floor script ran");
+
+		test::@check(value == "[true,true,true,true]",
+			"the floor is the ramp under the axis, below the capsule's bottom; got %s", value);
+	};
+}
+
+<*
+ Over a ledge's rim the floor is where the capsule rests, not the ground below.
+
+ A capsule whose axis is 10 cm past the edge of a platform stands on the rim with
+ a metre of air under its axis. A ray down the axis would put the feet a metre
+ below the character, so `floor` falls back to the height of the contact.
+*>
+fn void over_a_ledge_rim_the_floor_is_where_the_capsule_rests() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const top = new three.Mesh(new three.BoxGeometry(2, 1, 2));
+			top.position.y = -0.5;
+			scene.add(top);
+			const low = new three.Mesh(new three.BoxGeometry(40, 1, 40));
+			low.position.y = -1.5;
+			scene.add(low);
+
+			// The hemisphere 2 cm clear of the rim at (1, 0): its centre is
+			// sqrt(0.32² − 0.1²) over it, plus that gap, plus the half-height.
+			const y = Math.sqrt(0.32 * 0.32 - 0.1 * 0.1) + 0.02 + 0.6;
+			const r = three.moveAndSlide([1.1, y, 0], [0, 0, 0], { radius: 0.3, height: 1.8 });
+			return [r.grounded, Math.abs(r.floor.y) < 1e-3, +r.floor.x.toFixed(3)];
+		`, "the ledge floor script ran");
+
+		test::@check(value == "[true,true,1.1]",
+			"over the rim the floor is the rim's height; got %s", value);
+	};
+}
+
+<*
  A ledge under the step height is climbed, and one over it is not.
 
  Written as two runs of the same loop against two ledge heights, because the

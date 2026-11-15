@@ -127,6 +127,11 @@
   - `steps` — conservative advancement steps, summed over sweeps. Divided by `sweeps` it is under two
     for anything a character does; near the cap of 24 is a sweep grazing a surface it never quite
     reaches.
+- `footIk` — What the frame's foot IK did, as `{ rigs, solves, rays, misses, us }`, zeroed at the start
+  of every frame like `sweep`. `rigs` and `solves` are the characters and legs solved — a rig at weight
+  0 or switched off is not counted, because it costs nothing. `rays` is one per leg; `misses` is the
+  ones that found no ground within `reach`, which is a foot over a ledge or a level with a hole in its
+  colliders. `us` is the wall time of the whole pass in microseconds.
 - `gpuMs` — Milliseconds the GPU spent on the frame you just asked for, on the GPU's own clock.
   `three.render()` and a screenshot each leave their own measurement, so render first and read after.
   0 before anything is drawn and 0 for a run with no device — use `renderSize()` to tell those apart.

@@ -113,6 +113,9 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "bindSkin", &js_bind_skin, self)!;
 	self.js.@method(node, "bindSocket", &js_bind_socket, self)!;
 	self.js.@method(node, "unbindSocket", &js_unbind_socket, self)!;
+	self.js.@method(node, "footIk", &js_foot_ik, self)!;
+	self.js.@method(node, "footIkSet", &js_foot_ik_set, self)!;
+	self.js.@method(node, "footIkDrop", &js_foot_ik_drop, self)!;
 	self.js.@method(node, "setMorphWeights", &js_set_morph_weights, self)!;
 	self.js.@method(node, "playAnimation", &js_play_animation, self)!;
 	self.js.@method(node, "stopAnimation", &js_stop_animation, self)!;
@@ -779,6 +782,42 @@ fn bool js_bind_socket(JsRuntime* self, NodeRef holder, NodeRef root, String bon
 }
 
 <*
+ `root.footIk(bones, reach, tilt, smooth, ankle, weight)` — put a live
+ character's feet on the ground every frame. See `scene/foot_ik.c3`.
+
+ `bones` is node pairs (index, generation): the pelvis, then upper, lower and foot
+ for each leg. Answers with the rig's serial, or 0 when the root is not a live
+ skeleton or the bones do not make legs — the prelude has already checked both and
+ says which, so a zero here is a rig the host disagrees with.
+*>
+fn uint js_foot_ik(JsRuntime* self, NodeRef root, int[] bones, float reach, float tilt, float smooth, float ankle, float weight)
+{
+	if (bones.len < 8 || bones.len % 2 != 0) return 0;
+
+	NodeId[3 * FOOT_IK_LEGS] legs;
+	usz count = 0;
+	NodeId pelvis = { .index = (uint)bones[0], .generation = (uint)bones[1] };
+	for (usz i = 2; i + 1 < bones.len && count < legs.len; i += 2)
+	{
+		legs[count++] = { .index = (uint)bones[i], .generation = (uint)bones[i + 1] };
+	}
+	if (count % 3 != 0) return 0;
+
+	uint serial;
+	if (!root.scene.add_foot_rig(root.id, pelvis, legs[:count], reach, tilt, smooth, ankle, weight, &serial)) return 0;
+	return serial;
+}
+
+// `root.footIkSet(serial, weight, enabled)` — false for a rig that is gone.
+fn bool js_foot_ik_set(JsRuntime* self, NodeRef root, uint serial, float weight, bool enabled)
+{
+	return root.scene.set_foot_ik(root.id, serial, weight, enabled);
+}
+
+// `root.footIkDrop(serial)` — the clip's own pose back on the bones.
+fn bool js_foot_ik_drop(JsRuntime* self, NodeRef root, uint serial) => root.scene.remove_foot_rig(root.id, serial);
+
+<*
  `node.unbindSocket()` — take a node off whatever bone it was on.
 
  It stays where the bone last left it. Nothing in the prelude calls this yet; it
@@ -1236,6 +1275,8 @@ struct FrameStatsAnswer
 	// The frame's sweeps, as the one nested object: the four are ratios of each
 	// other. See `SweepCounters`.
 	SweepCounters sweep;
+	// The frame's foot IK — `FootIkCounters`.
+	FootIkCounters foot_ik;
 	double gpu_ms;
 	double prepare_ms;
 	double shadow_ms;
@@ -1325,6 +1366,7 @@ fn FrameStatsAnswer? js_stats(JsRuntime* self, Opt {int} id)
 		.lightmap_bytes = (double)stats.lightmap_bytes,
 		.lightmap_dirty = (uint)stats.lightmap_dirty,
 		.sweep = stats.sweep,
+		.foot_ik = stats.foot_ik,
 		.gpu_ms = timing.total,
 		.prepare_ms = timing.prepare,
 		.shadow_ms = timing.shadow,

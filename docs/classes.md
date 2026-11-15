@@ -74,6 +74,7 @@ topic. It is an Object3D, so moving it moves everything.
 - `blend(weights, { fade, sync, speed })` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a Scene has no bones
+- `footIk(options)` — throws: a Scene has no legs
 - `toJSON()`
 
 ### Details
@@ -160,6 +161,7 @@ material is one draw call.
 - `blend(weights, opts)`
 - `stop()`
 - `socket(bone)`
+- `footIk(options)` — feet on the ground; `{ skeleton: true }` characters only. See Foot IK
 - `toJSON()`
 
 ## MorphTargets
@@ -1086,6 +1088,7 @@ if (hero.animation.name === 'land' && !hero.animation.playing) hero.play('idle',
 - `blend(weights, opts)`
 - `stop()`
 - `socket(bone)`
+- `footIk(options)` — feet on the ground; `{ skeleton: true }` characters only. See Foot IK
 - `toJSON()`
 
 ## Box3
@@ -1495,6 +1498,64 @@ Asking for a bone the rig has not throws, with the list of the ones it has.
 ### Methods
 
 - `socket(boneName)`
+
+## Foot IK
+
+```js
+const ik = character.footIk({
+  pelvis: 'hips',
+  legs: [
+    { upper: 'thigh_L', lower: 'knee_L', foot: 'ankle_L' },
+    { upper: 'thigh_R', lower: 'knee_R', foot: 'ankle_R' },
+  ],
+  reach: 0.35, tilt: 30, smooth: 0.08, ankle: 0.10, weight: 1,
+});
+ik.weight = player.grounded ? 1 : 0;
+```
+
+Feet on the ground the clip did not know about. A walk is authored on a flat floor; every frame this
+casts a ray under each animated foot, lowers the pelvis for the leg that has furthest to go down, bends
+each leg with a two-bone solve so its foot meets its ground, and turns a planted foot toward the slope.
+A clip that sinks a foot into the floor has it lifted out to `ankle`. It runs after the clips and after
+every frame system — the one that walks the character included — and before the camera follow, the
+late systems and the draw.
+
+It writes bones, so it wants a character that has them: `asset.node(name, { skeleton: true })` or
+`asset.instantiate(name, { skeleton: true })`. A baked character throws, naming the option.
+
+- `pelvis` is the bone the legs hang from; it only ever comes down, so a foot on a rise never hangs
+  the other one in the air.
+- `legs` is one to four `{ upper, lower, foot }`, each the parent of the next. A twist bone in between
+  throws rather than solving wrong.
+- `reach` in world units is the most a foot is moved and the most the pelvis drops; ground further
+  away than that is a ledge, and the foot stays on the clip.
+- `tilt` in degrees is how far a planted foot turns toward the slope. A foot in the swing turns less,
+  by how far its ankle is off the ground.
+- `smooth` in seconds eases every correction; 0 snaps. A paused clock freezes it.
+- `ankle` is the ankle's height over the sole standing still; 0 measures the pose the character is in
+  when `footIk()` is called, so call it before anything plays or pass the number.
+- `weight` blends it in: 0 is the clip's pose exactly, 1 is feet on the ground. Ease it to 0 for a jump.
+
+What it costs is two rays and two closed-form solves a character: 4.4 µs a frame for Zidane on the
+Evil Forest in an optimised build, and nothing at weight 0. `three.stats().footIk` is the reading. It
+updates only the character's own world matrices and casts without re-filing the scene's query index,
+both of which would walk the whole level — so a floor that moved this frame is seen a frame late. It
+is for the characters near the camera; a crowd is too far away to see its feet.
+
+A held clip or a paused clock re-poses nothing, so every bone it touches keeps the clip's pose and is
+solved from that each frame rather than from its own last answer: a held pose stays one picture. A
+script that writes one of those bones itself is the new pose it solves from. Uniform scale is assumed
+along each leg. A `three.render()` from inside a callback draws last frame's feet.
+
+The character leaving the scene drops the rig (`ik.alive` turns false); adding it back needs `footIk()`
+again.
+
+### Members
+
+- `weight` — 0 to 1; writes cross to the host only when it changes
+- `enabled` — false puts the clip's pose back and stops solving
+- `alive` — false once disposed, or once the character left the scene
+- `dispose()` — the clip's pose back on the bones, and the rig gone
 
 ## Geometry
 
@@ -2462,6 +2523,7 @@ the times it is inside a wall.
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
+- `footIk(options)` — throws: a helper has no legs
 - `toJSON()`
 
 ## BoxHelper
@@ -2522,6 +2584,7 @@ moving it.
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
+- `footIk(options)` — throws: a helper has no legs
 - `toJSON()`
 
 ## AxesHelper
@@ -2573,6 +2636,7 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
+- `footIk(options)` — throws: a helper has no legs
 - `toJSON()`
 
 ## GridHelper
@@ -2630,6 +2694,7 @@ live. Divisions are capped at 256.
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
+- `footIk(options)` — throws: a helper has no legs
 - `toJSON()`
 
 ## WireframeHelper
@@ -2692,4 +2757,5 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
+- `footIk(options)` — throws: a helper has no legs
 - `toJSON()`

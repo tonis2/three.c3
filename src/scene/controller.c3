@@ -125,6 +125,10 @@ const int MOVE_DEFAULT_SLIDES = 4;
  The flags are floats because everything else in the block is, and a bit field
  that small is exact in a float32 — the alternative is a second buffer of a
  different type for three bits.
+
+ `MoveResult.floor` is not in it: the eight are spent and a ninth would cost the
+ shift. A crowd draws its feet at the capsule bottom, which is centimetres off on
+ a slope and invisible at crowd distance.
 *>
 const sz MOVE_RESULT_STRIDE = 8;
 
@@ -188,6 +192,18 @@ struct MoveResult
 	// Zero when airborne. Added into the capsule's position so a lift carries
 	// whoever is standing on it.
 	Vec3 ground_velocity;
+
+	<*
+	 The ground straight below the capsule's axis, where a character's feet are
+	 drawn. Only meaningful when `grounded`.
+
+	 Not `position` minus the half-height: that point is the bottom of the capsule,
+	 which rests on its skin and, on a slope, on the side of its hemisphere — two
+	 to five centimetres of daylight under a walking character. Over a ledge's rim
+	 or a crack, where nothing walkable is under the axis, it is the height the
+	 capsule is resting at instead, so the feet stay on the lip rather than in it.
+	*>
+	Vec3 floor;
 }
 
 <*
@@ -519,10 +535,45 @@ fn MoveResult Scene.move_capsule(&self, Assets* assets, Vec3 centre, Vec3 motion
 			if (was_grounded && motion.y <= 0.0f) at = at + delta;
 			if (options.dt > 1e-6f) result.ground_velocity = delta / options.dt;
 		}
+
+		// Last, once `at` is final: the snap and the carry both move it.
+		result.floor = self.floor_under_axis(assets, &soup, at, options, skip, floor);
 	}
 
 	result.position = at;
 	return result;
+}
+
+<*
+ The walkable ground straight under a resting capsule's axis — `MoveResult.floor`.
+
+ Cast from the lower hemisphere's centre, so nothing inside the capsule can be hit,
+ and only as deep as the hemisphere can hang over the slope it rests on: the
+ contact normal says how steep that is. Deeper would find the ground under a ledge
+ the capsule is standing on the rim of.
+*>
+fn Vec3 Scene.floor_under_axis(
+	&self,
+	Assets* assets,
+	TriangleSoup* soup,
+	Vec3 at,
+	MoveOptions options,
+	IgnoreSet skip,
+	SweepHit contact
+)
+{
+	Vec3 origin = at - (Vec3) { 0, options.half_height, 0 };
+	float sag   = options.radius * (1.0f / math::max(contact.normal.y, 0.2f) - 1.0f);
+	float reach = options.radius + options.skin * 3.0f + sag;
+
+	Vec3 point;
+	Vec3 normal;
+	if (self.soup_ray_down(assets, soup, origin, reach, skip, &point, &normal)
+		&& walkable(normal, options.slope_limit))
+	{
+		return point;
+	}
+	return { at.x, contact.point.y, at.z };
 }
 
 <*

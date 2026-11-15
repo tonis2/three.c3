@@ -44,6 +44,7 @@ module three;
 
 import std::io;
 import std::time;
+import std::math;
 import std::math::vector;
 import fastjs::js;
 import std::collections::list;
@@ -267,6 +268,19 @@ fn void JsRuntime.step_animations(&self, double dt_ms)
 }
 
 <*
+ Puts every rigged character's feet on the ground — `Scene.solve_foot_ik`.
+
+ Unlike the clips it runs on a paused frame too: the solve starts from the clip's
+ pose each time, so a pause re-poses to the same picture rather than leaving the
+ bones to whatever a script last wrote.
+*>
+fn void JsRuntime.solve_foot_ik(&self, double dt_ms)
+{
+	if (self.pass == null) return;
+	self.pass.scene.solve_foot_ik((float)(math::max(dt_ms, 0.0) / 1000.0));
+}
+
+<*
  Runs the callback once, if there is one.
 
  The host says what time it is. A tick that read the wall clock could only be
@@ -322,7 +336,11 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	// the frame it is being read in. Every scene, not just the rendered one: a
 	// script that sweeps the level it is building would otherwise accumulate there
 	// for ever. See `SweepCounters`.
-	foreach (each : self.pass.scenes) each.sweep = { };
+	foreach (each : self.pass.scenes)
+	{
+		each.sweep   = { };
+		each.foot_ik = { };
+	}
 
 	// The clock first, before anything asks what a frame is worth. One conversion,
 	// one answer: the clip player, the solver, the fixed loop, the follow camera
@@ -397,6 +415,8 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 
 	if (!self.is_animating())
 	{
+		// No script this frame, but a clip may still have re-posed a rigged character.
+		self.solve_foot_ik(delta_ms);
 		// Nothing will run this frame, so nothing will be told. Dropped rather than
 		// kept, or a world stepping under a scene with no callback grows a list
 		// nobody ever reads.
@@ -466,6 +486,12 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 	if (!self.timed_out) self.wake_frame_waiters();
 	if (!self.timed_out) self.drain_frame_jobs();
 	long after_jobs = (long)self.started.to_now();
+
+	// Feet on the ground, once everything that moves a character has: the clips
+	// above, and the systems that walk it and re-pose it. Before the follow and the
+	// late systems, so a camera or a label sees the lowered pelvis, and before the
+	// draw builds the palette from the bones.
+	self.solve_foot_ik(delta_ms);
 
 	// The follow, now rather than at the defer, and then whatever has to agree
 	// with where it put the camera: a label projected over a character by a

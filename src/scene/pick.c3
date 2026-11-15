@@ -51,10 +51,14 @@ struct Hit
 
  @param ray : `Origin and a unit direction, world space.`
  @param blockers_only : `Skip nodes with Node.blocks off — the floor under a nav waypoint is not a character's foot.`
+ @param skip : `Subtrees left out — a foot's ray is not to land on the leg it belongs to.`
+ @param max_distance : `How far the ray reaches; zero or less is unbounded.`
+ @param refile : `False answers from the index as it stands when it has one, rather than first re-filing what moved since — which walks every world matrix in the scene. Boxes of things moved since then are a frame old; the foot IK takes that, a pick does not.`
 *>
-fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray, bool blockers_only = false)
+fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray, bool blockers_only = false, IgnoreSet skip = { }, float max_distance = 0.0f, bool refile = true)
 {
-	Hit best = { .hit = false, .distance = float::max, .node = NO_NODE };
+	float limit = max_distance > 0.0f ? max_distance : float::max;
+	Hit best = { .hit = false, .distance = limit, .node = NO_NODE };
 	if (assets == null)
 	{
 		best.distance = 0;
@@ -71,11 +75,11 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray, bool blockers_on
 	// The broad phase itself is unchanged: the same world box from the same
 	// `world_mesh_bounds`, tested with the same `intersect_ray`. What changed is
 	// which boxes are reached.
-	self.ensure_query_index(assets);
+	if (refile || !self.query.current) self.ensure_query_index(assets);
 	QueryIndex* index = &self.query;
 	index.stamp_now++;
 
-	index.@walk_ray(ray, float::max ; uint i, float cell_near)
+	index.@walk_ray(ray, limit ; uint i, float cell_near)
 	{
 		// Nearest cell first, so a cell beginning beyond the best hit so far
 		// cannot improve on it. That is what makes the walk sublinear rather
@@ -89,7 +93,7 @@ fn Hit Scene.raycast(&self, Assets* assets, collision::Ray ray, bool blockers_on
 			QueryEntry entry         = index.entries[(sz)i];
 			collision::HitInfo broad = entry.box.intersect_ray(ray);
 			Node* node               = broad.collided && broad.depth <= best.distance ? self.query_node(entry) : null;
-			if (node != null && (!blockers_only || node.blocks))
+			if (node != null && (!blockers_only || node.blocks) && (skip.count == 0 || !self.ignored(entry.node, skip)))
 			{
 				Hit hit;
 				if (self.ray_hits_node(assets, entry.node, ray, best.distance, &hit)) best = hit;

@@ -1253,6 +1253,84 @@ fn bool soup_covers(TriangleSoup* soup, collision::Aabb3 box)
 		&& outer.max.x >= box.max.x && outer.max.y >= box.max.y && outer.max.z >= box.max.z;
 }
 
+<*
+ The nearest triangle straight below `origin`, within `length`.
+
+ From the call's list when it covers the ray, and gathered here otherwise — the way
+ `sweep_capsule` does it, and with the same skip set, so a character's own mesh is
+ never its floor. Two-sided, because a level's winding is not something to trust.
+
+ @param [&out] point : "Where the ray met the triangle"
+ @param [&out] normal : "That triangle's normal, turned to face up"
+ @require length > 0 : "A ray needs a length"
+
+ @return "Whether anything was within `length` of `origin`"
+*>
+fn bool Scene.soup_ray_down(
+	&self,
+	Assets* assets,
+	TriangleSoup* soup,
+	Vec3 origin,
+	float length,
+	IgnoreSet skip,
+	Vec3* point,
+	Vec3* normal
+)
+{
+	if (assets == null) return false;
+
+	// Thin rather than zero: a box with no width is one `collides` can miss on an
+	// edge the ray runs down exactly.
+	Vec3 thin            = { 1e-3f, 1e-3f, 1e-3f };
+	collision::Aabb3 box = { origin - (Vec3) { 0, length, 0 } - thin, origin + thin };
+	collision::Ray ray   = { .origin = origin, .direction = { 0, -1, 0 } };
+
+	@pool()
+	{
+		collision::TriangleVerts[] triangles;
+		uint[] live;
+		usz count = 0;
+
+		if (soup_covers(soup, box))
+		{
+			triangles = soup.triangles.array_view();
+			live      = alloc::new_array(tmem, uint, triangles.len);
+			count     = soup_in_box(soup, box, live);
+		}
+		else
+		{
+			List{collision::TriangleVerts} mine;
+			List{NodeId} mine_owners;
+			mine.tinit(16);
+			mine_owners.tinit(16);
+			self.gather_triangles(assets, box, skip, &mine, &mine_owners);
+			triangles = mine.array_view();
+			live      = alloc::new_array(tmem, uint, triangles.len);
+			for (usz i = 0; i < triangles.len; i++) live[count++] = (uint)i;
+		}
+
+		float best = length;
+		bool found = false;
+		collision::TriangleVerts nearest;
+		for (usz i = 0; i < count; i++)
+		{
+			collision::TriangleVerts tri = triangles[live[i]];
+			float t;
+			if (!tri.ray_t(ray, &t) || t > best) continue;
+			best    = t;
+			nearest = tri;
+			found   = true;
+		}
+		if (!found) return false;
+
+		Vec3 up = nearest.normal();
+		if (up.y < 0.0f) up = -up;
+		*point  = origin - (Vec3) { 0, best, 0 };
+		*normal = up;
+		return true;
+	};
+}
+
 // A triangle's own bounds, for the per-sweep filter over a call's list.
 fn collision::Aabb3 triangle_box(collision::TriangleVerts tri)
 {

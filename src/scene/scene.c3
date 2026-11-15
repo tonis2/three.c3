@@ -451,6 +451,9 @@ struct SceneStats
 	 frame; a `--script` run with no frames in it accumulates over the script.
 	*>
 	SweepCounters sweep;
+
+	// What the foot IK did since the last host tick — `FootIkCounters`.
+	FootIkCounters foot_ik;
 }
 
 // A drawable node, flattened out of the hierarchy and waiting to be sorted into
@@ -704,6 +707,12 @@ struct Scene
 	// a script reading it inside a frame is told about that frame.
 	SweepCounters sweep;
 
+	// The characters whose feet are put on the ground every frame — `scene/foot_ik.c3`.
+	// A handful at most: it is for heroes. Zeroed like `sweep`, and for its reason.
+	List{FootIkRig} foot_rigs;
+	uint foot_ik_serial;
+	FootIkCounters foot_ik;
+
 	// How many nodes are marked static right now. Maintained by the two writers of
 	// `Node.static_caster` and by `kill`, and read by `MeshPass.prepare` to decide
 	// whether the light's fit should hold still — see `ShadowMap.fit`'s `stable`. A
@@ -849,6 +858,7 @@ fn Scene* Scene.init(&self)
 	self.sockets.init(mem, 4);
 	self.morphs.init(mem, 4);
 	self.palettes.init(mem, 1);
+	self.foot_rigs.init(mem, 1);
 	self.draws.init(mem, 64);
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
@@ -1046,6 +1056,8 @@ fn void Scene.free(&self)
 	foreach (&entry : self.palettes) entry.matrices.free();
 	self.palettes.free();
 	self.palettes = { };
+	self.foot_rigs.free();
+	self.foot_rigs = { };
 	self.draws.free();
 	self.instances.free();
 	self.buckets.free();
@@ -2288,6 +2300,52 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	}
 }
 
+<*
+ The world matrices of one subtree, without walking the rest of the scene.
+
+ For a pass that needs one character's bones current in the middle of a frame —
+ the foot IK — where the whole walk is most of what that pass would cost. The
+ ancestors' matrices are computed into locals and their flags left alone, so the
+ full walk still finds them dirty and still updates their other children; the
+ subtree's are written as the full walk writes them. An ancestor that moved makes
+ the full walk do this subtree again, which is right and costs the subtree.
+*>
+fn void Scene.update_subtree_matrices(&self, NodeId id)
+{
+	if (self.matrices_current) return;
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	NodeId[64] chain;
+	usz depth = 0;
+	NodeId at = node.parent;
+	while (at.is_set())
+	{
+		Node* above = self.node(at);
+		if (above == null) return;
+		// Deeper than any rig is parented; the whole walk is the honest answer.
+		if (depth == chain.len)
+		{
+			self.update_world_matrices();
+			return;
+		}
+		chain[depth++] = at;
+		at = above.parent;
+	}
+
+	Matrix4f world = matrix::IDENTITY4{float};
+	bool visible   = true;
+	bool changed   = false;
+	for (usz i = depth; i > 0; i--)
+	{
+		Node* above = self.node(chain[i - 1]);
+		changed     = changed || above.dirty;
+		world       = changed ? world * above.local_matrix() : above.world;
+		visible     = visible && above.visible;
+	}
+	self.update_branch(id, world, visible, changed);
+}
+
 // ============================================================================
 // Culling
 // ============================================================================
@@ -3053,6 +3111,7 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		// Copied out rather than recounted: they are what the sweeps since the last
 		// tick actually did, and nothing this call does adds to them.
 		.sweep = self.sweep,
+		.foot_ik = self.foot_ik,
 	};
 
 	foreach (&node : self.nodes)

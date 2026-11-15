@@ -816,7 +816,7 @@ this is for stands up.
 
 The character controller. Sweeps a capsule from `position` by `motion`, slides along whatever it hits,
 climbs a ledge under the step height, and answers with
-`{ position, remaining, grounded, slope, ground, hit, normal, stepped, slides }`.
+`{ position, remaining, grounded, slope, ground, hit, normal, stepped, slides, floor, groundVelocity }`.
 
 Options are `{ radius, height, step, slope, skin, snap, ignore }`:
 
@@ -829,6 +829,14 @@ Options are `{ radius, height, step, slope, skin, snap, ignore }`:
 It integrates nothing: gravity, the velocity and the jump are yours. A frame is
 `three.moveAndSlide(where, [vx * dt, vy * dt, vz * dt], opts)` followed by copying `r.position` onto
 whatever you are driving. It is kinematic and touches no rigidbody.
+
+**Draw the feet on `floor`, not on the capsule.** `floor` is the walkable ground straight below the
+capsule's axis, or null in the air. The capsule's own bottom, `position.y` minus half the height, rests
+on its `skin` and, on a slope, on the side of its hemisphere: on the Evil Forest's ground that is 2 cm
+of daylight under a standing character and 5 cm on its steeper patches. Over a ledge's rim or a crack,
+where nothing walkable is under the axis, `floor` is the height the capsule is resting at, so the feet
+stay on the lip. Keep feeding `position` back into the next call — `floor` is for drawing, and a
+capsule placed on it would start every move inside its own skin.
 
 Pass the character's own object as `ignore`, and pass the Group rather than one mesh out of it:
 `ignore` leaves the object's whole subtree out, so a character built from a body, a head and four
@@ -901,6 +909,10 @@ agent 3 does not see agent 2's new position. Resolving in array order instead wo
 depend on how you happened to store your crowd, and `three.steer`'s separation already assumes
 simultaneity. Two agents can therefore end a step overlapping; separation keeps that rare and the next
 step's depenetration resolves it.
+
+There is no `floor` in the block: its eight floats are spent and a ninth would cost the stride its
+shift. A crowd draws its feet at the capsule bottom, which is centimetres off on a slope and invisible
+at crowd distance; the hero who needs better calls `three.moveAndSlide`.
 
 It answers with no node handles. The single form reports `ground` and `hit`; a flat float array cannot,
 and "what am I standing on" is a moving-platform question belonging to the one character riding the

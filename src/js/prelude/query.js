@@ -296,6 +296,10 @@ export function moveAndSlide(position, motion, options = null) {
 		remaining: new Vector3(null, raw.remaining[0], raw.remaining[1], raw.remaining[2]),
 		normal: new Vector3(null, raw.normal[0], raw.normal[1], raw.normal[2]),
 		groundVelocity: new Vector3(null, gv[0], gv[1], gv[2]),
+		// The ground under the capsule's axis — where the feet are drawn, rather
+		// than `position` minus the half-height, which floats on the skin and on
+		// the hemisphere's side of a slope. Null in the air.
+		floor: raw.grounded ? new Vector3(null, raw.floor[0], raw.floor[1], raw.floor[2]) : null,
 		grounded: raw.grounded,
 		slope: raw.slope,
 		stepped: raw.stepped,

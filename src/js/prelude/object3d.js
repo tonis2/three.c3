@@ -23,6 +23,51 @@ function sceneOf(object) {
 
 const PLAY_OPTIONS = ['loop', 'speed', 'time', 'fade', 'sync'];
 const BLEND_OPTIONS = ['fade', 'sync', 'speed'];
+const FOOT_IK_OPTIONS = ['pelvis', 'legs', 'reach', 'tilt', 'smooth', 'ankle', 'weight'];
+const FOOT_IK_LEG_KEYS = ['upper', 'lower', 'foot'];
+
+// What `character.footIk()` answers with: the rig's two dials and its end. Writes
+// cross to the host only when the value changes, so setting `weight` every frame
+// from an eased number costs nothing on the frames it holds still.
+class FootIk {
+	constructor(owner, serial, weight) {
+		this._owner = owner;
+		this._serial = serial;
+		this._weight = weight;
+		this._enabled = true;
+	}
+
+	get weight() { return this._weight; }
+	set weight(v) {
+		const w = Math.min(1, Math.max(0, +v));
+		if (!Number.isFinite(w)) throw new TypeError(`footIk: weight must be a number from 0 to 1, not ${String(v)}`);
+		if (w === this._weight) return;
+		this._weight = w;
+		this._push();
+	}
+
+	get enabled() { return this._enabled; }
+	set enabled(v) {
+		if (!!v === this._enabled) return;
+		this._enabled = !!v;
+		this._push();
+	}
+
+	// Whether the host still has the rig: false once disposed, or once the
+	// character left the scene and took its bones with it.
+	get alive() { return this._serial !== 0 && this._owner._h !== null; }
+
+	_push() {
+		if (!this.alive) return;
+		if (!this._owner._h.footIkSet(this._serial, this._weight, this._enabled)) this._serial = 0;
+	}
+
+	// The clip's own pose back on the bones, and the rig gone.
+	dispose() {
+		if (this.alive) this._owner._h.footIkDrop(this._serial);
+		this._serial = 0;
+	}
+}
 
 // A number a clip call can use, or a sentence naming the one that is not.
 function finite(value, what, verb) {
@@ -418,6 +463,65 @@ export class Object3D {
 			return 'socket() works on a character from asset.instantiate(). This object has no skeleton.';
 		}
 		return this._bones.length ? `this one has: ${this._bones.join(', ')}` : 'this one has no bones';
+	}
+
+	// -------------------------------------------------------------------
+	// Feet on the ground
+	//
+	// The clip was authored on a flat floor; this bends the legs so the feet
+	// meet the ground under them, every frame, after everything that moves the
+	// character. A ray under each foot, the pelvis lowered for the lower one, a
+	// two-bone solve per leg and the foot turned to the slope while it stands.
+	// It writes bones, so it needs them: `{ skeleton: true }`.
+	footIk(options = {}) {
+		const where = 'footIk()';
+		this._checkAnimationOptions(options, FOOT_IK_OPTIONS, where);
+		if (this._h === null) {
+			throw new Error(`${where} needs ${this._name || 'the object'} to be in a scene — add it first`);
+		}
+		if (!this._clips) {
+			throw new Error(`${where} works on the object asset.instantiate() or asset.node() returned — the character's root. This object is not one.`);
+		}
+		if (!this._liveSkin) {
+			const name = this._name || 'name';
+			throw new Error(
+				`${where} moves bones, and ${this._name || 'this character'} was loaded without them — `
+				+ `asset.node('${name}', { skeleton: true }) or asset.instantiate(name, { skeleton: true }) keeps them`
+			);
+		}
+		const { pelvis, legs, reach = 0.35, tilt = 30, smooth = 0.08, ankle = 0, weight = 1 } = options;
+		finite(reach, 'reach', 'footIk'); finite(tilt, 'tilt', 'footIk');
+		finite(smooth, 'smooth', 'footIk'); finite(ankle, 'ankle', 'footIk'); finite(weight, 'weight', 'footIk');
+		if (!Array.isArray(legs) || legs.length < 1 || legs.length > 4) {
+			throw new TypeError(`${where}: legs is one to four { upper, lower, foot } bone names, e.g. [{ upper: 'thigh_L', lower: 'knee_L', foot: 'ankle_L' }, ...]`);
+		}
+		const bone = (name) => {
+			const found = typeof name === 'string' ? this.getObjectByName(name) : null;
+			if (!found || found === this) throw new Error(`no bone named "${name}" — ${this._boneList()}`);
+			return found;
+		};
+		const chain = [bone(pelvis)];
+		for (const leg of legs) {
+			if (leg === null || typeof leg !== 'object') throw new TypeError(`${where}: each leg is { upper, lower, foot }`);
+			for (const key of Object.keys(leg)) {
+				if (!FOOT_IK_LEG_KEYS.includes(key)) throw new TypeError(`${where}: '${key}' is not part of a leg — a leg is { upper, lower, foot }`);
+			}
+			const [upper, lower, foot] = FOOT_IK_LEG_KEYS.map((k) => bone(leg[k]));
+			if (lower.parent !== upper) throw new Error(`${where}: "${leg.lower}" does not hang from "${leg.upper}" — a leg is three bones, each the parent of the next`);
+			if (foot.parent !== lower) throw new Error(`${where}: "${leg.foot}" does not hang from "${leg.lower}" — a leg is three bones, each the parent of the next`);
+			let above = upper.parent;
+			while (above && above !== chain[0]) above = above.parent;
+			if (!above) throw new Error(`${where}: "${leg.upper}" is not under the pelvis "${pelvis}"`);
+			chain.push(upper, lower, foot);
+		}
+		// Bound now if nothing has played yet: the rig needs the host's player.
+		this._bindAnimation();
+		const pairs = new Int32Array(chain.length * 2);
+		chain.forEach((o, i) => { pairs[i * 2] = o._h.index; pairs[i * 2 + 1] = o._h.generation; });
+		const w = Math.min(1, Math.max(0, weight));
+		const serial = this._h.footIk(pairs, reach, tilt, smooth, ankle, w);
+		if (!serial) throw new Error(`${where}: the host refused the rig on ${this._name || 'this character'} — it is not a live skeleton`);
+		return new FootIk(this, serial, w);
 	}
 
 	// Flat triples — glTF node index, host node index, host node generation
