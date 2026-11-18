@@ -13,14 +13,23 @@
  along +X over 0–3 s, `wave` at 3–3.5 s, the one-off `intro_trip` (the arm
  drops 0.4 m) at 5–5.333 s, three camera keys and two events.
  `finer.cutscene.glb` loops `wave` twice over 1–2 s, plays `walk` from 0.25 s
- in over 3–3.5 s, and has a baked, linear camera. The `cutscene_*.gltf` files
- are hand-made broken ones.
+ in over 3–3.5 s, and has a baked, linear camera. `turn.cutscene.gltf` is a
+ hand-made version 2 file: `hero` placed and turned twice, and a `post` to face.
+ The `cutscene_*.gltf`, `turn_*.gltf` and `place_*.gltf` files are hand-made
+ broken ones.
+
+ `walk_turn_play.cutscene.gltf` and `with_one_off.cutscene.gltf` / `.glb` are
+ Rigsmith's exports (`crig_tests::cutscene_samples`), and `<name>.poses.json` is
+ what Rigsmith's preview poses at a list of times. Their actors are
+ `sample_actor.gltf`: actor → hips → shoulder_L → hand_L and one triangle, with
+ clips `Walk` and `Rest` as long as Rigsmith's, which move only the hips.
 *>
 module three_tests::cutscene;
 
 import three;
 import three_tests::device;
 import std::core::test;
+import std::io::file;
 
 macro @with_gpu_js(; @body(three::JsRuntime* run))
 {
@@ -586,7 +595,7 @@ fn void a_bad_cutscene_file_says_what_is_wrong() @test
 		String[] names = { "plain", "version", "path", "missing", "bone", "stray", "noFile", "json" };
 		String[] says = {
 			"hierarchy.glb'): this glTF has no CUSTOM_cutscene extension",
-			"CUSTOM_cutscene is version 2, and this engine reads version 1",
+			"CUSTOM_cutscene is version 3, and this engine reads versions 1 and 2",
 			"actors[0].strips[0].path is 3, and the file has 1 path",
 			"'test/fixtures/nowhere.cutscene.glb' is not there",
 			"moves 'wrist', and actor 'hero' (from test/fixtures/cutscene_hero.glb) has no node by that name",
@@ -634,5 +643,529 @@ fn void a_cutscene_loaded_and_disposed_leaves_the_character_as_it_was() @test
 		`, "after forty cutscenes");
 		test::@check(left == `{"clips":"walk,wave","own":"walk,wave","animation":null,"arm":[6,1,0],"systems":0}`,
 			"the character's own clips, the arm at rest where the walk left the hero, nothing running: %s", left);
+	};
+}
+
+// Where an object's +Z faces, in whole degrees about +Y, read off its Euler XYZ.
+const String FACING = `
+	globalThis.facing = (o) => {
+		const a = o.rotation.x, b = o.rotation.y;
+		return Math.round(Math.atan2(Math.sin(b), Math.cos(a) * Math.cos(b)) * 180 / Math.PI) + 0;
+	};
+	globalThis.deg = (d) => d * Math.PI / 180;
+	globalThis.facingAt = (cs, o, times) => times.map(t => { cs.seek(t); return facing(o); });
+`;
+
+<*
+ A version 2 `place` is the actor's home: where `seek(0)` and `play()` put it,
+ whatever transform the object had, and its scale is left alone.
+*>
+fn void a_place_is_where_the_actor_starts() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@ok(run, HERO.tconcat(FACING).tconcat(`
+			globalThis.hero = kit.node("hero");
+			hero.scale.set(2, 2, 2);
+			scene.add(hero);
+			globalThis.post = new three.Group();
+			scene.add(post);
+			globalThis.cs = three.cutscene.load("test/fixtures/turn.cutscene.gltf", { actors: { hero, post }, camera: false });
+			globalThis.stand = () => [...hero.position.toArray().map(round), facing(hero), round(hero.scale.x)];
+		`));
+		String sought = @value(run, "cs.seek(0); return [stand(), post.position.toArray().map(round)];", "seek to the start");
+		test::@check(sought == `[[3,0,2,90,2],[8,0,2]]`, "both at their places, the hero turned to +X and still twice the size: %s", sought);
+
+		@ok(run, "hero.position.set(-4, 0, -4); hero.rotation = [0, 0, 0]; cs.play();");
+		double at = 0;
+		ticks(run, &at, 2);
+		String played = @value(run, "cs.pause(); return stand();", "play two frames");
+		test::@check(played == `[3,0,2,90,2]`, "moved away and played, it starts at its place: %s", played);
+		@ok(run, "cs.dispose();");
+
+		// Built in code too, with the quaternion's length taken off.
+		String made = @value(run, `
+			const cs = three.cutscene.create({ actors: [{ row: "hero",
+				place: { position: [1, 2, 3], rotation: [0, 0, 0, 2] } }] }, { actors: { hero } });
+			cs.seek(0);
+			return stand();
+		`, "a place in a spec");
+		test::@check(made == `[1,2,3,0,2]`, "create() places it the same: %s", made);
+	};
+}
+
+fn void a_version_2_file_turns_to_a_point_and_to_an_actor() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String turned = @value(run, HERO.tconcat(FACING).tconcat(`
+			const hero = kit.node("hero");
+			scene.add(hero);
+			const post = new three.Group();
+			scene.add(post);
+			const cs = three.cutscene.load("test/fixtures/turn.cutscene.gltf", { actors: { hero, post }, camera: false });
+			const out = facingAt(cs, hero, [0, 1.5, 2, 2.5, 3]);
+			cs.dispose();
+			return out;
+		`), "seek through both turns");
+		test::@check(turned == `[90,45,0,45,90]`, "from +X round to the point at +Z, then to the post at +X: %s", turned);
+	};
+}
+
+fn void a_turn_ends_facing_its_point() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String turned = @value(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.position.set(0, 0, 0);
+			rig.rotation = [0, 0, 0];
+			const cs = three.cutscene.create({ actors: [{ row: "hero", strips: [
+				{ type: "play", start: 0, clip: "slide", loop: true },
+				{ type: "turn", start: 1, end: 3, point: [5, 0, 0] } ] }] }, { actors: { hero: rig } });
+			const headings = facingAt(cs, rig, [0.5, 1.5, 2, 3, 4]);
+			cs.seek(2);
+			return { headings, clip: rig.animation.name, at: rig.position.toArray().map(round) };
+		`), "seek through the turn");
+		test::@check(turned == `{"headings":[0,14,45,90,90],"clip":"slide","at":[0,0,0]}`,
+			"eased in and out to face +X, held after, the clip and the place untouched: %s", turned);
+	};
+}
+
+fn void a_turn_goes_the_short_way_round() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String turned = @value(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.position.set(0, 0, 0);
+			rig.rotation = [0, deg(170), 0];
+			const cs = three.cutscene.create({ actors: [{ row: "hero", strips: [
+				{ type: "turn", start: 0, end: 1, ease: "linear", point: [Math.sin(deg(-170)), 0, Math.cos(deg(-170))] } ] }] },
+				{ actors: { hero: rig } });
+			return facingAt(cs, rig, [0, 0.25, 0.75, 1]);
+		`), "seek through the turn");
+		test::@check(turned == `[170,175,-175,-170]`, "20° on through 180°, not 340° back: %s", turned);
+	};
+}
+
+fn void a_turn_starts_from_an_earlier_turning_move() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String turned = @value(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.rotation = [0, 0, 0];
+			const cs = three.cutscene.create({ actors: [{ row: "hero", strips: [
+				{ type: "move", start: 0, end: 1, ease: "linear", path: [[0,0,0],[4,0,0]] },
+				{ type: "turn", start: 1, end: 2, ease: "linear", point: [9, 0, -5 * Math.sqrt(3)] } ] }] },
+				{ actors: { hero: rig } });
+			return facingAt(cs, rig, [0.5, 1, 1.5, 2]);
+		`), "seek along the walk and the turn");
+		test::@check(turned == `[90,90,120,150]`, "the turn picks up the walk's +X, not the home 0°: %s", turned);
+	};
+}
+
+<*
+ The post walks on while the hero turns to it. The hero faces where the post
+ was as the turn began, and finds that from the post's strips, not from where
+ the post object happens to be.
+*>
+fn void a_turn_to_an_actor_faces_where_it_stood_as_the_turn_began() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String turned = @value(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.position.set(0, 0, 0);
+			rig.rotation = [0, 0, 0];
+			const post = new three.Group();
+			scene.add(post);
+			const cs = three.cutscene.create({ actors: [
+				{ row: "hero", strips: [{ type: "turn", start: 1, end: 2, ease: "linear", actor: "post" }] },
+				{ row: "post", strips: [{ type: "move", start: 0, end: 2, ease: "linear", turn: false, path: [[0,0,5],[10,0,5]] }] } ] },
+				{ actors: { hero: rig, post } });
+			const headings = facingAt(cs, rig, [1, 2, 3]);
+			cs.seek(2);
+			return { headings, post: round(post.position.x) };
+		`), "seek through the turn");
+		test::@check(turned == `{"headings":[0,45,45],"post":10}`,
+			"facing (5, 0, 5), where the post was at 1 s, while it stands at x = 10: %s", turned);
+	};
+}
+
+fn void a_turn_with_nothing_to_face_keeps_its_heading() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String kept = @value(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.position.set(0, 0, 0);
+			rig.rotation = [0, deg(30), 0];
+			const cs = three.cutscene.create({ actors: [{ row: "hero", strips: [
+				{ type: "turn", start: 0, end: 1, point: [0, 3, 0] },
+				{ type: "turn", start: 1, end: 2, actor: "hero" } ] }] }, { actors: { hero: rig } });
+			return facingAt(cs, rig, [0.5, 1, 1.5, 2.5]);
+		`), "seek through both turns");
+		test::@check(kept == `[30,30,30,30]`, "a point straight overhead and the actor itself leave it at 30°: %s", kept);
+	};
+}
+
+<*
+ A move with `turn: false` keeps the heading of the turning strip before it, so
+ its rotation is the same whatever was posed first, and a played frame is the
+ frame a seek to its time shows.
+*>
+fn void a_seek_lands_on_the_same_rotation_from_anywhere() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@ok(run, ACTOR.tconcat(FACING).tconcat(`
+			rig.rotation = [0, 0, 0];
+			globalThis.cs = three.cutscene.create({ actors: [{ row: "hero", strips: [
+				{ type: "move", start: 0.5, end: 1, ease: "linear", path: [[0,0,0],[4,0,0]] },
+				{ type: "move", start: 1, end: 2, ease: "linear", turn: false, path: [[4,0,0],[4,0,4]] },
+				{ type: "turn", start: 3, end: 4, ease: "linear", point: [6, 0, 4 + 2 * Math.sqrt(3)] } ] }] },
+				{ actors: { hero: rig } });
+			globalThis.rot = () => JSON.stringify([rig.rotation.x, rig.rotation.y, rig.rotation.z].map(v => Math.round(v * 1e4) / 1e4));
+			globalThis.same = (t) => {
+				const seen = [0, 0.75, 2.5, 3.9].map(from => { cs.seek(from); cs.seek(t); return rot(); });
+				return seen.every(r => r === seen[0]);
+			};
+		`));
+		String sought = @value(run, "return { walk: same(1.5), turn: same(3.5), headings: facingAt(cs, rig, [0, 1.5, 3.5]) };", "seek from four places");
+		test::@check(sought == `{"walk":true,"turn":true,"headings":[0,90,60]}`,
+			"the same rotation from every earlier seek: %s", sought);
+
+		@ok(run, "cs.seek(0); cs.play();");
+		double at = 0;
+		ticks(run, &at, 210);
+		String played = @value(run, `
+			const t = cs.time, r = rot();
+			cs.pause();
+			cs.seek(0);
+			cs.seek(t);
+			return { inTurn: t > 3 && t < 4, same: r === rot() };
+		`, "play into the turn");
+		test::@check(played == `{"inTurn":true,"same":true}`, "the played frame is the sought one: %s", played);
+	};
+}
+
+fn void the_version_2_additions_are_refused_where_they_are_wrong() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@ok(run, HERO.tconcat(`
+			const hero = kit.node("hero");
+			scene.add(hero);
+			globalThis.tries = {};
+			const attempt = (name, fn) => { try { fn(); tries[name] = "loaded"; } catch (e) { tries[name] = e.message; } };
+			const fixture = (name) => "test/fixtures/" + name;
+			const turn = (strip) => three.cutscene.create({ actors: [{ row: "hero",
+				strips: [{ type: "turn", start: 0, end: 1, ...strip }] }] }, { actors: { hero } });
+			const place = (place) => three.cutscene.create({ actors: [{ row: "hero", place }] }, { actors: { hero } });
+			attempt("v1turn", () => three.cutscene.load(fixture("turn_version1.gltf"), { actors: { hero } }));
+			attempt("v1place", () => three.cutscene.load(fixture("place_version1.gltf"), { actors: { hero } }));
+			attempt("nobody", () => three.cutscene.load(fixture("turn_no_actor.gltf"), { actors: { hero } }));
+			attempt("neither", () => turn({}));
+			attempt("both", () => turn({ point: [0, 0, 1], actor: "hero" }));
+			attempt("backwards", () => turn({ start: 1, end: 1, point: [0, 0, 1] }));
+			attempt("clip", () => turn({ point: [0, 0, 1], clip: "wave" }));
+			attempt("ease", () => turn({ point: [0, 0, 1], ease: "fast" }));
+			attempt("point", () => turn({ point: [0, 1] }));
+			attempt("rotation", () => place({ position: [0, 0, 0], rotation: [0, 0, 0] }));
+			attempt("zero", () => place({ position: [0, 0, 0], rotation: [0, 0, 0, 0] }));
+			attempt("position", () => place({ rotation: [0, 0, 0, 1] }));
+		`));
+		String[] names = { "v1turn", "v1place", "nobody", "neither", "both", "backwards", "clip", "ease", "point",
+			"rotation", "zero", "position" };
+		String[] says = {
+			"turn_version1.gltf'): actors[0].strips[0].type 'turn' needs CUSTOM_cutscene version 2, and the file says version 1",
+			"place_version1.gltf'): actors[0].place needs CUSTOM_cutscene version 2, and the file says version 1",
+			"turn_no_actor.gltf'): actors[0].strips[0].actor is 'nobody', and this cutscene has no actor of that row",
+			"actors[0].strips[0]: a turn faces a point: [x, y, z] or an actor: '<row>', names neither",
+			"actors[0].strips[0]: a turn faces a point: [x, y, z] or an actor: '<row>', not both",
+			"actors[0].strips[0]: a turn needs an end after its start",
+			"actors[0].strips[0]: a turn plays no clip",
+			"actors[0].strips[0].ease is one of linear, in, out, inout",
+			"actors[0].strips[0].point wants [x, y, z], not [0,1]",
+			"actors[0].place.rotation wants a quaternion [x, y, z, w], not [0,0,0]",
+			"actors[0].place.rotation is all zeros, which is not a rotation",
+			"actors[0].place.position wants [x, y, z]",
+		};
+		foreach (i, name : names)
+		{
+			String said = @value(run, string::tformat("return tries.%s;", name), name);
+			test::@check(said.contains(says[i]), "%s: expected '%s' in %s", name, says[i], said);
+		}
+	};
+}
+
+// Rigsmith's sample exports, played on `sample_actor.gltf` copies, and the helpers the checks read them with.
+const String SAMPLE = `
+	globalThis.kit = three.load("test/fixtures/sample_actor.gltf");
+	globalThis.scene = new three.Scene();
+	globalThis.round = (n) => Math.round(n * 100) / 100 + 0;
+	globalThis.cast = (watcher) => {
+		const actors = { walker: kit.instantiate(), watcher: watcher ?? kit.instantiate() };
+		for (const o of Object.values(actors)) scene.add(o);
+		return actors;
+	};
+	globalThis.leave = (actors) => { for (const o of Object.values(actors)) scene.remove(o); };
+	// The quaternion of an Euler XYZ triple, as the prelude's quatFromEulerXYZ makes it.
+	globalThis.quat = (r) => {
+		const c1 = Math.cos(r.x / 2), c2 = Math.cos(r.y / 2), c3 = Math.cos(r.z / 2);
+		const s1 = Math.sin(r.x / 2), s2 = Math.sin(r.y / 2), s3 = Math.sin(r.z / 2);
+		return [s1 * c2 * c3 + c1 * s2 * s3, c1 * s2 * c3 - s1 * c2 * s3, c1 * c2 * s3 + s1 * s2 * c3, c1 * c2 * c3 - s1 * s2 * s3];
+	};
+	globalThis.multiply = ([ax, ay, az, aw], [bx, by, bz, bw]) => [
+		aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+		aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz];
+	globalThis.rotate = ([x, y, z, w], [vx, vy, vz]) => {
+		const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+		return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
+	};
+	globalThis.heading = ([x, y, z, w]) => Math.atan2(2 * (w * y - x * z), 1 - 2 * (y * y + z * z));
+	// The angle between two rotations, from their difference's axis part: acos near 1 loses the digits.
+	globalThis.apart = (p, q) => {
+		const d = multiply([-p[0], -p[1], -p[2], p[3]], q);
+		return 2 * Math.atan2(Math.hypot(d[0], d[1], d[2]), Math.abs(d[3]));
+	};
+	globalThis.turnOff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+	globalThis.distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+`;
+
+// What Rigsmith posed for sample `name`, set as `globalThis.ref`.
+fn String poses_script(String name) @local
+{
+	String text = (String)file::load(tmem, string::tformat("test/fixtures/%s.poses.json", name))!!;
+	return string::tformat("globalThis.ref = %s;", text);
+}
+
+fn void rigsmith_exports_load_as_version_2_and_start_at_their_places() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String read = @value(run, SAMPLE.tconcat(`
+			const read = (file) => {
+				const actors = cast();
+				actors.walker.position.set(-4, 0, -4);
+				actors.watcher.position.set(7, 0, 7);
+				actors.watcher.rotation = [0, 1, 0];
+				const cs = three.cutscene.load(file, { actors, camera: false });
+				const doc = JSON.parse(globalThis.__three.gltfJson(file));
+				cs.seek(0);
+				const out = {
+					version: doc.extensions.CUSTOM_cutscene.version, duration: cs.duration,
+					kinds: cs.spec.actors.map(a => a.row + ":" + a.strips.map(s => s.type).join(",")),
+					at: [actors.walker, actors.watcher].map(o => [...o.position.toArray().map(round), round(heading(quat(o.rotation)))]),
+				};
+				cs.dispose();
+				leave(actors);
+				return out;
+			};
+			const spec = (file) => {
+				const actors = cast();
+				const cs = three.cutscene.load(file, { actors, camera: false });
+				const out = JSON.stringify({ ...cs.spec, file: 0 });
+				cs.dispose();
+				leave(actors);
+				return out;
+			};
+			return { walk: read("test/fixtures/walk_turn_play.cutscene.gltf"), gltf: read("test/fixtures/with_one_off.cutscene.gltf"),
+				glb: read("test/fixtures/with_one_off.cutscene.glb"),
+				same: spec("test/fixtures/with_one_off.cutscene.gltf") === spec("test/fixtures/with_one_off.cutscene.glb") };
+		`), "load the samples");
+		String placed = `{"version":2,"duration":14,"kinds":["walker:move,turn,play","watcher:play,turn%s"],"at":[[0,0,0,0],[2.5,0,3,0]]}`;
+		String walk = string::tformat(placed, "");
+		String one_off = string::tformat(placed, ",play");
+		test::@check(read == string::tformat(`{"walk":%s,"gltf":%s,"glb":%s,"same":true}`, walk, one_off, one_off),
+			"version 2, both actors at their places whatever they stood at, the .glb the same as the .gltf: %s", read);
+	};
+}
+
+<*
+ What Rigsmith previews, within 1 mm, 1 mrad (0.06°) and 1 ms of clip time; and
+ what Rigsmith poses from the file itself, within 0.01 mm, 0.01 mrad and 0.01 ms.
+ The two differ by the writer's rounding of paths and times to 0.1 mm and 0.1 ms.
+*>
+const String TOLERANCE = "{ preview: { position: 1e-3, rotation: 1e-3, clip: 1e-3 }, file: { position: 1e-5, rotation: 1e-5, clip: 1e-5 } }";
+
+<*
+ Every actor at every time Rigsmith posed: its place, its rotation, the clip its
+ strip names and that clip's time, wrapped by the loop or held as the strip says.
+ Sought in order and then back again, so no answer leans on the seek before it.
+ Where Rigsmith plays nothing the player may still hold a stopped clip: neither
+ side's rules say what shows then, and a fresh load in order shows nothing.
+*>
+fn void rigsmith_exports_pose_as_rigsmith_previews_them() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@ok(run, SAMPLE.tconcat(`
+			globalThis.compare = (file, tolerance) => {
+				const actors = cast();
+				const cs = three.cutscene.load(file, { actors, camera: false });
+				const lengths = {};
+				for (const a of ref.actors) for (const c of a.clips) lengths[a.row + "/" + c.name] = c.length;
+				const worst = { preview: { position: 0, rotation: 0, clip: 0 }, file: { position: 0, rotation: 0, clip: 0 } };
+				const wrong = [];
+				const against = (into, row, a, want, loop) => {
+					const o = actors[row];
+					into.position = Math.max(into.position, distance(o.position.toArray(), want.position));
+					into.rotation = Math.max(into.rotation, apart(quat(o.rotation), want.rotation));
+					if (a === null || want.clip === undefined) return;
+					const length = lengths[row + "/" + want.clip];
+					let off = Math.abs(a.time - want.clip_local);
+					if (loop) off = Math.min(off, Math.abs(length - off));
+					into.clip = Math.max(into.clip, off);
+				};
+				for (const pose of [...ref.poses, ...ref.poses.slice().reverse()]) {
+					cs.seek(pose.time);
+					for (const want of pose.actors) {
+						const o = actors[want.row];
+						const at = want.row + " at " + pose.time + " s";
+						const a = o.animation;
+						if (want.strip < 0) {
+							if (a !== null && a.playing) wrong.push(at + " plays " + a.name + ", and Rigsmith nothing");
+							against(worst.preview, want.row, null, want, false);
+							against(worst.file, want.row, null, want.file, false);
+							continue;
+						}
+						if (a === null || a.name !== want.clip || want.file.clip !== want.clip) {
+							wrong.push(at + " plays " + (a && a.name) + ", not " + want.clip);
+							continue;
+						}
+						const length = lengths[want.row + "/" + want.clip];
+						if (Math.abs(a.duration - length) > 1e-5) wrong.push(at + ": " + want.clip + " lasts " + a.duration + " s, not " + length);
+						against(worst.preview, want.row, a, want, want.loop);
+						against(worst.file, want.row, a, want.file, want.loop);
+					}
+				}
+				cs.dispose();
+				leave(actors);
+				const within = (got, most) => got.position <= most.position && got.rotation <= most.rotation && got.clip <= most.clip;
+				const close = within(worst.preview, tolerance.preview) && within(worst.file, tolerance.file);
+				return { close, wrong, worst, times: ref.poses.length };
+			};
+		`));
+		String[2][] samples = {
+			{ "walk_turn_play", "walk_turn_play.cutscene.gltf" },
+			{ "with_one_off", "with_one_off.cutscene.gltf" },
+			{ "with_one_off", "with_one_off.cutscene.glb" },
+		};
+		foreach (sample : samples)
+		{
+			@ok(run, poses_script(sample[0]));
+			String said = @value(run, string::tformat(`return compare("test/fixtures/%s", %s);`, sample[1], TOLERANCE), sample[1]);
+			test::@check(said.starts_with(`{"close":true,"wrong":[],`), "%s plays as Rigsmith posed it: %s", sample[1], said);
+		}
+	};
+}
+
+<*
+ The walker turns to face the watcher where it stood as the turn began, and the
+ watcher turns to its point; both still face it to the end.
+*>
+fn void rigsmith_turns_end_facing_their_targets() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String faced = @value(run, SAMPLE.tconcat(`
+			const actors = cast();
+			const cs = three.cutscene.load("test/fixtures/walk_turn_play.cutscene.gltf", { actors, camera: false });
+			const turn = (row) => cs.spec.actors.find(a => a.row === row).strips.find(s => s.type === "turn");
+			const toward = turn("walker"), aside = turn("watcher");
+			const facing = (o, t) => { cs.seek(t); return heading(quat(o.rotation)); };
+			cs.seek(toward.start);
+			const from = actors.walker.position.toArray(), other = actors.watcher.position.toArray();
+			const walker = Math.atan2(other[0] - from[0], other[2] - from[2]);
+			cs.seek(aside.start);
+			const stood = actors.watcher.position.toArray();
+			const watcher = Math.atan2(aside.point[0] - stood[0], aside.point[2] - stood[2]);
+			const out = {
+				target: [toward.actor, aside.point],
+				degrees: [walker, watcher].map(h => Math.round(h * 180 / Math.PI)),
+				walker: [toward.end, 12, cs.duration].map(t => turnOff(facing(actors.walker, t), walker) < 1e-3),
+				watcher: [aside.end, 8, cs.duration].map(t => turnOff(facing(actors.watcher, t), watcher) < 1e-3),
+				midway: turnOff(facing(actors.walker, (toward.start + toward.end) / 2), walker) > 0.1,
+			};
+			cs.dispose();
+			leave(actors);
+			return out;
+		`), "seek past both turns");
+		test::@check(faced == `{"target":["watcher",[1.5,0,4]],"degrees":[112,-45],"walker":[true,true,true],"watcher":[true,true,true],"midway":true}`,
+			"each faces its target from its turn's end on, and not yet halfway through: %s", faced);
+	};
+}
+
+<*
+ The one-off moves the stub `shoulder_L`, so it binds to the watcher's own
+ `shoulder_L`: halfway through its strip that bone has the one-off's rotation,
+ read off where `hand_L` hangs from it, not its rest. A watcher whose rig has no
+ such bone is refused, naming it.
+*>
+fn void a_rigsmith_one_off_turns_the_bone_it_names() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		@ok(run, poses_script("with_one_off"));
+		String posed = @value(run, SAMPLE.tconcat(`
+			const arm = (o) => {
+				const a = o.getObjectByName("shoulder_L").getWorldPosition().toArray();
+				const b = o.getObjectByName("hand_L").getWorldPosition().toArray();
+				return [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+			};
+			const slerp = (a, b, u) => {
+				const dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+				const sign = dot < 0 ? -1 : 1, cos = Math.abs(dot);
+				if (cos > 0.9995) {
+					const q = a.map((v, i) => v + (sign * b[i] - v) * u);
+					const n = Math.hypot(...q);
+					return q.map(v => v / n);
+				}
+				const angle = Math.acos(cos), s = Math.sin(angle);
+				return a.map((v, i) => v * Math.sin((1 - u) * angle) / s + sign * b[i] * Math.sin(u * angle) / s);
+			};
+			// A rotation channel at clip time t, as glTF's LINEAR samples it.
+			const keyAt = (channel, t) => {
+				const key = (i) => channel.values.slice(i * 4, i * 4 + 4);
+				if (t <= channel.times[0]) return key(0);
+				for (let i = 1; i < channel.times.length; i++) {
+					if (t <= channel.times[i]) return slerp(key(i - 1), key(i), (t - channel.times[i - 1]) / (channel.times[i] - channel.times[i - 1]));
+				}
+				return key(channel.times.length - 1);
+			};
+			const reach = [0.5, 0, 0];
+			const channel = ref.one_offs[0].channels[0];
+			const once = (file) => {
+				const actors = cast();
+				const watcher = actors.watcher;
+				const cs = three.cutscene.load(file, { actors, camera: false });
+				const strip = cs.spec.actors.find(a => a.row === "watcher").strips.find(s => s.animation !== undefined);
+				const rest = () => rotate(quat(watcher.rotation), reach);
+				const out = { clips: watcher.animations.join(",") };
+				cs.seek(strip.start - 0.25);
+				out.before = distance(arm(watcher), rest()) < 1e-4;
+				cs.seek((strip.start + strip.end) / 2);
+				const a = watcher.animation;
+				const one = rotate(multiply(quat(watcher.rotation), keyAt(channel, a.time)), reach);
+				out.mid = [a.name, round(a.time), distance(arm(watcher), one) < 1e-4, round(distance(arm(watcher), rest()))];
+				cs.dispose();
+				out.after = [watcher.animations.join(","), distance(arm(watcher), rest()) < 1e-4];
+				leave(actors);
+				return out;
+			};
+			return { bone: channel.bone, gltf: once("test/fixtures/with_one_off.cutscene.gltf"), glb: once("test/fixtures/with_one_off.cutscene.glb") };
+		`), "play the one-off from both files");
+		String each = `{"clips":"Walk,Rest,one_off","before":true,"mid":["one_off",1,true,0.38],"after":["Walk,Rest",true]}`;
+		test::@check(posed == string::tformat(`{"bone":"shoulder_L","gltf":%s,"glb":%s}`, each, each),
+			"the shoulder at rest before, turned by the one-off halfway, and at rest once it is gone: %s", posed);
+
+		String refused = @value(run, `
+			const stray = three.load("test/fixtures/hierarchy.glb").instantiate();
+			let said = "loaded";
+			try { three.cutscene.load("test/fixtures/with_one_off.cutscene.gltf", { actors: cast(stray), camera: false }); }
+			catch (e) { said = e.message; }
+			return { said, left: three.load("test/fixtures/hierarchy.glb").animations.join(",") };
+		`, "a watcher without the bone");
+		test::@check(refused.contains("in test/fixtures/with_one_off.cutscene.gltf moves 'shoulder_L', and actor 'watcher' "
+			"(from test/fixtures/hierarchy.glb) has no node by that name") && refused.contains(`"left":"slide,spin,blink"`),
+			"the bone named and nothing left behind: %s", refused);
 	};
 }

@@ -1,6 +1,6 @@
 // three.c3 — three.cutscene: plays a timeline of actor strips, camera keys and
-// named events, loaded from the `.cutscene.glb` the Blender exporter writes or
-// built in code. See `## Cutscene` in docs/classes.md.
+// named events, loaded from a `.cutscene.glb` or built in code. See
+// `## Cutscene` in docs/classes.md.
 //
 // One pure pose-at-time (`_evaluate`) serves both playback and seeking, so a
 // scrubbed frame and a played frame are the same frame. The frame system is
@@ -12,12 +12,13 @@ const H = globalThis.__three;
 
 const WHERE = 'three.cutscene.create(spec, options)';
 const OPTION_KEYS = ['level', 'actors', 'scene', 'camera', 'restoreCamera'];
-const STRIP_TYPES = ['move', 'play'];
+const STRIP_TYPES = ['move', 'play', 'turn'];
 const EASES = ['linear', 'in', 'out', 'inout'];
 const SYSTEM = 'cutscene';
-// The root extension a `.cutscene.glb` carries, and the version of it read here.
+// The root extension a `.cutscene.glb` carries, and the versions of it read here.
+// Version 2 adds an actor's `place` and the `turn` strip.
 const EXTENSION = 'CUSTOM_cutscene';
-const EXTENSION_VERSION = 1;
+const EXTENSION_VERSIONS = [1, 2];
 const GLTF_FILE = /\.(glb|gltf)$/i;
 // Seconds before its end a held loop is posed at. Wider than the exporter's
 // 0.1 ms rounding of `start` and `end`, and a fortieth of a frame at 24 fps.
@@ -67,11 +68,54 @@ function _triple(value, where) {
 	return value.slice();
 }
 
+function _readEase(raw, where) {
+	const ease = raw.ease ?? 'inout';
+	if (!EASES.includes(ease)) throw new RangeError(`${where}.ease is one of ${EASES.join(', ')}`);
+	return ease;
+}
+
+// A turn faces a point, or another actor where it stands when the turn begins.
+function _readTurn(raw, where) {
+	if (raw.clip != null || raw.animation != null) throw new TypeError(`${where}: a turn plays no clip`);
+	const start = _num(raw.start, 0, `${where}.start`);
+	const end = raw.end === undefined ? null : _num(raw.end, 0, `${where}.end`);
+	if (end === null || !(end > start)) throw new RangeError(`${where}: a turn needs an end after its start`);
+	const point = raw.point ?? null, actor = raw.actor ?? null;
+	if ((point === null) === (actor === null)) {
+		const which = point === null ? 'names neither' : 'not both';
+		throw new TypeError(`${where}: a turn faces a point: [x, y, z] or an actor: '<row>', ${which}`);
+	}
+	if (actor !== null && (typeof actor !== 'string' || actor === '')) {
+		throw new TypeError(`${where}.actor is the row of the actor to face, not ${JSON.stringify(actor)}`);
+	}
+	return {
+		type: 'turn', start, end, ease: _readEase(raw, where), clip: null,
+		point: point === null ? null : _triple(point, `${where}.point`), actor, target: null,
+	};
+}
+
+// Where an actor stands as the cutscene starts, in place of its object's own transform.
+function _readPlace(raw, where) {
+	if (raw === null || typeof raw !== 'object') {
+		throw new TypeError(`${where} wants { position: [x, y, z], rotation: [x, y, z, w] }`);
+	}
+	const position = _triple(raw.position, `${where}.position`);
+	const q = raw.rotation;
+	if (!Array.isArray(q) || q.length !== 4 || !q.every(Number.isFinite)) {
+		throw new TypeError(`${where}.rotation wants a quaternion [x, y, z, w], not ${JSON.stringify(q)}`);
+	}
+	const length = Math.hypot(...q);
+	if (length < 1e-6) throw new RangeError(`${where}.rotation is all zeros, which is not a rotation; no turn at all is [0, 0, 0, 1]`);
+	return { position, rotation: q.map(v => v / length) };
+}
+
 function _readStrip(raw, where) {
 	if (raw === null || typeof raw !== 'object') throw new TypeError(`${where} is not an object`);
 	if (!STRIP_TYPES.includes(raw.type)) {
-		throw new RangeError(`${where}: type is ${STRIP_TYPES.map(t => `'${t}'`).join(' or ')}, not ${JSON.stringify(raw.type)}`);
+		const kinds = STRIP_TYPES.map(t => `'${t}'`);
+		throw new RangeError(`${where}: type is ${kinds.slice(0, -1).join(', ')} or ${kinds.at(-1)}, not ${JSON.stringify(raw.type)}`);
 	}
+	if (raw.type === 'turn') return _readTurn(raw, where);
 	const strip = {
 		type: raw.type,
 		start: _num(raw.start, 0, `${where}.start`),
@@ -104,8 +148,7 @@ function _readStrip(raw, where) {
 			throw new RangeError(`${where}: a move needs a path of at least 2 points`);
 		}
 		strip.path = raw.path.map((p, i) => _triple(p, `${where}.path[${i}]`));
-		strip.ease = raw.ease ?? 'inout';
-		if (!EASES.includes(strip.ease)) throw new RangeError(`${where}.ease is one of ${EASES.join(', ')}`);
+		strip.ease = _readEase(raw, where);
 		strip.turn = raw.turn !== false;
 		strip._curve = new CatmullRomCurve3(strip.path);
 	}
@@ -119,10 +162,21 @@ function _readSpec(spec) {
 	if (file !== null && (typeof file !== 'string' || file === '')) {
 		throw new TypeError(`${WHERE}: file is the path of the cutscene file its one-off clips are in`);
 	}
+	const rows = (spec.actors ?? []).map(a => a?.row);
 	const actors = (spec.actors ?? []).map((a, i) => {
 		const where = `actors[${i}]`;
 		if (typeof a?.row !== 'string' || a.row === '') throw new TypeError(`${where}.row names the object to drive`);
-		const strips = (a.strips ?? []).map((s, k) => _readStrip(s, `${where}.strips[${k}]`));
+		const strips = (a.strips ?? []).map((s, k) => {
+			const strip = _readStrip(s, `${where}.strips[${k}]`);
+			if (strip.actor) {
+				strip.target = rows.indexOf(strip.actor);
+				if (strip.target < 0) {
+					throw new RangeError(`${where}.strips[${k}].actor is '${strip.actor}', and this cutscene has no actor of that row`);
+				}
+			}
+			return strip;
+		});
+		// Stable, so strips that start together keep their order.
 		strips.sort((x, y) => x.start - y.start);
 		const oneOff = strips.find(s => s.animation !== undefined);
 		if (oneOff && file === null) {
@@ -131,7 +185,8 @@ function _readSpec(spec) {
 		if (oneOff && !(Number.isInteger(a.node) && a.node >= 0)) {
 			throw new TypeError(`${where}.node is the actor's stub node in ${file}, which its one-off clips are bound through`);
 		}
-		return { row: a.row, node: a.node ?? null, strips };
+		const place = a.place == null ? null : _readPlace(a.place, `${where}.place`);
+		return { row: a.row, node: a.node ?? null, place, strips };
 	});
 	const camera = (spec.camera ?? []).map((k, i) => {
 		const ease = k.ease ?? 'inout';
@@ -171,15 +226,18 @@ function _fromGltf(doc, path) {
 	if (ext === null || typeof ext !== 'object') {
 		throw new TypeError(`${where}: this glTF has no ${EXTENSION} extension, so it is not a cutscene — write one with the Blender exporter's Export Cutscene`);
 	}
-	if (ext.version !== EXTENSION_VERSION) {
-		throw new RangeError(`${where}: ${EXTENSION} is version ${JSON.stringify(ext.version)}, and this engine reads version ${EXTENSION_VERSION}`);
+	if (!EXTENSION_VERSIONS.includes(ext.version)) {
+		throw new RangeError(`${where}: ${EXTENSION} is version ${JSON.stringify(ext.version)}, and this engine reads versions ${EXTENSION_VERSIONS.join(' and ')}`);
 	}
+	// Neither existed in version 1, so a file saying 1 that has one is mislabelled.
+	const newer = (field) => new RangeError(`${where}: ${field} needs ${EXTENSION} version 2, and the file says version 1`);
 	const paths = Array.isArray(ext.paths) ? ext.paths : [];
 	const animations = Array.isArray(doc.animations) ? doc.animations : [];
 	const actors = (Array.isArray(ext.actors) ? ext.actors : []).map((a, i) => ({
 		...a,
 		strips: (Array.isArray(a?.strips) ? a.strips : []).map((s, k) => {
 			const at = `actors[${i}].strips[${k}]`;
+			if (ext.version === 1 && s?.type === 'turn') throw newer(`${at}.type 'turn'`);
 			const strip = { ...s };
 			if (s?.type === 'move') {
 				const p = Number.isInteger(s.path) ? paths[s.path] : undefined;
@@ -195,6 +253,10 @@ function _fromGltf(doc, path) {
 			return strip;
 		}),
 	}));
+	if (ext.version === 1) {
+		const placed = actors.findIndex(a => a?.place != null);
+		if (placed >= 0) throw newer(`actors[${placed}].place`);
+	}
 	const spec = { file: path };
 	for (const key of ['name', 'duration', 'fps']) if (ext[key] !== undefined) spec[key] = ext[key];
 	spec.actors = actors;
@@ -236,16 +298,68 @@ function _yawQuat(yaw) {
 	return [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
 }
 
-// What is left of an orientation once its heading about +Y is taken off: the
-// lean a character stands with, such as an armature tilted in Blender. A move
-// turns the heading and keeps it, as the addon's walk keys do. The heading is
-// the Y of a YZX decomposition, which is Blender's Euler Z once its Z-up is
-// glTF's Y-up.
-function _lean(euler) {
-	const q = quatFromEulerXYZ(euler);
-	const [x, y, z, w] = q;
-	const heading = Math.atan2(2 * (w * y - x * z), 1 - 2 * (y * y + z * z));
-	return multiplyQuat(_yawQuat(-heading), q);
+// The heading about +Y of an orientation: the Y of a YZX decomposition, which is
+// Blender's Euler Z once its Z-up is glTF's Y-up.
+function _headingOf([x, y, z, w]) {
+	return Math.atan2(2 * (w * y - x * z), 1 - 2 * (y * y + z * z));
+}
+
+// An orientation less its heading: the lean a character stands with, such as a
+// tilted armature, which strips keep while they turn the heading.
+function _lean(q) {
+	return multiplyQuat(_yawQuat(-_headingOf(q)), q);
+}
+
+// The signed turn from `from` to `to` the short way round, in (-π, π].
+function _shortest(from, to) {
+	let d = (to - from) % (2 * Math.PI);
+	if (d > Math.PI) d -= 2 * Math.PI;
+	else if (d <= -Math.PI) d += 2 * Math.PI;
+	return d;
+}
+
+function _moveU(move, t) {
+	return _ease(move.ease, clamp01((t - move.start) / (move.end - move.start)));
+}
+
+// Where an actor stands at `t` by its first `n` strips: inside the latest move
+// begun, or where that move ended, else at home.
+function _position(actor, t, n = actor.strips.length) {
+	let move = null;
+	for (let i = 0; i < n; i++) {
+		const s = actor.strips[i];
+		if (s.type === 'move' && s.start <= t) move = s;
+	}
+	if (move === null) return actor.home;
+	const p = move._curve.getPointAt(_moveU(move, t));
+	return [p.x, p.y, p.z];
+}
+
+// The heading at `t` from the actor's first `n` strips, or null to keep the home
+// rotation. Time and the spec alone, never what was posed before.
+function _heading(actor, t, n, actors) {
+	let at = -1;
+	for (let i = 0; i < n; i++) {
+		const s = actor.strips[i];
+		if (s.start <= t && (s.type === 'turn' || (s.type === 'move' && s.turn))) at = i;
+	}
+	if (at < 0) return null;
+	const s = actor.strips[at];
+	if (s.type === 'move') {
+		const u = _moveU(s, t);
+		const a = s._curve.getPointAt(Math.max(0, u - 1e-3));
+		const b = s._curve.getPointAt(Math.min(1, u + 1e-3));
+		if (Math.hypot(b.x - a.x, b.z - a.z) > 1e-6) return Math.atan2(b.x - a.x, b.z - a.z);
+		return _heading(actor, t, at, actors);
+	}
+	// A turn starts from the heading it found and ends facing its target.
+	const from = _heading(actor, s.start, at, actors) ?? actor.homeHeading;
+	const pos = _position(actor, s.start, n);
+	const target = s.point ?? _position(actors[s.target], s.start);
+	const dx = target[0] - pos[0], dz = target[2] - pos[2];
+	if (Math.hypot(dx, dz) <= 1e-6) return from;
+	const u = _ease(s.ease, clamp01((t - s.start) / (s.end - s.start)));
+	return from + _shortest(from, Math.atan2(dx, dz)) * u;
 }
 
 export class Cutscene {
@@ -276,11 +390,13 @@ export class Cutscene {
 		this._actors = read.actors.map(a => {
 			const object = this._resolve(a.row, options);
 			const r = object.rotation;
+			const q = a.place ? a.place.rotation : quatFromEulerXYZ([r.x, r.y, r.z]);
 			return {
 				row: a.row, node: a.node, strips: a.strips, object,
-				home: object.position.toArray(),
-				homeRotation: [r.x, r.y, r.z],
-				lean: _lean([r.x, r.y, r.z]),
+				home: a.place ? a.place.position.slice() : object.position.toArray(),
+				homeRotation: a.place ? eulerXYZFromQuat(q) : [r.x, r.y, r.z],
+				homeHeading: _headingOf(q),
+				lean: _lean(q),
 				clip: null,
 				holding: false,
 			};
@@ -468,32 +584,16 @@ export class Cutscene {
 	}
 
 	_pose(actor, t, exact) {
-		// Where it stands: inside the latest move begun, or where that move ended.
-		let move = null;
-		for (const s of actor.strips) if (s.type === 'move' && s.start <= t) move = s;
 		const object = actor.object;
-		if (move === null) {
-			object.position = actor.home;
-			object.rotation = actor.homeRotation;
-		}
-		else {
-			const u = _ease(move.ease, clamp01((t - move.start) / (move.end - move.start)));
-			const p = move._curve.getPointAt(u);
-			object.position = [p.x, p.y, p.z];
-			if (move.turn) {
-				const a = move._curve.getPointAt(Math.max(0, u - 1e-3));
-				const b = move._curve.getPointAt(Math.min(1, u + 1e-3));
-				if (Math.hypot(b.x - a.x, b.z - a.z) > 1e-6) {
-					const r = object.rotation;
-					object.rotation = eulerXYZFromQuat(multiplyQuat(_yawQuat(Math.atan2(b.x - a.x, b.z - a.z)), actor.lean));
-				}
-			}
-		}
+		object.position = _position(actor, t);
+		const heading = _heading(actor, t, actor.strips.length, this._actors);
+		object.rotation = heading === null ? actor.homeRotation
+			: eulerXYZFromQuat(multiplyQuat(_yawQuat(heading), actor.lean));
 
 		// What it plays: the latest strip begun that has a clip and has not ended.
 		let active = null;
 		for (const s of actor.strips) {
-			if (s.start > t || s.clip === null) continue;
+			if (s.start > t || s.clip === null || s.type === 'turn') continue;
 			if (s.type === 'move' && t > s.end) continue;
 			active = s;
 		}
@@ -570,7 +670,7 @@ export class Cutscene {
 export const cutscene = {
 	create(spec, options = null) { return new Cutscene(spec, options); },
 
-	// The `.cutscene.glb` / `.gltf` the Blender exporter writes.
+	// A `.cutscene.glb` / `.gltf`, CUSTOM_cutscene version 1 or 2.
 	load(path, options = null) {
 		const spec = _readFile(path);
 		try {

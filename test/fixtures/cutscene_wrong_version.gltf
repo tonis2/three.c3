@@ -22,7 +22,7 @@
 	],
 	"extensions": {
 		"CUSTOM_cutscene": {
-			"version": 2,
+			"version": 3,
 			"name": "bad",
 			"duration": 1.0
 		}

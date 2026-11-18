@@ -2315,10 +2315,11 @@ system back out of `three.systems` the moment nothing else needs it.
 three.cutscene.load(path, options)  |  three.cutscene.create(spec, options)
 ```
 
-A cutscene being played, loaded from a Blender-exported `.cutscene.glb` or built from a spec in code; `spec`
-is what `create` took or what `load` produced. One pose-at-time serves playback and seeking, so a scrubbed
-frame and a played frame are the same frame. It steps on the game clock — a paused `three.clock` holds it — through a
-`three.systems` entry installed only while something plays.
+A cutscene being played, loaded from a `.cutscene.glb` (`CUSTOM_cutscene` version 1 or 2) or built from a
+spec in code; `spec` is what `create` took or what `load` produced. One pose-at-time serves playback and
+seeking, so a scrubbed frame and a played frame are the same frame: an actor's place and heading at a time
+come from the strips alone, never from what was posed before. It steps on the game clock — a paused
+`three.clock` holds it — through a `three.systems` entry installed only while something plays.
 
 While a camera key drives the view it detaches the camera and turns `three.controls` off; both come back
 at the end or on `dispose()`. A follow camera is not re-attached — do that in the `end` handler.

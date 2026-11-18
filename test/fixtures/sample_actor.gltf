@@ -1,0 +1,197 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "three.c3 test fixture"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "name": "sample_actor",
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "actor",
+   "children": [
+    1,
+    4
+   ]
+  },
+  {
+   "name": "hips",
+   "translation": [
+    0,
+    1,
+    0
+   ],
+   "children": [
+    2
+   ]
+  },
+  {
+   "name": "shoulder_L",
+   "translation": [
+    0.2,
+    0.4,
+    0
+   ],
+   "children": [
+    3
+   ]
+  },
+  {
+   "name": "hand_L",
+   "translation": [
+    0.5,
+    0,
+    0
+   ]
+  },
+  {
+   "name": "body",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "name": "body",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4
+     }
+    }
+   ]
+  }
+ ],
+ "animations": [
+  {
+   "name": "Walk",
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 1,
+      "path": "translation"
+     }
+    }
+   ],
+   "samplers": [
+    {
+     "input": 0,
+     "output": 1,
+     "interpolation": "LINEAR"
+    }
+   ]
+  },
+  {
+   "name": "Rest",
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 1,
+      "path": "translation"
+     }
+    }
+   ],
+   "samplers": [
+    {
+     "input": 2,
+     "output": 3,
+     "interpolation": "LINEAR"
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 3,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    3.9666666984558105
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 3,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    4.9666666984558105
+   ]
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 4,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3",
+   "min": [
+    -0.2,
+    0,
+    0
+   ],
+   "max": [
+    0.2,
+    1.6,
+    0
+   ]
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 12
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 12,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 48,
+   "byteLength": 12
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 60,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 96,
+   "byteLength": 36
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 132,
+   "uri": "data:application/octet-stream;base64,AAAAAN7d/T/e3X1AAAAAAAAAgD8AAAAAAAAAAGZmhj8AAAAAAAAAAAAAgD8AAAAAAAAAAO/uHkDv7p5AAAAAAAAAgD8AAAAAAAAAAEjhej8AAAAAAAAAAAAAgD8AAAAAzcxMvgAAAAAAAAAAzcxMPgAAAAAAAAAAAAAAAM3MzD8AAAAA"
+  }
+ ]
+}

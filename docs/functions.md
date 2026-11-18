@@ -1308,8 +1308,10 @@ cs.play();
 ```
 
 **The file** is a mesh-less glTF whose `CUSTOM_cutscene` root extension holds the timeline; see
-`extensions/cutscene.md` in the Blender add-on for the format. `load` refuses a file without the
-extension, of another extension version, or whose strips name a path or animation it does not have.
+`extensions/cutscene.md` in the Blender add-on for the format. `load` reads versions 1 and 2 of it; version
+2 is version 1 plus an actor's `place` and the `turn` strip, below. `load` refuses a file without the
+extension, of any other version, with a `place` or a `turn` while it says version 1, or whose strips name a
+path, animation or actor it does not have.
 
 **The spec** is what `create` takes and what `load` produces from the file — `cs.spec` on a loaded cutscene
 is it, with each move's `path` index replaced by that path's points and `file` naming the glTF:
@@ -1329,9 +1331,19 @@ three.cutscene.create({
 
 - An actor's `row` is found in `options.actors` (an object or Map of id to object), then
   `options.level.objects`, then `options.scene.getObjectByName`.
+- An actor's `place: { position: [x, y, z], rotation: [x, y, z, w] }` is where it stands when the cutscene
+  starts, in place of the object's own position and rotation (its scale is kept). It is read when the
+  cutscene is built, and the object goes there on the first `seek` or `play`.
 - A `move` walks its path at even speed over `[start, end]`, eased (`linear`, `in`, `out`, `inout`), facing
   along it unless `turn: false`, and loops its `clip` while it walks. Path points are in the actor's parent
   space. After the move the actor stays where it ended.
+- A `turn` (`start`, `end`, `ease`, and one of `point: [x, y, z]` or `actor: '<row>'`) turns the actor about
+  +Y, the short way round, to face the point, or the other actor where that one stands as the turn begins. It
+  plays no clip, so whatever plays carries on. A target straight above or below leaves the heading as it
+  was.
+- The heading at any time comes from the latest `turn` or turning `move` begun, the later in the list on a
+  tie; a turn starts from the heading the strips before it give, and before any of them the actor keeps its
+  home rotation. Every frame is worked out from its time alone, so a sought frame and a played one match.
 - A `play` starts its `clip` at `start`, crossfading over `fade` seconds. With an `end` it stops there and
   holds the pose it ended on, which is what Blender shows; without one it runs until the next strip.
   `loop: false` holds the clip's last frame.
