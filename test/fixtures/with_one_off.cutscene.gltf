@@ -2,7 +2,8 @@
 "extensionsUsed":["CUSTOM_cutscene"],
 "extensions":{"CUSTOM_cutscene":{"version":2,"name":"Sample","duration":14,"fps":30,"actors":[
 {"row":"walker","node":0,"place":{"position":[0,0,0],"rotation":[0,0,0,1]},"strips":[
-{"type":"move","start":0.5,"end":8.6268,"path":0,"ease":"linear","turn":true,"clip":"Walk","loop":true,"speed":1,"fade":0.2},
+{"type":"move","start":0.5,"end":8.6268,"path":0,"ease":"linear","turn":true},
+{"type":"play","start":0.5,"end":8.6268,"clip":"Walk","loop":true,"speed":1,"fade":0.2},
 {"type":"turn","start":8.6268,"end":9.4268,"ease":"inout","actor":"watcher"},
 {"type":"play","start":8.6268,"end":14,"clip":"Rest","loop":true,"speed":1,"fade":0.2}]},
 {"row":"watcher","node":1,"place":{"position":[2.5,0,3],"rotation":[0,0,0,1]},"strips":[

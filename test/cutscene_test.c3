@@ -971,7 +971,7 @@ fn void rigsmith_exports_load_as_version_2_and_start_at_their_places() @test
 				glb: read("test/fixtures/with_one_off.cutscene.glb"),
 				same: spec("test/fixtures/with_one_off.cutscene.gltf") === spec("test/fixtures/with_one_off.cutscene.glb") };
 		`), "load the samples");
-		String placed = `{"version":2,"duration":14,"kinds":["walker:move,turn,play","watcher:play,turn%s"],"at":[[0,0,0,0],[2.5,0,3,0]]}`;
+		String placed = `{"version":2,"duration":14,"kinds":["walker:move,play,turn,play","watcher:play,turn%s"],"at":[[0,0,0,0],[2.5,0,3,0]]}`;
 		String walk = string::tformat(placed, "");
 		String one_off = string::tformat(placed, ",play");
 		test::@check(read == string::tformat(`{"walk":%s,"gltf":%s,"glb":%s,"same":true}`, walk, one_off, one_off),
