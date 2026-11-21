@@ -471,9 +471,9 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("fn LightTerms shade_lights("), "the lighting block is carried");
 	test::@check(source.contains("uint cluster = fragment_cluster(frame, screen_position, position);"),
 		"and the cluster a fragment is lit by is the culling pass's own index");
-	test::@check(source.contains("frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + local]"),
+	test::@check(source.contains("frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]"),
 		"read out of the frame block's list, overflow bit and all");
-	test::@check(source.contains("if (light.meta.z != LIGHT_DIRECTIONAL) continue;"),
+	test::@check(source.contains("i = frame[0].directional_lights[at + 1u];"),
 		"directionals come from the frame's list, punctuals from the cluster");
 
 	// The half's own seam: the record becomes a Surface, the surface goes to the
@@ -527,7 +527,8 @@ fn void the_ported_mesh_is_lit() @test
 		"the shadow atlases are declared at the bindings the pass already writes");
 	test::@check(source.contains("s.shadow = shadow_factor(s.position, geometric);"),
 		"the surface carries the sun's visibility, read once from the geometric normal");
-	test::@check(source.contains("float visibility = i == 0u ? sun_shadow : point_shadow_factor(i, light, position, receiver_normal);"),
+	test::@check(source.contains("float3 energy = sun.color.rgb * sun.color.w * reach * sun_shadow;")
+		&& source.contains("if (LIGHTS_LOCAL_SHADOWS) visibility = point_shadow_factor(i, light, position, receiver_normal);"),
 		"and the direct light folds it in, the sun from the surface and every other light from its own view");
 	test::@check(source.contains("Sampler2D ambient_occlusion_depth @set(0) @binding(4);"),
 		"the frame depth the crevice reads is declared at the engine's own binding");
@@ -538,7 +539,7 @@ fn void the_ported_mesh_is_lit() @test
 		"and the ambient floor and the world light are what it multiplies");
 	test::@check(source.contains("Sampler2D lightmap_atlas @set(0) @binding(20);"),
 		"the baked atlas is declared at the engine's own binding");
-	test::@check(source.contains("s.lightmapped = !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;")
+	test::@check(source.contains("s.lightmapped = SURFACE_LIGHTMAPS && !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;")
 		&& source.contains("lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb"),
 		"front faces with a tile read it once, back faces fall back to real time, and a lightmap bake reads nothing");
 	test::@check(source.contains("fn float3 lambert(Surface s, float3 normal, float occlusion)")
@@ -548,7 +549,7 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("fn float3 baked_diffuse(FrameBlock* frame, float3 normal, float3 receiver_normal, float3 position)")
 		&& source.contains("return baked_diffuse(push.frame, normal, s.receiver_normal, s.position);"),
 		"and the lightmap bake answers with the baked lights' direct diffuse");
-	test::@check(source.contains("if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;"),
+	test::@check(source.contains("if (!(LIGHTS_BAKED && skip_baked_diffuse && light_is_baked(sun))) terms.diffuse += energy * nl;"),
 		"a baked light's diffuse is skipped where the tile carries it and its highlight is not");
 	test::@check(source.contains("baked_dynamic_delta(push.frame, normal, s.receiver_normal, s.position)"),
 		"and the moving-caster delta is added beside the tile");

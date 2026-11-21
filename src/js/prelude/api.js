@@ -1782,7 +1782,7 @@ function asIntersection(raw) {
 // for the same reason it does not move the camera. A script rebuilding the
 // world is not a reason to switch off a diagnostic somebody is reading, and
 // rebuilding the world is exactly what the caller here does between looks.
-const DEBUG_VIEWS = ['off', 'shadow', 'shadowMap'];
+const DEBUG_VIEWS = ['off', 'shadow', 'shadowMap', 'features'];
 
 const debug = {
 	// One of:

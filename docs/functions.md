@@ -2713,7 +2713,7 @@ decides whether it receives screen occlusion.
 
 This is a screen-space approximation: off-screen and hidden geometry cannot occlude a surface. Partial
 scene viewports currently bypass it; the requested settings are retained for the next full-frame viewport.
-Its prepass and sampling time are included in `stats().sceneMs`, not `shadowMs`.
+Its depth pass is `stats().occlusionMs`; its sampling runs in the scene's fragments, so it is in `sceneMs`.
 
 ## three.light.shadow
 
@@ -3790,7 +3790,7 @@ straight after a mutation.
 ## three.debug
 
 What the renderer draws instead of the scene, when you ask. `three.debug.view` is `'off'` (the default),
-`'shadow'` or `'shadowMap'`.
+`'shadow'`, `'shadowMap'` or `'features'`.
 
 It exists because a frame with no visible shadows has three explanations — the pass did not run, the pass ran and
 the map is fitted somewhere else, or everything in shot is genuinely inside one big shadow — and until this
@@ -3803,6 +3803,10 @@ existed the renderer distinguished none of them.
   through the geometry that samples it. Magenta is outside the fitted box, so a mostly-magenta frame is a
   `three.light.shadow.distance` fitted somewhere other than where you are looking; dark purple is no shadow pass
   this frame.
+- `'features'` draws which features the shader drawing each surface kept. A frame decides them: with no
+  area light, spot, local shadow, second directional, baked light, environment map, light map, occlusion or sun
+  shadow, the renderer draws with a shader that leaves that code out, which a mobile GPU runs much faster. They
+  are stripes along world x, two metres wide and in that order: grey where kept, black where left out.
 
 The sky is not a surface and has no shadow, so a debug view colours only what the geometry covers.
 

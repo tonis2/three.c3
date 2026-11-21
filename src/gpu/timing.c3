@@ -9,20 +9,22 @@
  by the GPU itself measure the span between them on the GPU's own clock, and
  nothing else.
 
- ## Six marks, five spans
+ ## Eight marks, seven spans
 
- begin ──prepare──▶ ──shadow──▶ ──scene──▶ ──post──▶ ──present──▶ end
+ begin ──prepare──▶ ──shadow──▶ ──occlusion──▶ ──prepass──▶ ──scene──▶ ──post──▶ ──present──▶ end
 
  - prepare — the scene update, the frame's buffer writes and the compute
  skinning dispatch. Everything before the first rendering begins.
  - shadow — the depth-only pass. 0 with shadows off.
+ - occlusion — ambient occlusion's own depth pass. 0 with occlusion off.
+ - prepass — the depth prepass. 0 with it off.
  - scene — the pass that draws the picture, into the target or into the post
  chain's first image.
  - post — the chain, and 0 when no post shader is active.
  - present — getting the finished image out: the blit on a windowed frame, the
  readback copy on a `capture()`, the closing layout transition on all three.
  Not a phase of `record_scene` but the remainder of the outer span, which is
- what makes the five add up to `total`.
+ what makes the seven add up to `total`.
 
  The outer pair is the first and last command in the frame's buffer, so it
  covers the blit and the readback — deliberately, since "what did this frame
@@ -84,6 +86,10 @@ enum FrameMark : char
 	PREPARE,
 	// After the shadow pass.
 	SHADOW,
+	// After ambient occlusion's own depth pass.
+	OCCLUSION,
+	// After the depth prepass.
+	PREPASS,
 	// After the rendering that draws the picture.
 	SCENE,
 	// After the post chain.
@@ -97,7 +103,7 @@ const uint FRAME_MARKS = FrameMark.END.ordinal + 1;
 <*
  What one frame cost, split by phase, in milliseconds.
 
- `total` is the outer span and the five phases sum to it exactly, since each is
+ `total` is the outer span and the seven phases sum to it exactly, since each is
  the difference between two consecutive marks of the same pair. A phase missing
  from the sum is a bug here, not a gap in the frame.
 
@@ -109,6 +115,8 @@ struct FrameTiming
 	double total;
 	double prepare;
 	double shadow;
+	double occlusion;
+	double prepass;
 	double scene;
 	double post;
 	double present;
@@ -241,7 +249,9 @@ fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 		.total = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.END.ordinal]),
 		.prepare = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.PREPARE.ordinal]),
 		.shadow = self.span(stamps[FrameMark.PREPARE.ordinal], stamps[FrameMark.SHADOW.ordinal]),
-		.scene = self.span(stamps[FrameMark.SHADOW.ordinal], stamps[FrameMark.SCENE.ordinal]),
+		.occlusion = self.span(stamps[FrameMark.SHADOW.ordinal], stamps[FrameMark.OCCLUSION.ordinal]),
+		.prepass = self.span(stamps[FrameMark.OCCLUSION.ordinal], stamps[FrameMark.PREPASS.ordinal]),
+		.scene = self.span(stamps[FrameMark.PREPASS.ordinal], stamps[FrameMark.SCENE.ordinal]),
 		.post = self.span(stamps[FrameMark.SCENE.ordinal], stamps[FrameMark.POST.ordinal]),
 		.present = self.span(stamps[FrameMark.POST.ordinal], stamps[FrameMark.END.ordinal]),
 	};

@@ -122,8 +122,10 @@ const uint DEBUG_VIEW_SHADOW     = 1;
 // What the shadow lookup would read, with magenta for "outside the fitted box"
 // and dark purple for "no shadow pass ran".
 const uint DEBUG_VIEW_SHADOW_MAP = 2;
+// Which shader features the pipeline drawing a surface kept - see `unused_features`.
+const uint DEBUG_VIEW_FEATURES = 3;
 // The highest view there is, so the binding can range-check without listing them.
-const uint DEBUG_VIEW_MAX        = DEBUG_VIEW_SHADOW_MAP;
+const uint DEBUG_VIEW_MAX        = DEBUG_VIEW_FEATURES;
 
 <*
  One additional view of the active scene.
@@ -185,6 +187,12 @@ struct MeshPass
 	// `new three.Scene()` resets the graph, and a material an agent compiled should
 	// survive that exactly as a loaded `.glb` does.
 	List{Material} materials;
+	// This frame's mesh shader features nothing uses, as `SKIP_*` bits, and the
+	// pipeline each material draws with for them - see `resolve_lit_pipelines`.
+	uint skip_features;
+	List{LitPipeline} lit_pipelines;
+	// For tests: every draw keeps every light feature, as before there were variants.
+	bool feature_variants_disabled;
 	Assets assets;
 	<*
 	 The scene being rendered, and every scene that exists.
@@ -572,6 +580,7 @@ fn MeshPass? MeshPass.init(&self, Gpu* gpu, Target* target)
 	// a counted borrow without exception — the alternative, "the pass's own two are
 	// special", is a rule that has to be remembered at every future release.
 	self.materials.init(mem, 4);
+	self.lit_pipelines.init(mem, 4);
 	// Before the two claims below and not after them, because `claim_slot` counts
 	// through `note_material_claimed` and a threshold still at its zero fill is a
 	// threshold every claim is already past: the built-ins warned about themselves.
@@ -1257,6 +1266,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	Vec3 eye = self.camera.eye();
 	ulong shadow_view_address = self.write_shadow_views(gpu, slot)!;
 	ulong light_address = self.write_lights(gpu, slot)!;
+	self.resolve_lit_pipelines(gpu, target)!;
 	self.record_clusters(gpu, cmd, slot, light_address)!;
 	FrameBlock frame = {
 		.view_projection = view_projection,
@@ -1283,6 +1293,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.cluster_screen = { (float)target.extent.width, (float)target.extent.height,
 			self.camera.near_plane, self.camera.far_plane },
 		.view_rect = rect_floats(self.scene_rect),
+		.directional_lights = self.directional_lights(),
 	};
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
@@ -1646,7 +1657,11 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 *>
 fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
 {
-	if (!self.area_reference || !self.reference_ready) return pipeline;
+	if (!self.area_reference || !self.reference_ready)
+	{
+		foreach (lit : self.lit_pipelines) if (lit.base == pipeline) return lit.lit;
+		return pipeline;
+	}
 	if (pipeline == self.pipeline) return self.reference_pipeline;
 	if (pipeline == self.line_pipeline) return self.reference_line_pipeline;
 	if (pipeline == self.alpha_pipeline) return self.reference_alpha_pipeline;
@@ -2261,6 +2276,84 @@ fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBloc
 			+ (ulong)i * FrameBlock::size;
 	}
 	self.extra_frame_blocks[slot].upload(blocks.ptr, needed * FrameBlock::size);
+}
+
+// A material's pipeline and the variant of it this frame's lights draw with.
+struct LitPipeline
+{
+	MeshPipeline* base;
+	MeshPipeline* lit;
+}
+
+<*
+ The mesh shader features nothing in this frame uses, as `SKIP_*` bits. Light
+ zero is the sun, which has its own path through the shader, so among the lights
+ it only counts towards baking.
+
+ @return "Bits for `PipelineState.skip_features`"
+*>
+fn uint MeshPass.unused_features(&self)
+{
+	uint used;
+	if (self.environment_params()[0] > 0) used |= SKIP_ENVIRONMENT;
+	if (self.lightmap.live || (self.scene != null && self.scene.lightmap_live)) used |= SKIP_LIGHTMAPS;
+	if (self.ambient_occlusion.live) used |= SKIP_OCCLUSION;
+	if (self.shadows.live || self.lighting.lights[0].meta[1] != SHADOW_VIEW_NONE) used |= SKIP_SUN_SHADOW;
+	for (uint i = 0; i < self.lighting.count; i++)
+	{
+		Light* light = &self.lighting.lights[i];
+		if ((light.meta[3] & LIGHT_BAKED) != 0) used |= SKIP_BAKED_LIGHTS;
+		if (i == 0) continue;
+		switch (light.meta[2])
+		{
+			case 0: used |= SKIP_EXTRA_DIRECTIONALS;
+			case 4: used |= SKIP_SPOT_LIGHTS;
+			case 2:
+			case 3: used |= SKIP_AREA_LIGHTS;
+			default:
+		}
+		if (light.meta[1] != SHADOW_VIEW_NONE) used |= SKIP_LOCAL_SHADOWS;
+	}
+	return SKIP_ALL_FEATURES & ~used;
+}
+
+<*
+ Picks, for every live material, the pipeline variant this frame's lights draw
+ with, building any not built before. After `write_lights`, which settles the
+ lights and their shadow views.
+*>
+fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
+{
+	self.lit_pipelines.clear();
+	self.skip_features = self.feature_variants_disabled ? 0 : self.unused_features();
+	if (self.skip_features == 0) return;
+	foreach (&material : self.materials)
+	{
+		if (!material.alive || material.pipeline == null) continue;
+		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, self.skip_features)!;
+		if (lit != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit });
+	}
+}
+
+<*
+ The directional lights besides light zero, which the shader's light loop
+ visits before the cluster's: one more than their count, then up to three
+ indices. More than three write 0, which scans every light.
+
+ @return "FrameBlock.directional_lights"
+*>
+fn uint[4] MeshPass.directional_lights(&self)
+{
+	uint[4] out;
+	uint found;
+	for (uint i = 1; i < self.lighting.count; i++)
+	{
+		if (self.lighting.lights[i].meta[2] != 0) continue;
+		if (found == 3) return { 0, 0, 0, 0 };
+		out[1 + found++] = i;
+	}
+	out[0] = found + 1;
+	return out;
 }
 
 fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
@@ -3935,6 +4028,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	// into a deletion queue that is about to be drained anyway.
 	foreach (&material : self.materials) material.free();
 	self.materials.free();
+	self.lit_pipelines.free();
 	self.pipelines.free(gpu);
 	self.pipeline = null;
 	self.line_pipeline = null;

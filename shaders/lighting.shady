@@ -27,6 +27,19 @@ const uint LIGHT_RECT        = 2u;
 const uint LIGHT_DISK        = 3u;
 const uint LIGHT_SPOT        = 4u;
 
+// Which features a pipeline keeps. All on by default; a frame that uses none of
+// one draws with a variant that turns it off (`MeshPass.unused_features`),
+// because a mobile GPU pays registers for code even when it never runs.
+const bool LIGHTS_AREA              @spec(100) = true;
+const bool LIGHTS_SPOT              @spec(101) = true;
+const bool LIGHTS_EXTRA_DIRECTIONAL @spec(102) = true;
+const bool LIGHTS_LOCAL_SHADOWS     @spec(103) = true;
+const bool LIGHTS_BAKED             @spec(104) = true;
+const bool SURFACE_ENVIRONMENT      @spec(105) = true;
+const bool SURFACE_LIGHTMAPS        @spec(106) = true;
+const bool SURFACE_OCCLUSION        @spec(107) = true;
+const bool SURFACE_SUN_SHADOW       @spec(108) = true;
+
 // `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
 // direct diffuse in its tile. `shade_lights` skips the diffuse half for those
 // and keeps the specular live; a receiver with no tile shades it in real time
@@ -214,6 +227,7 @@ fn float shadow_view_factor_filtered(uint index, float3 position, float3 normal)
 // index, or 0xffffffff for a light with no view at all.
 fn float shadow_factor(float3 position, float3 normal)
 {
+	if (!SURFACE_SUN_SHADOW) return 1.0;
 	return shadow_view_factor_filtered(push.frame[0].lights[0].meta.y, position, normal);
 }
 
@@ -685,12 +699,14 @@ struct LightTerms
 
 // Every light that reaches this fragment.
 //
-// The directional lights are the frame's own list: there are few, they are
-// infinite, and a cluster cannot cull them. Everything with a position is found
-// through the culling pass's cluster, whose counts and indices are the frame
-// block's - and whose overflow bit means "the culling gave up on this cluster,
-// shade it with every light there is", which is what makes the pair correct at
-// any scale rather than only at the scale it was tuned for.
+// Light zero is the sun, lit on its own with the shadow map fitted around it.
+// Every other light goes through one loop: the frame's listed directionals
+// first, then the cluster's local lights from the culling pass. One loop body
+// rather than a second for the directionals, because a mobile GPU pays for
+// every line of a shader in registers whether it runs or not. When the host
+// did not list the directionals, or the culling gave up on this cluster - the
+// overflow bit - the loop scans every light instead, which keeps the pair
+// correct at any scale rather than only at the one it was tuned for.
 fn LightTerms shade_lights(
 	FrameBlock* frame,
 	float4 screen_position,
@@ -717,31 +733,25 @@ fn LightTerms shade_lights(
 	terms.specular = float3(0.0);
 
 	uint count = (uint)frame[0].lighting.y;
-	for (uint i = 0u; i < count; i++)
+	Light sun = frame[0].lights[0];
+	if (sun.meta.z == LIGHT_DIRECTIONAL)
 	{
-		Light light = frame[0].lights[i];
-		if (light.meta.z != LIGHT_DIRECTIONAL) continue;
-
 		float reach;
-		float3 toward = light_toward(light.direction, position, reach);
+		float3 toward = light_toward(sun.direction, position, reach);
 		float nl = max(dot(normal, toward), 0.0);
-		if (nl * reach <= 0.0) continue;
-
-		// Only light zero is the sun the shadow map was fitted around; a second
-		// directional has a view of its own or none, which `point_shadow_factor`
-		// answers.
-		float visibility = i == 0u ? sun_shadow : point_shadow_factor(i, light, position, receiver_normal);
-		float3 energy = light.color.rgb * light.color.w * reach * visibility;
+		float3 energy = sun.color.rgb * sun.color.w * reach * sun_shadow;
 		// A light map holds diffuse only, so a baked light's highlight stays in
 		// this real-time loop; only the diffuse half is the tile's.
-		if (!(skip_baked_diffuse && light_is_baked(light))) terms.diffuse += energy * nl;
+		if (!(LIGHTS_BAKED && skip_baked_diffuse && light_is_baked(sun))) terms.diffuse += energy * nl;
 		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
 	}
 
+	uint listed = frame[0].directional_lights.x;
+	uint extra = listed == 0u || !LIGHTS_EXTRA_DIRECTIONAL ? 0u : listed - 1u;
 	uint cluster = fragment_cluster(frame, screen_position, position);
 	uint packed = frame[0].cluster_grid.w == 0u ? 0x80000000u : frame[0].cluster_counts[cluster];
-	bool overflow = (packed & 0x80000000u) != 0u;
-	uint local_count = overflow ? count : packed;
+	bool scan = listed == 0u || (packed & 0x80000000u) != 0u;
+	uint total = scan ? count : extra + packed;
 
 	// The module's own area algorithm answers through `area_light_terms`. The
 	// cache is the LTC half's fit context, kept across emitters so a fragment
@@ -750,35 +760,45 @@ fn LightTerms shade_lights(
 	AreaCache area_cache;
 	bool area_ready = false;
 
-	for (uint local = 0u; local < local_count; local++)
+	for (uint at = 0u; at < total; at++)
 	{
-		uint i = overflow ? local : frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + local];
+		uint i = at;
+		if (!scan)
+		{
+			if (LIGHTS_EXTRA_DIRECTIONAL && at < extra) { i = frame[0].directional_lights[at + 1u]; }
+			else { i = frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]; }
+		}
+		if (i == 0u) continue;
 		Light light = frame[0].lights[i];
-		bool skip_diffuse = skip_baked_diffuse && light_is_baked(light);
+		bool skip_diffuse = LIGHTS_BAKED && skip_baked_diffuse && light_is_baked(light);
 
-		if (light.meta.z == LIGHT_RECT || light.meta.z == LIGHT_DISK)
+		if (LIGHTS_AREA && (light.meta.z == LIGHT_RECT || light.meta.z == LIGHT_DISK))
 		{
 			AreaTerms area = area_light_terms(
 				light, position, normal, view, f0, f90, a2, k, nv, area_cache, area_ready
 			);
 			if (area.diffuse <= 0.0 && dot(area.specular, float3(1.0)) <= 0.0) continue;
 			// One visibility for both lobes, like the punctual branch below.
-			float visibility = point_shadow_factor(i, light, position, receiver_normal);
+			float visibility = 1.0;
+			if (LIGHTS_LOCAL_SHADOWS) visibility = point_shadow_factor(i, light, position, receiver_normal);
 			if (!skip_diffuse) terms.diffuse += light.color.rgb * area.diffuse * visibility;
 			terms.specular += area.specular * visibility;
 			continue;
 		}
 
-		if (light.meta.z != LIGHT_POINT && light.meta.z != LIGHT_SPOT) continue;
+		// A directional reaches every fragment; `light_toward` tells it from a
+		// point light by the sign of its packed range.
+		if (light.meta.z != LIGHT_POINT && light.meta.z != LIGHT_SPOT && light.meta.z != LIGHT_DIRECTIONAL) continue;
 
 		float reach;
 		float3 toward = light_toward(light.direction, position, reach);
-		if (light.meta.z == LIGHT_SPOT) reach *= spot_reach(light, toward);
+		if (LIGHTS_SPOT && light.meta.z == LIGHT_SPOT) reach *= spot_reach(light, toward);
 
 		float nl = max(dot(normal, toward), 0.0);
 		if (nl * reach <= 0.0) continue;
 
-		float visibility = point_shadow_factor(i, light, position, receiver_normal);
+		float visibility = 1.0;
+		if (LIGHTS_LOCAL_SHADOWS) visibility = point_shadow_factor(i, light, position, receiver_normal);
 		float3 energy = light.color.rgb * light.color.w * reach * visibility;
 		if (!skip_diffuse) terms.diffuse += energy * nl;
 		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);

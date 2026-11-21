@@ -388,6 +388,10 @@ struct FrameBlock
 	uint[4] cluster_grid; // xyz dimensions, w per-cluster capacity
 	float[4] cluster_screen; // target width and height, then near and far
 	float[4] view_rect; // this view's x, y, width and height in target pixels
+	// The directional lights besides light zero, so the light loop need not scan
+	// `lights` for them: x is one more than how many of yzw hold one. 0, which a
+	// frame block that never filled it reads, scans every light instead.
+	uint[4] directional_lights;
 }
 
 <*
@@ -706,7 +710,7 @@ $assert ShadowPush::size == 96 : "the shadow push block moved off its pinned siz
 // boundary after `relief` ends at 404 and the four bytes between are padding —
 // not a field and not part of the wire format, which is why the new field is last.
 $assert DrawRecord::size == 416 : "DrawRecord moved off its pinned size";
-$assert FrameBlock::size == 416 : "FrameBlock moved off its pinned size";
+$assert FrameBlock::size == 432 : "FrameBlock moved off its pinned size";
 $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex moved off its pinned size";
@@ -801,6 +805,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "cluster_grid", 368, 16 },
 	{ "cluster_screen", 384, 16 },
 	{ "view_rect", 400, 16 },
+	{ "directional_lights", 416, 16 },
 };
 
 <*
@@ -943,7 +948,29 @@ struct PipelineState
 	// pass with a target of its own names another. Dynamic rendering checks it
 	// against the attachment, and a mismatch is a draw Metal silently drops.
 	vk::Format color;
+	// Mesh shader features compiled out, as `SKIP_*` bits. Zero keeps every one,
+	// which is what each pipeline but a frame's variant is built with - see
+	// `PipelineCache.variant`.
+	uint skip_features;
 }
+
+// What a frame may leave out of the mesh shader. A mobile GPU pays in registers
+// for every branch a shader has, taken or not, so a scene without any area
+// light draws with a pipeline that has no area-light code at all.
+const uint SKIP_AREA_LIGHTS        = 1;
+const uint SKIP_SPOT_LIGHTS        = 2;
+const uint SKIP_EXTRA_DIRECTIONALS = 4;
+const uint SKIP_LOCAL_SHADOWS      = 8;
+const uint SKIP_BAKED_LIGHTS       = 16;
+const uint SKIP_ENVIRONMENT        = 32;
+const uint SKIP_LIGHTMAPS          = 64;
+const uint SKIP_OCCLUSION          = 128;
+const uint SKIP_SUN_SHADOW         = 256;
+const uint SKIP_ALL_FEATURES       = 511;
+// The shaders' `LIGHTS_*` and `SURFACE_*` constants are `@spec(100)` onwards, in
+// the order of the bits above.
+const uint FEATURE_SPEC_ID = 100;
+const uint SHADER_FEATURES = 9;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces
@@ -1073,7 +1100,8 @@ fn bool PipelineState.equals(self, PipelineState other)
 				.depth_write // The line that makes a blended variant its own cache entry: one
 				// compile, about a millisecond for the extra `VkPipeline`.
 		&& self.blend == other.blend
-		&& self.color == other.color;
+		&& self.color == other.color
+		&& self.skip_features == other.skip_features;
 }
 
 struct MeshPipeline
@@ -1509,6 +1537,22 @@ fn MeshPipeline? MeshPipeline.init(
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[2] stages = draw_stages(module_handle);
+	// Each feature constant on unless its bit is set. A module without them - any
+	// but the mesh shader - ignores the entries.
+	uint[SHADER_FEATURES] kept;
+	vk::SpecializationMapEntry[SHADER_FEATURES] entries;
+	foreach (i, &entry : entries)
+	{
+		kept[i] = (state.skip_features & (1u << i)) == 0 ? 1 : 0;
+		*entry = { .constantID = FEATURE_SPEC_ID + (uint)i, .offset = (uint)(i * uint::size), .size = uint::size };
+	}
+	vk::SpecializationInfo lights = {
+		.mapEntryCount = SHADER_FEATURES,
+		.pMapEntries = &entries[0],
+		.dataSize = kept.len * uint::size,
+		.pData = &kept[0],
+	};
+	if (state.skip_features != 0) stages[1].pSpecializationInfo = &lights;
 
 	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
@@ -1971,6 +2015,12 @@ struct CachedPipeline
 	// the eviction order least-recently-released rather than whichever the scan
 	// reached first. Meaningless while `refs > 0`.
 	ulong released_at;
+	// The push contract it was built against, so a variant is built the same way.
+	// Owned: a caller's slice may be a temporary, as a defaulted const array is.
+	PushFieldLayout[] contract;
+	// The entry this is a lighting variant of, or null. A variant holds one borrow
+	// for as long as that entry has any - see `PipelineCache.variant`.
+	CachedPipeline* variant_of;
 }
 
 <*
@@ -2217,6 +2267,7 @@ fn MeshPipeline*? PipelineCache.acquire(
 	entry.state = state;
 	entry.pipeline = built;
 	entry.refs = 1;
+	entry.contract = copy_contract(contract);
 	// The module is kept alive by its pipelines and by nothing else. A build that
 	// failed on the line above leaves a freshly compiled module at zero — cached,
 	// so the retry is free, and released at `free` rather than by eviction, which
@@ -2261,6 +2312,59 @@ fn void PipelineCache.retain(&self, MeshPipeline* pipeline)
 	entry.refs++;
 }
 
+fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
+{
+	PushFieldLayout[] owned = mem::new_array(PushFieldLayout, contract.len);
+	owned[..] = contract[..];
+	return owned;
+}
+
+<*
+ `base` built over the same module and state with some shader features
+ compiled out, building it the first time it is asked for.
+
+ The variant is kept alive by `base`: it holds one borrow while `base` has any,
+ and gives it back when `base` is released for the last time. A pipeline this
+ cache did not hand out comes back unchanged.
+
+ @param [&in] base : "A pipeline `acquire` handed out"
+ @require skip_features <= SKIP_ALL_FEATURES : "Unknown feature bits"
+
+ @return "`base` itself when it already leaves out exactly those features"
+*>
+fn MeshPipeline*? PipelineCache.variant(&self, Gpu* gpu, Target* target, MeshPipeline* base, uint skip_features)
+{
+	CachedPipeline* entry = self.entry_for(base);
+	if (entry == null || entry.state.skip_features == skip_features) return base;
+
+	PipelineState state = entry.state;
+	state.skip_features = skip_features;
+	foreach (other : self.entries)
+	{
+		if (other.compiled != entry.compiled || !other.state.equals(state)) continue;
+		if (other.refs == 0) other.refs = 1;
+		if (other.variant_of == null) other.variant_of = entry;
+		return &other.pipeline;
+	}
+
+	MeshPipeline built;
+	built.init(gpu, target, &entry.compiled.mod, state, entry.contract)!;
+	self.builds++;
+
+	CachedPipeline* variant = mem::new(CachedPipeline);
+	*variant = {
+		.compiled = entry.compiled,
+		.state = state,
+		.pipeline = built,
+		.refs = 1,
+		.contract = copy_contract(entry.contract),
+		.variant_of = entry,
+	};
+	entry.compiled.refs++;
+	self.entries.push(variant);
+	return &variant.pipeline;
+}
+
 <*
  Gives a borrow back.
 
@@ -2280,6 +2384,13 @@ fn void PipelineCache.release(&self, Gpu* gpu, MeshPipeline* pipeline)
 	if (entry.refs > 0) return;
 
 	entry.released_at = ++self.clock;
+	// Its lighting variants were alive on its account alone.
+	foreach (other : self.entries)
+	{
+		if (other.variant_of != entry || other.refs == 0) continue;
+		other.refs = 0;
+		other.released_at = self.clock;
+	}
 	self.trim(gpu);
 }
 
@@ -2326,6 +2437,7 @@ fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
 {
 	CachedPipeline* entry = self.entries[index];
 	self.entries.remove_at(index);
+	foreach (other : self.entries) if (other.variant_of == entry) other.variant_of = null;
 
 	gpu.retire_pipeline(entry.pipeline);
 
@@ -2339,6 +2451,7 @@ fn void PipelineCache.evict_at(&self, Gpu* gpu, sz index)
 		if (compiled.refs == 0) self.drop_module(compiled);
 	}
 
+	free(entry.contract);
 	mem::free(entry);
 	self.evictions++;
 }
@@ -2368,6 +2481,7 @@ fn void PipelineCache.free(&self, Gpu* gpu)
 	foreach (entry : self.entries)
 	{
 		entry.pipeline.free(gpu);
+		free(entry.contract);
 		mem::free(entry);
 	}
 	self.entries.free();

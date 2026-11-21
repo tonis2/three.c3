@@ -135,8 +135,11 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			gpu_sum.total += gpu.total;
 			gpu_sum.prepare += gpu.prepare;
 			gpu_sum.shadow += gpu.shadow;
+			gpu_sum.occlusion += gpu.occlusion;
+			gpu_sum.prepass += gpu.prepass;
 			gpu_sum.scene += gpu.scene;
 			gpu_sum.post += gpu.post;
+			gpu_sum.present += gpu.present;
 		}
 		busy_ns += (long)busy.to_now() - wait_ns;
 		waited_ns += wait_ns;
@@ -145,9 +148,10 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		{
 			double seconds = (double)since_ns / 1e9;
 			double n = frames_drawn > 0 ? (double)frames_drawn : 1.0;
-			io::printfn("xr: %.1f fps, cpu %.2f ms, fence wait %.2f ms, gpu %.2f ms (prepare %.2f, shadow %.2f, scene %.2f, post %.2f)",
+			io::printfn("xr: %.1f fps, cpu %.2f ms, fence wait %.2f ms, gpu %.2f ms (prepare %.2f, shadow %.2f, ao %.2f, prepass %.2f, scene %.2f, post %.2f, present %.2f)",
 				frames_drawn / seconds, (double)busy_ns / 1e6 / n, (double)waited_ns / 1e6 / n,
-				gpu_sum.total / n, gpu_sum.prepare / n, gpu_sum.shadow / n, gpu_sum.scene / n, gpu_sum.post / n);
+				gpu_sum.total / n, gpu_sum.prepare / n, gpu_sum.shadow / n, gpu_sum.occlusion / n,
+				gpu_sum.prepass / n, gpu_sum.scene / n, gpu_sum.post / n, gpu_sum.present / n);
 			report_since = clock::now();
 			frames_drawn = 0;
 			busy_ns = 0;

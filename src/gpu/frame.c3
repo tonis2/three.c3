@@ -587,6 +587,8 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	if (may_skip && self.rendered_once && !self.always_render && key == self.rendered_key)
 	{
 		self.timer.mark(cmd, slot, FrameMark.SHADOW);
+		self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
+		self.timer.mark(cmd, slot, FrameMark.PREPASS);
 		self.timer.scene_begin(cmd, slot);
 		self.timer.scene_end(cmd, slot);
 		self.timer.mark(cmd, slot, FrameMark.SCENE);
@@ -647,6 +649,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// that reports no timings at all — see `gpu/timing.c3`.
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
 	if (!cache_reuse) self.pass.record_ambient_occlusion(cmd);
+	self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
 
 	// The depth prepass, and outside the query below on purpose: it is what makes
 	// `fragmentsShaded` mean "how many times the scene pass shaded a pixel" rather
@@ -654,6 +657,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	self.pass.cache_rect = cache_dirty;
 	bool prepassed = cache_reuse ? false
 		: self.pass.record_depth_prepass(cmd, &self.target, cache_partial, posted);
+	self.timer.mark(cmd, slot, FrameMark.PREPASS);
 
 	// Around the scene rendering and outside it — `gpu/timing.c3` says why.
 	self.timer.scene_begin(cmd, slot);

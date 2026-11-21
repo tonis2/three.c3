@@ -1074,3 +1074,85 @@ fn void sixty_four_shadow_views_record_without_crossing_the_plan_array() @test
 	test::@check(stats.shadow_static_draws == 0,
 		"the static half of every view is cached while dynamic draws continue");
 }
+
+<*
+ The light loop visits the directional lights the host lists besides the sun,
+ and more than three falls back to scanning every light rather than dropping one.
+*>
+fn void the_frame_lists_its_directional_lights() @test
+{
+	three::MeshPass* pass = mem::new(three::MeshPass);
+	defer free(pass);
+
+	// The sun, then point, directional, point, directional.
+	uint[5] kinds = { 0, 1, 0, 1, 0 };
+	pass.lighting.count = kinds.len;
+	foreach (i, kind : kinds) pass.lighting.lights[i].meta[2] = kind;
+	uint[4] listed = pass.directional_lights();
+	test::@check(listed == (uint[4]) { 3, 2, 4, 0 }, "listed %s", listed);
+
+	pass.lighting.count = 1;
+	listed = pass.directional_lights();
+	test::@check(listed == (uint[4]) { 1, 0, 0, 0 }, "the sun alone listed %s", listed);
+
+	// Three besides the sun fill the list; a fourth sends the shader to scan them all.
+	pass.lighting.count = kinds.len + 1;
+	pass.lighting.lights[5].meta[2] = 0;
+	listed = pass.directional_lights();
+	test::@check(listed == (uint[4]) { 4, 2, 4, 5 }, "three directionals besides the sun listed %s", listed);
+	pass.lighting.count = kinds.len + 2;
+	pass.lighting.lights[6].meta[2] = 0;
+	listed = pass.directional_lights();
+	test::@check(listed[0] == 0, "four directionals listed %s instead of scanning", listed);
+}
+
+// Point lights alone leave every other feature out of the variant they draw with.
+fn void the_frame_names_the_features_it_does_not_use() @test
+{
+	three::MeshPass* pass = mem::new(three::MeshPass);
+	defer free(pass);
+
+	// The sun and one point light: nothing but the point path is in use.
+	pass.lighting.count = 2;
+	pass.lighting.lights[0].meta = { 1, three::SHADOW_VIEW_NONE, 0, 0 };
+	pass.lighting.lights[1].meta = { 2, three::SHADOW_VIEW_NONE, 1, 0 };
+	test::@check(pass.unused_features() == three::SKIP_ALL_FEATURES,
+		"a sun and a point light still used %x", ~pass.unused_features() & three::SKIP_ALL_FEATURES);
+
+	// The sun's own shadow view counts as its shadow, not as a local one.
+	pass.lighting.lights[0].meta[1] = 0;
+	test::@check(pass.unused_features() == (three::SKIP_ALL_FEATURES & ~three::SKIP_SUN_SHADOW),
+		"the sun's shadow left %x unused", pass.unused_features());
+
+	pass.lighting.count = 6;
+	pass.lighting.lights[2].meta = { 3, three::SHADOW_VIEW_NONE, 4, 0 };
+	pass.lighting.lights[3].meta = { 4, 7, 2, 0 };
+	pass.lighting.lights[4].meta = { 5, three::SHADOW_VIEW_NONE, 0, 0 };
+	pass.lighting.lights[5].meta = { 6, three::SHADOW_VIEW_NONE, 3, three::LIGHT_BAKED };
+	uint surface = three::SKIP_ENVIRONMENT | three::SKIP_LIGHTMAPS | three::SKIP_OCCLUSION;
+	test::@check(pass.unused_features() == surface,
+		"a spot, a shadowed rectangle, a second sun and a baked disk left %x unused", pass.unused_features());
+
+	pass.ambient_occlusion.live = true;
+	test::@check(pass.unused_features() == (surface & ~three::SKIP_OCCLUSION), "occlusion did not count");
+}
+
+// A variant without the unused features draws the picture the full shader does.
+fn void a_lighting_variant_draws_what_the_full_shader_draws() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer renderer.pass.feature_variants_disabled = false;
+	scene(renderer);
+	points(renderer, 12, false);
+	renderer.pass.feature_variants_disabled = true;
+	image::Image full = renderer.capture()!!;
+	defer full.free();
+	renderer.pass.feature_variants_disabled = false;
+	image::Image variant = renderer.capture()!!;
+	defer variant.free();
+	test::@check(renderer.pass.skip_features == three::SKIP_ALL_FEATURES, "the frame kept %x", renderer.pass.skip_features);
+	test::@check(renderer.pass.lit_pipelines.len() > 0, "nothing drew with a variant");
+	test::@check(max_rgb_difference(&full, &variant) <= 1,
+		"the variant matches the full shader (largest channel error %d)", max_rgb_difference(&full, &variant));
+}

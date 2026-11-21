@@ -472,7 +472,7 @@ fn void append_json_lines(DString* out, String text)
  they are not scene facts: `SceneStats` is device-free, and the millisecond
  counts belong to whichever frame the run last drew.
 
- The five phases are here and not only in `stats()` because this is the result an
+ The seven phases are here and not only in `stats()` because this is the result an
  agent reads without being asked to: a tool result that already says
  `"shadowMs":2.66` next to `"gpuMs":3.92` saves finding out where a frame went by
  editing the scene six times. They sum to `gpuMs`, so the block is a breakdown
@@ -485,7 +485,7 @@ fn void append_json_lines(DString* out, String text)
 fn void append_stats(DString* out, SceneStats stats, FrameTiming timing)
 {
 	out.appendf(
-		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"geometryBytes":%d,"targetBytes":%d,"postBytes":%d,"shadowBytes":%d,"culledLastFrame":%d,"shadowCulled":%d,"gpuMs":%f,"prepareMs":%f,"shadowMs":%f,"sceneMs":%f,"postMs":%f,"presentMs":%f}`,
+		`{"drawCalls":%d,"uniqueMeshes":%d,"instances":%d,"nodes":%d,"assets":%d,"triangles":%d,"vertices":%d,"textures":%d,"textureBytes":%d,"geometryBytes":%d,"targetBytes":%d,"postBytes":%d,"shadowBytes":%d,"culledLastFrame":%d,"shadowCulled":%d,"gpuMs":%f,"prepareMs":%f,"shadowMs":%f,"occlusionMs":%f,"prepassMs":%f,"sceneMs":%f,"postMs":%f,"presentMs":%f}`,
 		stats.draw_calls,
 		stats.unique_meshes,
 		stats.instances,
@@ -504,6 +504,8 @@ fn void append_stats(DString* out, SceneStats stats, FrameTiming timing)
 		timing.total,
 		timing.prepare,
 		timing.shadow,
+		timing.occlusion,
+		timing.prepass,
 		timing.scene,
 		timing.post,
 		timing.present

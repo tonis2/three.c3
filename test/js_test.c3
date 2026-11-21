@@ -6021,7 +6021,7 @@ fn void stats_splits_the_frame_into_its_passes() @test
 			three.render(scene, three.camera);
 
 			const s = three.stats();
-			const parts = [s.prepareMs, s.shadowMs, s.sceneMs, s.postMs, s.presentMs];
+			const parts = [s.prepareMs, s.shadowMs, s.occlusionMs, s.prepassMs, s.sceneMs, s.postMs, s.presentMs];
 			const sum = parts.reduce((a, b) => a + b, 0);
 			return {
 				gpuMs: s.gpuMs,
@@ -6035,7 +6035,7 @@ fn void stats_splits_the_frame_into_its_passes() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(
 			result.value.contains(`"drift":true`) && result.value.contains(`"allFinite":true`),
-			"the phases came through: %s — five numbers that add up to gpuMs", result.value
+			"the phases came through: %s — seven numbers that add up to gpuMs", result.value
 		);
 	};
 }

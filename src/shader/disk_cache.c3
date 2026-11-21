@@ -30,19 +30,15 @@
 
  ## The compiler is in the key
 
- The key names the compiler that ran — a bare `shady` — because a file built by
- a different compiler must not be a candidate for this one. The name carries no
- revision: the compiler is a submodule and its own sources move with a checkout,
- so see the rule below for what a move means.
+ The key names the compiler that ran and its codegen revision — `shady r1` —
+ because a file built by a different compiler must not be a candidate for this
+ one. The revision is `shady::CODEGEN_REVISION`, which shady bumps whenever the
+ same source compiles to different SPIR-V, so moving the submodule across such a
+ change moves every module to a new filename.
 
- ## Moving shady means clearing the cache
-
- The key names no shady revision, and the submodule follows `main`, so modules
- the previous checkout compiled stay candidates after it moves. **After moving
- the shady submodule, delete the cache directory** — `build/shader-cache` by
- default, gitignored; deleting it is the whole of "clear the cache". Skip it and
- the next run serves a module the old compiler built: a shader still behaving
- the way it did before the move, on warm caches and not on cold ones.
+ A shady change that forgets the bump still serves old modules. Deleting the
+ cache directory — `build/shader-cache` by default, gitignored — is the whole of
+ "clear the cache".
 
  ## The spec values are in the key
 
@@ -64,7 +60,7 @@
  -----  ------------------------------------------------------------------
  4  magic — 'T3SC' as the four bytes T, 3, S, C
  4  SHADER_CACHE_FORMAT_VERSION
- blob  compiler — "shady"                              (identity, checked)
+ blob  compiler — "shady r<revision>"                  (identity, checked)
  blob  arguments — the compiler's flags, joined '\0'  (identity, checked)
  blob  name — the def or pass compiled                (identity, checked)
  blob  specs — (id, kind, bits), sorted by id         (identity, checked)
@@ -115,8 +111,8 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
 
  It is in the *key* as well as in the file, so a bump does not merely reject old
  entries — it moves every module to a new filename and leaves the old ones to be
- deleted with the directory. A moved shady is deliberately not a reason to bump:
- the key names no revision, and the directory is the answer instead, above.
+ deleted with the directory. A shady codegen change is not a reason to bump:
+ `shady::CODEGEN_REVISION` in the compiler string moves the key instead.
 
  2 added the compiler tag, above the arguments. 3 added `indirect` to a push
  field, which tells a uniform in the table buffer from one in the block — a
@@ -132,7 +128,8 @@ access, which a host checks a bound image against — a stored module without
 them would accept any image in any format. 10 is a codegen change rather than a
 format one (8 and 9 went to unreleased builds): an index into a matrix, vector
 or array behind a device address is address arithmetic, which Adreno needs, and
-a stored module would still carry the access chain.
+a stored module would still carry the access chain. From then on codegen
+changes move `shady::CODEGEN_REVISION` instead.
 *>
 const uint SHADER_CACHE_FORMAT_VERSION = 10;
 
@@ -165,7 +162,7 @@ struct ShaderSpec
  Everything that decides which module a file holds: what was compiled, by which
  compiler, and with which spec values.
 
- The compiler string is `shady` — see the header. `name` and `source` identify
+ The compiler string is `shady r<revision>` — see the header. `name` and `source` identify
  the module; `entries` is the requested entry list, empty for a def whose source
  already carries its entry points.
 *>

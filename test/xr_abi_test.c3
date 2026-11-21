@@ -18,6 +18,9 @@ fn void sizes() @test
 	test::eq(xr::ApplicationInfo::size, 272);
 	test::eq(xr::InstanceCreateInfo::size, 328);
 	test::eq(xr::InstanceProperties::size, 152);
+	test::eq(xr::ExtensionProperties::size, 152);
+	test::eq(xr::EventDataDisplayRefreshRateChangedFB::size, 24);
+	test::eq($reflect(xr::ExtensionProperties.extension_version).offset, 144);
 	test::eq(xr::SystemGetInfo::size, 24);
 	test::eq(xr::ViewConfigurationView::size, 40);
 	test::eq(xr::GraphicsRequirementsVulkanKHR::size, 32);

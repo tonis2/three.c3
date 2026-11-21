@@ -901,13 +901,13 @@ fn void the_phases_account_for_the_whole_frame() @test
 		renderer.render_offscreen()!!;
 
 		three::FrameTiming t = renderer.timing();
-		double sum = t.prepare + t.shadow + t.scene + t.post + t.present;
+		double sum = t.prepare + t.shadow + t.occlusion + t.prepass + t.scene + t.post + t.present;
 
 		test::@check(t.total > 0.0, "the frame was not measured at all: %f ms", t.total);
 		test::@check(
 			math::abs(sum - t.total) < 1e-6,
-			"the phases sum to %f ms but the frame was %f ms (prepare %f, shadow %f, scene %f, post %f, present %f)",
-			sum, t.total, t.prepare, t.shadow, t.scene, t.post, t.present
+			"the phases sum to %f ms but the frame was %f ms (prepare %f, shadow %f, occlusion %f, prepass %f, scene %f, post %f, present %f)",
+			sum, t.total, t.prepare, t.shadow, t.occlusion, t.prepass, t.scene, t.post, t.present
 		);
 		test::@check(t.total == renderer.gpu_ms(),
 			"gpu_ms() and timing().total disagree: %f vs %f", renderer.gpu_ms(), t.total);

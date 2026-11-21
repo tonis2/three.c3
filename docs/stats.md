@@ -141,10 +141,13 @@
 - `shadowMs` — Of `gpuMs`: the shadow map, 0 with shadows off. Worth looking at first outdoors — the
   map is fitted around the whole scene, so a wide level pays for texels nowhere near the camera and
   `three.light.shadow.size` is the knob.
+- `occlusionMs` — Of `gpuMs`: ambient occlusion's depth pass, 0 with occlusion off. The occlusion
+  taps themselves run inside the scene's fragments and land in `sceneMs`.
+- `prepassMs` — Of `gpuMs`: the depth prepass, 0 with `three.depthPrepass` off.
 - `sceneMs` — Of `gpuMs`: the pass that draws the picture.
 - `postMs` — Of `gpuMs`: the post chain, 0 with no post shader.
 - `presentMs` — Of `gpuMs`: getting the finished image out — the blit to the window, or the readback
-  behind a screenshot. The five add up to `gpuMs`, so anything unaccounted for is a bug.
+  behind a screenshot. The seven add up to `gpuMs`, so anything unaccounted for is a bug.
 - `fragmentsShaded` — Fragment shader invocations of the pass that drew the picture, from a pipeline
   statistics query — the shadow pass, the depth prepass and the post chain are all outside it, so it
   is the scene pass alone. Overdraw is `fragmentsShaded` divided by `width * height` of

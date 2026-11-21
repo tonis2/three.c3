@@ -90,20 +90,22 @@ fn float crevice_occlusion(float3 position, float3 normal)
 	// An occlusion pass records how much sky a *frame's* pixels can see; a bake
 	// writes a texture looked at from everywhere, so the crevice is open. A
 	// lightmap bake has no depth prepass either - `THREE_NO_AO` in the original.
-	if (MATERIAL_BAKE || MATERIAL_LIGHTMAP_BAKE) return 1.0;
+	if (MATERIAL_BAKE || MATERIAL_LIGHTMAP_BAKE || !SURFACE_OCCLUSION) return 1.0;
 	float4 settings = push.frame[0].ambient_occlusion;
 	if (settings.x <= 0.0) return 1.0;
 
-	float4 clip = push.frame[0].view_projection * float4(position, 1.0);
+	float4x4 view_projection = push.frame[0].view_projection;
+	float4x4 inverse = push.frame[0].inverse_view_projection;
+	float4 clip = view_projection * float4(position, 1.0);
 	float2 uv = float2(0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w);
 	if (clip.w <= 0.0) return 1.0;
 	float4 view = push.frame[0].view_rect;
 	float2 target = max(push.frame[0].cluster_screen.xy, float2(1.0));
 
-	float3 right = normalize((push.frame[0].inverse_view_projection * float4(1.0, 0.0, 0.0, 0.0)).xyz);
-	float3 up = normalize((push.frame[0].inverse_view_projection * float4(0.0, 1.0, 0.0, 0.0)).xyz);
-	float4 clip_right = push.frame[0].view_projection * float4(position + right * settings.y, 1.0);
-	float4 clip_up = push.frame[0].view_projection * float4(position + up * settings.y, 1.0);
+	float3 right = normalize(inverse[0].xyz);
+	float3 up = normalize(inverse[1].xyz);
+	float4 clip_right = view_projection * float4(position + right * settings.y, 1.0);
+	float4 clip_up = view_projection * float4(position + up * settings.y, 1.0);
 	float2 axis_x = float2(
 		0.5 * clip_right.x / clip_right.w + 0.5 - uv.x,
 		0.5 - 0.5 * clip_right.y / clip_right.w - uv.y
@@ -118,6 +120,15 @@ fn float crevice_occlusion(float3 position, float3 normal)
 		float2(0.424, 0.424), float2(-0.424, 0.424), float2(-0.424, -0.424), float2(0.424, -0.424),
 		float2(1.0, 0.0), float2(0.0, 1.0), float2(-1.0, 0.0), float2(0.0, -1.0)
 	};
+	// A tap's world point is `inverse * (2at.x - 1, 1 - 2at.y, depth, 1)`, written
+	// out as a sum of the matrix's columns so each tap is four multiply-adds
+	// rather than a matrix product: on a mobile GPU this loop is most of the cost.
+	float4 corner = inverse[3] - inverse[0] + inverse[1];
+	float4 across = inverse[0] * 2.0;
+	float4 down = inverse[1] * -2.0;
+	float4 deep = inverse[2];
+	float3 facing = normalize(normal);
+	float inverse_radius = 1.0 / settings.y;
 	float blocked = 0.0;
 	for (uint i = 0; i < 12; i++)
 	{
@@ -127,13 +138,12 @@ fn float crevice_occlusion(float3 position, float3 normal)
 		float2 texel = (view.xy + at * view.zw) / target;
 		float depth = ambient_occlusion_depth.SampleLevel(texel, 0.0).r;
 		if (depth >= 0.999999) continue;
-		float4 world = push.frame[0].inverse_view_projection
-			* float4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, depth, 1.0);
+		float4 world = corner + across * at.x + down * at.y + deep * depth;
 		if (abs(world.w) <= 1e-6) continue;
 		float3 delta = world.xyz / world.w - position;
 		float distance = length(delta);
 		if (distance > settings.y || distance <= 1e-5) continue;
-		blocked += step(settings.z, dot(normalize(normal), delta)) * (1.0 - distance / settings.y);
+		blocked += step(settings.z, dot(facing, delta)) * (1.0 - distance * inverse_radius);
 	}
 	return 1.0 - settings.x * blocked / 12.0;
 }
@@ -175,7 +185,7 @@ fn float3 environment_light(
 {
 	// A bake is unlit: a reflection is a fact about where the camera is, and a
 	// baked image is looked at from everywhere.
-	if (MATERIAL_BAKE) return float3(0.0);
+	if (MATERIAL_BAKE || !SURFACE_ENVIRONMENT) return float3(0.0);
 	float intensity = push.frame[0].environment.x;
 	if (intensity <= 0.0) return float3(0.0);
 
@@ -231,6 +241,25 @@ fn bool debug_view(float3 position, float3 normal, out float3 answer)
 	if (mode < 1.5)
 	{
 		answer = float3(shadow_factor(position, normal));
+		return true;
+	}
+
+	// The features this pipeline kept, as stripes along world x two metres wide
+	// in `SKIP_*` order: grey where kept, alternating shades so neighbours read
+	// apart, and black where the feature was left out.
+	if (mode > 2.5)
+	{
+		uint stripe = (uint)(fract(position.x * 0.5) * 9.0);
+		bool kept = SURFACE_SUN_SHADOW;
+		if (stripe == 0u) kept = LIGHTS_AREA;
+		else if (stripe == 1u) { kept = LIGHTS_SPOT; }
+		else if (stripe == 2u) { kept = LIGHTS_EXTRA_DIRECTIONAL; }
+		else if (stripe == 3u) { kept = LIGHTS_LOCAL_SHADOWS; }
+		else if (stripe == 4u) { kept = LIGHTS_BAKED; }
+		else if (stripe == 5u) { kept = SURFACE_ENVIRONMENT; }
+		else if (stripe == 6u) { kept = SURFACE_LIGHTMAPS; }
+		else if (stripe == 7u) { kept = SURFACE_OCCLUSION; }
+		answer = float3(kept ? 0.6 + 0.4 * float(stripe % 2u) : 0.0);
 		return true;
 	}
 
@@ -1099,7 +1128,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// **And not at all in a lightmap bake**: the atlas is the render target
 	// there, so reading it would be a feedback loop - the original's
 	// `THREE_NO_LIGHTMAP`.
-	s.lightmapped = !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;
+	s.lightmapped = SURFACE_LIGHTMAPS && !MATERIAL_LIGHTMAP_BAKE && front_facing && input.lightmap.z > 0.5;
 	s.lightmap = float3(0.0);
 	if (s.lightmapped) s.lightmap = lightmap_atlas.SampleLevel(input.lightmap.xy, 0.0).rgb;
 

@@ -64,7 +64,14 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 		xr::check(xr::cmd.initialize_loader(&loader), "xrInitializeLoaderKHR")!;
 	}
 
-	ZString[2] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance" };
+	// The two optional ones only when the runtime has them: asking for an
+	// extension it lacks fails the whole instance.
+	bool refresh_rate = xr::has_extension(xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) ?? false;
+	bool performance = xr::has_extension(xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME) ?? false;
+	ZString[4] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null };
+	uint enabled = 2;
+	if (refresh_rate) extensions[enabled++] = xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
+	if (performance) extensions[enabled++] = xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
 	xr::InstanceCreateInfoAndroidKHR android_info = {
 		.type = xr::TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
 		.application_vm = app.activity.vm,
@@ -80,11 +87,12 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 			.engine_version = 1,
 			.api_version = xr::make_version(1, 0, 0),
 		},
-		.enabled_extension_count = extensions.len,
+		.enabled_extension_count = enabled,
 		.enabled_extension_names = &extensions[0],
 	};
 	xr::check(xr::cmd.create_instance(&info, &self.instance), "xrCreateInstance")!;
 	xr::load_instance(self.instance)!;
+	xr::load_extensions(self.instance, refresh_rate, performance);
 	xr::set_result_names(self.instance);
 
 	xr::InstanceProperties props = { .type = xr::TYPE_INSTANCE_PROPERTIES };
@@ -296,6 +304,9 @@ fn void XrHost.poll(&self)
 				self.state = changed.state;
 				io::printfn("xr: session state %d", self.state);
 				self.follow_state();
+			case xr::TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB:
+				xr::EventDataDisplayRefreshRateChangedFB* rate = (xr::EventDataDisplayRefreshRateChangedFB*)&event;
+				io::printfn("xr: display now %.0f Hz, was %.0f", rate.to_display_refresh_rate, rate.from_display_refresh_rate);
 			default:
 		}
 	}
@@ -311,6 +322,9 @@ fn void XrHost.follow_state(&self)
 				.primary_view_configuration_type = xr::VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
 			};
 			self.running = @ok(xr::check(xr::cmd.begin_session(self.session, &begin), "xrBeginSession"));
+			if (self.running) self.tune_session();
+		case xr::SESSION_STATE_FOCUSED:
+			self.report_refresh_rates();
 		case xr::SESSION_STATE_STOPPING:
 			(void)xr::check(xr::cmd.end_session(self.session), "xrEndSession");
 			self.running = false;
@@ -319,6 +333,40 @@ fn void XrHost.follow_state(&self)
 			self.exit_wanted = true;
 		default:
 	}
+}
+
+<*
+ Asks for sustained-high CPU and GPU clocks, where the runtime has the extension
+ for it. A failure is logged and otherwise ignored: the session runs either way,
+ just slower.
+*>
+fn void XrHost.tune_session(&self)
+{
+	if (xr::cmd.perf_settings_set_performance_level != null)
+	{
+		bool cpu = @ok(xr::check(xr::cmd.perf_settings_set_performance_level(self.session,
+			xr::PERF_SETTINGS_DOMAIN_CPU, xr::PERF_SETTINGS_LEVEL_SUSTAINED_HIGH), "xrPerfSettingsSetPerformanceLevelEXT"));
+		bool gpu = @ok(xr::check(xr::cmd.perf_settings_set_performance_level(self.session,
+			xr::PERF_SETTINGS_DOMAIN_GPU, xr::PERF_SETTINGS_LEVEL_SUSTAINED_HIGH), "xrPerfSettingsSetPerformanceLevelEXT"));
+		if (cpu && gpu) io::printn("xr: CPU and GPU at sustained high");
+	}
+}
+
+<*
+ Logs the display rates the runtime offers and the one it runs at. It picks the
+ rate itself: a request for another, made at READY or at FOCUSED, is accepted
+ and ignored by the Quest 3 runtime (Oculus 210.137).
+*>
+fn void XrHost.report_refresh_rates(&self)
+{
+	if (xr::cmd.enumerate_display_refresh_rates == null) return;
+	float[16] rates;
+	uint count;
+	if (catch xr::check(xr::cmd.enumerate_display_refresh_rates(self.session, rates.len, &count, &rates[0]),
+		"xrEnumerateDisplayRefreshRatesFB")) return;
+	foreach (rate : rates[:count]) io::printfn("xr: display offers %.0f Hz", rate);
+	float now;
+	if (xr::cmd.get_display_refresh_rate(self.session, &now) >= 0) io::printfn("xr: display at %.0f Hz", now);
 }
 
 // Asks the runtime to wind the session down; `poll` sees it through.

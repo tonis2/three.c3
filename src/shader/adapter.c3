@@ -69,6 +69,14 @@ struct ShadyVariable
 const String[*] SHADY_ARGUMENTS = { "scalar-layout" };
 
 <*
+ The compiler string a cache key carries: the name plus shady's codegen
+ revision, so modules an older shady emitted stop being candidates.
+
+ @return "A temp string, such as `shady r1`"
+*>
+fn String shady_compiler_tag(String name) @local => string::tformat("%s r%d", name, shady::CODEGEN_REVISION);
+
+<*
  Compiles a `ShaderDef` through shady.
 
  `$Type` is the push block: a type parameter rather than a field of `ShaderDef`
@@ -148,7 +156,7 @@ fn ShaderModule compile_compute_shader_cached(String name, String source)
 	@pool()
 	{
 		ShaderCacheKey key = {
-			.compiler = "shady-compute",
+			.compiler = shady_compiler_tag("shady-compute"),
 			.arguments = shader_cache_argument_blob(SHADY_ARGUMENTS[..]),
 			.name = name,
 			.source = source,
@@ -719,8 +727,7 @@ fn ShaderModule compile_shady_cached_source(
 	@pool()
 	{
 		ShaderCacheKey key = {
-			// The compiler's name only; a moved revision is a cache clear.
-			.compiler = "shady",
+			.compiler = shady_compiler_tag("shady"),
 			.arguments = shader_cache_argument_blob(SHADY_ARGUMENTS[..]),
 			.name = def.name,
 			.specs = specs,

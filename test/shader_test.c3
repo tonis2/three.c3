@@ -1743,6 +1743,31 @@ fn void the_stored_compiler_identity_is_checked() @test
 	test::@check(again.spirv == reference.spirv, "and the clean module came back");
 }
 
+// A shady that emits different SPIR-V bumps its revision, which moves the key.
+fn void the_stored_identity_names_the_codegen_revision() @test
+{
+	fresh_cache(CACHE_COMPILER_DIR);
+
+	bool ran = false;
+	three::ShaderModule compiled = three::compile_shader(three::ShaderPass.CLUSTER, &ran)!!;
+	defer compiled.free();
+	test::@check(ran && three::shader_cache_stats().stores == 1, "one module was stored");
+
+	@pool()
+	{
+		String path = cached_module_path(CACHE_COMPILER_DIR);
+		char[] bytes = file::load(tmem, path)!!;
+		String revision = string::tformat(" r%d", shady::CODEGEN_REVISION);
+		usz at = byte_offset(bytes, "shady");
+		test::@check(at < bytes.len, "the stored identity names the compiler");
+		usz tag_end = at + "shady".len;
+		while (tag_end < bytes.len && bytes[tag_end] != ' ') tag_end++;
+		test::@check(tag_end + revision.len <= bytes.len
+			&& (String)bytes[tag_end:revision.len] == revision,
+			"and its codegen revision,%s", revision);
+	};
+}
+
 <*
  An empty cache directory is not a cache at all: nothing is read, nothing is
  written, and no directory appears.

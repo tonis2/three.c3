@@ -1280,6 +1280,8 @@ struct FrameStatsAnswer
 	double gpu_ms;
 	double prepare_ms;
 	double shadow_ms;
+	double occlusion_ms;
+	double prepass_ms;
 	double scene_ms;
 	double post_ms;
 	double present_ms;
@@ -1370,6 +1372,8 @@ fn FrameStatsAnswer? js_stats(JsRuntime* self, Opt {int} id)
 		.gpu_ms = timing.total,
 		.prepare_ms = timing.prepare,
 		.shadow_ms = timing.shadow,
+		.occlusion_ms = timing.occlusion,
+		.prepass_ms = timing.prepass,
 		.scene_ms = timing.scene,
 		.post_ms = timing.post,
 		.present_ms = timing.present,
