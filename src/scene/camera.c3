@@ -45,6 +45,15 @@ struct Camera
 	float fov;
 	float near_plane;
 	float far_plane;
+
+	<*
+	 Set by an XR host each frame: the headset decides the view and projection,
+	 and target and yaw are then the rig the head moves in (see `xr/view.c3`).
+	*>
+	bool head_locked;
+	Matrix4f head_view;
+	Matrix4f head_projection;
+	Vec3 head_eye;
 }
 
 fn Camera default_camera()
@@ -81,7 +90,7 @@ const float CAMERA_PITCH_LIMIT = 89.0f;
 *>
 const float FRAME_MARGIN = 1.05f;
 
-fn Vec3 Camera.eye(&self) => self.target + self.orbit_dir() * self.distance;
+fn Vec3 Camera.eye(&self) => self.head_locked ? self.head_eye : self.target + self.orbit_dir() * self.distance;
 
 <*
  The unit vector from the target towards the eye, from the orbit angles alone.
@@ -257,6 +266,7 @@ fn float Camera.world_per_point(&self, float viewport_height)
 *>
 fn Matrix4f Camera.view(&self)
 {
+	if (self.head_locked) return self.head_view;
 	Vec3 eye = self.eye();
 	Vec3 at  = self
 		.distance > 0.0f ? self
@@ -276,6 +286,7 @@ fn Matrix4f Camera.view(&self)
 *>
 fn Matrix4f Camera.projection(&self, float aspect)
 {
+	if (self.head_locked) return self.head_projection;
 	return matrix::perspective{float}(math::deg_to_rad(self.fov), aspect, self.near_plane, self.far_plane);
 }
 

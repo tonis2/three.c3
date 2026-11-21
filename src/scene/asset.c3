@@ -46,7 +46,7 @@ import std::io;
 import std::io::file;
 import std::collections::list;
 import std::thread;
-import std::thread::cpu;
+import std::os; // num_cpu: std::thread::cpu answers 1 on Android
 import std::time;
 import std::math;
 import std::math::vector;
@@ -2215,7 +2215,7 @@ fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
 		slots[j] = moving;
 	}
 
-	int detected = cpu::native_cpu();
+	int detected = os::num_cpu();
 	uint cores = detected < 1 ? 1 : (uint)detected;
 
 	uint outer = (sz)cores > slots.len() ? (uint)slots.len() : cores;

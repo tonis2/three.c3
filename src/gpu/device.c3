@@ -292,6 +292,37 @@ fn bool validation_layer_present()
 }
 
 <*
+ What an OpenXR runtime asks of the device it composites from: extensions on
+ the instance and device, and which physical device to use. Null on every run
+ that is not an XR one; the XR host sets it before `Engine.open`.
+*>
+struct VulkanRequest
+{
+	ZString[] instance_extensions;
+	ZString[] device_extensions;
+	// Asked once the instance exists. Null keeps the usual choice.
+	PickDeviceFn pick_device;
+	void* pick_context;
+}
+
+alias PickDeviceFn = fn vk::PhysicalDevice(void* context, vk::Instance instance);
+
+VulkanRequest* vulkan_request;
+
+fn void push_missing(vk::ZStringList* list, ZString[] names) @local
+{
+	foreach (name : names)
+	{
+		bool have;
+		foreach (existing : *list)
+		{
+			if (existing.str_view() == name.str_view()) have = true;
+		}
+		if (!have) list.push(name);
+	}
+}
+
+<*
  The instance extensions three.c3 always wants: the platform surface extension
  and `VK_KHR_surface` itself. Headless drops both — see `create_instance`. On
  Linux that is both window systems' surfaces, of which `create_instance` keeps
@@ -377,6 +408,7 @@ fn vk::Instance? create_instance(bool validate, bool headless = false, bool sync
 	// without it the request is silently ignored and the layer runs with its
 	// ordinary checks, which is a synchronization check that checks nothing.
 	if (validating && sync) extensions.push(VALIDATION_FEATURES_EXTENSION);
+	if (vulkan_request != null) push_missing(&extensions, vulkan_request.instance_extensions);
 
 	// VK_KHR_portability_enumeration is deliberately *not* requested, and its
 	// instance flag deliberately not set. That flag is the spec's own switch for
@@ -503,6 +535,13 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
 	vk::DeviceList devices = instance.getDevices()!;
 	defer devices.free();
 
+	// The runtime composites from one particular device; only that one will do.
+	vk::PhysicalDevice wanted;
+	if (vulkan_request != null && vulkan_request.pick_device != null)
+	{
+		wanted = vulkan_request.pick_device(vulkan_request.pick_context, instance);
+	}
+
 	vk::DeviceSelection best;
 	bool found          = false;
 	bool found_discrete = false;
@@ -510,6 +549,8 @@ fn vk::DeviceSelection? select_device(vk::Instance instance, vk::SurfaceKHR surf
 
 	foreach (candidate : devices)
 	{
+		if ((void*)wanted != null && candidate != wanted) continue;
+
 		// A portability implementation advertises VK_KHR_portability_subset, and
 		// on this platform that means MoltenVK, which three.c3 does not support.
 		// 
@@ -601,6 +642,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	if (surface != null) extensions.push("VK_KHR_swapchain");
 	extensions.push("VK_KHR_dynamic_rendering");
 	extensions.push("VK_KHR_push_descriptor");
+	if (vulkan_request != null) push_missing(&extensions, vulkan_request.device_extensions);
 
 	vk::DeviceSelection selection = select_device(instance, surface, extensions)!;
 	self.pdevice = selection.device;

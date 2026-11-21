@@ -386,7 +386,8 @@ struct FrameBlock
 	uint* cluster_counts; // one count per cluster
 	uint* cluster_indices; // fixed-stride lists
 	uint[4] cluster_grid; // xyz dimensions, w per-cluster capacity
-	float[4] cluster_screen; // target width and height
+	float[4] cluster_screen; // target width and height, then near and far
+	float[4] view_rect; // this view's x, y, width and height in target pixels
 }
 
 <*
@@ -705,7 +706,7 @@ $assert ShadowPush::size == 96 : "the shadow push block moved off its pinned siz
 // boundary after `relief` ends at 404 and the four bytes between are padding —
 // not a field and not part of the wire format, which is why the new field is last.
 $assert DrawRecord::size == 416 : "DrawRecord moved off its pinned size";
-$assert FrameBlock::size == 400 : "FrameBlock moved off its pinned size";
+$assert FrameBlock::size == 416 : "FrameBlock moved off its pinned size";
 $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex moved off its pinned size";
@@ -799,6 +800,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "cluster_indices", 360, 8 },
 	{ "cluster_grid", 368, 16 },
 	{ "cluster_screen", 384, 16 },
+	{ "view_rect", 400, 16 },
 };
 
 <*
@@ -2379,3 +2381,4 @@ fn void PipelineCache.free(&self, Gpu* gpu)
 	self.modules.free();
 	*self = { };
 }
+

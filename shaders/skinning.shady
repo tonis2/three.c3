@@ -38,8 +38,40 @@ const uint FLAG_HAS_TANGENTS = 4096;
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
 
+// One copy's `Instance`, read a field at a time. A plain struct rather than
+// the wire one: Adreno reads a whole scalar-layout struct as if it were std430,
+// so a copy of `Instance` comes back with its last fields shifted. The draw
+// record stays behind its pointer for the same reason.
+struct InstanceData
+{
+	float4x4 model;
+	float4x4 normal;
+	float4 color;
+	uint variant;
+	uint pose;
+	uint pose_next;
+	float pose_t;
+	uint morph;
+	float4 lightmap;
+}
+
+fn InstanceData instance_at(Instance* instances, uint i)
+{
+	InstanceData data;
+	data.model = instances[i].model;
+	data.normal = instances[i].normal;
+	data.color = instances[i].color;
+	data.variant = instances[i].variant;
+	data.pose = instances[i].pose;
+	data.pose_next = instances[i].pose_next;
+	data.pose_t = instances[i].pose_t;
+	data.morph = instances[i].morph;
+	data.lightmap = instances[i].lightmap;
+	return data;
+}
+
 // The four influences of one vertex, blended into the matrix that poses it.
-fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
+fn float4x4 skin_matrix(DrawRecord* draw, InstanceData instance, uint vid)
 {
 	float4x4* palette = draw.palette;
 	if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
@@ -62,7 +94,7 @@ fn float4x4 skin_matrix(DrawRecord draw, Instance instance, uint vid)
 }
 
 // The base vertex, displaced by every morph target this bucket carries.
-fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 position, inout float3 normal)
+fn void apply_morph(DrawRecord* draw, InstanceData instance, uint vid, inout float3 position, inout float3 normal)
 {
 	if (draw.morph_targets == 0 || instance.morph == 0) return;
 
@@ -79,9 +111,9 @@ fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 p
 		// compare against two multiply-adds and a 24-byte read.
 		if (weight == 0.0) continue;
 
-		MorphDelta delta = draw.morph[t * draw.skin_stride + vid];
-		position += weight * delta.position;
-		normal += weight * delta.normal;
+		uint at = t * draw.skin_stride + vid;
+		position += weight * draw.morph[at].position;
+		normal += weight * draw.morph[at].normal;
 	}
 }
 
@@ -96,7 +128,7 @@ fn void apply_morph(DrawRecord draw, Instance instance, uint vid, inout float3 p
 // `local` is the bind pose the draw path's `Vertex.local` hands a script: the
 // morphed position before either skinning path runs, so a displacement sized by
 // the mesh's own length does not slide across the surface when a character moves.
-fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inout float3 position, inout float3 normal, inout float3 tangent, out float3 local)
+fn void pose_vertex(DrawRecord* draw, InstanceData instance, uint vid, uint iid, inout float3 position, inout float3 normal, inout float3 tangent, out float3 local)
 {
 	apply_morph(draw, instance, vid, position, normal);
 	local = position;
@@ -121,8 +153,7 @@ fn void pose_vertex(DrawRecord draw, Instance instance, uint vid, uint iid, inou
 		// The compute pass already did the blend, once per vertex per frame rather
 		// than once per vertex per draw. It wrote one copy of the mesh per
 		// instance, so the index carries the instance as well as the vertex.
-		SkinnedVertex skinned = draw.posed[iid * draw.skin_stride + vid];
-		position = skinned.position;
-		normal = skinned.normal;
+		position = draw.posed[iid * draw.skin_stride + vid].position;
+		normal = draw.posed[iid * draw.skin_stride + vid].normal;
 	}
 }

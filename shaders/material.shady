@@ -97,6 +97,8 @@ fn float crevice_occlusion(float3 position, float3 normal)
 	float4 clip = push.frame[0].view_projection * float4(position, 1.0);
 	float2 uv = float2(0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w);
 	if (clip.w <= 0.0) return 1.0;
+	float4 view = push.frame[0].view_rect;
+	float2 target = max(push.frame[0].cluster_screen.xy, float2(1.0));
 
 	float3 right = normalize((push.frame[0].inverse_view_projection * float4(1.0, 0.0, 0.0, 0.0)).xyz);
 	float3 up = normalize((push.frame[0].inverse_view_projection * float4(0.0, 1.0, 0.0, 0.0)).xyz);
@@ -121,7 +123,9 @@ fn float crevice_occlusion(float3 position, float3 normal)
 	{
 		float2 at = uv + axis_x * taps[i].x + axis_y * taps[i].y;
 		if (any(at <= float2(0.0)) || any(at >= float2(1.0))) continue;
-		float depth = ambient_occlusion_depth.SampleLevel(at, 0.0).r;
+		// `at` is across this view; the depth image spans the whole target.
+		float2 texel = (view.xy + at * view.zw) / target;
+		float depth = ambient_occlusion_depth.SampleLevel(texel, 0.0).r;
 		if (depth >= 0.999999) continue;
 		float4 world = push.frame[0].inverse_view_projection
 			* float4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, depth, 1.0);
@@ -605,7 +609,7 @@ fn float3 specular(Surface s)
 // two lines again, with a uv of the caller's choosing.
 fn float3 base_albedo(Surface s, float2 uv)
 {
-	DrawRecord draw = push.draw[0];
+	DrawRecord* draw = push.draw;
 	float3 albedo = draw.base_color.rgb * srgb_to_linear(s.color.rgb);
 	if ((draw.flags & FLAG_HAS_UVS) != 0)
 	{
@@ -900,7 +904,7 @@ fn float4 map_texel(Map image, float2 uv, float2 dx, float2 dy, bool scattered)
 // invisible by accident.
 fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 {
-	DrawRecord draw = push.draw[0];
+	DrawRecord* draw = push.draw;
 
 	Surface s;
 	s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);

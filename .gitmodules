@@ -42,3 +42,7 @@
 	path = lib/fastjs.c3l
 	url = https://github.com/tonis2/fastjs.c3.git
 	branch = master
+[submodule "lib/openxr.c3l"]
+	path = lib/openxr.c3l
+	url = https://github.com/tonis2/openxr.c3.git
+	branch = main

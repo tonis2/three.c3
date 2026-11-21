@@ -232,7 +232,7 @@ fn void usage()
 
 
 
-fn int main(String[] args)
+fn int main(String[] args) @feat(!ANDROID) // android_main is the entry there
 {
 	Options? parsed = parse_args(args);
 	if (catch err = parsed)

@@ -275,8 +275,11 @@ struct MeshPass
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] shadow_view_buffers;
 	ShadowViewSet shadow_view_set;
 	ShadowManager shadow_manager;
+	// One grid per view, side by side; the capacities count views.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] cluster_counts;
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] cluster_indices;
+	sz[MAX_FRAMES_IN_FLIGHT] cluster_count_views;
+	sz[MAX_FRAMES_IN_FLIGHT] cluster_index_views;
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] cluster_overflow;
 	uint cluster_overflow_last;
 	// Binning depends on bounds and the camera. Each slot keeps its result
@@ -1035,6 +1038,20 @@ fn void MeshPass.set_extra_views(&self, SceneView[] views)
 	foreach (view : views) self.extra_views.push(view);
 }
 
+<*
+ Every view this frame draws, the main one first: its index, pixel rect and
+ view-projection.
+*>
+macro void MeshPass.@each_view(&self; @body(uint index, vk::Rect2D rect, Matrix4f view_projection))
+{
+	@body(0, self.scene_rect, self.frame_view_projection);
+	foreach (i, view : self.prepared_views) @body((uint)i + 1, view.rect, view.view_projection);
+}
+
+fn float[4] rect_floats(vk::Rect2D rect) @local => {
+	(float)rect.offset.x, (float)rect.offset.y, (float)rect.extent.width, (float)rect.extent.height
+};
+
 fn void MeshPass.prepare_extra_views(&self, vk::Extent2D extent)
 {
 	self.prepared_views.clear();
@@ -1107,7 +1124,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		io::eprintn("three: the area-light table could not be uploaded — area lights are integrated numerically");
 	}
 	self.ambient_occlusion.live = false;
-	if (self.ambient_occlusion.enabled && !self.scene_rect_partial)
+	if (self.ambient_occlusion.enabled)
 	{
 		if (catch self.ambient_occlusion.ensure(gpu, target.extent))
 		{
@@ -1240,7 +1257,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	Vec3 eye = self.camera.eye();
 	ulong shadow_view_address = self.write_shadow_views(gpu, slot)!;
 	ulong light_address = self.write_lights(gpu, slot)!;
-	self.record_clusters(gpu, cmd, slot, light_address, view_projection)!;
+	self.record_clusters(gpu, cmd, slot, light_address)!;
 	FrameBlock frame = {
 		.view_projection = view_projection,
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time,
@@ -1260,12 +1277,12 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.ambient_occlusion = { self.ambient_occlusion.live ? self.ambient_occlusion.intensity : 0.0f,
 			self.ambient_occlusion.radius, self.ambient_occlusion.bias, 0 },
 		.shadow_views = (ShadowGpuView*)shadow_view_address,
-		.cluster_counts = (uint*)self.cluster_counts[slot].address,
-		.cluster_indices = (uint*)self.cluster_indices[slot].address,
-		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z,
-			self.cluster_bruteforce || self.scene_rect_partial ? 0 : CLUSTER_LIGHT_CAPACITY },
+		.cluster_counts = self.view_cluster_counts(slot, 0),
+		.cluster_indices = self.view_cluster_indices(slot, 0),
+		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z, self.cluster_bruteforce ? 0 : CLUSTER_LIGHT_CAPACITY },
 		.cluster_screen = { (float)target.extent.width, (float)target.extent.height,
 			self.camera.near_plane, self.camera.far_plane },
+		.view_rect = rect_floats(self.scene_rect),
 	};
 	self.live_address = live_address;
 	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
@@ -1649,7 +1666,7 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 	self.record_view(cmd, self.scene_rect, self.frame_view_projection, self.frame_address, true);
 	foreach (view : self.prepared_views)
 	{
-		self.record_view(cmd, view.rect, view.view_projection, view.frame_address, false);
+		self.record_view(cmd, view.rect, view.view_projection, view.frame_address, true);
 	}
 }
 
@@ -1849,8 +1866,11 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 {
 	if (!self.prepared || !self.ambient_occlusion.live) return;
 	self.ambient_occlusion.begin(cmd);
-	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
-	self.record_casters(cmd, CASTERS_VISIBLE, self.frame_view_projection);
+	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
+	{
+		if (self.scene_rect_partial || index > 0) set_viewport_rect(cmd, rect, true);
+		self.record_casters(cmd, CASTERS_VISIBLE, view_projection);
+	};
 	self.ambient_occlusion.end(cmd);
 }
 
@@ -1875,38 +1895,42 @@ fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* targ
 
 	if (cached) { target.begin_cached_depth(cmd, self.cache_rect, sampled); }
 	else { target.begin_depth(cmd); }
-	if (self.scene_rect_partial) set_viewport_rect(cmd, self.scene_rect, true);
-	if (cached) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
 
 	vk::Pipeline bound = (vk::Pipeline)null;
 	uint recorded = 0;
 
-	foreach (i, bucket : self.scene.buckets)
+	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
 	{
-		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
-		if (at == NOT_DRAWN || bucket.visible == 0) continue;
+		if (self.scene_rect_partial || index > 0) set_viewport_rect(cmd, rect, true);
+		if (cached) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
 
-		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
-		Material* material = self.material(bucket.material);
-		if (mesh == null || material == null) continue;
-		if (!self.prepassed(material)) continue;
-
-		bool cutout            = material.alpha_test > 0.0f;
-		MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
-
-		if (pipeline.handle != bound)
+		foreach (i, bucket : self.scene.buckets)
 		{
-			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
-			// Beside the pipeline bind, because set 0 differs per shader and a set
-			// binding survives only while the layouts stay compatible up to its own
-			// number. A no-op on a device without the table.
-			self.assets.bind_texture_table(cmd, pipeline.layout);
-			bound = pipeline.handle;
-		}
-		vk::cmdSetCullMode(cmd, material.cull);
+			uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+			if (at == NOT_DRAWN || bucket.visible == 0) continue;
 
-		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, self.frame_view_projection);
-	}
+			GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
+			Material* material = self.material(bucket.material);
+			if (mesh == null || material == null) continue;
+			if (!self.prepassed(material)) continue;
+
+			bool cutout            = material.alpha_test > 0.0f;
+			MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
+
+			if (pipeline.handle != bound)
+			{
+				vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+				// Beside the pipeline bind, because set 0 differs per shader and a set
+				// binding survives only while the layouts stay compatible up to its own
+				// number. A no-op on a device without the table.
+				self.assets.bind_texture_table(cmd, pipeline.layout);
+				bound = pipeline.handle;
+			}
+			vk::cmdSetCullMode(cmd, material.cull);
+
+			recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, view_projection);
+		}
+	};
 
 	vk::cmdEndRendering(cmd);
 	self.prepass.draws = recorded;
@@ -2228,10 +2252,11 @@ fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBloc
 		blocks[i].inverse_view_projection = invert(view.view_projection);
 		Vec3 eye = source.camera.eye();
 		blocks[i].camera = { eye.x, eye.y, eye.z, 0 };
-		blocks[i].ambient_occlusion[0] = 0;
-		blocks[i].cluster_grid[3] = 0;
+		blocks[i].cluster_counts = self.view_cluster_counts(slot, (uint)i + 1);
+		blocks[i].cluster_indices = self.view_cluster_indices(slot, (uint)i + 1);
 		blocks[i].cluster_screen[2] = source.camera.near_plane;
 		blocks[i].cluster_screen[3] = source.camera.far_plane;
+		blocks[i].view_rect = rect_floats(view.rect);
 		self.prepared_views[i].frame_address = self.extra_frame_blocks[slot].address
 			+ (ulong)i * FrameBlock::size;
 	}
@@ -2258,17 +2283,22 @@ fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot)
 	return address;
 }
 
-fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot, ulong lights, Matrix4f vp)
+<*
+ Bins the lights for every view, one grid each, side by side in this slot's
+ buffers: the main view's first, then the extras in order.
+*>
+fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot, ulong lights)
 {
 	const sz CLUSTER_COUNT = CLUSTER_X * CLUSTER_Y * CLUSTER_Z;
-	if (self.cluster_counts[slot].buffer == null)
+	sz views = (sz)self.prepared_views.len() + 1;
+	sz had_counts = self.cluster_count_views[slot];
+	sz had_indices = self.cluster_index_views[slot];
+	gpu.grow_slot_buffer(&self.cluster_counts[slot], &self.cluster_count_views[slot], views, 1,
+		CLUSTER_COUNT * uint::size, device_local: true)!;
+	gpu.grow_slot_buffer(&self.cluster_indices[slot], &self.cluster_index_views[slot], views, 1,
+		CLUSTER_COUNT * CLUSTER_LIGHT_CAPACITY * uint::size, device_local: true)!;
+	if (self.cluster_count_views[slot] != had_counts || self.cluster_index_views[slot] != had_indices)
 	{
-		self.cluster_counts[slot] = gpu.create_device_storage(CLUSTER_COUNT * uint::size)!;
-		self.cluster_cached[slot] = false;
-	}
-	if (self.cluster_indices[slot].buffer == null)
-	{
-		self.cluster_indices[slot] = gpu.create_device_storage(CLUSTER_COUNT * CLUSTER_LIGHT_CAPACITY * uint::size)!;
 		self.cluster_cached[slot] = false;
 	}
 	if (self.cluster_overflow[slot].buffer == null)
@@ -2280,11 +2310,14 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	{
 		self.cluster_overflow_last = *(uint*)self.cluster_overflow[slot].data();
 	}
-	ulong key = hash_bytes(0, &vp, Matrix4f::size);
-	Vec3 eye = self.camera.eye();
-	key = @hash_value(key, eye);
-	key = @hash_value(key, self.camera.near_plane);
-	key = @hash_value(key, self.camera.far_plane);
+	ulong key = @hash_value(0, views);
+	for (uint v = 0; v < views; v++)
+	{
+		ClusterPush view = self.cluster_view(v);
+		key = hash_bytes(key, &view.view_projection, Matrix4f::size);
+		key = @hash_value(key, view.camera_near);
+		key = @hash_value(key, view.far_plane);
+	}
 	key = @hash_value(key, self.lighting.count);
 	for (uint i = 1; i < self.lighting.count; i++)
 	{
@@ -2315,21 +2348,51 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 		if (!mod.ok) { @advise("three: cluster shader: %s", mod.diagnostic); return SHADER_MISSING_ENTRY_POINT~; }
 		self.cluster_pipeline.init_cluster(gpu, &mod)!;
 	}
-	ClusterPush push = {
-		.lights = (Light*)lights, .counts = (uint*)self.cluster_counts[slot].address,
-		.indices = (uint*)self.cluster_indices[slot].address, .overflow = (uint*)self.cluster_overflow[slot].address,
-		.view_projection = vp, .light_count = self.lighting.count,
-		.camera_near = { self.camera.eye().x, self.camera.eye().y, self.camera.eye().z, self.camera.near_plane },
-		.far_plane = self.camera.far_plane,
-	};
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_COMPUTE, self.cluster_pipeline.handle);
-	vk::cmdPushConstants(cmd, self.cluster_pipeline.layout, SHADER_STAGE_COMPUTE_BIT, 0,
-		self.cluster_pipeline.shader.push_size, &push);
-	vk::cmdDispatch(cmd, (CLUSTER_COUNT + 63) / 64, 1, 1);
+	for (uint v = 0; v < views; v++)
+	{
+		ClusterPush push = self.cluster_view(v);
+		push.lights = (Light*)lights;
+		push.counts = self.view_cluster_counts(slot, v);
+		push.indices = self.view_cluster_indices(slot, v);
+		push.overflow = (uint*)self.cluster_overflow[slot].address;
+		push.light_count = self.lighting.count;
+		vk::cmdPushConstants(cmd, self.cluster_pipeline.layout, SHADER_STAGE_COMPUTE_BIT, 0,
+			self.cluster_pipeline.shader.push_size, &push);
+		vk::cmdDispatch(cmd, (CLUSTER_COUNT + 63) / 64, 1, 1);
+	}
 	self.cluster_keys[slot] = key;
 	self.cluster_cached[slot] = true;
 	self.cluster_dispatches++;
 	compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+}
+
+<*
+ One view's camera, as the cluster pass bins against it: 0 is the main view.
+ @require view <= self.prepared_views.len() : "No such view"
+*>
+fn ClusterPush MeshPass.cluster_view(&self, uint view)
+{
+	sz extra = (sz)view - 1;
+	Camera* camera = view == 0 ? &self.camera : &self.extra_views[extra].camera;
+	Vec3 eye = camera.eye();
+	return {
+		.view_projection = view == 0 ? self.frame_view_projection : self.prepared_views[extra].view_projection,
+		.camera_near = { eye.x, eye.y, eye.z, camera.near_plane },
+		.far_plane = camera.far_plane,
+	};
+}
+
+fn uint* MeshPass.view_cluster_counts(&self, uint slot, uint view) @inline
+{
+	const ulong STRIDE = CLUSTER_X * CLUSTER_Y * CLUSTER_Z * uint::size;
+	return (uint*)(self.cluster_counts[slot].address + view * STRIDE);
+}
+
+fn uint* MeshPass.view_cluster_indices(&self, uint slot, uint view) @inline
+{
+	const ulong STRIDE = CLUSTER_X * CLUSTER_Y * CLUSTER_Z * CLUSTER_LIGHT_CAPACITY * uint::size;
+	return (uint*)(self.cluster_indices[slot].address + view * STRIDE);
 }
 
 <*
@@ -3807,6 +3870,8 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		if (self.cluster_overflow[i].buffer != null) self.cluster_overflow[i].free();
 		self.cluster_cached[i] = false;
 		self.cluster_keys[i] = 0;
+		self.cluster_count_views[i] = 0;
+		self.cluster_index_views[i] = 0;
 		self.light_capacity[i] = 0;
 		if (self.instance_buffers[i].buffer != null) self.instance_buffers[i].free();
 		self.instance_capacity[i] = 0;

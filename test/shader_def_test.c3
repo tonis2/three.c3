@@ -1183,7 +1183,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 	// The same vertex path, the same lines - the def handed the same text twice.
 	test::@check(cutout_source.contains("fn float4 posed_clip(uint vid, uint iid)"),
 		"the cut-out module carries the shared vertex path too");
-	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw[0], push.instances[input.iid], input.vid);"),
+	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw, instance_at(push.instances, input.iid), input.vid);"),
 		"beside the uv only it carries");
 
 	// The fragment stage, the sampler, and nothing else that changed.

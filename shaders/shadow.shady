@@ -49,8 +49,8 @@ struct VertexOutput
 // pose a vertex identically.
 fn float4 posed_clip(uint vid, uint iid)
 {
-	DrawRecord draw = push.draw[0];
-	Instance instance = push.instances[iid];
+	DrawRecord* draw = push.draw;
+	InstanceData instance = instance_at(push.instances, iid);
 
 	float3 position = draw.positions[vid];
 

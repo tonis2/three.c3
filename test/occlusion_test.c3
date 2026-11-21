@@ -344,21 +344,83 @@ fn void invalid_settings_are_refused_without_partial_changes() @test
 	};
 }
 
-fn void a_partial_scene_view_conservatively_disables_ao() @test
+fn void a_partial_scene_view_keeps_its_ao() @test
 {
 	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
 	{
 		three::RunResult built = run.run(CORNER.treplace("MATERIAL", `new three.MeshLambertMaterial()`));
 		defer built.free();
 		test::@check(built.ok, "partial-view scene built: %s", built.error);
+		renderer.pass.view_rect = { 0.1, 0.1, 0.8, 0.8 };
+		image::Image open = renderer.capture()!!;
+		defer open.free();
+
 		three::RunResult enabled = run.run(`three.light.occlusion.enabled = true`);
 		defer enabled.free();
-
-		renderer.pass.view_rect = { 0.1, 0.1, 0.8, 0.8 };
-		renderer.capture()!!.free();
+		image::Image occluded = renderer.capture()!!;
+		defer occluded.free();
 		test::@check(renderer.pass.scene_rect_partial, "the requested scene view was not partial");
-		test::@check(!renderer.pass.ambient_occlusion.live,
-			"AO sampled a full-frame depth image while drawing a partial scene view");
+		test::@check(renderer.pass.ambient_occlusion.live, "a partial scene view turned AO off");
+		test::@check(rgb_sum(&occluded) + 300 < rgb_sum(&open),
+			"AO darkens the corner in a partial view: %d then %d", rgb_sum(&open), rgb_sum(&occluded));
+	};
+}
+
+// The largest channel difference between the left half of a shot and its right.
+fn uint halves_difference(image::Image* shot)
+{
+	sz bpp = shot.bytes_per_pixel();
+	uint half = shot.width / 2;
+	uint largest = 0;
+	for (uint y = 0; y < shot.height; y++)
+	{
+		for (uint x = 0; x < half; x++)
+		{
+			sz left = ((sz)y * shot.width + x) * bpp;
+			sz right = left + (sz)half * bpp;
+			for (sz c = 0; c < 3; c++)
+			{
+				int d = (int)shot.pixels[left + c] - (int)shot.pixels[right + c];
+				uint diff = (uint)(d < 0 ? -d : d);
+				if (diff > largest) largest = diff;
+			}
+		}
+	}
+	return largest;
+}
+
+<*
+ Two views with one camera, as a headset with no eye separation would draw them:
+ AO, clusters and the depth prepass apply to both, so the halves match.
+*>
+fn void both_halves_of_a_stereo_pair_draw_alike() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(CORNER.treplace("MATERIAL", `new three.MeshLambertMaterial()`));
+		defer built.free();
+		test::@check(built.ok, "stereo scene built: %s", built.error);
+		three::RunResult lit = run.run(`
+			three.light.occlusion.enabled = true;
+			for (let i = 0; i < 12; i++) {
+				three.lights.add({ position: [Math.sin(i) * 2.5, 0.4 + (i % 3) * 0.5, Math.cos(i) * 2.5],
+					range: 2.5, color: 0x40ff * (i + 1), intensity: 2 });
+			}
+		`);
+		defer lit.free();
+		test::@check(lit.ok, "stereo lights added: %s", lit.error);
+
+		renderer.capture()!!.free();
+		three::Camera camera = renderer.pass.camera;
+		renderer.pass.view_rect = { 0, 0, 0.5f, 1 };
+		three::SceneView[1] views = { { .camera = camera, .rect = { 0.5f, 0, 0.5f, 1 } } };
+		renderer.pass.set_extra_views(views[..]);
+		image::Image shot = renderer.capture()!!;
+		defer shot.free();
+		test::@check(renderer.pass.ambient_occlusion.live, "AO was off for the stereo pair");
+		test::@check(renderer.pass.prepass.draws > 0, "the depth prepass drew nothing");
+		test::@check(halves_difference(&shot) <= 2,
+			"the two views of one camera differ by %d", halves_difference(&shot));
 	};
 }
 

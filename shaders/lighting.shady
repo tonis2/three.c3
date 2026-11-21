@@ -637,14 +637,16 @@ fn float3 baked_dynamic_delta(FrameBlock* frame, float3 normal, float3 receiver_
 
 // This fragment's place in the cluster grid, from its screen position and its
 // distance to the camera - the same arithmetic the culling pass ran in reverse,
-// and it has to stay that arithmetic to the last `min`.
+// and it has to stay that arithmetic to the last `min`. The grid spans this
+// view's rect, which is the whole target unless views share it.
 fn uint fragment_cluster(FrameBlock* frame, float4 screen_position, float3 position)
 {
 	uint3 grid = frame[0].cluster_grid.xyz;
-	float2 extent = max(frame[0].cluster_screen.xy, float2(1.0));
+	float2 origin = frame[0].view_rect.xy;
+	float2 extent = max(frame[0].view_rect.zw, float2(1.0));
 
-	uint x = min((uint)(screen_position.x * float(grid.x) / extent.x), grid.x - 1u);
-	uint y = min((uint)(screen_position.y * float(grid.y) / extent.y), grid.y - 1u);
+	uint x = min((uint)((screen_position.x - origin.x) * float(grid.x) / extent.x), grid.x - 1u);
+	uint y = min((uint)((screen_position.y - origin.y) * float(grid.y) / extent.y), grid.y - 1u);
 
 	float near_plane = frame[0].cluster_screen.z;
 	float far_plane = frame[0].cluster_screen.w;

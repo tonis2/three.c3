@@ -5,6 +5,7 @@
 #     ./setup.sh              # all of it
 #     ./setup.sh submodules   # just one step, by name
 #     ./setup.sh driver
+#     ./setup.sh android      # the OpenXR loader for the Quest build (not in "all")
 #
 # Safe to re-run: every step checks whether it has already been done.
 #
@@ -73,12 +74,39 @@ run_driver() {
 	./lib/vulkan.c3l/fetch-dylibs.sh
 }
 
+run_android() {
+	# The Khronos OpenXR loader for Android, which the Quest APK ships beside
+	# libthree.so. Published as an AAR on Maven Central; pinned by version and
+	# the sha1 Maven publishes beside it. packaging/android/build-apk.sh links
+	# against jni/arm64-v8a/libopenxr_loader.so out of the unpacked copy.
+	local version="1.1.65"
+	local sha1="b81c1049f63302428fbf473d1b310de51c32b969"
+	local dir="packaging/android/third_party"
+	local aar="$dir/openxr_loader_for_android-$version.aar"
+	echo "==> android: OpenXR loader $version"
+	mkdir -p "$dir"
+	if [[ ! -f "$aar" ]]; then
+		curl -fsSL -o "$aar.part" \
+			"https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$version/openxr_loader_for_android-$version.aar"
+		mv "$aar.part" "$aar"
+	fi
+	if [[ "$(sha1sum "$aar" | cut -d' ' -f1)" != "$sha1" ]]; then
+		echo "setup: $aar does not match its pinned sha1" >&2
+		rm -f "$aar"
+		exit 1
+	fi
+	rm -rf "$dir/aar"
+	mkdir -p "$dir/aar"
+	unzip -q -o "$aar" -d "$dir/aar"
+}
+
 case "$step" in
 	all)        run_submodules; run_driver ;;
 	submodules) run_submodules ;;
 	driver)     run_driver ;;
+	android)    run_android ;;
 	-h|--help)  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	*)          echo "setup: unknown step '$step' (all, submodules, driver)" >&2; exit 2 ;;
+	*)          echo "setup: unknown step '$step' (all, submodules, driver, android)" >&2; exit 2 ;;
 esac
 
 echo "==> done"

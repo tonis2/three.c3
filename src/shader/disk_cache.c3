@@ -129,9 +129,12 @@ const uint SHADER_CACHE_MAGIC = 0x4353_3354;
  from a contract field of the same name; a stored module without it would have
  no uniforms at all. 7 added a storage image's declared format, texel class and
 access, which a host checks a bound image against — a stored module without
-them would accept any image in any format.
+them would accept any image in any format. 10 is a codegen change rather than a
+format one (8 and 9 went to unreleased builds): an index into a matrix, vector
+or array behind a device address is address arithmetic, which Adreno needs, and
+a stored module would still carry the access chain.
 *>
-const uint SHADER_CACHE_FORMAT_VERSION = 7;
+const uint SHADER_CACHE_FORMAT_VERSION = 10;
 
 <*
  What kind of value a spec constant holds.

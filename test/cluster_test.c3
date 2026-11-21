@@ -281,7 +281,19 @@ fn void asymmetric_vertical_clusters_match_both_material_oracles() @test
 	}
 }
 
-fn void partial_viewport_conservatively_matches_the_all_light_oracle() @test
+// The frame blocks the last capture drew with: the main view's, then the extras'.
+fn three::FrameBlock* last_frame_blocks(three::Renderer* renderer, bool extra = false)
+{
+	uint slot = (renderer.frames.slot + three::MAX_FRAMES_IN_FLIGHT - 1) % three::MAX_FRAMES_IN_FLIGHT;
+	vk::Memory* blocks = extra ? &renderer.pass.extra_frame_blocks[slot] : &renderer.pass.frame_blocks[slot];
+	return (three::FrameBlock*)blocks.data();
+}
+
+<*
+ A view offset into the target bins its clusters over its own rect, so the grid
+ a fragment looks up is the one its pixel fell in.
+*>
+fn void a_partial_viewport_is_clustered_and_matches_the_all_light_oracle() @test
 {
 	three::Renderer* renderer = device::borrow(W, H);
 	defer device::release();
@@ -296,9 +308,40 @@ fn void partial_viewport_conservatively_matches_the_all_light_oracle() @test
 	renderer.pass.cluster_bruteforce = false;
 	image::Image partial = renderer.capture()!!;
 	defer partial.free();
+	test::@check(last_frame_blocks(renderer).cluster_grid[3] > 0, "the partial view fell back to every light");
 	test::@check(max_rgb_difference(&reference, &partial) <= 2,
-		"a partial viewport uses the conservative all-light path (largest channel error %d)",
+		"a partial viewport's clusters match the all-light image (largest channel error %d)",
 		max_rgb_difference(&reference, &partial));
+}
+
+<*
+ A stereo pair: the main camera over the left half and a turned one over the
+ right, each with clusters of its own.
+*>
+fn void a_stereo_pair_matches_the_all_light_oracle() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	points(renderer, 31, false);
+	renderer.pass.camera.yaw = 29;
+	renderer.pass.camera.pitch = -11;
+	three::Camera right = renderer.pass.camera;
+	right.yaw = 41;
+	renderer.pass.view_rect = { 0, 0, 0.5f, 1 };
+	three::SceneView[1] views = { { .camera = right, .rect = { 0.5f, 0, 0.5f, 1 } } };
+	renderer.pass.set_extra_views(views[..]);
+	renderer.pass.cluster_bruteforce = true;
+	image::Image reference = renderer.capture()!!;
+	defer reference.free();
+	renderer.pass.cluster_bruteforce = false;
+	image::Image clustered = renderer.capture()!!;
+	defer clustered.free();
+	test::@check(last_frame_blocks(renderer).cluster_grid[3] > 0, "the left eye fell back to every light");
+	test::@check(last_frame_blocks(renderer, extra: true).cluster_grid[3] > 0, "the right eye fell back to every light");
+	test::@check(max_rgb_difference(&reference, &clustered) <= 2,
+		"both eyes' clusters match the all-light image (largest channel error %d)",
+		max_rgb_difference(&reference, &clustered));
 }
 
 fn void cluster_overflow_falls_back_instead_of_dropping_lights() @test

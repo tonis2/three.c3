@@ -62,3 +62,7 @@ dkms.conf
 
 # Build output
 build/
+
+# The Quest build: the fetched OpenXR loader and the local signing key.
+packaging/android/third_party/
+packaging/android/debug.keystore

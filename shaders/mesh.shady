@@ -106,8 +106,8 @@ fn float2 variant_uv(float2 uv, UvVariant row)
 // gets the empty function the def splices in, so the call is unconditional.
 fn void mesh_vertex(VertexIn input, out VertexOutput output)
 {
-	DrawRecord draw = push.draw[0];
-	Instance instance = push.instances[input.iid];
+	DrawRecord* draw = push.draw;
+	InstanceData instance = instance_at(push.instances, input.iid);
 
 	float3 position = draw.positions[input.vid];
 
