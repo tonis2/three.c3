@@ -32,10 +32,22 @@ struct PostPush
 // here because the engine's own post path writes bytes rather than this struct.
 $assert @layout_matches(PostPush, POST_PUSH_FIELDS) : "PostPush no longer lays out the way POST_PUSH_FIELDS says";
 
+// The frame's own depth buffer, as the rasteriser wrote it: non-linear device
+// depth. Declared only for a body that reads `p.depth`.
+const String POST_DEPTH_READ = `Sampler2D depth_buffer @set(0) @binding(2);
+fn float post_device_depth(float2 uv) { return depth_buffer.Sample(uv).r; }
+`;
+// The far plane everywhere, for a body that never reads depth.
+const String POST_DEPTH_FAR = `fn float post_device_depth(float2 uv) { return 1.0; }
+`;
+
 macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialTexture[] textures = {},
 	ShaderImage[] images = {})
 {
 	ShaderSource[] sources = {
+		// A body that never says `.depth` leaves the depth buffer unsampled, so
+		// the scene need not write it back.
+		{ .name = "post.depth", .source = body.contains(".depth") ? POST_DEPTH_READ : POST_DEPTH_FAR },
 		{ .name = "post", .file = ShaderFile.POST_SHADY },
 	};
 

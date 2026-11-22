@@ -993,6 +993,20 @@ fn void PostPass.set_tonemap_exposure(&self, float value)
 // ============================================================================
 
 <*
+ Whether any pass in the chain, the tonemap included, samples the depth buffer.
+ When none does, the scene need not write its depth back.
+*>
+fn bool PostPass.reads_depth(&self)
+{
+	if (pipeline_declares_binding(&self.tonemap.pipeline, 2)) return true;
+	foreach (stage : self.stages)
+	{
+		if (pipeline_declares_binding(&stage.pipeline, 2)) return true;
+	}
+	return false;
+}
+
+<*
  Runs the chain: every script pass in order, then the tonemap into
  `target.color`.
 
@@ -1022,6 +1036,8 @@ fn void PostPass.set_tonemap_exposure(&self, float value)
  anything.
 
  @param now : `The game clock in seconds. Every stage is told it, and a stage set from here on is stamped against it.`
+ @param output : "Where the tonemap writes, instead of target.color; null for the target"
+ @param output_view : "A view of output"
 *>
 fn void? PostPass.record_chain(
 	&self,
@@ -1031,7 +1047,9 @@ fn void? PostPass.record_chain(
 	double now = 0,
 	float near_plane = 0,
 	float far_plane = 0,
-	bool scene_cached = false
+	bool scene_cached = false,
+	vk::Image output = (vk::Image)null,
+	vk::ImageView output_view = (vk::ImageView)null
 )
 {
 	sz count = self.stages.len();
@@ -1123,8 +1141,8 @@ fn void? PostPass.record_chain(
 		{
 			.prev = last,
 			.scene = self.scene.view,
-			.dst = target.color,
-			.dst_view = target.color_view,
+			.dst = output != null ? output : target.color,
+			.dst_view = output != null ? output_view : target.color_view,
 			.extent = self.extent,
 			.sampler = self.sampler,
 			.depth = target.depth_view,

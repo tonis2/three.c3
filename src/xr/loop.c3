@@ -19,11 +19,12 @@ import three::ndk;
 const float XR_RENDER_SCALE = 0.7f;
 
 <*
- Draws one frame and hands it to `dst`, an image of the XR swapchain.
- `render_offscreen` with a blit at the end, left in the layout the runtime
- expects to be given back.
+ Draws one frame into `dst`, an image of the XR swapchain, and leaves it in the
+ layout the runtime expects to be given back. The tonemap writes it directly;
+ a frame with an interface over it goes through the target and a blit.
 *>
-fn void? Renderer.render_xr(&self, vk::Image dst, vk::Extent2D dst_extent, long* wait_ns = null)
+fn void? Renderer.render_xr(&self, vk::Image dst, vk::ImageView dst_view, vk::Extent2D dst_extent,
+	long* wait_ns = null)
 {
 	if (wait_ns != null) *wait_ns = 0;
 	uint slot       = self.frames.slot;
@@ -37,8 +38,8 @@ fn void? Renderer.render_xr(&self, vk::Image dst, vk::Extent2D dst_extent, long*
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd)!;
-	record_blit(cmd, self.target.color, self.target.extent, dst, dst_extent, {
+	bool direct = self.record_scene(cmd, output: dst_view != null ? dst : (vk::Image)null, output_view: dst_view)!;
+	if (!direct) record_blit(cmd, self.target.color, self.target.extent, dst, dst_extent, {
 		...IMAGE_BARRIER,
 		.image = dst,
 		.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
@@ -199,7 +200,8 @@ fn void? draw_to_swapchain(XrHost* host, Renderer* renderer, long* wait_ns) @loc
 		xr::SwapchainImageReleaseInfo release = { .type = xr::TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
 		(void)xr::check(xr::cmd.release_swapchain_image(host.swapchain, &release), "xrReleaseSwapchainImage");
 	}
-	renderer.render_xr(host.images[index], { host.eye_width * 2, host.eye_height }, wait_ns)!;
+	vk::ImageView view = index < host.views.len() ? host.views[index] : (vk::ImageView)null;
+	renderer.render_xr(host.images[index], view, { host.eye_width * 2, host.eye_height }, wait_ns)!;
 }
 
 <*

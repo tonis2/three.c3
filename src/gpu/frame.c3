@@ -583,8 +583,13 @@ fn ulong Renderer.picture_key(&self)
  `self.target.close(cmd)` here: both fail.
 
  @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn. Only the window path passes true - a screenshot and a headless batch ask for each frame explicitly, and one that answered with the last one would be a lie.`
+
+ @param output : "An image the tonemap writes straight into, left as a colour attachment; null for target.color"
+ @param output_view : "A view of output"
+ @return "Whether the frame went to output; false when it went to target.color as usual"
 *>
-fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false)
+fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false,
+	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null)
 {
 	// A shared test/device renderer may predate this frame path, and a resize can
 	// retire A between frames. Make the always-on HDR input and display encoder
@@ -628,7 +633,7 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		self.timer.mark(cmd, slot, FrameMark.SCENE);
 		self.timer.mark(cmd, slot, FrameMark.POST);
 		self.skipped_frames++;
-		return;
+		return false;
 	}
 	self.rendered_key = key;
 	// Only the window path leaves a picture the window path may re-present. A
@@ -710,7 +715,11 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	}
 	else if (posted)
 	{
-		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear, prepassed);
+		// Kept for a later frame's cache or a post pass that samples it, and
+		// otherwise not written back at all.
+		bool store_depth = cache_safe || self.post.reads_depth();
+		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear, prepassed,
+			store_depth);
 	}
 	else
 	{
@@ -739,6 +748,9 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// The asset table comes down with it because each post shader's own samplers
 	// resolve through it — bindings 0 and 1 are the chain's own images, and
 	// everything above them is an image a script named.
+	// Straight into `output` when there is nothing to draw over the frame after
+	// the tonemap: one image and one copy fewer.
+	bool direct = output != null && posted && !(!presenting && self.ui.active());
 	if (posted)
 	{
 		self.post.record_chain(
@@ -748,7 +760,9 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 			self.pass.clock.time,
 			self.pass.camera.near_plane,
 			self.pass.camera.far_plane,
-			cache_reuse
+			cache_reuse,
+			direct ? output : (vk::Image)null,
+			direct ? output_view : (vk::ImageView)null
 		)!;
 	}
 
@@ -770,9 +784,11 @@ fn void? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		vk::cmdEndRendering(cmd);
 	}
 
+	if (direct) return true;
 	// With no post pass a reused target was already left in TRANSFER_SRC by the
 	// previous frame. Closing it again would claim the wrong old layout.
 	if (posted || !cache_reuse) self.target.close(cmd);
+	return false;
 }
 
 <*

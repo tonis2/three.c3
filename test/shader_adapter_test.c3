@@ -183,11 +183,17 @@ fn void a_post_def_reflects_its_bindings_and_uniforms() @test
 		{ "tint", 4, 1 }, // one float4, 16 bytes
 	};
 
-	three::ShaderDef def = three::post_def(identity_post(), declared);
+	// A body that reads `p.depth`, so the depth buffer is declared beside the others.
+	three::ShaderDef def = three::post_def("fn float3 post(Post p) { return p.color * saturate(p.depth); }", declared);
 	three::ShaderModule mod = three::compile_shady(def, three::PostPush);
 	defer mod.free();
 
 	test::@check(mod.ok, "the ported post compiles: %s", mod.diagnostic);
+
+	three::ShaderModule plain = three::compile_shady(three::post_def(identity_post(), declared), three::PostPush);
+	defer plain.free();
+	test::@check(plain.ok && plain.layout.binding_of("depth_buffer") == null && plain.layout.bindings.len() == 3,
+		"a body that never reads depth declares no depth buffer, got %d bindings", plain.layout.bindings.len());
 	test::@check(mod.layout.push_size == 24 + 20, "the push block is the header plus the set, got %d", mod.layout.push_size);
 
 	// The four reserved samplers, at the bindings the post path binds them by.

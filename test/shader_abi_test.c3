@@ -441,6 +441,16 @@ fn void collect_deltas(List{Delta}* out)
 	delta(out, "lightmap_material", "", "descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER",
 		"the port declares the lightmap atlas unconditionally, where the Slang shaping dropped it");
 
+	// A post body that never reads `p.depth` declares no depth buffer, so the scene
+	// can skip writing its depth back.
+	const String NO_DEPTH = "the depth buffer is declared only for a post body that reads p.depth";
+	delta(out, "post", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "", NO_DEPTH);
+	delta(out, "post_declared", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "", NO_DEPTH);
+	delta(out, "tonemap_none", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "", NO_DEPTH);
+	delta(out, "tonemap_agx", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "", NO_DEPTH);
+	delta(out, "tonemap_agx_blender", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "",
+		NO_DEPTH);
+
 	// The cut-out module is `shadow.shady` plus its own vertex entry, so the pose
 	// file's `vertexMain` reaches the module beside `cutoutVertexMain`.
 	delta(out, "shadow_cutout", "", "entry cutoutVertexMain vertex",
@@ -490,6 +500,12 @@ fn void compare_variant(
 				break;
 			}
 			test::@check(found, "%s: the fixture records '%s' for the reason '%s'", variant, d.expected, d.reason);
+			// A line the port no longer declares at all.
+			if (d.actual.len == 0)
+			{
+				if (found) delta_used[i] = true;
+				continue;
+			}
 		}
 
 		bool found = false;

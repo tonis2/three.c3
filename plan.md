@@ -40,14 +40,14 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       `PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT` on the
       pipelines drawn in it. The prepass must use the same map, or the scene's
       EQUAL depth test sees full-resolution depth under coarse fragments.
-- [ ] **Tonemap straight into the XR image.** Every frame goes scene → RGBA16F →
-      tonemap → `target.color` → blit to the swapchain: about 0.5 ms all told
-      (post plus present). Writing the tonemap into the acquired image drops the
-      blit and a full-size image; a screenshot or a UI overlay can still take the
-      old path.
-- [ ] **Depth is stored when nothing reads it.** Every attachment is STORE.
-      AO's depth is dead after the scene, and the scene's depth is dead unless a
-      post stage reads it — `post.shady` samples it whether or not it is used.
+- [x] **Tonemap straight into the XR image.** The tonemap writes the acquired
+      swapchain image; the blit and `target.color` are skipped unless an
+      interface is drawn over the frame. About 0.2 ms.
+- [x] **Depth is stored when nothing reads it.** The scene's depth is not
+      written back when no post pass reads it and the scene cache is off, and
+      a post body that never reads `p.depth` no longer declares the depth
+      buffer. No measurable change on Quest 3, whose driver seems to render
+      these passes straight to memory.
 - [x] **CPU/GPU levels.** `XR_EXT_performance_settings` asks for sustained high
       at session start; light scenes got about 30% faster.
 - [x] **A refresh-rate knob for scripts.** `three.xr.refreshRate` and

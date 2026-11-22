@@ -27,6 +27,9 @@ struct XrHost
 	CInt space_type;
 	xr::Swapchain swapchain;
 	List {vk::Image} images;
+	// One per image, for drawing into it directly.
+	List {vk::ImageView} views;
+	vk::Device device;
 	long format;
 	// One eye; the swapchain is twice as wide.
 	uint eye_width;
@@ -219,6 +222,7 @@ fn void? XrHost.start(&self, Gpu* gpu)
 	self.format = self.pick_format()!;
 	xr::SwapchainCreateInfo swap_info = {
 		.type = xr::TYPE_SWAPCHAIN_CREATE_INFO,
+		// Drawn into by the tonemap, or copied into when something is drawn over the frame.
 		.usage_flags = xr::SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | xr::SWAPCHAIN_USAGE_TRANSFER_DST_BIT,
 		.format = self.format,
 		.sample_count = 1,
@@ -237,7 +241,18 @@ fn void? XrHost.start(&self, Gpu* gpu)
 	foreach (&image : found) image.type = xr::TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
 	xr::check(xr::cmd.enumerate_swapchain_images(self.swapchain, count, &count, found.ptr), "xrEnumerateSwapchainImages")!;
 	self.images.init(mem);
-	foreach (image : found) self.images.push((vk::Image)image.image);
+	self.views.init(mem);
+	self.device = gpu.handle;
+	// Views only in the target's own format, the one the tonemap is built for.
+	bool drawable = (vk::Format)self.format == TARGET_COLOR_FORMAT;
+	foreach (image : found)
+	{
+		self.images.push((vk::Image)image.image);
+		if (!drawable) continue;
+		vk::ImageView? view = gpu.create_view_2d((vk::Image)image.image, (vk::Format)self.format);
+		if (catch view) return xr::CALL_FAILED~;
+		self.views.push(view);
+	}
 	io::printfn("xr: swapchain %dx%d, format %d, %d images", self.eye_width * 2, self.eye_height, self.format, count);
 }
 
@@ -407,6 +422,8 @@ fn void XrHost.request_exit(&self)
 
 fn void XrHost.close(&self)
 {
+	foreach (view : self.views) vk::destroyImageView(self.device, view, null);
+	self.views.free();
 	if (self.swapchain != null) xr::cmd.destroy_swapchain(self.swapchain);
 	if (self.space != null) xr::cmd.destroy_space(self.space);
 	if (self.session != null) xr::cmd.destroy_session(self.session);

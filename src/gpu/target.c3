@@ -480,8 +480,9 @@ fn void Target.begin_render(
 	&self,
 	vk::CommandBuffer cmd,
 	float[4] clear = { 0, 0, 0, 1 },
-	bool keep_depth = false
-) => self.begin_render_to(cmd, self.color, self.color_view, clear, keep_depth);
+	bool keep_depth = false,
+	bool store_depth = true
+) => self.begin_render_to(cmd, self.color, self.color_view, clear, keep_depth, store_depth);
 
 <*
  The same, into a colour image that is not necessarily the target's.
@@ -504,7 +505,8 @@ fn void Target.begin_render_to(
 	vk::Image image,
 	vk::ImageView view,
 	float[4] clear = { 0, 0, 0, 1 },
-	bool keep_depth = false
+	bool keep_depth = false,
+	bool store_depth = true
 )
 {
 	// The one colour in the renderer that never meets a shader, so the one that
@@ -524,7 +526,9 @@ fn void Target.begin_render_to(
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(keep_depth ? ATTACHMENT_LOAD_OP_LOAD : ATTACHMENT_LOAD_OP_CLEAR)
-		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
+		// Not written back when nothing reads it after the scene: on a tiled GPU
+		// that is a whole depth image of memory traffic saved.
+		.setStoreOp(store_depth ? ATTACHMENT_STORE_OP_STORE : ATTACHMENT_STORE_OP_DONT_CARE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)

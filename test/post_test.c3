@@ -877,7 +877,7 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 		`fn float3 post(Post p)
 		{
 		    float3 graded = grade_lut.Sample(float2(p.color.r, 0.5)).rgb;
-		    return graded + grain_map.Sample(p.uv).rgb * 0.05;
+		    return graded + grain_map.Sample(p.uv).rgb * 0.05 * saturate(p.depth);
 		}`,
 		{},
 		mem,
@@ -2460,5 +2460,18 @@ fn void main(PostThread t) @compute @threads(8, 8, 1)
 		defer shown.free();
 		int delta = worst_channel_delta(&plain, &shown);
 		test::@check(delta <= 1, "the image a fragment pass stored is the frame: %d levels", delta);
+	};
+}
+
+<*
+ The tonemap alone samples no depth, so a frame with no post pass of its own
+ does not write the scene's depth back.
+*>
+fn void the_tonemap_alone_does_not_read_depth() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.render_offscreen()!!;
+		test::@check(!renderer.post.reads_depth(), "the tonemap declares the depth buffer");
 	};
 }

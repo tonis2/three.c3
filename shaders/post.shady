@@ -44,11 +44,11 @@ struct VertexOutput
 Sampler2D prev @set(0) @binding(0);
 Sampler2D scene @set(0) @binding(1);
 
-// The frame's own depth buffer, as the rasteriser wrote it: non-linear device
-// depth, not a colour. The red channel is the value, and a body never touches
-// this - `Post.depth` is the same texel reconstructed into world units, so that
-// no body has to write the reconstruction or forget to.
-Sampler2D depth_buffer @set(0) @binding(2);
+// The frame's own depth buffer is `post_device_depth`, which the def emits:
+// a read of binding 2 for a body that uses `p.depth`, and the far plane for one
+// that does not. A body never touches it - `Post.depth` is the same texel
+// reconstructed into world units, so that no body has to write the
+// reconstruction or forget to.
 
 // The fourth: another pass's output, named by a handle. Bound to the scene when
 // nothing was named.
@@ -108,7 +108,7 @@ fn float4 fragmentMain(VertexOutput input) @fragment
 	// is its inverse. At d = 0 that is `near` and at d = 1 it is `far`, which is
 	// what makes a pixel nothing was drawn into read as the far plane rather
 	// than as a division by zero: the clear value is 1.0.
-	float d = depth_buffer.Sample(input.uv).r;
+	float d = post_device_depth(input.uv);
 	float near = push.planes.x;
 	float far = push.planes.y;
 	float span = far - d * (far - near);
