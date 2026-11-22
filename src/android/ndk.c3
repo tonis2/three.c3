@@ -90,6 +90,24 @@ extern fn void asset_close(void* asset) @cname("AAsset_close");
 
 extern fn CInt dup2(CInt old_fd, CInt new_fd) @cname("dup2");
 
+// PROP_VALUE_MAX in sys/system_properties.h.
+const sz PROPERTY_VALUE_MAX = 92;
+
+extern fn CInt system_property_get(ZString name, char* value) @cname("__system_property_get");
+
+<*
+ A system property, as `adb shell setprop` set it; empty when it is unset.
+
+ @return "Temp memory"
+*>
+fn String property(ZString name)
+{
+	char[PROPERTY_VALUE_MAX] value;
+	CInt len = system_property_get(name, &value);
+	if (len <= 0) return "";
+	return ((String)value[:(sz)len]).tcopy();
+}
+
 <*
  Runs every event the looper has ready, waiting up to `timeout_ms` for the first.
 

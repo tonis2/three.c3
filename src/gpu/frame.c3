@@ -336,11 +336,14 @@ struct Renderer
 const float[4] DEFAULT_CLEAR = { 0.10, 0.11, 0.13, 1.0 };
 
 <*
- Where a script and the XR loop meet over the display rate. The script writes
- `wanted`; the loop requests it once a session runs and fills in the rest.
+ Where a script and the XR loop meet over the display: its rate, foveation and
+ passthrough. The script writes requests; the loop applies them once a session
+ runs and fills in the rest.
 *>
 struct XrDisplay
 {
+	// A session is running and frames go to the headset.
+	bool presenting;
 	// Hz asked for; 0 leaves the choice to the runtime.
 	float wanted;
 	// The last `wanted` passed on, so a request goes out once per change.
@@ -352,6 +355,12 @@ struct XrDisplay
 	// `three.xr.foveation` asked for, as `Foveation` ordinal + 1; 0 when nothing
 	// is waiting for the loop to apply.
 	char foveation_request;
+	// `three.xr.passthrough`: the room behind the scene instead of its background.
+	bool passthrough_wanted;
+	// The headset can show the room; false off one.
+	bool passthrough_supported;
+	// The room is showing on the frame being drawn.
+	bool passthrough_active;
 }
 
 <*
@@ -593,11 +602,15 @@ fn ulong Renderer.picture_key(&self)
 
  @param output : "An image the tonemap writes straight into, left as a colour attachment; null for target.color"
  @param output_view : "A view of output"
+ @param see_through : "Drawn over passthrough: no background, and alpha is coverage"
  @return "Whether the frame went to output; false when it went to target.color as usual"
 *>
 fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false,
-	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null)
+	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null, bool see_through = false)
 {
+	// All zero, not the background with alpha 0: premultiplied, any colour here
+	// would be added over the room.
+	float[4] clear = see_through ? (float[4]){ 0, 0, 0, 0 } : self.clear;
 	// A shared test/device renderer may predate this frame path, and a resize can
 	// retire A between frames. Make the always-on HDR input and display encoder
 	// present at the recording boundary as well as at normal construction.
@@ -654,7 +667,7 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// Explicit captures use the same cache when their target has an uncontaminated
 	// scene image; `scene_cache_disabled` gives comparisons a forced-full path.
 	ulong cache_global = KEY_SEED;
-	cache_global = @hash_value(cache_global, self.clear);
+	cache_global = @hash_value(cache_global, clear);
 	cache_global = @hash_value(cache_global, posted);
 	// Extent alone cannot distinguish a target rebuilt at the same size.
 	cache_global = @hash_value(cache_global, self.target.color);
@@ -718,7 +731,7 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		self.target.begin_cached_render_to(cmd,
 			posted ? self.post.scene.image : self.target.color,
 			posted ? self.post.scene.view : self.target.color_view,
-			cache_dirty, self.clear, posted, prepassed);
+			cache_dirty, clear, posted, prepassed);
 	}
 	else if (posted)
 	{
@@ -726,11 +739,11 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		// otherwise not written back at all.
 		bool store_depth = cache_safe || self.post.reads_depth();
 		GpuImage* scene = self.post.scene_target();
-		self.target.begin_render_to(cmd, scene.image, scene.view, self.clear, prepassed, store_depth);
+		self.target.begin_render_to(cmd, scene.image, scene.view, clear, prepassed, store_depth);
 	}
 	else
 	{
-		self.target.begin_render(cmd, self.clear, prepassed);
+		self.target.begin_render(cmd, clear, prepassed);
 	}
 
 	// Everything drawn into the target, between `begin_render` and `close`. One
@@ -741,7 +754,9 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	{
 		self.pass.cache_rect = cache_dirty;
 		self.pass.cache_partial = cache_partial;
+		self.pass.see_through = see_through;
 		self.pass.record(cmd);
+		self.pass.see_through = false;
 		self.pass.cache_partial = false;
 		vk::cmdEndRendering(cmd);
 	}
@@ -769,7 +784,8 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 			self.pass.camera.far_plane,
 			cache_reuse,
 			direct ? output : (vk::Image)null,
-			direct ? output_view : (vk::ImageView)null
+			direct ? output_view : (vk::ImageView)null,
+			see_through
 		)!;
 	}
 
@@ -1055,14 +1071,15 @@ fn bool? Renderer.frame(&self, long* wait_ns = null)
 
  @return `An Image owning its pixels — free it with Image.free.`
 *>
-fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long* wait_ns = null)
+fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long* wait_ns = null, bool see_through = false)
 {
 	vk::Memory readback = self.target.create_readback(&self.gpu)!;
 	defer readback.free();
-	self.render_offscreen(wait_ns, readback: &readback)!;
+	self.render_offscreen(wait_ns, readback: &readback, see_through: see_through)!;
 	// The buffer is host-coherent and the fence covers the copy, so there is
 	// nothing to invalidate and nothing to map — vk::Memory pages stay mapped.
-	return self.target.decode_readback(&readback, allocator);
+	// A see-through frame keeps its alpha: there, alpha is the picture.
+	return self.target.decode_readback(&readback, allocator, keep_alpha: see_through);
 }
 
 <*
@@ -1076,8 +1093,10 @@ fn image::Image? Renderer.capture(&self, alloc::Allocator allocator = mem, long*
  drawn says so at the line that asked for it.
 
  @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn - see record_scene. False for three.render(), which is an explicit ask; the offscreen half of a host driving its own loop is what passes true.`
+ @param see_through : `Drawn as for passthrough: no background, alpha is coverage.`
 *>
-fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = false, vk::Memory* readback = null)
+fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = false, vk::Memory* readback = null,
+	bool see_through = false)
 {
 	if (wait_ns != null) *wait_ns = 0;
 	uint slot       = self.frames.slot;
@@ -1091,7 +1110,7 @@ fn void? Renderer.render_offscreen(&self, long* wait_ns = null, bool may_skip = 
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	self.record_scene(cmd, may_skip: may_skip)!;
+	self.record_scene(cmd, may_skip: may_skip, see_through: see_through)!;
 	if (readback != null) self.target.record_readback(cmd, readback);
 	self.timer.end(cmd, slot);
 

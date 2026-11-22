@@ -1244,7 +1244,7 @@ fn void PostStage.push_info(&self, vk::CommandBuffer cmd, PassIo io, float width
 		width,
 		height,
 		(float)(io.time - self.set_at),
-		0,
+		io.see_through ? 1 : 0,
 		io.near_plane,
 		io.far_plane,
 	};

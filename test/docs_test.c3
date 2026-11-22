@@ -155,6 +155,16 @@ fn void the_docs_name_everything_the_api_exposes() @test
 		for (const name of Object.keys(Object.getOwnPropertyDescriptors(three.input))) {
 			if (!named('three.input', name)) missing.push('input.' + name);
 		}
+
+		// The headset's too: its hands are a class nobody constructs, reached
+		// only through three.xr.left and three.xr.right.
+		for (const name of Object.keys(Object.getOwnPropertyDescriptors(three.xr))) {
+			if (!named('three.xr', name)) missing.push('xr.' + name);
+		}
+		for (const m of members(three.xr.right.constructor)) {
+			if (!named('three.xr.right', m)) missing.push('xr.right.' + m);
+		}
+		if (!named('three.xr.right.aim', 'direction')) missing.push('xr.right.aim.direction');
 		return missing;
 	`);
 

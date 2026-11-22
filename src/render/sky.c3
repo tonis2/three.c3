@@ -189,7 +189,7 @@ fn float[4] MeshPass.environment_params(&self)
 *>
 fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f[] view_projections)
 {
-	if (self.sky_pipeline == null || self.scene == null) return;
+	if (self.sky_pipeline == null || self.scene == null || self.see_through) return;
 
 	SkyLook sky = self.scene.look.sky;
 	if (sky.background == NO_TEXTURE || sky.background_intensity <= 0) return;

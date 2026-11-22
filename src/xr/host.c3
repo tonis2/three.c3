@@ -45,6 +45,13 @@ struct XrHost
 	VulkanRequest request;
 	// The renderer's, so a script's `three.xr.refreshRate` reaches the runtime.
 	XrDisplay* display;
+	// XR_FB_passthrough is enabled and the system says it can show the room.
+	bool passthrough_supported;
+	// Made the first time a script asks for the room, then paused and resumed.
+	xr::PassthroughFB passthrough;
+	xr::PassthroughLayerFB passthrough_layer;
+	bool passthrough_running;
+	XrInput input;
 }
 
 <*
@@ -73,10 +80,12 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 	// extension it lacks fails the whole instance.
 	bool refresh_rate = xr::has_extension(xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) ?? false;
 	bool performance = xr::has_extension(xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME) ?? false;
-	ZString[4] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null };
+	bool passthrough = xr::has_extension(xr::FB_PASSTHROUGH_EXTENSION_NAME) ?? false;
+	ZString[5] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null, null };
 	uint enabled = 2;
 	if (refresh_rate) extensions[enabled++] = xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
 	if (performance) extensions[enabled++] = xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+	if (passthrough) extensions[enabled++] = xr::FB_PASSTHROUGH_EXTENSION_NAME;
 	xr::InstanceCreateInfoAndroidKHR android_info = {
 		.type = xr::TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
 		.application_vm = app.activity.vm,
@@ -97,7 +106,7 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 	};
 	xr::check(xr::cmd.create_instance(&info, &self.instance), "xrCreateInstance")!;
 	xr::load_instance(self.instance)!;
-	xr::load_extensions(self.instance, refresh_rate, performance);
+	xr::load_extensions(self.instance, refresh_rate, performance, passthrough);
 	xr::set_result_names(self.instance);
 
 	xr::InstanceProperties props = { .type = xr::TYPE_INSTANCE_PROPERTIES };
@@ -109,6 +118,7 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 
 	xr::SystemGetInfo system_info = { .type = xr::TYPE_SYSTEM_GET_INFO, .form_factor = xr::FORM_FACTOR_HEAD_MOUNTED_DISPLAY };
 	xr::check(xr::cmd.get_system(self.instance, &system_info, &self.system), "xrGetSystem")!;
+	self.report_system(passthrough);
 
 	xr::ViewConfigurationView[2] views = {
 		{ .type = xr::TYPE_VIEW_CONFIGURATION_VIEW },
@@ -149,6 +159,36 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 		.fragment_density_map = true,
 	};
 	vulkan_request = &self.request;
+}
+
+<*
+ Logs what the headset is and whether it can show the room, and keeps the
+ latter: passthrough needs the extension, the capability, and its commands.
+
+ @param extension : "Whether XR_FB_passthrough was enabled"
+*>
+fn void XrHost.report_system(&self, bool extension)
+{
+	xr::SystemPassthroughProperties2FB passthrough = { .type = xr::TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB };
+	xr::SystemProperties props = { .type = xr::TYPE_SYSTEM_PROPERTIES, .next = extension ? &passthrough : null };
+	if (catch xr::check(xr::cmd.get_system_properties(self.instance, self.system, &props), "xrGetSystemProperties")) return;
+	xr::Flags64 caps = passthrough.capabilities;
+	self.passthrough_supported = extension && (caps & xr::PASSTHROUGH_CAPABILITY_BIT_FB) != 0
+		&& xr::cmd.create_passthrough_fb != null && xr::cmd.create_passthrough_layer_fb != null;
+	io::printfn("xr: %s, passthrough %s%s", ((ZString)&props.system_name).str_view(),
+		self.passthrough_supported ? "yes" : "no",
+		(caps & xr::PASSTHROUGH_CAPABILITY_COLOR_BIT_FB) != 0 ? " (colour)" : "");
+
+	CInt[8] modes;
+	uint count;
+	if (xr::cmd.enumerate_environment_blend_modes(self.instance, self.system,
+		xr::VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, modes.len, &count, &modes[0]) < 0) return;
+	foreach (mode : modes[:min(count, (uint)modes.len)])
+	{
+		io::printfn("xr: blend mode %s", mode == xr::ENVIRONMENT_BLEND_MODE_OPAQUE ? "opaque"
+			: mode == xr::ENVIRONMENT_BLEND_MODE_ADDITIVE ? "additive"
+			: mode == xr::ENVIRONMENT_BLEND_MODE_ALPHA_BLEND ? "alpha blend" : "other");
+	}
 }
 
 <*
@@ -209,6 +249,11 @@ fn void? XrHost.start(&self, Gpu* gpu)
 	};
 	xr::SessionCreateInfo session_info = { .type = xr::TYPE_SESSION_CREATE_INFO, .next = &binding, .system_id = self.system };
 	xr::check(xr::cmd.create_session(self.instance, &session_info, &self.session), "xrCreateSession")!;
+	if (catch err = self.input.open(self.instance, self.session))
+	{
+		io::eprintfn("xr: running without controllers: %s", err);
+		self.input.close();
+	}
 
 	self.space_type = self.pick_space()!;
 	xr::ReferenceSpaceCreateInfo space_info = {
@@ -322,6 +367,11 @@ fn void XrHost.poll(&self)
 				self.state = changed.state;
 				io::printfn("xr: session state %d", self.state);
 				self.follow_state();
+			case xr::TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+				self.input.note_profiles(self.instance, self.session);
+			case xr::TYPE_EVENT_DATA_PASSTHROUGH_STATE_CHANGED_FB:
+				xr::EventDataPassthroughStateChangedFB* changed = (xr::EventDataPassthroughStateChangedFB*)&event;
+				self.passthrough_changed(changed.flags);
 			case xr::TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB:
 				xr::EventDataDisplayRefreshRateChangedFB* rate = (xr::EventDataDisplayRefreshRateChangedFB*)&event;
 				io::printfn("xr: display now %.0f Hz, was %.0f", rate.to_display_refresh_rate, rate.from_display_refresh_rate);
@@ -410,6 +460,104 @@ fn void XrHost.apply_refresh_rate(&self)
 	io::printfn("xr: asked for %.0f Hz", hz);
 }
 
+<*
+ Shows or hides the room as `three.xr.passthrough` asks, once a session runs.
+ A failure is logged once and turns the feature off for the session.
+*>
+fn void XrHost.apply_passthrough(&self)
+{
+	XrDisplay* display = self.display;
+	if (display == null) return;
+	bool wanted = display.passthrough_wanted && self.passthrough_supported && self.running;
+	if (wanted && !self.passthrough_running)
+	{
+		if (catch err = self.start_passthrough())
+		{
+			io::eprintfn("xr: passthrough failed (%s); off for this session", err);
+			self.destroy_passthrough();
+			self.passthrough_supported = false;
+		}
+	}
+	else if (!wanted && self.passthrough_running)
+	{
+		self.pause_passthrough();
+	}
+	display.passthrough_supported = self.passthrough_supported;
+	display.passthrough_active = self.passthrough_running;
+}
+
+<*
+ @return? xr::CALL_FAILED
+*>
+fn void? XrHost.start_passthrough(&self)
+{
+	if (self.passthrough == null)
+	{
+		xr::PassthroughCreateInfoFB info = { .type = xr::TYPE_PASSTHROUGH_CREATE_INFO_FB };
+		xr::check(xr::cmd.create_passthrough_fb(self.session, &info, &self.passthrough), "xrCreatePassthroughFB")!;
+	}
+	if (self.passthrough_layer == null)
+	{
+		xr::PassthroughLayerCreateInfoFB info = {
+			.type = xr::TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB,
+			.passthrough = self.passthrough,
+			.purpose = xr::PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB,
+		};
+		xr::check(xr::cmd.create_passthrough_layer_fb(self.session, &info, &self.passthrough_layer),
+			"xrCreatePassthroughLayerFB")!;
+	}
+	xr::check(xr::cmd.passthrough_start_fb(self.passthrough), "xrPassthroughStartFB")!;
+	xr::check(xr::cmd.passthrough_layer_resume_fb(self.passthrough_layer), "xrPassthroughLayerResumeFB")!;
+	self.passthrough_running = true;
+	io::printn("xr: passthrough on");
+}
+
+fn void XrHost.pause_passthrough(&self)
+{
+	if (self.passthrough_layer != null)
+	{
+		(void)xr::check(xr::cmd.passthrough_layer_pause_fb(self.passthrough_layer), "xrPassthroughLayerPauseFB");
+	}
+	if (self.passthrough != null)
+	{
+		(void)xr::check(xr::cmd.passthrough_pause_fb(self.passthrough), "xrPassthroughPauseFB");
+	}
+	self.passthrough_running = false;
+	io::printn("xr: passthrough off");
+}
+
+fn void XrHost.destroy_passthrough(&self)
+{
+	if (self.passthrough_layer != null) xr::cmd.destroy_passthrough_layer_fb(self.passthrough_layer);
+	if (self.passthrough != null) xr::cmd.destroy_passthrough_fb(self.passthrough);
+	self.passthrough_layer = (xr::PassthroughLayerFB)null;
+	self.passthrough = (xr::PassthroughFB)null;
+	self.passthrough_running = false;
+}
+
+<*
+ The runtime's word on the room: an error it cannot recover from ends the
+ feature, and one that needs a rebuild gets one on the next frame.
+*>
+fn void XrHost.passthrough_changed(&self, xr::Flags64 flags)
+{
+	if ((flags & xr::PASSTHROUGH_STATE_CHANGED_NON_RECOVERABLE_ERROR_BIT_FB) != 0)
+	{
+		io::eprintn("xr: passthrough stopped for good");
+		self.destroy_passthrough();
+		self.passthrough_supported = false;
+		return;
+	}
+	if ((flags & xr::PASSTHROUGH_STATE_CHANGED_REINIT_REQUIRED_BIT_FB) != 0)
+	{
+		io::printn("xr: passthrough needs rebuilding");
+		self.destroy_passthrough();
+		return;
+	}
+	if ((flags & xr::PASSTHROUGH_STATE_CHANGED_RECOVERABLE_ERROR_BIT_FB) != 0) io::eprintn("xr: passthrough interrupted");
+	if ((flags & xr::PASSTHROUGH_STATE_CHANGED_RESTORED_ERROR_BIT_FB) != 0) io::printn("xr: passthrough back");
+}
+
 // Asks the runtime to wind the session down; `poll` sees it through.
 fn void XrHost.request_exit(&self)
 {
@@ -426,6 +574,8 @@ fn void XrHost.close(&self)
 	foreach (view : self.views) vk::destroyImageView(self.device, view, null);
 	self.views.free();
 	if (self.swapchain != null) xr::cmd.destroy_swapchain(self.swapchain);
+	self.destroy_passthrough();
+	self.input.close();
 	if (self.space != null) xr::cmd.destroy_space(self.space);
 	if (self.session != null) xr::cmd.destroy_session(self.session);
 	if (self.instance != null) xr::cmd.destroy_instance(self.instance);

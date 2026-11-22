@@ -10,6 +10,8 @@
 
 	<uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
 	<uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true" />
+	<!-- three.xr.passthrough: the room in colour behind the scene. -->
+	<uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
 
 	<!-- MCP over `adb forward tcp:8808 tcp:8808`. -->
 	<uses-permission android:name="android.permission.INTERNET" />

@@ -7570,3 +7570,295 @@ fn void foveation_is_off_off_a_headset() @test
 			&& three::foveation_density(three::Foveation.HIGH, 1.0f) == 63, "high steps down from the lens centre");
 	};
 }
+
+// ============================================================================
+// The hand controllers
+// ============================================================================
+
+fn three::HandsReading right_trigger(float pulled)
+{
+	three::HandsReading reading;
+	reading.hand[three::Hand.RIGHT.ordinal] = {
+		.connected = true,
+		.trigger = pulled,
+		.profile = "oculus/touch_controller",
+		.pose = { { .position = { 0.1, 1.2, -0.3 }, .rotation = { 0, 0, 0, 1 } }, { .rotation = { 0, 0, 0, 1 } } },
+	};
+	return reading;
+}
+
+<*
+ Off a headset neither hand is there, and a button that is not one is refused
+ with the list of the ones that are.
+*>
+fn void no_hand_is_connected_off_a_headset() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult off = run.run("const r = three.xr.right; return [three.xr.left.connected, r.connected, r.trigger, r.thumbstick, r.profile, three.xr.presenting];");
+		defer off.free();
+		test::@check(off.ok && off.value == `[false,false,0,[0,0],"",false]`, "got %s %s", off.value, off.error);
+
+		three::RunResult wrong = run.run("three.xr.right.isDown('z');");
+		defer wrong.free();
+		test::@check(!wrong.ok && wrong.error.contains("stick, menu, trigger, squeeze"), "an unknown button is refused: %s", wrong.error);
+	};
+}
+
+<*
+ What the headset reads reaches the animation callback, with one press on the
+ frame the trigger crosses its threshold and one release when it falls back.
+*>
+fn void a_headset_reading_reaches_the_script_with_its_edges() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			globalThis.seen = [];
+			three.setAnimationLoop(() => {
+				const r = three.xr.right;
+				seen.push([r.connected, r.pressed('trigger'), r.isDown('trigger'), r.released('trigger'), r.profile]);
+			});`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+		three::HandsReading pulled = right_trigger(0.9f);
+		three::HandsReading resting = right_trigger(0.1f);
+		run.tick(16, { }, &pulled);
+		run.tick(32, { }, &pulled);
+		run.tick(48, { }, &resting);
+		three::RunResult seen = run.run("return seen;");
+		defer seen.free();
+		test::@check(seen.value == `[[true,true,true,false,"oculus/touch_controller"],[true,false,true,false,"oculus/touch_controller"],[true,false,false,true,"oculus/touch_controller"]]`,
+			"edges across three ticks: %s", seen.value);
+	};
+}
+
+<*
+ The grip is a group the engine places from the rig, so it follows a camera the
+ callback moved, and a child of it follows it.
+*>
+fn void the_grip_follows_the_rig_and_carries_its_children() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 0);
+			const held = new three.Group();
+			held.position.set(0, 0, -0.1);
+			three.xr.right.grip.add(held);
+			globalThis.held = held;
+			three.setAnimationLoop(() => { three.camera.lookAt(5, 0, 0); });`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+		three::HandsReading reading = right_trigger(0);
+		run.tick(16, { }, &reading);
+		three::RunResult where = run.run("const g = three.xr.right.grip.position; const w = held.getWorldPosition(); return [g.x, g.y, g.z, w.x, w.z].map(n => Math.round(n * 100) / 100);");
+		defer where.free();
+		test::@check(where.value == "[5.1,1.2,-0.3,5.1,-0.4]", "the grip and its child, after the rig moved: %s %s", where.value, where.error);
+	};
+}
+
+<*
+ The grip is the headset's to move, and its visibility is the controller's.
+*>
+fn void the_grip_cannot_be_moved_or_shown_by_a_script() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult moved = run.run("three.xr.right.grip.position.set(1, 2, 3);");
+		defer moved.free();
+		test::@check(!moved.ok && moved.error.contains("placed by the headset"), "a write is refused: %s", moved.error);
+
+		three::RunResult shown = run.run("three.xr.right.grip.visible = true;");
+		defer shown.free();
+		test::@check(!shown.ok, "visibility is not the script's");
+
+		three::RunResult hidden = run.run("return three.xr.right.grip.visible;");
+		defer hidden.free();
+		test::@check(hidden.value == "false", "a disconnected hand's grip is hidden: %s", hidden.value);
+	};
+}
+
+<*
+ Each scene has its own grip, and going back to a scene finds the one it had.
+*>
+fn void each_scene_keeps_its_own_grip() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult same = run.run(`
+			const first = new three.Scene();
+			const a = three.xr.right.grip;
+			const second = new three.Scene();
+			second.activate();
+			const b = three.xr.right.grip;
+			first.activate();
+			return [a === b, a === three.xr.right.grip, a.parent === first];`);
+		defer same.free();
+		test::@check(same.value == "[false,true,true]", "grips by scene: %s %s", same.value, same.error);
+	};
+}
+
+<*
+ A vibration is clamped into range and counted, so the headset sends each once.
+*>
+fn void vibrate_is_clamped_and_counted() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult buzz = run.run("three.xr.left.vibrate(3, 0.25); three.xr.left.vibrate(0.5);");
+		defer buzz.free();
+		test::@check(buzz.ok, "%s", buzz.error);
+		three::Haptic haptic = run.hands.hand[three::Hand.LEFT.ordinal].haptic;
+		test::eq(haptic.serial, (uint)2);
+		test::eq(haptic.amplitude, 0.5f);
+		test::@check(math::abs(haptic.seconds - 0.1f) < 1e-6f, "seconds kept, got %f", haptic.seconds);
+
+		three::RunResult wrong = run.run("three.xr.left.vibrate(NaN);");
+		defer wrong.free();
+		test::@check(!wrong.ok, "a NaN amplitude is refused");
+	};
+}
+
+<*
+ A script can hold a hand down, which is how a test drives a game with no
+ controller in it.
+*>
+fn void a_script_can_hold_a_hand() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult held = run.run("three.xr.left.press('x'); three.xr.left.tilt(0, 1);");
+		defer held.free();
+		run.tick(16);
+		three::RunResult read = run.run("const l = three.xr.left; return [l.connected, l.pressed('x'), l.isDown('a'), l.thumbstick];");
+		defer read.free();
+		test::@check(read.value == "[true,true,false,[0,1]]", "a held hand: %s %s", read.value, read.error);
+		three::RunResult let_go = run.run("three.xr.releaseAll();");
+		defer let_go.free();
+		run.tick(32);
+		three::RunResult after = run.run("return three.xr.left.connected;");
+		defer after.free();
+		test::@check(after.value == "false", "released: %s", after.value);
+	};
+}
+
+// ============================================================================
+// Passthrough
+// ============================================================================
+
+fn char[4] pixel_at(image::Image* shot, uint x, uint y)
+{
+	sz at = ((sz)y * shot.width + x) * 4;
+	return { shot.pixels[at], shot.pixels[at + 1], shot.pixels[at + 2], shot.pixels[at + 3] };
+}
+
+<*
+ A box filling the middle of the frame, in a material made by `material`, and
+ the frame drawn as over passthrough with its alpha kept.
+*>
+fn image::Image see_through_box(three::JsRuntime* run, String material)
+{
+	@pool()
+	{
+		three::RunResult built = run.run(string::tformat(`
+			const scene = new three.Scene();
+			scene.background = 0x336699;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			scene.add(new three.Mesh(new three.BoxGeometry(2, 2, 2), %s));`, material));
+		defer built.free();
+		test::@check(built.ok, "%s", built.error);
+	};
+	return run.renderer.capture(see_through: true)!!;
+}
+
+<*
+ Over passthrough the frame's alpha is coverage: nothing where the background
+ was, everything under an opaque mesh whatever its opacity says, the opacity
+ under a blended one with the colour premultiplied, and nothing under added
+ light, which brightens the room rather than hiding it.
+*>
+fn void a_see_through_frame_carries_coverage_in_alpha() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		image::Image opaque = see_through_box(run, "new three.MeshLambertMaterial({ color: 0xffffff })");
+		defer opaque.free();
+		char[4] corner = pixel_at(&opaque, 2, 2);
+		test::@check(corner == (char[4]){ 0, 0, 0, 0 }, "the background is clear, got %d %d %d %d",
+			corner[0], corner[1], corner[2], corner[3]);
+		test::eq(pixel_at(&opaque, 100, 75)[3], (char)255);
+
+		image::Image unblended = see_through_box(run, "new three.MeshLambertMaterial({ color: 0xffffff, opacity: 0.5 })");
+		defer unblended.free();
+		test::@check(pixel_at(&unblended, 100, 75)[3] == 255, "opacity without blending still covers");
+
+		image::Image glass = see_through_box(run, "new three.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })");
+		defer glass.free();
+		char[4] pane = pixel_at(&glass, 100, 75);
+		test::@check(pane[3] >= 120 && pane[3] <= 136, "a half-opaque pane covers half, got alpha %d", pane[3]);
+		test::@check(pane[0] <= pane[3] + 1 && pane[1] <= pane[3] + 1 && pane[2] <= pane[3] + 1,
+			"and its colour is premultiplied, got %d %d %d over %d", pane[0], pane[1], pane[2], pane[3]);
+
+		image::Image glow = see_through_box(run, "new three.MeshLambertMaterial({ color: 0xffffff, blending: three.AdditiveBlending })");
+		defer glow.free();
+		char[4] light = pixel_at(&glow, 100, 75);
+		test::@check(light[3] == 0 && light[0] > 0, "added light covers nothing and still adds, got %d %d %d %d",
+			light[0], light[1], light[2], light[3]);
+	};
+}
+
+<*
+ Off a headset there is no room to show: the request is kept, and the setting
+ reads false until a headset says it can.
+*>
+fn void passthrough_is_a_request_off_a_headset() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		defer run.renderer.xr_display = {};
+		three::RunResult asked = run.run("three.xr.passthrough = true; return [three.xr.passthrough, three.xr.passthroughSupported];");
+		defer asked.free();
+		test::@check(asked.value == "[false,false]", "off a headset: %s %s", asked.value, asked.error);
+		test::@check(run.renderer.xr_display.passthrough_wanted, "the request is kept");
+		run.renderer.xr_display.passthrough_supported = true;
+		three::RunResult on = run.run("return three.xr.passthrough;");
+		defer on.free();
+		test::@check(on.value == "true", "on a headset that can: %s", on.value);
+	};
+}
+
+<*
+ At a desk the mouse is the right hand: it points along the pointer's ray, the
+ left button is its trigger, and the keys the hands take are theirs alone.
+*>
+fn void the_mouse_is_the_right_hand_when_emulating() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		defer run.hands = { };
+		three::RunResult setup = run.run(`
+			three.xr.emulate = true;
+			three.camera.lookAt(0, 1.6, 0);
+			three.camera.orbit(30, 0, 0);
+			three.input.movePointer(100, 75);
+			three.input.pressButton(0);
+			three.input.press('1');
+			globalThis.seen = null;
+			three.setAnimationLoop(() => {
+				const r = three.xr.right;
+				const ray = three.camera.ray(100, 75);
+				const d = r.aim.direction;
+				const along = d.x * ray.direction.x + d.y * ray.direction.y + d.z * ray.direction.z;
+				seen = [r.connected, r.pressed('trigger'), r.isDown('a'), three.input.isDown('1'), three.controls.enabled, along > 0.999];
+			});`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+		run.tick(16);
+		three::RunResult seen = run.run("const s = seen; three.xr.emulate = false; three.input.releaseAll(); return s;");
+		defer seen.free();
+		test::@check(seen.value == "[true,true,true,false,false,true]", "the emulated right hand: %s %s", seen.value, seen.error);
+	};
+}

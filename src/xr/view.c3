@@ -39,14 +39,6 @@ fn void head_lock(Camera* camera, Vec3 rig_position, float rig_yaw, xr::View vie
 	camera.head_locked = true;
 }
 
-// `v` turned by `angle` radians about +Y, the way yaw turns the orbit camera.
-fn Vec3 turn_y(Vec3 v, float angle) @local
-{
-	float c = math::cos(angle);
-	float s = math::sin(angle);
-	return { v.x * c + v.z * s, v.y, -v.x * s + v.z * c };
-}
-
 fn Vec3 rotate(xr::Quaternionf q, Vec3 v) @local
 {
 	Vec3 u = { q.x, q.y, q.z };

@@ -339,8 +339,9 @@ fn void the_ported_post_is_generated() @test
 		"the four reserved samplers keep their bindings");
 	test::@check(source.contains("p.depth = span > 1e-6 ? near * far / span : far;"),
 		"and the depth a body reads is already in world units");
-	test::@check(source.contains("return float4(post(p), 1.0);"),
-		"with alpha the pass's rather than the body's");
+	test::@check(source.contains("return float4(post(p) * unmix, coverage);")
+		&& source.contains("float coverage = push.info.w > 0.5 ? saturate(scene.Sample(input.uv).a) : 1.0;"),
+		"with alpha the pass's rather than the body's: 1, or the scene's coverage over passthrough");
 	test::@check(source.contains("fn float3 post(Post p)\n{\n\treturn p.color;"),
 		"and the body that was spliced in is the identity");
 
@@ -566,8 +567,8 @@ fn void the_ported_mesh_is_lit() @test
 		"and a debug view answers instead of the body, before the body runs");
 	test::@check(source.contains("float alpha = draw.base_color.a * input.color.a;")
 		&& source.contains("alpha *= input.vertex_color.a;")
-		&& source.contains("return float4(shade(s), alpha);"),
-		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's");
+		&& source.contains("return float4(shade(s), (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);"),
+		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's, and 1 unless blended");
 	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
 		"and the body that was spliced in is the one that runs");
 

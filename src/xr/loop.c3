@@ -41,7 +41,8 @@ fn void? Renderer.render_xr(&self, vk::Image dst, vk::ImageView dst_view, vk::Ex
 	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
 
 	self.timer.begin(&self.gpu, cmd, slot)!;
-	bool direct = self.record_scene(cmd, output: dst_view != null ? dst : (vk::Image)null, output_view: dst_view)!;
+	bool direct = self.record_scene(cmd, output: dst_view != null ? dst : (vk::Image)null, output_view: dst_view,
+		see_through: self.xr_display.passthrough_active)!;
 	if (!direct) record_blit(cmd, self.target.color, self.target.extent, dst, dst_extent, {
 		...IMAGE_BARRIER,
 		.image = dst,
@@ -66,9 +67,10 @@ fn void? Renderer.render_xr(&self, vk::Image dst, vk::ImageView dst_view, vk::Ex
 
  @param [&inout] app : "The glue's app"
  @param [&inout] host : "An open XR host with a started session"
- @return? xr::CALL_FAILED
+ @param [&inout] dev : "Tool calls and pushed scripts, served between frames"
+ @return? xr::CALL_FAILED, HeadsetDev.between_frames!
 *>
-fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runtime)
+fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runtime, HeadsetDev* dev)
 {
 	DString said;
 	said.init(mem, 256);
@@ -79,6 +81,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 	io::printfn("xr: multiview %s", renderer.target.views > 1 ? "on" : "off");
 	host.display = &renderer.xr_display;
 	defer host.display = null;
+	defer renderer.xr_display.presenting = false;
 
 	xr::Time first_time = 0;
 	// For the once-every-few-seconds line saying how it is going.
@@ -94,8 +97,14 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		ndk::pump(app, host.running ? 0 : 50);
 		host.poll();
 		if (host.exit_wanted || app.destroy_requested != 0) break;
+		// Served while the session is idle too, so the tools still answer with
+		// the headset off.
+		dev.between_frames(runtime, renderer)!;
+		if (runtime.quit_wanted) host.request_exit();
+		renderer.xr_display.presenting = host.running;
 		if (!host.running) continue;
 		host.apply_refresh_rate();
+		host.apply_passthrough();
 
 		xr::FrameWaitInfo wait_info = { .type = xr::TYPE_FRAME_WAIT_INFO };
 		xr::FrameState frame = { .type = xr::TYPE_FRAME_STATE };
@@ -107,7 +116,11 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		if (first_time == 0) first_time = frame.predicted_display_time;
 		double elapsed_ms = (double)(frame.predicted_display_time - first_time) / 1_000_000.0;
 		Clock host_started = clock::now();
-		runtime.tick(elapsed_ms);
+		bool focused = host.state == xr::SESSION_STATE_FOCUSED;
+		HandsReading hands;
+		host.input.read(host.session, host.space, frame.predicted_display_time, focused, &hands);
+		runtime.tick(elapsed_ms, { }, &hands);
+		host.input.send_haptics(host.session, &runtime.hands, focused);
 
 		xr::View[2] views = { { .type = xr::TYPE_VIEW }, { .type = xr::TYPE_VIEW } };
 		bool drawn = false;
@@ -157,10 +170,11 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		{
 			double seconds = (double)since_ns / 1e9;
 			double n = frames_drawn > 0 ? (double)frames_drawn : 1.0;
-			io::printfn("xr: %.1f fps, cpu %.2f ms, fence wait %.2f ms, gpu %.2f ms (prepare %.2f, shadow %.2f, ao %.2f, prepass %.2f, scene %.2f, post %.2f, present %.2f)",
+			io::printfn("xr: %.1f fps, cpu %.2f ms, fence wait %.2f ms, gpu %.2f ms (prepare %.2f, shadow %.2f, ao %.2f, prepass %.2f, scene %.2f, post %.2f, present %.2f), hands L:%s R:%s",
 				frames_drawn / seconds, (double)busy_ns / 1e6 / n, (double)waited_ns / 1e6 / n,
 				gpu_sum.total / n, gpu_sum.prepare / n, gpu_sum.shadow / n, gpu_sum.occlusion / n,
-				gpu_sum.prepass / n, gpu_sum.scene / n, gpu_sum.post / n, gpu_sum.present / n);
+				gpu_sum.prepass / n, gpu_sum.scene / n, gpu_sum.post / n, gpu_sum.present / n,
+				hand_word(&runtime.hands, Hand.LEFT), hand_word(&runtime.hands, Hand.RIGHT));
 			report_since = clock::now();
 			frames_drawn = 0;
 			busy_ns = 0;
@@ -168,6 +182,14 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			gpu_sum = {};
 		}
 	}
+}
+
+// For the timing line: which controller a hand holds, or "-".
+fn String hand_word(Hands* hands, Hand hand) @local
+{
+	HandReading now = hands.hand[hand.ordinal].now;
+	if (!now.connected) return "-";
+	return now.profile.len > 0 ? now.profile : "?";
 }
 
 <*
@@ -283,13 +305,27 @@ fn void? end_frame(XrHost* host, xr::FrameState* frame, xr::View[2]* views, bool
 		.view_count = 2,
 		.views = &eyes[0],
 	};
-	xr::CompositionLayerBaseHeader*[1] layers = { (xr::CompositionLayerBaseHeader*)&layer };
+	// The room goes under the scene, which is premultiplied and covers it where
+	// its alpha says. A frame not drawn still shows the room.
+	xr::CompositionLayerPassthroughFB room = {
+		.type = xr::TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB,
+		.flags = xr::COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+		.layer_handle = host.passthrough_layer,
+	};
+	xr::CompositionLayerBaseHeader*[2] layers;
+	uint count;
+	if (host.passthrough_running) layers[count++] = (xr::CompositionLayerBaseHeader*)&room;
+	if (drawn)
+	{
+		if (host.passthrough_running) layer.layer_flags = xr::COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+		layers[count++] = (xr::CompositionLayerBaseHeader*)&layer;
+	}
 	xr::FrameEndInfo end_info = {
 		.type = xr::TYPE_FRAME_END_INFO,
 		.display_time = frame.predicted_display_time,
 		.environment_blend_mode = xr::ENVIRONMENT_BLEND_MODE_OPAQUE,
-		.layer_count = drawn ? 1 : 0,
-		.layers = drawn ? &layers[0] : null,
+		.layer_count = count,
+		.layers = count > 0 ? &layers[0] : null,
 	};
 	xr::check(xr::cmd.end_frame(host.session, &end_info), "xrEndFrame")!;
 }

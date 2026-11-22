@@ -99,8 +99,19 @@ how much a pixel executes. That is why the frame's unused features are compiled 
 
 ## 3. Input
 
-- [ ] **Touch controllers.** No OpenXR actions yet: grip and aim poses, triggers,
-      thumbsticks, buttons, haptics, and a JS API for scripts.
+- [x] **Touch controllers.** OpenXR actions for the Touch profile (simple controller
+      as a fallback): grip and aim poses, triggers, thumbsticks, buttons and haptics, as
+      `three.xr.left` / `three.xr.right` with engine-placed `grip` and `aim` groups.
+      `three.xr.emulate` makes the mouse and keyboard the hands at a desk.
+- [x] **Try them on the headset.** On Quest 3 (runtime 210.137) both hands come up as
+      `oculus/touch_controller`; triggers, squeeze, A, B, Y and both sticks reach the
+      script with their edges, `vr_controllers.js` grabs, throws and pushes cubes, and
+      `vibrate` buzzes the controller. X, the stick clicks and menu were not pressed
+      in that session.
+- [ ] **A grab lags its hand by a physics step.** A kinematic hand copied from
+      `r.grip` in the callback reaches the solver one step late, so a joint made the
+      frame a hand arrives holds the object that far off. `node.xrTrack` on a
+      top-level kinematic mesh would close it.
 
 ## 4. Stereo
 
@@ -112,6 +123,18 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       into the other. The tonemap is per pixel and fine.
 
 ## 5. Android
+
+- [x] **Passthrough.** `three.xr.passthrough` over `XR_FB_passthrough`: the scene
+      clears to nothing, skips its sky, and its premultiplied alpha is coverage (opaque
+      writes 1, additive leaves it alone, the tonemap carries it).
+- [x] **Try passthrough on the headset.** The room shows behind the scene and toggles
+      cleanly; `vr_controllers.js` held 120 fps at about 1.2 ms CPU and 2.5-3.5 ms GPU
+      with it on or off.
+- [x] **Hot reload on the headset.** `quest.sh push` reloads the running game in about
+      30 ms without restarting the app or the session.
+- [x] **Build and test from a Mac.** `build-apk.sh` finds the NDK's host toolchain;
+      `quest.sh` pushes a game (reloaded in place), forwards MCP and tails logcat;
+      the headset serves the MCP tools on 8808.
 
 - [ ] **Ship a shader cache in the APK.** `build-apk.sh` packs none, so the first
       launch after an install compiles every shader on the headset.

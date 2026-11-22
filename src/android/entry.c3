@@ -108,6 +108,8 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// Runs before `engine.close`: the session holds the engine's device.
 	defer host.close();
 	if (xr_up) host.start(&engine.renderer.gpu)!;
+	// Before the boot, so a script can ask what the headset can do.
+	engine.renderer.xr_display.passthrough_supported = host.passthrough_supported;
 
 	JsRuntime runtime;
 	runtime.open(&engine.renderer.pass, &engine.renderer)!;
@@ -116,9 +118,15 @@ fn void? run_android(ndk::App* app, String internal, String external)
 
 	if (xr_up)
 	{
-		run_xr(app, host, &engine.renderer, &runtime)!;
+		// Heap, not stack: the tools hold pointers into it.
+		HeadsetDev* dev = mem::new(HeadsetDev);
+		defer mem::free(dev);
+		dev.open(&runtime, &engine.renderer, game, external);
+		defer dev.close();
+		run_xr(app, host, &engine.renderer, &runtime, dev)!;
 		return;
 	}
+	defer game.free();
 	run_probe(app, &engine.renderer, &runtime)!;
 }
 
@@ -156,9 +164,17 @@ fn void? run_probe(ndk::App* app, Renderer* renderer, JsRuntime* runtime)
 
 struct GameDir
 {
+	// Owned, both.
 	String root;
 	// Empty when the root has a main.js to boot instead.
 	String script;
+}
+
+fn void GameDir.free(&self)
+{
+	if (self.root.len > 0) free(self.root);
+	if (self.script.len > 0) free(self.script);
+	*self = {};
 }
 
 <*

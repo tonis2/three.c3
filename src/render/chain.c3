@@ -144,6 +144,8 @@ struct PassIo
 	// a fact about the frame being recorded, and a pass that read it from
 	// somewhere else could be recorded with a time the frame does not have.
 	double time;
+	// The tonemap over passthrough: it writes the scene's coverage as alpha.
+	bool see_through;
 }
 
 <*
@@ -1092,7 +1094,8 @@ fn void? PostPass.record_chain(
 	float far_plane = 0,
 	bool scene_cached = false,
 	vk::Image output = (vk::Image)null,
-	vk::ImageView output_view = (vk::ImageView)null
+	vk::ImageView output_view = (vk::ImageView)null,
+	bool see_through = false
 )
 {
 	sz count = self.stages.len();
@@ -1108,7 +1111,7 @@ fn void? PostPass.record_chain(
 	// A multiview frame with nothing but the tonemap reads its eyes in place.
 	if (self.eyes.exists() && count == 0)
 	{
-		self.record_tonemap_eyes(cmd, target, assets, now, near_plane, far_plane, output, output_view);
+		self.record_tonemap_eyes(cmd, target, assets, now, near_plane, far_plane, output, output_view, see_through);
 		return;
 	}
 
@@ -1209,6 +1212,7 @@ fn void? PostPass.record_chain(
 			.tap = self.scene.view,
 			.assets = assets,
 			.time = now,
+			.see_through = see_through,
 		}
 	)!;
 }
@@ -1218,7 +1222,7 @@ fn void? PostPass.record_chain(
  `output`, or of `target.color`, in one rendering.
 *>
 fn void PostPass.record_tonemap_eyes(&self, vk::CommandBuffer cmd, Target* target, Assets* assets, double now,
-	float near_plane, float far_plane, vk::Image output, vk::ImageView output_view)
+	float near_plane, float far_plane, vk::Image output, vk::ImageView output_view, bool see_through = false)
 {
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({
 		shader_read_barrier(self.eyes.whole.image), depth_read_barrier(target.depth) }));
@@ -1240,6 +1244,7 @@ fn void PostPass.record_tonemap_eyes(&self, vk::CommandBuffer cmd, Target* targe
 			.tap = eye,
 			.assets = assets,
 			.time = now,
+			.see_through = see_through,
 		};
 	}
 	self.tonemap.record_side_by_side(cmd, views[:target.views], target.extent);

@@ -90,7 +90,10 @@ run_android() {
 			"https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/$version/openxr_loader_for_android-$version.aar"
 		mv "$aar.part" "$aar"
 	fi
-	if [[ "$(sha1sum "$aar" | cut -d' ' -f1)" != "$sha1" ]]; then
+	# sha1sum is missing on older macOS; shasum is everywhere Perl is.
+	local sum
+	if command -v sha1sum >/dev/null; then sum="$(sha1sum "$aar")"; else sum="$(shasum -a 1 "$aar")"; fi
+	if [[ "${sum%% *}" != "$sha1" ]]; then
 		echo "setup: $aar does not match its pinned sha1" >&2
 		rm -f "$aar"
 		exit 1

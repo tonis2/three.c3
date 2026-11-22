@@ -1153,3 +1153,19 @@ It costs no draw call in the colour pass, so marking ten thousand crates is free
 
 Watch `three.stats().shadowStaticDraws`: 0 on most frames means the cache is holding. Refused on skinned meshes — a
 pose changes the silhouette without the transform moving — and reading `.static` back is how you see that.
+
+## xr-controllers
+
+There is no `renderer.xr.getController(i)`, no `selectstart` event and no `gamepad` object. The hands are
+`three.xr.left` and `three.xr.right`, read each frame like `three.input`: `r.pressed('trigger')` is the frame the
+trigger went down, `r.thumbstick` is `[x, y]`, and `r.grip` and `r.aim` are groups the engine keeps on the
+controller, so `r.grip.add(sword)` is all it takes to hold something.
+
+**`thumbstick[1]` is positive pushed forward** — OpenXR's sign. A WebXR gamepad's axis is positive pulled back,
+so a snippet ported from Three.js walks backwards until the sign is flipped.
+
+## passthrough
+
+There is no `'immersive-ar'` session and no `scene.background = null` to see the room. `three.xr.passthrough =
+true` shows it behind the scene, and while it does the background colour and sky are not drawn.
+`scene.background` is left alone and comes back when the room is turned off.

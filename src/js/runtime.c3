@@ -148,6 +148,7 @@ const char[*] PRELUDE_DECORATORS = $embed("prelude/decorators.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
 const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
 const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
+const char[*] PRELUDE_XR       = $embed("prelude/xr.js");
 
 <*
  The prelude's modules, by their `three:` specifiers.
@@ -161,7 +162,7 @@ const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
 *>
 fn js::EmbeddedModule[] prelude_parts()
 {
-	static js::EmbeddedModule[26] parts;
+	static js::EmbeddedModule[27] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -188,6 +189,7 @@ fn js::EmbeddedModule[] prelude_parts()
 		{ "three:decorators.js", (char[])PRELUDE_DECORATORS[..] },
 		{ "three:ui.js", (char[])PRELUDE_UI[..] },
 		{ "three:widget.js", (char[])PRELUDE_WIDGET[..] },
+		{ "three:xr.js", (char[])PRELUDE_XR[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 	};
 	return parts[..];
@@ -439,6 +441,9 @@ struct JsRuntime
 	// buttons and wheel beside it. Merged into every frame the same way the keys
 	// are, and for the same reason — `SyntheticPointer` argues the whole design.
 	SyntheticPointer pointer;
+	// Both hand controllers, stepped every tick from the headset, the desktop's
+	// emulation, or what a script is holding through `three.xr.right.press`.
+	Hands hands;
 	// The press a windowless host is waiting to see the end of.
 	//
 	// There is never both this and the one `main.c3`'s loop owns: with a window

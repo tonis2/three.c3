@@ -96,7 +96,13 @@ fn float4 fragmentMain(VertexOutput input) @fragment
 	p.uv = input.uv;
 	p.resolution = push.info.xy;
 	p.time = push.info.z;
-	p.color = prev.Sample(input.uv).rgb;
+	// Over passthrough the scene is premultiplied and its alpha is coverage:
+	// the curve runs on the colour as drawn, and the coverage goes out with it.
+	// `info.w` is 0 for every pass but a see-through tonemap, so elsewhere this
+	// is exactly the opaque frame.
+	float coverage = push.info.w > 0.5 ? saturate(scene.Sample(input.uv).a) : 1.0;
+	float unmix = coverage > 0.004 ? coverage : 1.0;
+	p.color = prev.Sample(input.uv).rgb / unmix;
 	p.scene = scene.Sample(input.uv).rgb;
 	p.tap = tap_image.Sample(input.uv).rgb;
 
@@ -121,7 +127,7 @@ fn float4 fragmentMain(VertexOutput input) @fragment
 	// **Alpha is not the body's to return.** The last thing a chain writes goes to
 	// the blit and the readback, and the readback forces alpha opaque regardless;
 	// a body that could dim it could make a screenshot differ from the window.
-	return float4(post(p), 1.0);
+	return float4(post(p) * unmix, coverage);
 }
 
 // Defined by the pass's body. The default an agent gets by attaching nothing is

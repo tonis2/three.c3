@@ -42,6 +42,7 @@ import { cutscene, Cutscene } from './cutscene.js';
 import { key, keys, owned } from './decorators.js';
 import { track, Entity, entity, instanceOf, emit, setScriptHandler, setClickShaper, report as rulesReport, disposeAll as disposeAllEntities } from './entity.js';
 import { ui } from './ui.js';
+import { xr } from './xr.js';
 import { Widget, nodes as uiNodes, unmountAll as unmountAllWidgets } from './widget.js';
 
 const H = globalThis.__three;
@@ -1551,32 +1552,6 @@ const clock = {
 // `three.systems.report()` is the rolling per-system version and the one
 // to reach for next: this splits the frame into four spans, that splits
 // two of those spans by name.
-
-// `Foveation` in `gpu/foveation.c3`, in its order.
-const FOVEATION_LEVELS = ['off', 'low', 'medium', 'high'];
-
-// The headset. Off one, the rate reads 0 and the list is empty.
-const xr = {
-	// The display's rate in Hz. Setting it asks the headset for the offered
-	// rate nearest to it, and the display switches a few frames later; 0
-	// hands the choice back to the runtime.
-	get refreshRate() { return H.xrRefreshRateGet(); },
-	set refreshRate(hz) {
-		hz = +hz;
-		if (!(hz >= 0)) throw new RangeError('three.xr.refreshRate wants Hz, 0 or more');
-		H.xrRefreshRateSet(hz);
-	},
-	get refreshRates() { return H.xrRefreshRatesGet(); },
-
-	// How coarsely the edge of each eye's view is shaded: 'off', 'low',
-	// 'medium' (the default) or 'high'. Always 'off' off a headset.
-	get foveation() { return FOVEATION_LEVELS[H.xrFoveationGet()]; },
-	set foveation(level) {
-		const at = FOVEATION_LEVELS.indexOf(level);
-		if (at < 0) throw new RangeError(`three.xr.foveation is one of ${FOVEATION_LEVELS.join(', ')}`);
-		H.xrFoveationSet(at);
-	},
-};
 
 const frame = {
 	get running() { return H.frameStats().running; },

@@ -22,6 +22,7 @@ import three_tests::device;
 import vk;
 import c3w;
 import std::core::test;
+import std::io::file;
 
 <*
  A runtime over a scene with no device behind it, and the scene itself.
@@ -538,4 +539,40 @@ fn void a_reload_gives_back_the_materials_the_script_held() @test
 			"the materials outlived the script that held them: %s",
 			@answer(run, "return three.stats().materials;"));
 	};
+}
+
+const String WATCHED = "build/test-game-watch.js";
+
+fn void a_push_is_noticed_once_it_settles() @test
+{
+	file::save(WATCHED, "1")!!;
+	defer (void)file::delete(WATCHED);
+	three::GameWatch watch;
+	watch.init(mem);
+	defer watch.free();
+	watch.add(WATCHED);
+	watch.add("build/test-game-watch-missing.js");
+
+	test::eq(watch.step(0), false);
+	// A second's resolution: move the time rather than wait for it.
+	file::set_modified_time(WATCHED, 1_000_000)!!;
+	test::eq(watch.step(100), false);  // not polled yet
+	test::eq(watch.step(400), false);  // seen, still settling
+	test::eq(watch.step(800), true);
+	test::eq(watch.step(1200), false); // once per change
+}
+
+fn void a_file_that_appears_counts_as_a_change() @test
+{
+	String later = "build/test-game-watch-later.js";
+	(void)file::delete(later);
+	three::GameWatch watch;
+	watch.init(mem);
+	defer watch.free();
+	watch.add(later);
+	test::eq(watch.step(0), false);
+	file::save(later, "x")!!;
+	defer (void)file::delete(later);
+	test::eq(watch.step(400), false);
+	test::eq(watch.step(800), true);
 }

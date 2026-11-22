@@ -65,6 +65,10 @@ Sampler2D shadow_atlas @set(0) @binding(17);
 // decides for itself, which is why the fold below is behind `MATERIAL_BUILT_IN`.
 const uint FLAG_COLORS_ARE_MASK = 1024;
 
+// Blended, so `alpha` is coverage. An opaque mesh writes 1: it covers what is
+// behind it, and passthrough reads that from the scene image's alpha.
+const uint FLAG_BLENDED = 16384;
+
 // sRGB to linear, for the one colour that arrives from a file rather than from
 // the frame: the instance colour is what a person picked in a colour picker.
 fn float3 srgb_to_linear(float3 c)
@@ -1106,5 +1110,5 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	float3 view;
 	if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
 
-	return float4(shade(s), alpha);
+	return float4(shade(s), (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);
 }

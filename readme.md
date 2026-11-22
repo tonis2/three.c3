@@ -76,6 +76,20 @@ PNG of the frame (at most 1568 px on its longest side, and `image: false` leaves
 `screenshot` re-renders it. The API is [`docs/`](docs/), and
 `run_script`'s description gives agents the path to it.
 
+### Meta Quest 3
+
+```sh
+./setup.sh android                                        # once: the OpenXR loader
+packaging/android/build-apk.sh examples/vr_controllers.js --run
+packaging/android/quest.sh push examples/vr_controllers.js   # reloads in place, no rebuild
+packaging/android/quest.sh mcp                            # the agent tools above, on the headset
+packaging/android/quest.sh logs
+```
+
+Needs the Android SDK and NDK (`ANDROID_HOME`) and a headset in developer mode on USB. The hands are
+`three.xr.left` and `three.xr.right`, and `three.xr.passthrough` shows the room; with `three.xr.emulate = true`
+the mouse and keyboard are the hands at a desk. See "The headset" in [`docs/functions.md`](docs/functions.md).
+
 ### Building
 
 Needs [c3c](https://github.com/c3lang/c3c) — v0.8.5_1 is what the releases are built with.

@@ -13,6 +13,9 @@
 module three;
 
 import std::io;
+import std::io::file;
+import std::time;
+import std::collections::list;
 import c3w;
 import fastjs::js;
 
@@ -71,6 +74,8 @@ fn void? reload(
 	runtime.close();
 
 	if (renderer != null) renderer.post.clear(gpu, &pass.assets);
+	// The room is the game's to ask for, so a new game starts without it.
+	if (renderer != null) renderer.xr_display.passthrough_wanted = false;
 	pass.reset_world(gpu);
 
 	runtime.open(pass, renderer, memory_limit)!;
@@ -259,4 +264,78 @@ fn void JsRuntime.restore_persist(&self, String json)
 fn void js_reload(JsRuntime* self)
 {
 	self.reload_wanted = true;
+}
+
+// How often a `GameWatch` looks at its files.
+const long GAME_WATCH_POLL_MS = 300;
+
+<*
+ Notices an `adb push` on the headset, where nothing tells an app that a file
+ changed. A change is reported on the first quiet poll after it, so a push of
+ several files reloads once rather than once per file.
+*>
+struct GameWatch
+{
+	// Owned. A file that does not exist yet reads as time 0.
+	List {String} paths;
+	List {Time} seen;
+	long polled_ms;
+	bool polled;
+	bool pending;
+}
+
+<*
+ @param [&inout] allocator : "Where the paths are kept"
+*>
+fn void GameWatch.init(&self, Allocator allocator)
+{
+	self.paths.init(allocator);
+	self.seen.init(allocator);
+}
+
+<*
+ Watches one more file, from its time now.
+
+ @param path : "Copied"
+*>
+fn void GameWatch.add(&self, String path)
+{
+	self.paths.push(path.copy(self.paths.allocator));
+	self.seen.push(file::last_modified(path) ?? (Time)0);
+}
+
+<*
+ Whether the files changed and have since been left alone.
+
+ @param now_ms : "Any clock that only goes forward"
+ @return "True once per change"
+*>
+fn bool GameWatch.step(&self, long now_ms)
+{
+	if (self.polled && now_ms - self.polled_ms < GAME_WATCH_POLL_MS) return false;
+	self.polled = true;
+	self.polled_ms = now_ms;
+	bool moved = false;
+	foreach (i, path : self.paths)
+	{
+		Time now = file::last_modified(path) ?? (Time)0;
+		if (now == self.seen[i]) continue;
+		self.seen[i] = now;
+		moved = true;
+	}
+	if (moved)
+	{
+		self.pending = true;
+		return false;
+	}
+	if (!self.pending) return false;
+	self.pending = false;
+	return true;
+}
+
+fn void GameWatch.free(&self)
+{
+	foreach (path : self.paths) path.free(self.paths.allocator);
+	self.paths.free();
+	self.seen.free();
 }

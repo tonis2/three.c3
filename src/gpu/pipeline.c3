@@ -149,6 +149,13 @@ const uint FLAG_HAS_TANGENTS                = 4096;
 const uint FLAG_UV_V_DOWN                   = 8192;
 
 <*
+ Drawn with blending, so the alpha the shader works out is coverage. Without it
+ the mesh writes alpha 1: an opaque mesh covers what is behind it, which
+ passthrough reads from the scene image's alpha.
+*>
+const uint FLAG_BLENDED                     = 16384;
+
+<*
  `Instance.pose` is an offset in matrices with a selector in its top bit.
 
  Set means this frame's live palette — a character posed from its bone nodes, so
@@ -1592,10 +1599,11 @@ fn MeshPipeline? MeshPipeline.init(
 			// here" and "somebody deleted a line" look identical otherwise.
 			break;
 		case ADDITIVE:
-			// Source over destination with nothing taken away. The alpha channel
-			// accumulates the same way, which matters only for an offscreen target
-			// somebody reads back — `Target.capture` forces it opaque.
+			// Source over destination with nothing taken away, and the coverage
+			// left as it was: added light covers nothing, so over passthrough a
+			// glow brightens the room instead of hiding it.
 			blend.dstColorBlendFactor = BLEND_FACTOR_ONE;
+			blend.srcAlphaBlendFactor = BLEND_FACTOR_ZERO;
 			blend.dstAlphaBlendFactor = BLEND_FACTOR_ONE;
 	}
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::defaultColorBlendState(

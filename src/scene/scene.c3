@@ -540,6 +540,9 @@ struct Scene
 	// that has not asked for one, which is almost all of them.
 	List{Socket} sockets;
 
+	// The nodes kept on a hand controller — `Scene.track_hand`.
+	List{TrackedNode} tracked;
+
 	// The nodes carrying morph weights — `Scene.set_morph_weights`. A side table
 	// rather than a field on `Node`, because a scene of ten thousand crates should
 	// not carry ten thousand empty lists for a feature none of them use.
@@ -856,6 +859,7 @@ fn Scene* Scene.init(&self)
 	self.free_slots.init(mem, 16);
 	self.players.init(mem, 4);
 	self.sockets.init(mem, 4);
+	self.tracked.init(mem, 4);
 	self.morphs.init(mem, 4);
 	self.palettes.init(mem, 1);
 	self.foot_rigs.init(mem, 1);
@@ -1048,6 +1052,8 @@ fn void Scene.free(&self)
 	self.players.free();
 	self.sockets.free();
 	self.sockets = { };
+	self.tracked.free();
+	self.tracked = { };
 	foreach (&entry : self.morphs) entry.weights.free();
 	self.morphs.free();
 	self.morphs = { };

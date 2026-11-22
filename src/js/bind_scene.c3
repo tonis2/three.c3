@@ -63,6 +63,9 @@ fn void JsRuntime.install_bindings(&self)
 	// The keyboard (js/bind_input.c3)
 	self.bind_input_verbs(host)!!;
 
+	// The hand controllers (js/bind_xr.c3)
+	self.bind_xr_verbs(host)!!;
+
 	// Saving (js/bind_save.c3)
 	self.bind_save_verbs(host)!!;
 
@@ -113,6 +116,7 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "bindSkin", &js_bind_skin, self)!;
 	self.js.@method(node, "bindSocket", &js_bind_socket, self)!;
 	self.js.@method(node, "unbindSocket", &js_unbind_socket, self)!;
+	self.js.@method(node, "xrTrack", &js_xr_track, self)!;
 	self.js.@method(node, "footIk", &js_foot_ik, self)!;
 	self.js.@method(node, "footIkSet", &js_foot_ik_set, self)!;
 	self.js.@method(node, "footIkDrop", &js_foot_ik_drop, self)!;

@@ -303,9 +303,10 @@ fn void JsRuntime.solve_foot_ik(&self, double dt_ms)
 
  @param elapsed_ms : `Milliseconds, monotonic, from whenever the host started counting — a wall clock. What the callback is told is this through the game clock.`
  @param input : `This frame's keyboard and mouse. Default-empty, for a host that has no window and for the checks that only care about the callback.`
+ @param xr : `This frame's hand controllers, in tracking space; null off a headset.`
  @return `true when something ran, false when nothing is registered — so a caller can tell an idle loop from a running one without asking twice.`
 *>
-fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
+fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { }, HandsReading* xr = null)
 {
 	// Keys a script is holding folded in beside the window's, before anything
 	// reads them — so `three.input.pressed`, `isDown` and every `onKeyDown`
@@ -329,7 +330,25 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { })
 		frame = self.scripted_pointer_frame(frame, elapsed_ms, wall_dt < 0 ? 0.0f : wall_dt);
 	}
 
+	// At a desk the mouse and some keys are the hands, and the game sees them
+	// only as the hands.
+	HandsReading hands = xr != null ? *xr : { };
+	if (xr == null && self.hands.emulate)
+	{
+		uint width = self.renderer != null ? self.renderer.target.extent.width : 0;
+		uint height = self.renderer != null ? self.renderer.target.extent.height : 0;
+		hands = emulate_hands(&self.pass.camera, &frame, width, height);
+		frame = without_emulated(frame);
+	}
+
 	self.take_input(frame);
+
+	// Before the solver, so a kinematic body copied from a hand and the callback
+	// both see this frame's pose; and placed again last, after anything that
+	// moved the rig.
+	self.hands.step(hands);
+	self.place_hands();
+	defer self.place_hands();
 
 	// The sweep counters, zeroed before anything in the frame can add to them, so
 	// `three.stats().sweep` read from a system or the animation callback is about
@@ -1137,4 +1156,13 @@ fn void? js_frame_wait(JsRuntime* self, js::Value resolve)
 {
 	if (!resolve.is_function()) return self.js.fail("frameWait wants the promise's resolve function")~;
 	self.frame_waiters.push(self.js.hold(resolve));
+}
+
+<*
+ Puts the hands, and every node kept on one, where the rig says they are.
+*>
+fn void JsRuntime.place_hands(&self)
+{
+	self.hands.to_world(self.pass.camera.target, self.pass.camera.yaw);
+	self.pass.scene.update_tracked(&self.hands);
 }

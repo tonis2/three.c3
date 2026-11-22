@@ -869,12 +869,15 @@ fn void Target.record_readback(&self, vk::CommandBuffer cmd, vk::Memory* dst)
 
  @return `An Image owning its pixels — free it with Image.free.`
 *>
-fn image::Image Target.decode_readback(&self, vk::Memory* src, alloc::Allocator allocator = mem)
+fn image::Image Target.decode_readback(&self, vk::Memory* src, alloc::Allocator allocator = mem, bool keep_alpha = false)
 {
 	sz size      = self.readback_size();
 	char[] bytes = alloc::new_array(allocator, char, size);
 	mem::copy(bytes.ptr, src.data(), size);
-	for (sz i = 3; i < size; i += 4) bytes[i] = 0xff;
+	if (!keep_alpha)
+	{
+		for (sz i = 3; i < size; i += 4) bytes[i] = 0xff;
+	}
 
 	return {
 		.width = self.extent.width,

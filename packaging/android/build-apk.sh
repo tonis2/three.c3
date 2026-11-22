@@ -44,8 +44,11 @@ latest() { ls -1 "$1" | sort -V | tail -1; }
 ndk="${ANDROID_NDK:-$sdk/ndk/$(latest "$sdk/ndk")}"
 tools="$sdk/build-tools/$(latest "$sdk/build-tools")"
 platform="$sdk/platforms/$(latest "$sdk/platforms")/android.jar"
-bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+# The NDK ships one prebuilt toolchain per host: linux-x86_64, darwin-x86_64, ...
+bin="$(echo "$ndk"/toolchains/llvm/prebuilt/*/bin)"
 cc="$bin/aarch64-linux-android$API-clang"
+[[ -x "$cc" ]] || { echo "build-apk: no $cc" >&2; exit 1; }
+sha1() { if command -v sha1sum >/dev/null; then sha1sum; else shasum -a 1; fi; }
 
 loader="$HERE/third_party/aar/jni/arm64-v8a/libopenxr_loader.so"
 [[ -f "$loader" ]] || { echo "build-apk: no OpenXR loader; run ./setup.sh android" >&2; exit 1; }
@@ -80,7 +83,7 @@ fi
 # APK's assets cannot be listed recursively from native code.
 (
 	cd "$out/apk/assets/game"
-	echo "$(date -u +%Y%m%dT%H%M%SZ)-$(find . -type f -print0 | sort -z | xargs -0 cat | sha1sum | cut -c1-12)"
+	echo "$(date -u +%Y%m%dT%H%M%SZ)-$(find . -type f -print0 | sort -z | xargs -0 cat | sha1 | cut -c1-12)"
 	find . -type f ! -name manifest.txt | sed 's|^\./||' | sort
 ) > "$out/manifest.txt"
 mv "$out/manifest.txt" "$out/apk/assets/game/manifest.txt"
@@ -101,7 +104,17 @@ echo "wrote ${out#"$ROOT/"}/three.apk ($(du -h "$out/three.apk" | cut -f1))"
 
 if (( install )); then
 	echo "==> install"
-	adb install -r "$out/three.apk"
+	# An install signed with another machine's debug key cannot be updated in place.
+	if ! result="$(adb install -r "$out/three.apk" 2>&1)"; then
+		echo "$result"
+		if [[ "$result" == *INSTALL_FAILED_UPDATE_INCOMPATIBLE* ]]; then
+			echo "==> signed with another key; uninstalling the old one"
+			adb uninstall "$PACKAGE"
+			adb install "$out/three.apk"
+		else
+			exit 1
+		fi
+	fi
 fi
 if (( run )); then
 	adb shell am force-stop "$PACKAGE"

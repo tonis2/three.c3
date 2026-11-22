@@ -1624,6 +1624,130 @@ Like the refresh rate it belongs to the renderer: `new three.Scene()` does not r
 three.xr.foveation = 'high';
 ```
 
+## three.xr.presenting
+
+Whether frames are going to a headset right now. False at a desk, and on the headset until the session is
+running, so a script that boots there reads `false`; the first animation frame reads `true`.
+
+## three.xr.passthrough
+
+The room, in colour, behind the scene instead of its background. While it shows, the background colour and any
+sky are not drawn and the scene's alpha decides where the room shows through: an opaque mesh covers it, a
+`transparent` one covers it by its opacity, and `AdditiveBlending` light brightens the room without covering
+it. `scene.background` keeps its value and comes back when passthrough is turned off.
+
+False off a headset and on one that cannot, though the request is kept. Like the refresh rate it belongs to
+the renderer, but a reload turns it off: the room is the game's to ask for.
+
+```js
+if (three.xr.passthroughSupported) three.xr.passthrough = true;
+```
+
+## three.xr.passthroughSupported
+
+Whether this headset can show the room: true on Quest 3 and 3S, false off a headset. Known at boot.
+
+## three.xr.left / three.xr.right
+
+The two hand controllers, each an `XrHand`. Off a headset neither is connected and every value reads as nothing
+held, so a game written for the headset still runs at a desk. Everything below is per hand, read each frame.
+
+```js
+const r = three.xr.right;
+if (r.pressed('trigger')) shoot(r.aim.position, r.aim.direction);
+r.grip.add(sword);
+```
+
+## three.xr.right.connected
+
+Whether the controller is in hand and tracked. False off a headset, while the system menu is open, and while the
+controller has lost tracking. A hand that disconnects lets go of every button, so each held button reports its
+`released` edge.
+
+## three.xr.right.trigger / squeeze
+
+How far the trigger and the grip button are pulled, `0` to `1`. As buttons, `'trigger'` and `'squeeze'` count as
+held from `0.6` until they fall back to `0.4`, so a finger resting at the threshold does not chatter.
+
+## three.xr.right.thumbstick
+
+`[x, y]`, each `-1` to `1`. **`+y` is the stick pushed forward**, which is OpenXR's sign and the opposite of a
+WebXR gamepad's axis.
+
+## three.xr.right.isDown(name) / pressed(name) / released(name)
+
+Whether a button is held, went down this frame, or came up this frame. The names are `'a'` and `'b'` on the right
+hand, `'x'`, `'y'` and `'menu'` on the left, and `'stick'` (the thumbstick's click), `'trigger'` and `'squeeze'`
+on both. A button the hand does not have reads `false`; a name that is not a button throws, listing the ones
+that are. The right hand's menu button is the system's and never reaches a game.
+
+## three.xr.right.vibrate(amplitude, seconds)
+
+Buzz the controller: `amplitude` from `0` to `1` (default `1`), for `seconds` (default `0.1`; `0` is the shortest
+pulse the controller makes). Amplitude `0` stops a buzz. Nothing happens off a headset.
+
+## three.xr.right.grip / aim
+
+Groups the engine keeps on the controller every frame, in the world, in the scene being shown. `grip` is where
+the hand holds things, and an object added to it is carried; `aim` is where the controller points, along its
+`-Z`. Both are hidden while the controller is disconnected.
+
+They cannot be moved, turned or shown by a script: that throws. Move a child instead. Give a controller model
+`collides = false`, or a raycast from `aim` hits it first.
+
+A tracked group has no body of its own, so `three.physics` cannot use it. To push things with a hand, copy the
+grip onto a top-level kinematic body each frame, and join what the hand holds to that body:
+
+```js
+const palm = new three.Mesh(new three.SphereGeometry(0.03), material);
+palm.visible = false;
+scene.add(palm);
+three.physics.add(palm, { shape: 'sphere', kinematic: true });
+three.setAnimationLoop(() => {
+  const g = three.xr.right.grip.position;
+  palm.position.set(g.x, g.y, g.z);
+});
+```
+
+## three.xr.right.aim.direction
+
+The way `aim` points, a unit vector in the world: what `scene.raycast(r.aim.position, r.aim.direction)` takes.
+
+## three.xr.right.profile
+
+Which controller the hand holds, such as `'oculus/touch_controller'`; `''` when none. `'synthetic'` for a hand a
+script is holding, `'emulated'` for the mouse.
+
+## three.xr.right.handedness
+
+`'left'` or `'right'`.
+
+## three.xr.right.press(name, value) / release(name) / tilt(x, y) / place(position, direction) / connect()
+
+Hold a hand from a script, for a test with no controller in it, the way `three.input.press` holds a key. Any of
+these connects the hand. `press` takes the pull for `'trigger'` and `'squeeze'` (default `1`); `place` puts both
+grip and aim at `position`, pointing along `direction`, relative to where the player stands and faces — as a
+real controller reports. They take effect on the next frame.
+
+## three.xr.releaseAll
+
+Lets go of everything `press`, `tilt`, `place` and `connect` held.
+
+## three.xr.emulate
+
+The mouse and keyboard as the two hands, at a desk. The right hand sits on the pointer's ray and points along
+it: the left button is its trigger, the right button squeeze, the middle button the stick's click, `1` and `2`
+are A and B, and the arrows its stick. The left hand hangs low and to the left of the view: Q and E are its
+trigger and squeeze, `3` and `4` X and Y, M menu, WASD its stick.
+
+The keys and buttons it takes are the hands' alone while it is on — `three.input` does not see them — and the
+mouse stops turning the camera. It does nothing on a headset, where the controllers are the hands, so a game
+can turn it on unconditionally.
+
+```js
+three.xr.emulate = true;
+```
+
 # The clock
 
 ## three.clock.wall

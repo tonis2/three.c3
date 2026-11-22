@@ -465,6 +465,8 @@ struct MeshPass
 	// A cached frame replays the ordinary draw list through this tighter scissor.
 	vk::Rect2D cache_rect;
 	bool cache_partial;
+	// Drawn over passthrough this frame: no sky, so the room shows behind.
+	bool see_through;
 
 	<*
 	 Which debug view the shading pass draws, or `DEBUG_VIEW_OFF`.
@@ -3926,6 +3928,9 @@ fn uint MeshPass.map_flags(&self, Material* material)
 	// setting that silently did nothing on a `ShaderMaterial` would be worse than
 	// one that is not offered.
 	uint stochastic = material.stochastic ? FLAG_STOCHASTIC : 0;
+	// Every material's, for the same reason: a body's alpha is coverage only
+	// when it is blended.
+	if (material.blend != BlendMode.NONE) stochastic |= FLAG_BLENDED;
 	if (!self.shades_built_in(material)) return stochastic;
 
 	uint flags = stochastic;
