@@ -18,7 +18,7 @@ const ball = new three.Mesh(
   new three.SphereGeometry(1.2, 48, 24),
   new three.ShaderMaterial({
     uniforms: { tint: [1, 0.4, 0.2] },
-    fragment: "float3 shade(Surface s) { return lambert(s.normal) * tint; }",
+    fragment: "return lambert(s, s.normal) * s.uniforms.tint;",
   }),
 );
 ball.position.y = 3;
