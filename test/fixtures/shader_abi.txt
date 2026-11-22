@@ -207,7 +207,7 @@ descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAM
 descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
-descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 24
@@ -490,7 +490,7 @@ descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAM
 descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
-descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 24
@@ -586,7 +586,7 @@ descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAM
 descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
-descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 100
@@ -783,7 +783,7 @@ descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAM
 descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
-descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 44
@@ -885,7 +885,7 @@ descriptor shadow_atlas set=0 binding=17 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor shadow_atlas_compare set=0 binding=18 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor shadow_atlas_static_compare set=0 binding=21 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER
-descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
+descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor environment_map set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER
 descriptor three_textures set=1 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 24

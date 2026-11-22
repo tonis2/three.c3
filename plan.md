@@ -23,13 +23,13 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       directional, local shadow, baked, environment, light map, occlusion and sun
       shadow are spec constants; `MeshPass.unused_features` picks a pipeline
       variant per frame. `three.debug.view = 'features'` shows which were kept.
-- [ ] **AO still costs about 7 ms with 32 lamps.** The taps are cheaper now (an
-      affine unproject, one normalize), but the same `crevice_occlusion` measured
-      2-2.5 ms cheaper when a material body called it than where `mesh_fragment`
-      calls it, and moving the call, or giving it the shading normal, did not
-      recover that. Worth a GPU profiler (Snapdragon Profiler or RenderDoc for
-      Meta) before guessing further. AO's own depth pass is 0.2 ms and could reuse
-      the prepass's depth.
+- [x] **AO cost about 6 ms with 32 lamps; now about 1.1 ms.** The 12 taps
+      left the mesh shader for a pass of their own at half resolution, from a
+      half-resolution depth pass, and the mesh shader reads the answer once
+      after the light loop. Holding even one value across that loop cost it
+      1-2 ms; the read at the end costs about 0.4.
+- [ ] **AO's depth pass could reuse the prepass's depth.** About 0.1 ms at
+      half resolution, so only worth it alongside other depth changes.
 - [ ] **`@relaxed` in the lighting.** Measured once the features were compiled
       out: no gain (9.58 against 9.54 ms). It only helped while the shader was
       starved of registers. Leave it until a scene that needs every feature is slow.

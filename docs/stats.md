@@ -75,9 +75,9 @@
 - `shadowDeferred` — Views awaiting an update budget. New or invalid deferred views contribute light
   without shadows; combined views retain their last complete live depth. Valid untouched static views
   need no update budget.
-- `occlusionBytes` — The current ambient-occlusion depth image's actual Vulkan allocation. It is
-  zero until `three.light.occlusion` first runs, then remains allocated across off/on toggles and
-  follows the render target's extent.
+- `occlusionBytes` — The ambient-occlusion depth and occlusion images' actual Vulkan allocations,
+  both at half the render size. Zero until `three.light.occlusion` first runs, then remains
+  allocated across off/on toggles and follows the render target's extent.
 - `materials` — Materials built and not yet collected; the two built-in ones are not counted. A
   material holds a compiled pipeline until `material.dispose()`, so a script that builds one per run
   and drops the handle grows this forever — the host says so past 64. It falls when the material is
@@ -141,8 +141,8 @@
 - `shadowMs` — Of `gpuMs`: the shadow map, 0 with shadows off. Worth looking at first outdoors — the
   map is fitted around the whole scene, so a wide level pays for texels nowhere near the camera and
   `three.light.shadow.size` is the knob.
-- `occlusionMs` — Of `gpuMs`: ambient occlusion's depth pass, 0 with occlusion off. The occlusion
-  taps themselves run inside the scene's fragments and land in `sceneMs`.
+- `occlusionMs` — Of `gpuMs`: ambient occlusion's depth pass and the pass that works out the
+  occlusion from it, 0 with occlusion off. The scene's one read per pixel lands in `sceneMs`.
 - `prepassMs` — Of `gpuMs`: the depth prepass, 0 with `three.depthPrepass` off.
 - `sceneMs` — Of `gpuMs`: the pass that draws the picture.
 - `postMs` — Of `gpuMs`: the post chain, 0 with no post shader.

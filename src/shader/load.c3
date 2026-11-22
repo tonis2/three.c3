@@ -55,6 +55,7 @@ fn String? find_shader(ShaderFile file, alloc::Allocator allocator = mem)
 // file. A def names the file and gets its text, with nothing spliced into it,
 // so every file here is a whole program or a piece one imports.
 const char[*] EMBED_SKY_SHADY             = $embed("../../shaders/sky.shady");
+const char[*] EMBED_AMBIENT_OCCLUSION_SHADY = $embed("../../shaders/ambient_occlusion.shady");
 const char[*] EMBED_MESH_SHADY            = $embed("../../shaders/mesh.shady");
 const char[*] EMBED_SKINNING_SHADY        = $embed("../../shaders/skinning.shady");
 const char[*] EMBED_SKIN_SHADY            = $embed("../../shaders/skin.shady");
@@ -88,6 +89,7 @@ enum ShaderFile : int (String name, String text)
 
 	// The shady modules.
 	SKY_SHADY            { "sky.shady", EMBED_SKY_SHADY },
+	AMBIENT_OCCLUSION_SHADY { "ambient_occlusion.shady", EMBED_AMBIENT_OCCLUSION_SHADY },
 	MESH_SHADY           { "mesh.shady", EMBED_MESH_SHADY },
 	SKINNING_SHADY       { "skinning.shady", EMBED_SKINNING_SHADY },
 	SKIN_SHADY           { "skin.shady", EMBED_SKIN_SHADY },

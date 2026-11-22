@@ -530,10 +530,11 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("float3 energy = sun.color.rgb * sun.color.w * reach * sun_shadow;")
 		&& source.contains("if (LIGHTS_LOCAL_SHADOWS) visibility = point_shadow_factor(i, light, position, receiver_normal);"),
 		"and the direct light folds it in, the sun from the surface and every other light from its own view");
-	test::@check(source.contains("Sampler2D ambient_occlusion_depth @set(0) @binding(4);"),
-		"the frame depth the crevice reads is declared at the engine's own binding");
-	test::@check(source.contains("s.crevice = occlusion * crevice_occlusion(s.position, geometric);"),
-		"the surface carries the crevice the ambient terms scale by");
+	test::@check(source.contains("Sampler2D ambient_occlusion_map @set(0) @binding(4);"),
+		"the occlusion the occlusion pass worked out is declared at the engine's own binding");
+	test::@check(source.contains("s.crevice = occlusion;")
+		&& source.contains("float visibility = ao * s.crevice * screen_occlusion(s.screen_position);"),
+		"the surface carries the occlusion map, and the screen occlusion joins it where the ambient terms are scaled");
 	test::@check(source.contains("float3 diffuse = ambient * visibility")
 		&& source.contains("+ push.frame[0].world.rgb * visibility;"),
 		"and the ambient floor and the world light are what it multiplies");

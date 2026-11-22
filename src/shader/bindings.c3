@@ -112,7 +112,7 @@ const uint SHADOW_ATLAS_STATIC_COMPARE_BINDING = 21;
  for.
 
  Seven, and all seven belong to the *frame* rather than to the surface:
- `environment_map` (2), `ambient_occlusion_depth` (4), `shadow_atlas` (17),
+ `environment_map` (2), `ambient_occlusion_map` (4), `shadow_atlas` (17),
  `shadow_atlas_compare` (18), `ltc_lut` (19), `lightmap_atlas` (20), and the
  static shadow comparison atlas (21). Every image a material wears —
  `material.map` and everything a body declared — is a slot of the device-wide

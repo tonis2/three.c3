@@ -75,6 +75,8 @@ enum ShaderPass : char
 	// A script's compute post pass: `post_compute.shady` with the script's
 	// entry point after it. Last before COUNT so no earlier number moves.
 	POST_COMPUTE,
+	// The half-resolution ambient occlusion the mesh shader reads.
+	AMBIENT_OCCLUSION,
 	COUNT,
 }
 
@@ -184,6 +186,8 @@ fn ShaderModule? compile_shader(
 			// that is the whole entry point rather than a function the template
 			// calls - see `post_compute_def`.
 			return compile_shady_cached(post_compute_def(body, uniforms, textures, images), PostPush, compiled, specs);
+		case ShaderPass.AMBIENT_OCCLUSION:
+			return compile_shady_cached(ambient_occlusion_def(), AoPush, compiled, specs);
 		default:
 			@advise("three: no module is wired for pass %d", (int)pass);
 			return SHADY_PASS_UNWIRED~;

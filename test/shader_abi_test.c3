@@ -431,13 +431,13 @@ fn void collect_deltas(List{Delta}* out)
 	const String UNREAD = "shady emits every declaration the shared files name; Slang dropped this one as unread";
 	delta(out, "mesh_lightmap", "", "descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER",
 		"the lightmap bake carries the LTC half, whose table declaration the capture does not list");
-	delta(out, "mesh_lightmap", "", "descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
-	delta(out, "material_vertex", "", "descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
+	delta(out, "mesh_lightmap", "", "descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
+	delta(out, "material_vertex", "", "descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
 	delta(out, "material_bake", "", "descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER",
 		"the bake carries the LTC half alongside the built-in look");
 	delta(out, "lightmap_material", "", "descriptor ltc_lut set=0 binding=19 count=1 type=COMBINED_IMAGE_SAMPLER",
 		"the bake carries the LTC half");
-	delta(out, "lightmap_material", "", "descriptor ambient_occlusion_depth set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
+	delta(out, "lightmap_material", "", "descriptor ambient_occlusion_map set=0 binding=4 count=1 type=COMBINED_IMAGE_SAMPLER", UNREAD);
 	delta(out, "lightmap_material", "", "descriptor lightmap_atlas set=0 binding=20 count=1 type=COMBINED_IMAGE_SAMPLER",
 		"the port declares the lightmap atlas unconditionally, where the Slang shaping dropped it");
 

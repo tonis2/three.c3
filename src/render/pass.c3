@@ -1057,7 +1057,7 @@ macro void MeshPass.@each_view(&self; @body(uint index, vk::Rect2D rect, Matrix4
 	foreach (i, view : self.prepared_views) @body((uint)i + 1, view.rect, view.view_projection);
 }
 
-fn float[4] rect_floats(vk::Rect2D rect) @local => {
+fn float[4] rect_floats(vk::Rect2D rect) => {
 	(float)rect.offset.x, (float)rect.offset.y, (float)rect.extent.width, (float)rect.extent.height
 };
 
@@ -1883,10 +1883,15 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 	self.ambient_occlusion.begin(cmd);
 	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
 	{
-		if (self.scene_rect_partial || index > 0) set_viewport_rect(cmd, rect, true);
+		self.ambient_occlusion.depth_view(cmd, rect);
 		self.record_casters(cmd, CASTERS_VISIBLE, view_projection);
 	};
 	self.ambient_occlusion.end(cmd);
+	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
+	{
+		self.ambient_occlusion.draw_view(cmd, rect, view_projection);
+	};
+	self.ambient_occlusion.finish(cmd);
 }
 
 <*

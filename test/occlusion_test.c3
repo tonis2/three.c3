@@ -481,7 +481,7 @@ fn void a_material_declares_no_samplers_of_its_own_whatever_its_stack() @test
 			}
 
 			// The three that used to be shed are all present at every size.
-			test::@check(mod.layout.binding_of("ambient_occlusion_depth") != null, "%d maps lost the AO depth", n);
+			test::@check(mod.layout.binding_of("ambient_occlusion_map") != null, "%d maps lost the AO map", n);
 			test::@check(mod.layout.binding_of("ltc_lut") != null, "%d maps lost the area table", n);
 			test::@check(mod.layout.binding_of("lightmap_atlas") != null, "%d maps lost the lightmap", n);
 
@@ -517,7 +517,7 @@ fn void twelve_live_material_samplers_draw_and_keep_their_ambient_occlusion() @t
 			if (binding.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) samplers += binding.count;
 		test::@check(samplers <= 16,
 			"portable material sampler count is %d, over 16", samplers);
-		test::@check(mod.layout.binding_of("ambient_occlusion_depth") != null,
+		test::@check(mod.layout.binding_of("ambient_occlusion_map") != null,
 			"a twelve-sampler material lost the AO depth it no longer has to");
 	};
 

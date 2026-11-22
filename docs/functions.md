@@ -2725,9 +2725,11 @@ floor, world light, and environment reflection. Direct lights, emissive surfaces
 
 Set `three.light.occlusion = true`, or set `{ enabled, radius, intensity, bias }`. `radius` is the world-space
 sampling distance and defaults to 1; `intensity` is 0..1 and defaults to 1; `bias` rejects nearly coplanar
-neighbours and defaults to 0.02. Each property can also be read and written independently. Enabling allocates one
-full-resolution depth image and adds a camera depth prepass plus twelve depth samples per shaded pixel. Disabling
-stops both costs while retaining the allocation for a later toggle. `stats().occlusionBytes` reports this image.
+neighbours and defaults to 0.02. Each property can also be read and written independently. Enabling allocates a
+depth image and an occlusion image, both at half the render size, and adds two passes: the visible geometry
+depth-only, then twelve depth samples per half-resolution pixel. The scene then reads the occlusion image once per
+pixel. Disabling stops all three costs while retaining the allocations for a later toggle. `stats().occlusionBytes`
+reports both images.
 
 Opaque and alpha-tested geometry enters the depth prepass; blended geometry and debug lines do not. A
 `ShaderMaterial` with a custom vertex body neither contributes nor receives screen occlusion, because this depth
@@ -2737,7 +2739,7 @@ decides whether it receives screen occlusion.
 
 This is a screen-space approximation: off-screen and hidden geometry cannot occlude a surface. Partial
 scene viewports currently bypass it; the requested settings are retained for the next full-frame viewport.
-Its depth pass is `stats().occlusionMs`; its sampling runs in the scene's fragments, so it is in `sceneMs`.
+Both of its passes are `stats().occlusionMs`; the scene's one read per pixel is in `sceneMs`.
 
 ## three.light.shadow
 

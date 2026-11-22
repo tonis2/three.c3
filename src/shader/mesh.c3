@@ -86,6 +86,12 @@ macro ShaderDef mesh_def(
 			? "const bool MATERIAL_BUILT_IN = true;\n"
 			: "const bool MATERIAL_BUILT_IN = false;\n" },
 
+		// Screen occlusion is worked out from depth this material's displaced
+		// surface is not in, so a material with a vertex body does not read it.
+		{ .name = "three.displaced", .source = vertex_code.len > 0
+			? "const bool MATERIAL_DISPLACED = true;\n"
+			: "const bool MATERIAL_DISPLACED = false;\n" },
+
 		{ .name = "three.material", .file = ShaderFile.MATERIAL_SHADY },
 		{ .name = "mesh", .file = ShaderFile.MESH_SHADY },
 	};

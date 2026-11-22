@@ -1,0 +1,123 @@
+// Ambient occlusion, worked out once per frame at half resolution so the mesh
+// shader only reads the answer. Drawn per view into that view's half of an R8
+// image, from the half-resolution depth the occlusion depth pass left.
+//
+// Both images share one grid: texel centre `t` is full-resolution point `2t`,
+// and the mesh shader's read in `material.shady` relies on exactly that.
+
+struct VertexIn
+{
+	uint vid @builtin(vertex_index);
+}
+
+struct VertexOutput
+{
+	float4 sv_position @position;
+}
+
+Sampler2D occlusion_depth @set(0) @binding(0);
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	float2 uv = float2(float((input.vid << 1) & 2u), float(input.vid & 2u));
+	output.sv_position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+	return output;
+}
+
+// The world point at `uv` across this view and device depth `depth`.
+fn float3 unproject(float2 uv, float depth)
+{
+	float4 world = push.inverse_view_projection * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+	return world.xyz / world.w;
+}
+
+// Device depth at a half-resolution texel centre.
+fn float depth_at(float2 texel)
+{
+	return occlusion_depth.SampleLevel(texel / push.target.zw, 0.0).r;
+}
+
+// The world point at a half-resolution texel centre.
+fn float3 point_at(float2 texel, float depth)
+{
+	float4 view = push.view_rect;
+	return unproject((texel * 2.0 - view.xy) / view.zw, depth);
+}
+
+// One axis of the surface's slope: towards whichever neighbour is nearer in
+// depth, so a texel on an edge is not bent towards what is behind it, and never
+// across the edge of the view.
+fn float3 slope(float2 texel, float2 step_by, float depth, float3 position, float low, float high, float at)
+{
+	float before = depth_at(texel - step_by);
+	float after = depth_at(texel + step_by);
+	bool use_after = abs(after - depth) < abs(before - depth);
+	if (at - 2.0 < low) use_after = true;
+	if (at + 2.0 > high) use_after = false;
+	return use_after ? point_at(texel + step_by, after) - position : position - point_at(texel - step_by, before);
+}
+
+// How much of the sky a point sees: twelve taps in screen space - the four
+// axes and the eight diagonals - each counted as blocking when it is in front
+// of the surface and nearer than the contact radius `settings.y`.
+fn float4 fragmentMain(VertexOutput input) @fragment
+{
+	float4 settings = push.settings;
+	float4 view = push.view_rect;
+	float2 texel = input.sv_position.xy;
+	float2 pixel = texel * 2.0;
+
+	float depth = depth_at(texel);
+	if (depth >= 0.999999 || settings.x <= 0.0) return float4(1.0, 1.0, 1.0, 1.0);
+	float2 uv = (pixel - view.xy) / view.zw;
+	float3 position = unproject(uv, depth);
+
+	float3 across = slope(texel, float2(1.0, 0.0), depth, position, view.x, view.x + view.z, pixel.x);
+	float3 down = slope(texel, float2(0.0, 1.0), depth, position, view.y, view.y + view.w, pixel.y);
+	float3 facing = normalize(cross(across, down));
+	// Towards the eye, whichever way the cross product came out.
+	if (dot(facing, position - unproject(uv, 0.0)) > 0.0) facing = -facing;
+
+	// The radius across the screen at this depth: a pixel's step unprojected at
+	// the same device depth moves the point along the view plane only.
+	float2 pixel_uv = float2(1.0) / view.zw;
+	float reach_x = settings.y / max(length(unproject(uv + float2(pixel_uv.x, 0.0), depth) - position), 1e-6);
+	float reach_y = settings.y / max(length(unproject(uv + float2(0.0, pixel_uv.y), depth) - position), 1e-6);
+	float2 axis_x = float2(pixel_uv.x * reach_x, 0.0);
+	float2 axis_y = float2(0.0, pixel_uv.y * reach_y);
+
+	const float2 taps[12] = {
+		float2(0.25, 0.0), float2(0.0, 0.25), float2(-0.25, 0.0), float2(0.0, -0.25),
+		float2(0.424, 0.424), float2(-0.424, 0.424), float2(-0.424, -0.424), float2(0.424, -0.424),
+		float2(1.0, 0.0), float2(0.0, 1.0), float2(-1.0, 0.0), float2(0.0, -1.0)
+	};
+	// A tap's world point is `inverse * (2at.x - 1, 1 - 2at.y, depth, 1)`, written
+	// out as a sum of the matrix's columns: four multiply-adds a tap.
+	float4x4 inverse = push.inverse_view_projection;
+	float4 corner = inverse[3] - inverse[0] + inverse[1];
+	float4 step_x = inverse[0] * 2.0;
+	float4 step_y = inverse[1] * -2.0;
+	float4 deep = inverse[2];
+	float inverse_radius = 1.0 / settings.y;
+	float blocked = 0.0;
+	for (uint i = 0; i < 12; i++)
+	{
+		float2 at = uv + axis_x * taps[i].x + axis_y * taps[i].y;
+		if (any(at <= float2(0.0)) || any(at >= float2(1.0))) continue;
+		// Onto the centre of the texel it reads, so the point rebuilt is the one
+		// that depth belongs to and a plane does not occlude itself.
+		float2 tap_texel = floor((view.xy + at * view.zw) * 0.5) + 0.5;
+		at = (tap_texel * 2.0 - view.xy) / view.zw;
+		float tap_depth = depth_at(tap_texel);
+		if (tap_depth >= 0.999999) continue;
+		float4 world = corner + step_x * at.x + step_y * at.y + deep * tap_depth;
+		if (abs(world.w) <= 1e-6) continue;
+		float3 delta = world.xyz / world.w - position;
+		float distance = length(delta);
+		if (distance > settings.y || distance <= 1e-5) continue;
+		blocked += step(settings.z, dot(facing, delta)) * (1.0 - distance * inverse_radius);
+	}
+	float open = 1.0 - settings.x * blocked / 12.0;
+	return float4(open, open, open, 1.0);
+}
