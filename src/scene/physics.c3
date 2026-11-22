@@ -171,6 +171,29 @@ struct ContactHit
 	Vec3 point;
 }
 
+<*
+ A joint that carried more than its `breakForce` or `breakTorque` and is gone.
+ Its record is already dropped by the time this is read.
+*>
+struct JointBreakHit
+{
+	sz id;
+	NodeId a;
+	NodeId b;
+	float force; // Newtons, in the substep it broke
+	float torque; // Newton-metres
+}
+
+<*
+ What a joint carried in the last substep it was solved: newtons through its
+ linear limits and newton-metres through its angular ones.
+*>
+struct JointLoad
+{
+	float force;
+	float torque;
+}
+
 struct Physics
 {
 	collision::PhysicsWorld world;
@@ -187,6 +210,7 @@ struct Physics
 	// otherwise have its EXIT events wiped before anything saw them.
 	List{TriggerHit} trigger_events;
 	List{ContactHit} contact_events;
+	List{JointBreakHit} joint_breaks;
 
 	// Bodies the solver lost control of, taken out of the world and waiting to be
 	// reported. See `Physics.evict_diverged`.
@@ -282,6 +306,7 @@ fn void Physics.open(&self)
 	self.bodies.init(mem);
 	self.trigger_events.init(mem);
 	self.contact_events.init(mem);
+	self.joint_breaks.init(mem);
 	self.diverged.init(mem);
 	self.joints.init(mem);
 	self.softs.init(mem);
@@ -304,6 +329,7 @@ fn void Physics.close(&self)
 	self.joints.free();
 	self.trigger_events.free();
 	self.contact_events.free();
+	self.joint_breaks.free();
 	self.diverged.free();
 	self.world.free();
 	self.opened = false;
@@ -716,8 +742,23 @@ fn void Physics.harvest(&self)
 			}
 		);
 	}
+	// The world has dropped these joints already; dropping the records too is
+	// what keeps the next `rebuild_joints` from putting them back.
+	foreach (broke : self.world.joint_breaks)
+	{
+		foreach (i, &record : self.joints)
+		{
+			if (record.id != broke.joint_id) continue;
+			self.joint_breaks.push(
+				{ .id = record.id, .a = record.a, .b = record.b, .force = broke.force, .torque = broke.torque }
+			);
+			self.joints.remove_at(i);
+			break;
+		}
+	}
 	self.world.trigger_events.clear();
 	self.world.contact_events.clear();
+	self.world.joint_breaks.clear();
 }
 
 <*
@@ -731,6 +772,7 @@ fn void Physics.drop_events(&self)
 {
 	self.trigger_events.clear();
 	self.contact_events.clear();
+	self.joint_breaks.clear();
 }
 
 <*
@@ -976,6 +1018,11 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 		if (rigid)
 		{
 			self.world.run_step(dt, iterations, substeps);
+			// After every step, not once a frame: `run_step` clears the world's
+			// event lists at the top, so a frame that took two steps lost the
+			// first one's — and a lost joint break would come back at the next
+			// `rebuild_joints`.
+			self.harvest();
 		}
 		else
 		{
@@ -989,7 +1036,6 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 
 	if (steps > 0)
 	{
-		self.harvest();
 		self.write_back(scene);
 		self.write_back_soft(scene);
 	}
@@ -1091,6 +1137,10 @@ struct JointSpec
 	// Whether the two bodies still collide with each other. Off by default,
 	// because two things bolted together usually overlap where they are bolted.
 	bool collide;
+	// The load the joint breaks at — newtons through its linear limits,
+	// newton-metres through its angular ones — or 0 to never break.
+	float break_force;
+	float break_torque;
 	// The limits, in the order the script gave them. Borrowed for the length of
 	// the call — `add_joint` copies what it needs into the joint.
 	JointLimit[] limits;
@@ -1179,7 +1229,9 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 	Vec3 at_b  = rigid_b.collider.translation;
 	Vec3 pivot = spec.has_pivot ? spec.pivot : (at_a + at_b) * 0.5f;
 
+	sz id = self.next_id++;
 	collision::GenericJoint3D joint = {
+		.id = id,
 		.body_a = record_a.id,
 		.body_b = record_b.id,
 		.collides = spec.collide,
@@ -1187,6 +1239,8 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 		.anchor_b = rigid_b.collider.rotation.conjugate() * (pivot - at_b),
 		.relative_orientation = rigid_a.collider.rotation.conjugate() * rigid_b.collider.rotation,
 		.stiffness = spec.stiffness,
+		.break_force = spec.break_force,
+		.break_torque = spec.break_torque,
 	};
 
 	// The joint's own frame, in world space. Axis 0 is what the script named and
@@ -1229,7 +1283,6 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 	self.wake(rigid_a);
 	self.wake(rigid_b);
 
-	sz id = self.next_id++;
 	self.joints.push({ .id = id, .a = a, .b = b, .joint = joint });
 	return id;
 }
@@ -1248,6 +1301,16 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 *>
 fn void Physics.rebuild_joints(&self)
 {
+	// What each joint last carried, which the records do not track, so a joint
+	// that sleeps through someone else's removal still reads its load.
+	foreach (&record : self.joints)
+	{
+		if (try load = self.joint_load(record.id))
+		{
+			record.joint.force = load.force;
+			record.joint.torque = load.torque;
+		}
+	}
 	self.world.joints.clear();
 	self.world.filters.clear();
 	foreach (&record : self.joints)
@@ -1255,6 +1318,22 @@ fn void Physics.rebuild_joints(&self)
 		if (catch self.world.add_constraint(record.joint)) continue;
 	}
 	self.world.islands_dirty = true;
+}
+
+<*
+ What a joint carried in the last substep it was solved; kept while both its
+ bodies sleep.
+
+ @return? NOT_FOUND : `No joint has that id: it was removed, or it broke.`
+*>
+fn JointLoad? Physics.joint_load(&self, sz id)
+{
+	if (!self.opened) return NOT_FOUND~;
+	foreach (&joint : self.world.joints)
+	{
+		if (joint.id == id) return { .force = joint.force, .torque = joint.torque };
+	}
+	return NOT_FOUND~;
 }
 
 <*

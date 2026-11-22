@@ -3082,6 +3082,10 @@ export const three = {
 	// — there is no contact left to describe by then.
 	onContact(fn) { setScriptHandler('contact', fn, 'three.onContact'); },
 
+	// A joint carried more than its breakForce or breakTorque and is gone:
+	// { id, a, b, force, torque }, the load in newtons and newton-metres.
+	onJointBreak(fn) { setScriptHandler('break', fn, 'three.onJointBreak'); },
+
 	// Buffers, kernels and dispatches — GPU work that is not a picture. The
 	// buffers own themselves and the kernels are compiled from shader source a
 	// script writes; nothing here needs a scene to exist.

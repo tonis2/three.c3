@@ -480,6 +480,7 @@ struct JsRuntime
 	// of the script, not of the world it happens to be watching.
 	HeldFn trigger_handler;
 	HeldFn contact_handler;
+	HeldFn break_handler;
 
 	// `import`, wired up by `js/modules.c3` over fastjs's loader. An empty
 	// root means no `--assets` boot and no disk imports at all, which is what a
@@ -655,6 +656,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	self.click_handler = held_nothing();
 	self.trigger_handler = held_nothing();
 	self.contact_handler = held_nothing();
+	self.break_handler = held_nothing();
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
 	self.ready = true;

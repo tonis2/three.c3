@@ -198,8 +198,8 @@ const queue = [];
 
 // Which host slots have been asked for. A feed is bound on demand — a scene with
 // no rules and no `three.onTrigger` must not pay a JS call per contact.
-const bound = { trigger: false, contact: false, click: false };
-const scriptHandler = { trigger: null, contact: null, click: null };
+const bound = { trigger: false, contact: false, click: false, break: false };
+const scriptHandler = { trigger: null, contact: null, click: null, break: null };
 let clickShaper = null;
 let drainRegistered = false;
 
@@ -989,7 +989,7 @@ export function instanceOf(object) {
 function addRule(t, event, matcher, fn, options = null) {
 	const where = `${t.name}.on(event, matcher, fn, options)`;
 	if (typeof event !== 'string' || event === '') {
-		throw new TypeError(`${where} wants an event name — 'touch', 'enter', 'exit', 'near', 'click', or one of your own for three.emit`);
+		throw new TypeError(`${where} wants an event name — 'touch', 'enter', 'exit', 'near', 'click', 'break', or one of your own for three.emit`);
 	}
 	if (typeof fn !== 'function') {
 		throw new TypeError(`${where} wants a handler, not ${fn === null ? 'null' : typeof fn}`);
@@ -1044,6 +1044,7 @@ function addRule(t, event, matcher, fn, options = null) {
 	if (event === 'enter' || event === 'exit') ensureFeed('trigger');
 	if (event === 'touch' || event === 'separate') ensureFeed('contact');
 	if (event === 'click') ensureFeed('click');
+	if (event === 'break') ensureFeed('break');
 	return name;
 }
 
@@ -1286,6 +1287,14 @@ function ensureFeed(which) {
 			queue.push({ event: raw.type === 'end' ? 'separate' : 'touch', a, b, info: { type: raw.type, normal, point } });
 			const fn = scriptHandler.contact;
 			return fn === null ? undefined : fn({ type: raw.type, a, b, normal, point });
+		});
+	} else if (which === 'break') {
+		H.onJointBreak(raw => {
+			const a = raw.a?.owner ?? null;
+			const b = raw.b?.owner ?? null;
+			queue.push({ event: 'break', a, b, info: { id: raw.id, force: raw.force, torque: raw.torque } });
+			const fn = scriptHandler.break;
+			return fn === null ? undefined : fn({ id: raw.id, a, b, force: raw.force, torque: raw.torque });
 		});
 	} else {
 		H.onClick((raw, x, y) => {

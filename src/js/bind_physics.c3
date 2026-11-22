@@ -12,6 +12,7 @@
  three.physics.soft(jelly, { mass: 2 })
  three.onTrigger(e => ...)
  three.onContact(e => ...)
+ three.onJointBreak(e => ...)
 
  Velocity and impulse are what make a character possible: without them no
  combination of the verbs above both walks and collides — a dynamic body can be
@@ -55,6 +56,7 @@ fn void? JsRuntime.bind_physics_verbs(&self, js::Value host)
 	self.js.@bind(host, "physicsTorqueImpulse", &js_physics_torque_impulse, self)!;
 	self.js.@bind(host, "physicsJoint", &js_physics_joint, self)!;
 	self.js.@bind(host, "physicsJointRemove", &js_physics_joint_remove, self)!;
+	self.js.@bind(host, "physicsJointForce", &js_physics_joint_force, self)!;
 	self.js.@bind(host, "physicsSoftAdd", &js_physics_soft_add, self)!;
 	self.js.@bind(host, "physicsSoftRemove", &js_physics_soft_remove, self)!;
 	self.js.@bind(host, "physicsSoftCount", &js_physics_soft_count, self)!;
@@ -63,6 +65,7 @@ fn void? JsRuntime.bind_physics_verbs(&self, js::Value host)
 	self.js.@bind(host, "physicsSoftUnpin", &js_physics_soft_unpin, self)!;
 	self.js.@bind(host, "onTrigger", &js_on_trigger, self)!;
 	self.js.@bind(host, "onContact", &js_on_contact, self)!;
+	self.js.@bind(host, "onJointBreak", &js_on_joint_break, self)!;
 }
 
 <*
@@ -426,7 +429,8 @@ fn int? js_physics_count(JsRuntime* self, uint scene_id) => (int)physics_scene(s
 const sz JOINT_LIMIT_FLOATS = 6;
 
 <*
- `physicsJoint(a, b, hasPivot, px, py, pz, ax, ay, az, collide, stiffness, damping, limits)`.
+ `physicsJoint(a, b, hasPivot, px, py, pz, ax, ay, az, collide, stiffness, damping,
+ breakForce, breakTorque, limits)`.
 
  `limits` is a `Float32Array` of six numbers per limit —
  `kind, axes, min, max, stiffness, damping` — rather than an options array read
@@ -443,6 +447,8 @@ fn int? js_physics_joint(
 	bool collide,
 	float stiffness,
 	float damping,
+	float break_force,
+	float break_torque,
 	float[] packed
 )
 {
@@ -483,6 +489,8 @@ fn int? js_physics_joint(
 			.collide = collide,
 			.stiffness = stiffness,
 			.damping = damping,
+			.break_force = break_force,
+			.break_torque = break_torque,
 			.limits = limits,
 		};
 
@@ -530,6 +538,17 @@ fn String joint_message(fault err) @local
 fn bool? js_physics_joint_remove(JsRuntime* self, uint scene_id, int id)
 {
 	return physics_scene(self, scene_id)!.physics.remove_joint((sz)id);
+}
+
+<*
+ `physicsJointForce(sceneId, id)` — `[force, torque]` from the last substep the
+ joint was solved, or null once it is removed or broken.
+*>
+fn js::Value? js_physics_joint_force(JsRuntime* self, uint scene_id, int id)
+{
+	JointLoad? load = physics_scene(self, scene_id)!.physics.joint_load((sz)id);
+	if (catch load) return js::NULL;
+	return self.js.numbers({ load.force, load.torque });
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +703,19 @@ fn void? js_on_contact(JsRuntime* self, js::Value f)
 	self.contact_handler.hold(self.js, f);
 }
 
+fn void? js_on_joint_break(JsRuntime* self, js::Value f)
+{
+	bool clearing = f.is_nullish();
+	if (!clearing && !f.is_function())
+	{
+		return self.js.fail("three.onJointBreak(fn) wants a function, or null to unbind")~;
+	}
+
+	self.break_handler.release(self.js);
+	if (clearing) return;
+	self.break_handler.hold(self.js, f);
+}
+
 <*
  Lets both handlers go. Same rule as `clear_key_handlers`: before the context
  goes, never after.
@@ -692,6 +724,7 @@ fn void JsRuntime.clear_physics_handlers(&self)
 {
 	self.trigger_handler.release(self.js);
 	self.contact_handler.release(self.js);
+	self.break_handler.release(self.js);
 }
 
 // The rendered scene's, in all three of these: they are the frame's half of
@@ -782,6 +815,32 @@ fn void JsRuntime.dispatch_physics_events(&self)
 		}
 	}
 
+	if (self.pass.scene.physics.joint_breaks.len() > 0 && self.break_handler.active)
+	{
+		foreach (hit : self.pass.scene.physics.joint_breaks)
+		{
+			if (self.timed_out) break;
+			ScriptJointBreakEvent event = {
+				.id = (int)hit.id,
+				.a = self.live_node(hit.a),
+				.b = self.live_node(hit.b),
+				.force = hit.force,
+				.torque = hit.torque,
+			};
+			js::Value? value = self.js.@object_of(event);
+			if (catch value)
+			{
+				self.js.take_exception();
+				continue;
+			}
+			if (!self.call_physics_handler(self.break_handler.get(self.js), value, "joint break"))
+			{
+				self.break_handler.release(self.js);
+				break;
+			}
+		}
+	}
+
 	self.pass.scene.physics.drop_events();
 }
 
@@ -807,6 +866,19 @@ struct ScriptContactEvent
 	NodeId b;
 	Vec3 normal;
 	Vec3 point;
+}
+
+<*
+ `{ id, a, b, force, torque }`: the joint's id as `joint()` answered it, its two
+ objects, and the load it broke under in newtons and newton-metres.
+*>
+struct ScriptJointBreakEvent
+{
+	int id;
+	NodeId a;
+	NodeId b;
+	float force;
+	float torque;
 }
 
 // The id while its node lives, so an event names a removed node as null.

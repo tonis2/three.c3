@@ -1472,6 +1472,113 @@ fn void a_joint_goes_when_it_is_removed_or_its_body_does() @test
 }
 
 <*
+ A joint past its rating breaks, the script is told once with the load it broke
+ under, and the joint is gone everywhere: removeJoint and jointForce both say
+ so, and what it held falls. The one under its rating holds and reads its load.
+
+ The break lands in the first of three steps one frame takes. Events were read
+ once a frame and `run_step` clears them at the top of every step, so this one
+ was lost — and its joint would have come back at the next rebuild.
+*>
+fn void a_joint_breaks_past_its_rating() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const hook = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			hook.position.set(0, 8, 0);
+			scene.add(hook);
+			three.physics.add(hook, { shape: 'box', mass: 0 });
+			globalThis.hook = hook;
+
+			// 2 kg hanging still is 19.6 N.
+			const hang = (x, rating) => {
+				const m = new three.Mesh(new three.BoxGeometry(0.5, 0.5, 0.5));
+				m.position.set(x, 7, 0);
+				scene.add(m);
+				three.physics.add(m, { shape: 'box', mass: 2 });
+				return [m, three.physics.joint(hook, m, { type: 'point', pivot: [x, 7.5, 0], breakForce: rating })];
+			};
+			[globalThis.dropped, globalThis.droppedId] = hang(0, 15);
+			[globalThis.held, globalThis.heldId] = hang(3, 25);
+
+			globalThis.breaks = [];
+			three.onJointBreak(e => globalThis.breaks.push(e));
+			three.setAnimationLoop(() => {});
+			return 'ok';
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		run.tick(1000.0 / 60.0);
+		run.tick(4 * (1000.0 / 60.0));
+
+		three::RunResult told = run.run(`
+			const b = globalThis.breaks;
+			return [
+				b.length,
+				b.length > 0 && b[0].id === globalThis.droppedId,
+				b.length > 0 && b[0].a === globalThis.hook && b[0].b === globalThis.dropped,
+				b.length > 0 && b[0].force > 15 && b[0].force < 25,
+				three.physics.removeJoint(globalThis.droppedId),
+				three.physics.jointForce(globalThis.droppedId),
+				Math.round(three.physics.jointForce(globalThis.heldId).force * 10) / 10,
+			];
+		`);
+		defer told.free();
+		test::@check(told.ok, "read the break back: %s", told.error);
+		test::@check(
+			told.value == "[1,true,true,true,false,null,19.6]",
+			"told once, about the right joint and load, which is gone; the other carries 2 kg: %s", told.value
+		);
+
+		for (int i = 5; i <= 70; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult after = run.run(`
+			return [globalThis.breaks.length, globalThis.dropped.position.y < 5, globalThis.held.position.y > 6.5];
+		`);
+		defer after.free();
+		test::@check(after.ok, "read the weights back: %s", after.error);
+		test::@check(after.value == "[1,true,true]", "the broken one fell and the other hangs: %s", after.value);
+	};
+}
+
+<*
+ A rating is a load, so a negative or a non-number one is refused by name rather
+ than read as "never".
+*>
+fn void a_joint_rating_must_be_a_load() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult said = run.run(`
+			const scene = new three.Scene();
+			const make = (y, mass) => {
+				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				m.position.set(0, y, 0);
+				scene.add(m);
+				three.physics.add(m, { shape: 'box', mass });
+				return m;
+			};
+			const wall = make(4, 0);
+			const post = make(2, 1);
+			const tell = (fn) => { try { fn(); return 'made'; } catch (e) { return e.message.slice(0, 30); } };
+			return [
+				tell(() => three.physics.joint(wall, post, { type: 'fixed', breakForce: -1 })),
+				tell(() => three.physics.joint(wall, post, { type: 'fixed', breakTorque: 'a lot' })),
+			];
+		`);
+		defer said.free();
+		test::@check(said.ok, "the script ran: %s", said.error);
+		test::@check(
+			said.value == "[\"joint.breakForce must be a fin\",\"joint.breakTorque must be a fi\"]",
+			"each bad rating is named: %s", said.value
+		);
+	};
+}
+
+<*
  A hinge written out as limits and a hinge asked for by name are the same joint.
 
  The shorthand is expanded in `prelude/physics.js` and nothing below it knows

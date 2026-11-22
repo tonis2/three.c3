@@ -2052,7 +2052,7 @@ written by hand are the same object.
 
 ```js
 { limits: [{ linearAxes: [0,1,2], angularAxes: [0,1,2], min, max, stiffness, damping }],
-  axis: [x, y, z], pivot: [x, y, z], stiffness, damping, collide }
+  axis: [x, y, z], pivot: [x, y, z], stiffness, damping, collide, breakForce, breakTorque }
 ```
 
 - Axis 0 is `axis` (default `[0, 1, 0]`); axes 1 and 2 are derived perpendicular to it, so a limit naming
@@ -2072,6 +2072,17 @@ written by hand are the same object.
   usually overlap where they are bolted.
 - A linear axis is a world direction and does not turn with the bodies, so a slider on something that rotates
   is not expressible; angular axes do turn with them.
+- `breakForce` (newtons, through the linear limits) and `breakTorque` (newton-metres, through the angular ones)
+  are the load the joint breaks at; 0, the default, never breaks. A joint that carries more in any substep is
+  removed, `three.onJointBreak` is told, and its two bodies collide again. `jointForce(id)` reads what a joint
+  carries, which is how to pick a rating: a 2 kg weight hanging still carries 19.6 N, and an impact that should
+  break it reads well above that.
+
+```js
+// Blocks welded into a wall that a hard enough hit knocks apart.
+three.physics.joint(lower, upper, { type: 'fixed', breakForce: 400, breakTorque: 150 });
+three.onJointBreak(({ a, b, force }) => spawnDust(a.position, force));
+```
 
 ## three.physics.joint (the four shorthand types)
 
@@ -2095,6 +2106,15 @@ an error.
 
 Removing either body removes the joints holding it, so a script that destroys things does not have to track
 their joints as well.
+
+## three.physics.jointForce(id)
+
+What a joint carried in the last physics substep it was solved: `{ force, torque }`, in newtons through its
+linear limits and newton-metres through its angular ones. Null once the joint is removed or broken.
+
+The measurement is the solver's own, so it does not change with `substeps`: a 2 kg weight hanging still reads
+19.6 N at 4 substeps or 16. While both bodies sleep the joint is not solved and keeps the load it last carried.
+A hinge or slider inside its range carries nothing on that axis, so it reads only what its held axes carry.
 
 ## three.physics.soft(object, options)
 
@@ -2162,6 +2182,14 @@ a contact also produced a physical response.
 
 `normal` and `point` describe the touch and mean something only on a start — by the end there is no contact left
 to describe. Same registration and same rules as `onTrigger`.
+
+## three.onJointBreak(fn)
+
+Call `fn({ id, a, b, force, torque })` when a joint carried more than its `breakForce` or `breakTorque` and
+broke. `id` is what `joint()` answered with, `a` and `b` the two objects in the order they were joined, and
+`force` and `torque` the load it broke under. By the time `fn` runs the joint is already gone: `removeJoint(id)`
+answers false and `jointForce(id)` null. Same registration and same rules as `onTrigger`, and a
+`Class.on('break', ...)` rule hears the same event.
 
 # The camera
 

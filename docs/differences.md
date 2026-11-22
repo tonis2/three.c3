@@ -384,8 +384,8 @@ The rules are the other half. `Class.on(event, matcher, fn, options)` dispatches
 first: the rule lives on `Critter`, so the handler is handed `(critter, player)` in that order. The
 matcher is a tracked class, an Object3D, `'*'`, or a class name as a string for a forward reference.
 
-Events are `enter`/`exit` from a trigger, `touch`/`separate` from a contact, `click` from the
-raycast, and `near` from `{ within }` — a distance test the engine runs, and the one physics never
+Events are `enter`/`exit` from a trigger, `touch`/`separate` from a contact, `break` from a joint
+that broke (its info is `{ id, force, torque }`), `click` from the raycast, and `near` from `{ within }` — a distance test the engine runs, and the one physics never
 raises, since `three.moveAndSlide` produces no contact at all. Anything else is the game's own,
 through `three.emit(a, verb, b)`.
 

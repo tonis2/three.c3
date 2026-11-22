@@ -369,7 +369,14 @@ export function makeScenePhysics(scene) {
 		//   axis: [x, y, z],     // axis 0 of the frame; default [0, 1, 0]
 		//   stiffness: 0,        // the spring for limits that name none; 0 is rigid
 		//   damping: 0,          // carried, and not read by the solver yet
+		//   breakForce: 0,       // newtons the joint breaks at; 0 never breaks
+		//   breakTorque: 0,      // newton-metres, the same for its angular limits
 		//   collide: false }     // whether the two still collide with each other
+		//
+		// A JOINT THAT BREAKS IS GONE: three.onJointBreak is told, and its
+		// two bodies collide again. jointForce(id) reads what a joint is
+		// carrying, which is how to pick a rating: a 2 kg weight hanging
+		// still carries 19.6 N.
 		//
 		// THE JOINT IS MADE WHERE THE BODIES ARE: the pivot defaults to the
 		// midpoint between them and the relative orientation is whatever
@@ -390,7 +397,12 @@ export function makeScenePhysics(scene) {
 
 			const stiffness = desc.stiffness === undefined ? 0 : Number(desc.stiffness);
 			const damping = desc.damping === undefined ? 0 : Number(desc.damping);
-			for (const [name, value] of [['stiffness', stiffness], ['damping', damping]]) {
+			const breakForce = desc.breakForce === undefined ? 0 : Number(desc.breakForce);
+			const breakTorque = desc.breakTorque === undefined ? 0 : Number(desc.breakTorque);
+			for (const [name, value] of [
+				['stiffness', stiffness], ['damping', damping],
+				['breakForce', breakForce], ['breakTorque', breakTorque],
+			]) {
 				if (!Number.isFinite(value) || value < 0) {
 					throw new TypeError(`joint.${name} must be a finite number that is not negative, not ${value}`);
 				}
@@ -404,7 +416,7 @@ export function makeScenePhysics(scene) {
 			return H.physicsJoint(
 				first, second,
 				hasPivot, px, py, pz, ax, ay, az,
-				!!desc.collide, stiffness, damping,
+				!!desc.collide, stiffness, damping, breakForce, breakTorque,
 				packJointLimits(limits)
 			);
 		},
@@ -414,6 +426,14 @@ export function makeScenePhysics(scene) {
 		// either body removes the joints holding it.
 		removeJoint(id) {
 			return H.physicsJointRemove(scene._sid, Number(id));
+		},
+
+		// What a joint carried in the last substep it was solved:
+		// { force, torque } in newtons and newton-metres, kept while its
+		// bodies sleep. Null once it is removed or broken.
+		jointForce(id) {
+			const load = H.physicsJointForce(scene._sid, Number(id));
+			return load === null ? null : { force: load[0], torque: load[1] };
 		},
 
 		// ---------------------------------------------------------------

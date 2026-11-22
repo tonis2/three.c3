@@ -343,6 +343,46 @@ fn void a_trigger_reaches_a_rule_subject_first_and_the_script_handler_too() @tes
 }
 
 <*
+ A joint breaking reaches a `'break'` rule as well as `three.onJointBreak`, with
+ the load in the rule's info.
+*>
+fn void a_broken_joint_reaches_a_break_rule() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @after_frames(run, `
+			const scene = new three.Scene();
+			globalThis.Hook = three.track(class Hook {
+				constructor() {
+					this.object = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+					this.object.position.set(0, 8, 0);
+				}
+			}, { body: { shape: 'box', mass: 0 } });
+			globalThis.Weight = three.track(class Weight {
+				constructor() {
+					this.object = new three.Mesh(new three.BoxGeometry(0.5, 0.5, 0.5));
+					this.object.position.set(0, 7, 0);
+					this.broke = null;
+				}
+			}, { body: { shape: 'box', mass: 2 } });
+
+			globalThis.h = Hook.spawn();
+			globalThis.w = Weight.spawn();
+			// 2 kg is 19.6 N.
+			globalThis.id = three.physics.joint(h.object, w.object, { type: 'point', pivot: [0, 7.5, 0], breakForce: 15 });
+			Weight.on('break', Hook, (weight, hook, info) => {
+				weight.broke = [weight === w, hook === h, info.id === id, info.force > 15];
+			});
+			globalThis.raw = 0;
+			three.onJointBreak(() => { raw++; });
+		`, 6, "return [w.broke, raw];", "the joint script ran");
+
+		test::@check(value == "[[true,true,true,true],1]",
+			"the rule is handed (weight, hook, { id, force }) and the script handler still hears it; got %s", value);
+	};
+}
+
+<*
  A trigger MOVED after it was added still fires.
 
  The solver bakes a trigger's AABB where it was added, and only the kinematic
