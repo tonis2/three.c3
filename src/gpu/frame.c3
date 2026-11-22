@@ -349,6 +349,9 @@ struct XrDisplay
 	float now;
 	float[8] offered;
 	uint offered_count;
+	// `three.xr.foveation` asked for, as `Foveation` ordinal + 1; 0 when nothing
+	// is waiting for the loop to apply.
+	char foveation_request;
 }
 
 <*

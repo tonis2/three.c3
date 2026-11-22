@@ -77,6 +77,11 @@ struct GpuLimits
 	// computes together. Optional - the extension is only requested of a
 	// device that has it - so anything built on it must ask first.
 	bool cooperative_matrix;
+	// `VK_EXT_fragment_density_map` with plain (non-subsampled) attachments, the
+	// only kind this renderer draws into. Optional, and asked for only by XR.
+	bool fragment_density_map;
+	vk::Extent2D fragment_density_texel_min;
+	vk::Extent2D fragment_density_texel_max;
 	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
 	// instanced draw tells six vertices which drawing they belong to. A
 	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
@@ -303,6 +308,8 @@ struct VulkanRequest
 	// Asked once the instance exists. Null keeps the usual choice.
 	PickDeviceFn pick_device;
 	void* pick_context;
+	// Enable VK_EXT_fragment_density_map where the device has it, for foveation.
+	bool fragment_density_map;
 }
 
 alias PickDeviceFn = fn vk::PhysicalDevice(void* context, vk::Instance instance);
@@ -658,6 +665,10 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 	// the pNext chain is invalid usage rather than a struct the driver ignores.
 	bool has_cooperative_matrix = device_extension_present(selection.device, "VK_KHR_cooperative_matrix");
 	if (has_cooperative_matrix) extensions.push("VK_KHR_cooperative_matrix");
+	// The same terms, and only when asked: nothing but foveation draws with it.
+	bool has_density_map = vulkan_request != null && vulkan_request.fragment_density_map
+		&& device_extension_present(selection.device, "VK_EXT_fragment_density_map");
+	if (has_density_map) extensions.push("VK_EXT_fragment_density_map");
 
 	// Through properties2 rather than the v1 call, because that is the only way to
 	// reach `maxPushDescriptors`. A device without VK_KHR_push_descriptor walks
@@ -684,9 +695,13 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES,
 		.pNext = &v12_properties,
 	};
+	vk::PhysicalDeviceFragmentDensityMapPropertiesEXT density_properties = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT,
+		.pNext = &v11_properties,
+	};
 	vk::PhysicalDeviceProperties2 properties2 = {
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-		.pNext = &v11_properties,
+		.pNext = has_density_map ? (void*)&density_properties : (void*)&v11_properties,
 	};
 	vk::getPhysicalDeviceProperties2(self.pdevice, &properties2);
 	vk::PhysicalDeviceProperties properties = properties2.properties;
@@ -721,7 +736,14 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
 		.pNext = has_cooperative_matrix ? (void*)&coopmat : (void*)&v12,
 	};
-	vk::PhysicalDeviceFeatures2 features = { .sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v11 };
+	vk::PhysicalDeviceFragmentDensityMapFeaturesEXT density = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_FEATURES_EXT,
+		.pNext = &v11,
+	};
+	vk::PhysicalDeviceFeatures2 features = {
+		.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+		.pNext = has_density_map ? (void*)&density : (void*)&v11,
+	};
 	vk::getPhysicalDeviceFeatures2(self.pdevice, &features);
 
 	self.limits = {
@@ -739,6 +761,10 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		// reported is what the device will have. False on a device without the
 		// extension, because the struct was never chained there.
 		.cooperative_matrix = has_cooperative_matrix && coopmat.cooperativeMatrix == vk::TRUE,
+		.fragment_density_map = has_density_map && density.fragmentDensityMap == vk::TRUE
+			&& density.fragmentDensityMapNonSubsampledImages == vk::TRUE,
+		.fragment_density_texel_min = density_properties.minFragmentDensityTexelSize,
+		.fragment_density_texel_max = density_properties.maxFragmentDensityTexelSize,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim
@@ -988,6 +1014,12 @@ fn void Gpu.report(&self)
 		self.limits.max_set_update_after_bind_samplers
 	);
 	io::printfn("  textureTableSize     %d", self.limits.texture_table_size());
+	if (self.limits.fragment_density_map)
+	{
+		io::printfn("  fragmentDensityMap   texels %dx%d to %dx%d",
+			self.limits.fragment_density_texel_min.width, self.limits.fragment_density_texel_min.height,
+			self.limits.fragment_density_texel_max.width, self.limits.fragment_density_texel_max.height);
+	}
 }
 
 <*

@@ -1398,7 +1398,7 @@ fn bool MeshPass.prepassed(&self, Material* material)
 fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
 {
 	self.prepass.draws = 0;
-	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts());
+	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts(), target.foveation.exists());
 	if (!self.prepass.live) return;
 
 	bool found = false;

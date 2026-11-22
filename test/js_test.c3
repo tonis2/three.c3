@@ -7546,3 +7546,27 @@ fn void the_headset_refresh_rate_is_a_request() @test
 		test::@check(listed.value == "[72,80,90,120]", "the offered rates read back, got %s", listed.value);
 	};
 }
+
+<*
+ Off a headset there is no foveation, whatever a script asks for, and a level
+ that is not one of the four is refused.
+*>
+fn void foveation_is_off_off_a_headset() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		defer run.renderer.xr_display = {};
+		three::RunResult asked = run.run("three.xr.foveation = 'high'; return three.xr.foveation;");
+		defer asked.free();
+		test::@check(asked.ok && asked.value == `"off"`, "foveation reads off off a headset: %s %s", asked.value, asked.error);
+		test::@check(run.renderer.xr_display.foveation_request == (char)three::Foveation.HIGH.ordinal + 1,
+			"the request is kept for the loop");
+		three::RunResult wrong = run.run("three.xr.foveation = 'extreme';");
+		defer wrong.free();
+		test::@check(!wrong.ok, "an unknown level is refused");
+		test::@check(three::foveation_density(three::Foveation.OFF, 3.0f) == 255, "off shades every pixel");
+		test::@check(three::foveation_density(three::Foveation.HIGH, 0.1f) == 255
+			&& three::foveation_density(three::Foveation.HIGH, 0.5f) == 127
+			&& three::foveation_density(three::Foveation.HIGH, 1.0f) == 63, "high steps down from the lens centre");
+	};
+}

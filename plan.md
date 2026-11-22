@@ -33,13 +33,12 @@ how much a pixel executes. That is why the frame's unused features are compiled 
 - [ ] **`@relaxed` in the lighting.** Measured once the features were compiled
       out: no gain (9.58 against 9.54 ms). It only helped while the shader was
       starved of registers. Leave it until a scene that needs every feature is slow.
-- [ ] **Foveated rendering.** The Quest driver has `VK_EXT_fragment_density_map`,
-      its v2 and `VK_QCOM_fragment_density_map_offset`. It needs the device feature
-      enabled, a density map with two lens centres over the side-by-side target,
-      `RenderingFragmentDensityMapAttachmentInfoEXT` on the scene rendering, and
-      `PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT` on the
-      pipelines drawn in it. The prepass must use the same map, or the scene's
-      EQUAL depth test sees full-resolution depth under coarse fragments.
+- [x] **Foveated rendering.** A fragment density map of 32x32-pixel texels
+      around each lens centre, on the scene and the prepass renderings and
+      their pipelines; `three.xr.foveation` is 'off', 'low', 'medium' (the
+      default) or 'high'. vr_lights with 32 lamps and AO went from about 10 ms
+      to 7.4 and holds 120 Hz. The prepass and the scene share the map, and
+      the EQUAL test still matches.
 - [x] **Tonemap straight into the XR image.** The tonemap writes the acquired
       swapchain image; the blit and `target.color` are skipped unless an
       interface is drawn over the frame. About 0.2 ms.

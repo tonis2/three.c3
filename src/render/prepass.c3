@@ -52,7 +52,7 @@ struct DepthPrepass
  @return ? SHADER_MISSING_ENTRY_POINT : `The shader would not compile. The diagnostic is printed.`
 *>
 fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format format,
-	bool cutout = false, bool dynamic_cull = false)
+	bool cutout = false, bool dynamic_cull = false, bool density_map = false)
 {
 	ShaderPass pass = cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW;
 	// Entry names are how the host tells stages apart. The cut-out module carries
@@ -69,7 +69,7 @@ fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format forma
 		return SHADER_MISSING_ENTRY_POINT~;
 	}
 
-	pipeline.init_shadow(gpu, &mod, format, entries, dynamic_cull: dynamic_cull)!;
+	pipeline.init_shadow(gpu, &mod, format, entries, dynamic_cull: dynamic_cull, density_map: density_map)!;
 }
 
 <*
@@ -77,7 +77,7 @@ fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format forma
 
  @param cutouts : `Whether anything in the scene is drawn with material.alphaTest. The second pipeline is a compile charged to the first frame that actually asks.`
 *>
-fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts)
+fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts, bool density_map = false)
 {
 	self.live = false;
 	if (!self.enabled) return;
@@ -92,14 +92,18 @@ fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts)
 
 	if (!self.ready && !self.refused)
 	{
-		if (catch build_depth_pipeline(gpu, &self.pipeline, format, dynamic_cull: true)) { self.refused = true; }
+		if (catch build_depth_pipeline(gpu, &self.pipeline, format, dynamic_cull: true, density_map: density_map))
+		{
+			self.refused = true;
+		}
 		else { self.ready = true; }
 	}
 	if (!self.ready) return;
 
 	if (cutouts && !self.cutout_ready && !self.cutout_refused)
 	{
-		if (catch build_depth_pipeline(gpu, &self.cutout_pipeline, format, cutout: true, dynamic_cull: true))
+		if (catch build_depth_pipeline(gpu, &self.cutout_pipeline, format, cutout: true, dynamic_cull: true,
+			density_map: density_map))
 		{
 			self.cutout_refused = true;
 		}

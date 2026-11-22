@@ -214,6 +214,8 @@ fn void? JsRuntime.bind_scene_verbs(&self, js::Value host)
 	self.js.@bind(host, "xrRefreshRateGet", &js_xr_refresh_rate_get, self)!;
 	self.js.@bind(host, "xrRefreshRateSet", &js_xr_refresh_rate_set, self)!;
 	self.js.@bind(host, "xrRefreshRatesGet", &js_xr_refresh_rates_get, self)!;
+	self.js.@bind(host, "xrFoveationGet", &js_xr_foveation_get, self)!;
+	self.js.@bind(host, "xrFoveationSet", &js_xr_foveation_set, self)!;
 	self.js.@bind(host, "shadowFit", &js_shadow_fit, self)!;
 	self.js.@bind(host, "debugViewGet", &js_debug_view_get, self)!;
 	self.js.@bind(host, "debugViewSet", &js_debug_view_set, self)!;
@@ -2732,6 +2734,27 @@ fn js::Value? js_xr_refresh_rates_get(JsRuntime* self)
 	uint count = self.renderer == null ? 0 : self.renderer.xr_display.offered_count;
 	for (uint i = 0; i < count; i++) rates[i] = self.renderer.xr_display.offered[i];
 	return self.js.numbers(rates[:count]);
+}
+
+<*
+ `xrFoveationGet()` — the foveation level as a `Foveation` ordinal: 0 (off)
+ without a map, else the one waiting to be applied, else the map's.
+*>
+fn int js_xr_foveation_get(JsRuntime* self)
+{
+	if (self.renderer == null || !self.renderer.target.foveation.exists()) return 0;
+	if (self.renderer.xr_display.foveation_request != 0) return self.renderer.xr_display.foveation_request - 1;
+	return (int)self.renderer.target.foveation.level.ordinal;
+}
+
+<*
+ `xrFoveationSet(level)` — a `Foveation` ordinal for the XR loop to apply.
+
+ @require level >= 0 && level < Foveation::len : "Level out of range"
+*>
+fn void js_xr_foveation_set(JsRuntime* self, int level)
+{
+	if (self.renderer != null) self.renderer.xr_display.foveation_request = (char)(level + 1);
 }
 
 // `depthPrepassGet()` — whether the depth prepass is on.

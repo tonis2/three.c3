@@ -1367,6 +1367,9 @@ struct GraphicsPipelineDesc
 	// writes nothing while the rest of the frame keeps the state it was built with.
 	// Requires `dynamic_cull`: every pass that sets one sets the other.
 	bool dynamic_depth;
+	// Drawn inside a rendering with a fragment density map - the scene and the
+	// depth prepass on a foveated target.
+	bool density_map;
 }
 
 <*
@@ -1447,7 +1450,9 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 	vk::PipelineViewportStateCreateInfo viewport = vk::pipelineViewportStateCreateInfo().setViewportCount(1)
 		.setScissorCount(1);
 
-	self.handle = vk::graphicsPipelineCreateInfo().setNext(desc.rendering).setStages(desc.stages)
+	vk::PipelineCreateFlags flags = desc.density_map
+		? PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT : (vk::PipelineCreateFlags)0;
+	self.handle = vk::graphicsPipelineCreateInfo().setFlags(flags).setNext(desc.rendering).setStages(desc.stages)
 		.setVertexInputState(&vertex_input)
 		.setInputAssemblyState(&input_assembly)
 		.setViewportState(&viewport)
@@ -1598,6 +1603,7 @@ fn MeshPipeline? MeshPipeline.init(
 		mod,
 		{
 			...GRAPHICS_PIPELINE,
+			.density_map = target.foveation.exists(),
 			.stages = stages[..],
 			.rendering = &rendering,
 			.color_blend = &color_blend,
@@ -1805,7 +1811,7 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.shady and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
-	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false)
+	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false, bool density_map = false)
 {
 	// The list is both the contract the module is held to and the names its
 	// stages are created under: one place, so the pipeline cannot check for one
@@ -1856,6 +1862,7 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 			.dynamic_cull = dynamic_cull,
 			.depth_test = true,
 			.depth_write = true,
+			.density_map = density_map,
 		}
 	);
 }

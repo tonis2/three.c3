@@ -1603,6 +1603,22 @@ three.xr.refreshRate = 90;
 The display rates the headset offers, lowest first on Quest 3 — `[72, 80, 90, 120]` — and `[]` off a headset.
 Filled once the session is focused, so a script that reads it at boot sees `[]` on the headset too.
 
+## three.xr.foveation
+
+How coarsely the edge of each eye's view is shaded: `'off'`, `'low'`, `'medium'` or `'high'`. `'medium'` by
+default on a headset that can, and always `'off'` off one.
+
+The scene and the depth prepass shade the middle of each eye's view at full resolution and the rest in 2x2 or
+4x4 blocks of pixels, centred on each lens. The lens blurs the edge of the view anyway, and the edge is most of
+the pixels, so this is the largest saving there is for a scene whose cost is in its fragments. `'low'` keeps
+more of the view sharp, `'high'` less. The post chain and the interface are never foveated.
+
+Like the refresh rate it belongs to the renderer: `new three.Scene()` does not reset it.
+
+```js
+three.xr.foveation = 'high';
+```
+
 # The clock
 
 ## three.clock.wall

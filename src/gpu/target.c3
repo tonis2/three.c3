@@ -78,6 +78,9 @@ struct Target
 	vk::Image depth;
 	vk::ImageView depth_view;
 	vk::Memory depth_memory;
+	// Where the scene and the prepass shade coarsely; none unless the device was
+	// opened for a headset that can.
+	FoveationMap foveation;
 }
 
 <*
@@ -115,6 +118,7 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 	self.depth = depth.image;
 	self.depth_view = depth.view;
 	self.depth_memory = depth.memory;
+	if (gpu.limits.fragment_density_map) self.foveation.init(gpu, self.extent, Foveation.MEDIUM)!;
 
 	return *self;
 }
@@ -129,6 +133,7 @@ fn void Target.free(&self, Gpu* gpu)
 	if (self.depth_view != null) self.depth_view.free(gpu.handle);
 	self.color_memory.free();
 	self.depth_memory.free();
+	self.foveation.free(gpu);
 	*self = { };
 }
 
@@ -417,7 +422,7 @@ fn vk::ImageMemoryBarrier2 depth_reopen_barrier(vk::Image image, bool sampled)
 <*
  Begins a depth-only rendering over `extent`, cleared to the far plane.
 *>
-fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent)
+fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent, void* next = null)
 {
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -426,7 +431,8 @@ fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Ext
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
-		.setDepthAttachment(&depth_attachment);
+		.setDepthAttachment(&depth_attachment)
+		.setNext(next);
 
 	vk::cmdBeginRendering(cmd, &rendering);
 	set_full_viewport(cmd, extent, true);
@@ -446,7 +452,8 @@ fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Ext
 fn void Target.begin_depth(&self, vk::CommandBuffer cmd)
 {
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ vk::depthBarrier(self.depth) }));
-	begin_depth_rendering(cmd, self.depth_view, self.extent);
+	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
+	begin_depth_rendering(cmd, self.depth_view, self.extent, self.foveation.attach(&density));
 }
 
 <*
@@ -531,9 +538,11 @@ fn void Target.begin_render_to(
 		.setStoreOp(store_depth ? ATTACHMENT_STORE_OP_STORE : ATTACHMENT_STORE_OP_DONT_CARE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
+	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
 		.setColorAttachments({ color_attachment })
-		.setDepthAttachment(&depth_attachment);
+		.setDepthAttachment(&depth_attachment)
+		.setNext(self.foveation.attach(&density));
 
 	vk::cmdBeginRendering(cmd, &rendering);
 
@@ -575,8 +584,10 @@ fn void Target.begin_cached_render_to(
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL).setLoadOp(ATTACHMENT_LOAD_OP_LOAD)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
+	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
-		.setColorAttachments({ color_attachment }).setDepthAttachment(&depth_attachment);
+		.setColorAttachments({ color_attachment }).setDepthAttachment(&depth_attachment)
+		.setNext(self.foveation.attach(&density));
 	vk::cmdBeginRendering(cmd, &rendering);
 
 	float[4] clear_linear = srgb_to_linear_rgb(clear);
@@ -599,8 +610,10 @@ fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty
 	vk::RenderingAttachmentInfo attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_LOAD).setStoreOp(ATTACHMENT_STORE_OP_STORE);
+	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent })
-		.setLayerCount(1).setDepthAttachment(&attachment);
+		.setLayerCount(1).setDepthAttachment(&attachment)
+		.setNext(self.foveation.attach(&density));
 	vk::cmdBeginRendering(cmd, &rendering);
 	vk::ClearAttachment clear = { .aspectMask = IMAGE_ASPECT_DEPTH_BIT,
 		.clearValue = { .depthStencil = { 1.0, 0 } } };

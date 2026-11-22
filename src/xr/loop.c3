@@ -10,6 +10,7 @@ module three @feat(ANDROID);
 
 import std::io;
 import std::time;
+import std::math;
 import std::math::vector;
 import xr;
 import vk;
@@ -122,6 +123,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			if (count == 2 && (view_state.view_state_flags & xr::VIEW_STATE_ORIENTATION_VALID_BIT) != 0)
 			{
 				aim_eyes(renderer, views);
+				renderer.update_foveation(views)!;
 				draw_to_swapchain(host, renderer, &wait_ns)!;
 				drawn = true;
 			}
@@ -180,6 +182,48 @@ fn void aim_eyes(Renderer* renderer, xr::View[2] views) @local
 	renderer.pass.view_rect = { 0, 0, 0.5f, 1 };
 	SceneView[1] extra = { { .camera = right, .rect = { 0.5f, 0, 0.5f, 1 } } };
 	renderer.pass.set_extra_views(extra[..]);
+}
+
+<*
+ Refills the foveation map when a script asked for another level or the lens
+ centres moved - in practice once, on the first frame, and on each change of
+ `three.xr.foveation`. Waits for the device, which is fine that rarely.
+*>
+fn void? Renderer.update_foveation(&self, xr::View[2] views)
+{
+	FoveationMap* map = &self.target.foveation;
+	if (!map.exists()) return;
+	Foveation level = map.level;
+	if (self.xr_display.foveation_request != 0)
+	{
+		level = Foveation::from_ordinal(self.xr_display.foveation_request - 1);
+		self.xr_display.foveation_request = 0;
+	}
+	float[2] left = lens_center(views[0].fov);
+	float[2] right = lens_center(views[1].fov);
+	float[4] centers = { left[0], left[1], right[0], right[1] };
+	bool moved = false;
+	foreach (i, c : centers) moved |= math::abs(c - map.centers[i]) > 0.01f;
+	if (level == map.level && !moved) return;
+	self.gpu.wait_idle();
+	map.fill(&self.gpu, self.target.extent, level, centers)!;
+	io::printfn("xr: foveation %s, lens centres %.2f %.2f and %.2f %.2f", level.name,
+		centers[0], centers[1], centers[2], centers[3]);
+}
+
+<*
+ Where straight ahead lands across an eye's view, 0..1 from its top left: the
+ eye's projection is off-axis, so the lens centre is nearer the nose.
+*>
+fn float[2] lens_center(xr::Fovf fov) @local
+{
+	float left = math::tan(fov.angle_left);
+	float right = math::tan(fov.angle_right);
+	float up = math::tan(fov.angle_up);
+	float down = math::tan(fov.angle_down);
+	float x = -(right + left) / (right - left);
+	float y = -(up + down) / (up - down);
+	return { (1.0f + x) * 0.5f, (1.0f - y) * 0.5f };
 }
 
 <*

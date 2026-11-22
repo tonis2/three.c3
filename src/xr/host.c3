@@ -146,6 +146,7 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 		.device_extensions = self.device_extensions.array_view(),
 		.pick_device = &pick_xr_device,
 		.pick_context = self,
+		.fragment_density_map = true,
 	};
 	vulkan_request = &self.request;
 }
