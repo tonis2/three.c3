@@ -2028,7 +2028,9 @@ instead of every other one:
 three.physics.rate = three.xr.refreshRate || 60;
 ```
 
-Each step costs the same solver time, so 120 costs twice what 60 does. Two worlds stepped at different rates
+Each step costs the same solver time, so 120 costs twice what 60 does. When a frame's steps took longer
+on the wall than the time they stepped, the next frame takes one step and drops the rest: the world runs
+slower for a moment rather than catching up, which would make the frame longer still. Two worlds stepped at different rates
 are different simulations: the same throw lands in a slightly different place. A kinematic body is moved once
 per step, an equal share of the way its node went since the last one, so its velocity is the node's own at
 any frame rate. Per scene, like `gravity`; a RangeError outside the range.

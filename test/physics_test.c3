@@ -2181,6 +2181,45 @@ fn void the_rate_steps_the_world_that_often() @test
 }
 
 <*
+ Steps that cost more wall time than they simulated are not caught up on: the
+ frame after takes one and drops the rest. Before, a 100-block castle being hit
+ on a 120 Hz headset took the ten steps a long frame allowed, every frame, and
+ ran at 14 fps. The cost is written in, since a test cannot make the solver
+ slow on demand.
+*>
+fn void a_solver_that_falls_behind_takes_one_step() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			const ball = new three.Mesh(new three.SphereGeometry(0.1));
+			ball.position.set(0, 10, 0);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1 });
+			return three.physics.count;`);
+		defer setup.free();
+		test::@check(setup.value == "1", "a body to step: %s %s", setup.value, setup.error);
+
+		double step = 1000.0 / 60.0;
+		double at = 0;
+		for (int i = 0; i < 3; i++) run.tick(at += step);
+		three::Physics* physics = &run.pass.scene.physics;
+
+		run.tick(at += 3 * step);
+		test::eq(physics.last_steps, 3);
+
+		physics.last_spent_ms = 1000;
+		run.tick(at += 3 * step);
+		test::eq(physics.last_steps, 1);
+
+		// Kept up again, so the next long frame catches up as before.
+		run.tick(at += 3 * step);
+		test::eq(physics.last_steps, 3);
+	};
+}
+
+<*
  A thrown stone stops at a plank that is free to move, and knocks it away. At 40
  m/s and 90 steps a second it moves 11 cm a substep against a plank and stone 9
  cm through together, and the solver swept fast bodies only against static

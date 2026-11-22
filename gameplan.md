@@ -79,6 +79,19 @@ Only what is comfortable in a headset.
       where its substeps landed. The sweep now covers moving bodies too, in their own
       frame, and keeps the stone's speed so the block takes the momentum (clamping
       it away the way the static sweep does handed on a sixth of the hit).
+- [x] **Solver speed** (found by the milestone 0 probe). A welded castle being hit
+      cost 96 ms a frame at 100 blocks on the Quest. Now 5-6 ms:
+      - A sleeping island's welds are no longer solved every substep.
+      - The broad phase tests boxes before handing a pair on (a 2 m cell holds
+        the whole castle, so every pair of blocks was reported).
+      - Box against box is a separating-axis test instead of GJK plus EPA.
+      - The solver's vector maths is inlined; the std methods are weak symbols
+        LLVM never inlines. A cube's world inertia is its local one.
+      - A weld's three angular axes are one constraint. Its linear axes stay
+        three: as one, a welded stack never settled.
+      - Steps that run slower than real time are not caught up on: the next
+        frame takes one, so the world slows down instead of the frame rate
+        falling to 3 fps.
 - [ ] **Audio.** The engine has none, and a physics game feels hollow without impact
       sounds. A feature of its own (AAudio on Quest, CoreAudio on the Mac); haptics
       stand in until then.
@@ -88,10 +101,29 @@ Only what is comfortable in a headset.
 Each is pushed with `quest.sh push`, checked over MCP on the headset, and run on the
 desktop with `--xr-emulate`.
 
-0. **Physics probe.** Build the castle at 100, 200 and 300 blocks, knock it down, and
-   read the physics time from the headset's 5 s report. This decides the block count
-   and is the biggest risk: the Quest's CPU is much slower than the Mac's. Target
-   90 Hz, about 11 ms a frame.
+0. **Physics probe.** Done: `examples/siege/probe.js` builds a ring of 10 cm blocks
+   welded to the one below and beside, throws stones at it, then lets every block go.
+   Solver milliseconds a frame on the Quest 3, 4 substeps, one step a frame:
+
+   | Blocks | Standing | Being hit, 90 Hz | Falling, 90 Hz | Being hit, 120 Hz |
+   |--------|----------|------------------|----------------|-------------------|
+   | 100    | 0.6      | 6.0              | 3.8            | 5.3               |
+   | 200    | 1.1      | 9.1              | 7.4            | 8.8               |
+   | 300    | 1.7      | 10.8             | 9.9            | 12.6              |
+
+   The rest of the frame is about 0.8 ms. The Quest is 3.5x slower than an M-series
+   Mac per step.
+
+   **Decided from it:**
+   - The display runs at 90 Hz (11.1 ms), the world steps at 90.
+   - About 200 blocks in a level, welded in sections (a wall, a tower) that are not
+     welded to each other, so a hit wakes one section and not the castle.
+   - Slow motion on the big collapse is also the budget: at `timeScale` 0.3 the
+     world takes a third of the steps.
+
+   Still slow, for later: a standing castle costs 1.7 ms at 300 blocks, nearly all of
+   it the broad phase scanning one 2 m cell (a cell size per world would fix it), and
+   one island solves on one thread.
 1. **Throwing.** The basket, the stones, the throw with hand velocity, haptics.
 2. **Castle and textures.** One builder (`buildWall`, `buildTower`) for all three
    levels, and the materials.

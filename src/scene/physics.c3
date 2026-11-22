@@ -5,6 +5,7 @@ import std::collections::map;
 import std::math;
 import std::math::vector;
 import std::math::quaternion;
+import std::time;
 import collision;
 
 faultdef
@@ -244,6 +245,10 @@ struct Physics
 	uint iterations;
 	// Steps a second, from `three.physics.rate`; zero is `PHYSICS_RATE`.
 	uint rate;
+	// What the last frame's steps cost on the wall, and how many there were: the
+	// pair `Physics.step` decides from whether catching up is affordable.
+	double last_spent_ms;
+	int last_steps;
 
 	bool opened;
 }
@@ -1049,9 +1054,9 @@ fn bool finite_and_near(Vec3 at) @local
  The accumulator is the whole of it: whatever the frame took, the world advances
  in fixed steps (60 a second unless `three.physics.rate` says otherwise) and
  keeps the remainder. `Physics.max_steps` is where a frame that ran very long
- stops trying to catch up, and dropping the rest is
- deliberate — carrying it is how one slow frame becomes a spiral that never
- recovers.
+ stops trying to catch up, and a frame after steps that cost more wall time
+ than they simulated takes only one. Dropping the rest is deliberate — carrying
+ it is how one slow frame becomes a spiral that never recovers.
 *>
 fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 {
@@ -1065,6 +1070,11 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 	// Counted before any is taken, so each step moves a kinematic body its share.
 	double step_ms = self.step_ms();
 	int max_steps = self.max_steps();
+	// Steps that cost more wall time than the time they stood for cannot be
+	// caught up on, and trying is the spiral: a slower frame owes more steps.
+	// So the frame after takes one and drops the rest, and the world runs slow
+	// for a moment instead of the frame rate falling through the floor.
+	if (self.last_steps > 0 && self.last_spent_ms > self.last_steps * step_ms) max_steps = 1;
 	int due = 0;
 	for (double owed = self.accumulator_ms; owed >= step_ms - PHYSICS_STEP_SLACK_MS && due < max_steps; owed -= step_ms) due++;
 
@@ -1077,6 +1087,7 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 	bool rigid = self.bodies.len() > 0;
 	uint substeps = self.substep_count();
 	uint iterations = self.iteration_count();
+	Clock started = clock::now();
 	while (steps < due)
 	{
 		float dt = (float)(step_ms / 1000.0);
@@ -1098,6 +1109,8 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 		steps++;
 	}
 
+	self.last_steps = steps;
+	self.last_spent_ms = (double)(long)started.to_now() / 1e6;
 	if (self.accumulator_ms > step_ms) self.accumulator_ms = 0;
 
 	if (steps > 0)
