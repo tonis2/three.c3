@@ -65,6 +65,17 @@ class TrackedSpace extends Group {
 		return new Vector3(null, d[0], d[1], d[2]);
 	}
 
+	// How fast it moves, in metres a second, and turns, in radians a second
+	// about the axis it turns around: what a thrown object leaves with.
+	get velocity() {
+		const v = H.xrHandMotion(this._hand, this._space).linear;
+		return new Vector3(null, v[0], v[1], v[2]);
+	}
+	get angularVelocity() {
+		const v = H.xrHandMotion(this._hand, this._space).angular;
+		return new Vector3(null, v[0], v[1], v[2]);
+	}
+
 	// Shown while the controller is connected, hidden while it is not.
 	get visible() { return H.xrHand(this._hand).connected; }
 	set visible(_) { throw new Error(`${this._where()}.visible follows whether the controller is connected`); }
@@ -85,7 +96,7 @@ function trackedSpace(hand, space) {
 	if (held !== null && held._h !== null && held.parent !== null && H.sceneAlive(sid)) return held;
 	const made = new TrackedSpace(hand, space);
 	sceneForId(sid).add(made);
-	made._h.xrTrack(hand, space);
+	made._h.xrTrack(hand, space, true);
 	made._tracked = true;
 	row[hand][space] = made;
 	return made;
@@ -136,6 +147,39 @@ export class XrHand {
 	// the shown scene that the engine keeps on the controller.
 	get grip() { return trackedSpace(this._hand, 0); }
 	get aim() { return trackedSpace(this._hand, 1); }
+
+	// Keep a top-level object of the shown scene on this hand's grip or aim,
+	// placed before the physics step: a kinematic body on it meets the solver
+	// where the hand is this frame, not where it was the frame before.
+	track(object, space = 'grip') {
+		const where = this._where('track(object, space)');
+		const at = SPACES.indexOf(space);
+		if (at < 0) throw new RangeError(`${where} wants a space of ${SPACES.join(' or ')}, not ${JSON.stringify(space)}`);
+		if (object === null || typeof object !== 'object' || object._trackedBy === undefined) {
+			throw new TypeError(`${where} wants a Mesh or a Group`);
+		}
+		if (object instanceof TrackedSpace) throw new TypeError(`${where}: ${object._where()} is already on a hand`);
+		if (object._h === null || object.parent === null || object.parent._isScene !== true) {
+			throw new Error(`${where} wants an object added straight to a scene, the way a body is`);
+		}
+		if (object._solverOwned) {
+			throw new Error(`${where}: a dynamic body is moved by the solver — add it as kinematic to carry it on a hand`);
+		}
+		if (object.parent._sid !== H.sceneActive()) throw new Error(`${where} wants an object in the shown scene`);
+		if (object._h.xrTrack(this._hand, at, false) !== true) throw new Error(`${where} could not keep that object`);
+		object._trackedBy = this._where(space);
+	}
+
+	// Stop keeping an object on this hand. It stays where the hand last put it.
+	untrack(object) {
+		if (object === null || typeof object !== 'object' || object._trackedBy === undefined) {
+			throw new TypeError(`${this._where('untrack(object)')} wants a Mesh or a Group`);
+		}
+		if (object._trackedBy === null || object._h === null) return;
+		object._syncSolver();
+		object._h.xrUntrack();
+		object._trackedBy = null;
+	}
 
 	// A hand held by the script, for a test with no controller in it. Any of
 	// these connects the hand; `three.xr.releaseAll()` lets go of everything.

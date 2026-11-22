@@ -7744,6 +7744,126 @@ fn void a_script_can_hold_a_hand() @test
 	};
 }
 
+<*
+ A grip's velocity is what the headset measured, in the world: with the player
+ turned to face +x, a hand moving along its own +x moves along the world's -z.
+*>
+fn void the_grip_moves_as_the_headset_measured() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run("three.camera.lookAt(0, 0, 0); three.camera.orbit(90, 0, 0);");
+		defer setup.free();
+		three::HandsReading reading = right_trigger(0);
+		three::HandReading* hand = &reading.hand[three::Hand.RIGHT.ordinal];
+		hand.measured = true;
+		hand.motion[three::HandSpace.GRIP.ordinal] = { .linear = { 2, 0, 0 }, .angular = { 0, 3, 0 } };
+		run.tick(16, { }, &reading);
+		three::RunResult seen = run.run(`
+			const g = three.xr.right.grip, v = g.velocity, w = g.angularVelocity;
+			return [v.x, v.y, v.z, w.x, w.y, w.z].map(n => Math.round(n * 1000) / 1000);`);
+		defer seen.free();
+		test::@check(seen.value == "[0,0,-2,0,3,0]", "velocity and spin in the world: %s %s", seen.value, seen.error);
+	};
+}
+
+<*
+ A body kept on a hand meets the solver where the hand is this frame, so what it
+ holds is there too. Copied from `grip` in the callback, it reached the solver a
+ step late and the held cube trailed the hand by however far it moved in one.
+*>
+fn void a_tracked_body_carries_what_it_holds_on_the_same_frame() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 0);
+			const palm = new three.Mesh(new three.SphereGeometry(0.03));
+			palm.visible = false;
+			scene.add(palm);
+			three.xr.right.track(palm);
+			three.physics.add(palm, { shape: 'sphere', kinematic: true });
+			Object.assign(globalThis, { scene, palm });`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+
+		three::HandsReading here = right_trigger(0);
+		run.tick(1000.0 / 60.0, { }, &here);
+		three::RunResult held = run.run(`
+			const p = palm.position;
+			const cube = new three.Mesh(new three.BoxGeometry(0.08, 0.08, 0.08));
+			cube.position.set(p.x, p.y, p.z);
+			scene.add(cube);
+			three.physics.add(cube, { shape: 'box', mass: 0.3 });
+			three.physics.joint(palm, cube, { type: 'fixed' });
+			globalThis.cube = cube;
+			return [p.x, p.y, p.z].map(n => Math.round(n * 1000) / 1000);`);
+		defer held.free();
+		test::@check(held.value == "[0.1,1.2,-0.3]", "the palm is on the hand: %s %s", held.value, held.error);
+
+		// Twenty centimetres along x in one frame, which is a brisk swing at 60 Hz.
+		three::HandsReading there = right_trigger(0);
+		there.hand[three::Hand.RIGHT.ordinal].pose[three::HandSpace.GRIP.ordinal].position = { 0.3, 1.2, -0.3 };
+		run.tick(2000.0 / 60.0, { }, &there);
+		three::RunResult where = run.run(`
+			const c = cube.position, p = palm.position;
+			return [p.x, c.x, Math.abs(c.y - 1.2) < 0.01, Math.abs(c.z + 0.3) < 0.01].map(n => typeof n === 'number' ? Math.round(n * 1000) / 1000 : n);`);
+		defer where.free();
+		test::@check(where.value == "[0.3,0.3,true,true]", "the palm and the cube it holds, a frame later: %s %s", where.value, where.error);
+
+		// The script's visibility, not the controller's: a hidden palm stays hidden.
+		foreach (entry : run.pass.scene.tracked)
+		{
+			if (entry.shown_with_hand) continue;
+			test::@check(!run.pass.scene.node(entry.node).visible, "a tracked palm the script hid was shown");
+		}
+	};
+}
+
+<*
+ Only a top-level object can be kept on a hand, and one that is cannot be moved
+ by a script until it is let go of.
+*>
+fn void tracking_takes_top_level_objects_and_keeps_them() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult refused = run.run(`
+			const scene = new three.Scene();
+			const tried = (f) => { try { f(); return 'kept'; } catch (e) { return e.message; } };
+			const group = new three.Group();
+			const child = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			group.add(child);
+			scene.add(group);
+			const loose = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			const falling = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(falling);
+			three.physics.add(falling, { shape: 'box', mass: 1 });
+			return [tried(() => three.xr.right.track(child)), tried(() => three.xr.right.track(loose)),
+				tried(() => three.xr.right.track(falling)), tried(() => three.xr.right.track(group, 'palm'))];`);
+		defer refused.free();
+		test::@check(refused.ok, "%s", refused.error);
+		test::@check(refused.value.contains("added straight to a scene") && refused.value.contains("dynamic body")
+			&& refused.value.contains("grip or aim") && !refused.value.contains("kept"), "refusals: %s", refused.value);
+
+		three::RunResult moved = run.run(`
+			const scene = new three.Scene();
+			const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(box);
+			three.xr.left.track(box, 'aim');
+			let write;
+			try { box.position.set(1, 2, 3); write = 'moved'; } catch (e) { write = e.message; }
+			three.xr.left.untrack(box);
+			box.position.set(1, 2, 3);
+			return [write, box.position.x];`);
+		defer moved.free();
+		test::@check(moved.value.contains("kept on three.xr.left.aim") && moved.value.contains(",1]"),
+			"a tracked object refuses a write until it is let go of: %s %s", moved.value, moved.error);
+	};
+}
+
 // ============================================================================
 // Passthrough
 // ============================================================================

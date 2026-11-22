@@ -197,6 +197,17 @@ const vk::ImageMemoryBarrier2 IMAGE_BARRIER = {
 };
 
 <*
+ The colour range of one layer, or of every layer for a negative one: what a
+ barrier opening one eye of a layered image names, so opening the other eye's
+ does not discard what the first one wrote.
+*>
+fn vk::ImageSubresourceRange color_layers(int layer)
+{
+	if (layer < 0) return COLOR_LEVEL;
+	return { ...COLOR_LEVEL, .baseArrayLayer = (uint)layer, .layerCount = 1 };
+}
+
+<*
  The barrier a colour attachment is opened with, for whichever image the pass is
  about to write.
 
@@ -205,8 +216,10 @@ const vk::ImageMemoryBarrier2 IMAGE_BARRIER = {
  draw into the target: a pass that post-processes it draws into `self.color`
  while the scene draws into an image that pass then samples. `begin_render_to` is
  the other half.
+
+ @param layer : "The one layer to open, or every layer when negative"
 *>
-fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
+fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image, int layer = -1)
 {
 	// The contents are cleared on load, so UNDEFINED preserves nothing that
 	// matters. ALL_COMMANDS with no source access is an execution dependency and
@@ -222,6 +235,7 @@ fn vk::ImageMemoryBarrier2 color_attachment_barrier(vk::Image image)
 		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		.subresourceRange = color_layers(layer),
 	};
 }
 
@@ -285,8 +299,10 @@ fn vk::ImageMemoryBarrier2 shader_read_barrier(vk::Image image)
  the one layout a storage image may be written in. An execution dependency on
  everything before it and no source access, for the same write-after-read reason
  - last frame sampled it, this frame overwrites it.
+
+ @param layer : "The one layer to open, or every layer when negative"
 *>
-fn vk::ImageMemoryBarrier2 storage_open_barrier(vk::Image image)
+fn vk::ImageMemoryBarrier2 storage_open_barrier(vk::Image image, int layer = -1)
 {
 	return {
 		...IMAGE_BARRIER,
@@ -297,6 +313,7 @@ fn vk::ImageMemoryBarrier2 storage_open_barrier(vk::Image image)
 		.dstAccessMask = ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = IMAGE_LAYOUT_GENERAL,
+		.subresourceRange = color_layers(layer),
 	};
 }
 

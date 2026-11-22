@@ -95,6 +95,10 @@ export class Object3D {
 		// makes the host the authority on it rather than these numbers.
 		// Set by three.physics.add for a dynamic body and by nothing else.
 		this._solverOwned = false;
+		// Which hand space keeps this object, such as 'three.xr.right.grip',
+		// or null. Set by `three.xr.right.track`; like a solver-owned object,
+		// the host moves it and reading refreshes it.
+		this._trackedBy = null;
 		this.scale = new Vector3(this, 1, 1, 1);
 		this.children = [];
 		this.parent = null;
@@ -160,7 +164,7 @@ export class Object3D {
 	set rotation(v) { const [x, y, z] = asTriple(v, 'rotation'); this._rotation.set(x, y, z); }
 
 	_syncSolver() {
-		if (!this._solverOwned || this._h === null) return;
+		if ((!this._solverOwned && this._trackedBy === null) || this._h === null) return;
 		const { position: p, rotation: r } = H.physicsTransform(this._h);
 		this._position._adopt(p[0], p[1], p[2]);
 		this._rotation._adopt(r[0], r[1], r[2]);
@@ -545,6 +549,9 @@ export class Object3D {
 	_flush() {
 		const h = this._h;
 		if (h === null) return;
+		if (this._trackedBy !== null) {
+			throw new Error(`this object is kept on ${this._trackedBy} — untrack it first, or move a child of it`);
+		}
 		const { position: p, rotation: r, scale: s } = this;
 		h.setTransform(p._x, p._y, p._z, r._x, r._y, r._z, s._x, s._y, s._z);
 		if (this._q) h.setQuaternion(this._q[0], this._q[1], this._q[2], this._q[3]);
@@ -616,6 +623,8 @@ export class Object3D {
 	// removing a node removes its descendants.
 	_demote() {
 		this._h = null;
+		// The host forgets a dead node's tracking, so this object does too.
+		this._trackedBy = null;
 		// The host dropped the player along with the nodes, so the map has to be
 		// sent again if this subtree is re-added. Without this a character removed
 		// and put back would keep its clips and quietly stop being posed by them.
@@ -663,6 +672,11 @@ export class Object3D {
 
 			if (this._h !== null) {
 				if (o._h !== null) {
+					// Tracking is top-level only, so a move under a parent ends it.
+					if (o._trackedBy !== null) {
+						o._h.xrUntrack();
+						o._trackedBy = null;
+					}
 					o._h.setParent(this._h);
 				} else {
 					o._materialize(this);

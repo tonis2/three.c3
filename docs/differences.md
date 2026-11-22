@@ -1028,10 +1028,11 @@ A body with mass 0 is static and is not owned, because it never moves.
 
 ## physics-fixed-60hz
 
-Physics runs at a fixed 60 Hz whatever rate frames arrive at, and the accumulator is the host's rather than the
-animation callback's — so a slow frame stutters instead of spending the script budget and stopping the callback for
-good. A frame that ran very long catches up at most five steps and drops the rest, which is the difference between
-a stutter and a spiral.
+Physics runs at a fixed rate whatever rate frames arrive at, 60 Hz unless `three.physics.rate` says otherwise,
+and the accumulator is the host's rather than the animation callback's — so a slow frame stutters instead of
+spending the script budget and stopping the callback for good. A frame that ran very long catches up at most a
+twelfth of a second of steps (five at 60 Hz) and drops the rest, which is the difference between a stutter and a
+spiral.
 
 What it steps by is game time, so `three.clock.timeScale` scales the world and 0 stops it falling;
 `three.clock.fixedRate` is the gameplay rate and does not touch the solver's.

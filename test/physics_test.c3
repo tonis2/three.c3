@@ -2109,3 +2109,106 @@ fn void more_substeps_stand_a_taller_tower() @test
 		test::@check(standing[0] < 10, "at 4 all 10 stood too, so this does not show the setting is used");
 	};
 }
+
+<*
+ A kinematic body moves at the speed its node does, at any frame rate.
+
+ At 120 Hz every other frame takes no step. Driven every frame, a body's
+ velocity came from one frame's movement over one step's time: half the speed
+ it was going, and a hand swung through a stack shoved it half as hard.
+*>
+fn void a_kinematic_body_keeps_its_speed_at_120_hz() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			const lift = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			scene.add(lift);
+			three.physics.add(lift, { shape: 'box', kinematic: true });
+			globalThis.speeds = [];
+			three.setAnimationLoop(() => {
+				lift.position.x = three.clock.time;
+				speeds.push(three.physics.velocity(lift)[0]);
+			});`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+		for (int i = 1; i <= 60; i++) run.tick((double)i * (1000.0 / 120.0));
+		three::RunResult speeds = run.run("return speeds.slice(10).every(v => Math.abs(v - 1) < 0.02) || speeds;");
+		defer speeds.free();
+		test::@check(speeds.value == "true", "metres per second, frame by frame: %s %s", speeds.value, speeds.error);
+	};
+}
+
+<*
+ `three.physics.rate` steps the world as often as it says: at a headset's 120 Hz
+ a falling body moves on every frame, where at the default it moves on every
+ other one and holds still between.
+*>
+fn void the_rate_steps_the_world_that_often() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			const ball = new three.Mesh(new three.SphereGeometry(0.1));
+			ball.position.set(0, 10, 0);
+			scene.add(ball);
+			three.physics.add(ball, { shape: 'sphere', mass: 1 });
+			globalThis.heights = [];
+			three.setAnimationLoop(() => heights.push(ball.position.y));
+			const tried = (v) => { try { three.physics.rate = v; return 'kept'; } catch (e) { return e instanceof RangeError; } };
+			const refused = [tried(20), tried(1000), tried(NaN)];
+			const before = three.physics.rate;
+			three.physics.rate = 119.6;
+			return [before, three.physics.rate, ...refused];`);
+		defer setup.free();
+		test::@check(setup.value == "[60,120,true,true,true]", "the rate and its range: %s %s", setup.value, setup.error);
+
+		for (int i = 1; i <= 30; i++) run.tick((double)i * (1000.0 / 120.0));
+		three::RunResult moved = run.run("const h = heights.slice(4); return h.slice(1).filter((y, i) => y === h[i]).length;");
+		defer moved.free();
+		test::@check(moved.value == "0", "frames the ball held still at 120 steps a second: %s %s", moved.value, moved.error);
+
+		three::RunResult back = run.run("three.physics.rate = 0; heights.length = 0; return three.physics.rate;");
+		defer back.free();
+		test::@check(back.value == "60", "0 is the default again: %s", back.value);
+		for (int i = 31; i <= 60; i++) run.tick((double)i * (1000.0 / 120.0));
+		three::RunResult held = run.run("const h = heights.slice(4); return h.slice(1).filter((y, i) => y === h[i]).length >= 10;");
+		defer held.free();
+		test::@check(held.value == "true", "and at 60 it holds still every other frame: %s", held.value);
+	};
+}
+
+<*
+ A thrown stone stops at a plank that is free to move, and knocks it away. At 40
+ m/s and 90 steps a second it moves 11 cm a substep against a plank and stone 9
+ cm through together, and the solver swept fast bodies only against static
+ geometry: this one went through without touching it.
+*>
+fn void a_fast_stone_does_not_pass_through_a_loose_plank() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			const scene = new three.Scene();
+			three.physics.gravity = [0, 0, 0];
+			three.physics.rate = 90;
+			const plank = new three.Mesh(new three.BoxGeometry(0.3, 0.3, 0.03));
+			scene.add(plank);
+			three.physics.add(plank, { shape: 'box', mass: 2 });
+			const stone = new three.Mesh(new three.SphereGeometry(0.03));
+			stone.position.set(0, 0, 0.5);
+			scene.add(stone);
+			three.physics.add(stone, { shape: 'sphere', mass: 0.3 });
+			three.physics.setVelocity(stone, [0, 0, -40]);
+			Object.assign(globalThis, { plank, stone });`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+		for (int i = 1; i <= 30; i++) run.tick((double)i * (1000.0 / 90.0));
+		three::RunResult hit = run.run(`
+			return [stone.position.z > plank.position.z, three.physics.velocity(plank)[2] < -4];`);
+		defer hit.free();
+		test::@check(hit.value == "[true,true]", "the stone stopped at the plank and knocked it away: %s %s", hit.value, hit.error);
+	};
+}

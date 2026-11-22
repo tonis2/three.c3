@@ -150,8 +150,8 @@ struct PostStage (FullscreenPass)
 	// one place that decides which of the two a stage got.
 	// 
 	// Allocated only when something taps it, so a chain nobody taps costs the two
-	// images it always cost.
-	GpuImage keep;
+	// images it always cost. A layer per eye, like every chain image.
+	LayeredImage keep;
 	bool kept;
 
 	// A fragment body or a compute entry point - which pipeline was built, and
@@ -188,16 +188,19 @@ struct PostPass
 	// second full-size attachment.
 	GpuImage scene;
 
-	// The ping-pong pair, in `POST_CHAIN_FORMAT`. `pong[1]` exists only from the
-	// second stage on. `render/chain.c3` has the two rules that index them.
-	GpuImage[2] pong;
+	// The ping-pong pair, in `POST_CHAIN_FORMAT`, a layer per eye. `pong[1]`
+	// exists only from the second stage on. `render/chain.c3` has the two rules
+	// that index them.
+	LayeredImage[2] pong;
 
-	// A multiview target's scene, one layer per eye, in `POST_CHAIN_FORMAT`. The
-	// tonemap reads each layer into its half of the frame. A script's passes read
-	// A instead, which the eyes are copied into side by side, beside the depth in
-	// `eyes_depth`, so a body sees the frame it always did.
+	// A multiview target's scene, one layer per eye, in `POST_CHAIN_FORMAT`, in
+	// place of A. Every pass runs once per eye on that eye's layer of each image,
+	// and the tonemap reads each eye into its half of the frame.
 	LayeredImage eyes;
-	GpuImage eyes_depth;
+
+	// How many layers every chain image has: the target's views. One eye's frame
+	// is `extent`.
+	uint layers;
 
 	// What the images were created at. Compared against `target.extent` every time
 	// a stage is built, so a target that ever *does* change size takes them with
@@ -285,9 +288,9 @@ fn void PostPass.init(&self)
 *>
 fn usz PostPass.bytes(&self)
 {
-	usz total = (usz)(self.scene.memory.size + self.pong[0].memory.size + self.pong[1].memory.size);
-	foreach (stage : self.stages) total += (usz)stage.keep.memory.size;
-	foreach (image : self.images) total += (usz)image.image.memory.size;
+	usz total = (usz)(self.scene.memory.size + self.pong[0].whole.memory.size + self.pong[1].whole.memory.size);
+	foreach (stage : self.stages) total += (usz)stage.keep.whole.memory.size;
+	foreach (image : self.images) total += (usz)image.image.whole.memory.size;
 	return total;
 }
 
@@ -493,7 +496,7 @@ fn uint? PostPass.add(
  a wrong picture rather than a crash, and the allocation failure was already
  reported to the script.
 *>
-fn GpuImage* PostPass.output_of(&self, sz stage)
+fn LayeredImage* PostPass.output_of(&self, sz stage)
 {
 	PostStage* owner = self.stages[stage];
 	if (owner.kept && owner.keep.exists()) return &owner.keep;
@@ -502,18 +505,19 @@ fn GpuImage* PostPass.output_of(&self, sz stage)
 
 <*
  What a stage reads as `prev`: the output of the last pass before it that wrote
- the frame, or image A when none has. A side pass leaves the frame as it found
- it, so it is stepped over - the pass after it reads what it read.
+ the frame, or null for the scene when none has. A side pass leaves the frame as
+ it found it, so it is stepped over - the pass after it reads what it read.
+ `PostPass.source_view` turns either into one eye's view.
 
  `count` for the tonemap, which reads what the whole chain left.
 *>
-fn GpuImage* PostPass.source_of(&self, sz stage)
+fn LayeredImage* PostPass.source_of(&self, sz stage)
 {
 	for (sz i = stage; i > 0; i--)
 	{
 		if (self.stages[i - 1].writes_output) return self.output_of(i - 1);
 	}
-	return &self.scene;
+	return null;
 }
 
 <*
@@ -528,7 +532,7 @@ fn void? PostPass.ensure_keeps(&self, Gpu* gpu)
 	foreach (stage : self.stages)
 	{
 		if (!stage.kept || stage.keep.exists()) continue;
-		stage.keep = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, self.pong_usage())!;
+		stage.keep = gpu.create_layered_image(POST_CHAIN_FORMAT, self.extent, self.layers, self.pong_usage())!;
 	}
 }
 
@@ -1049,7 +1053,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 {
 	if (self.kind == PostKind.COMPUTE) return self.record_compute(cmd, io);
 
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color_attachment_barrier(io.dst) }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color_attachment_barrier(io.dst, (int)io.layer) }));
 
 	// Colour only, and no depth attachment — `MeshPipeline.init_post` declares no
 	// depth format, and dynamic rendering checks the two against each other.
@@ -1086,7 +1090,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// from `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
 	SampledBindings samplers;
 	self.add_chain_samplers(&samplers, io);
-	self.add_images(&samplers);
+	self.add_images(&samplers, io.layer);
 	samplers.push(cmd, &self.pipeline);
 	self.push_info(cmd, io, width, height);
 
@@ -1125,7 +1129,7 @@ fn void PostStage.record_side_by_side(&self, vk::CommandBuffer cmd, PassIo[] vie
 		set_viewport_rect(cmd, { .offset = { left, 0 }, .extent = io.extent }, false);
 		SampledBindings samplers;
 		self.add_chain_samplers(&samplers, io);
-		self.add_images(&samplers);
+		self.add_images(&samplers, io.layer);
 		samplers.push(cmd, &self.pipeline);
 		self.push_info(cmd, io, (float)io.extent.width, (float)io.extent.height);
 		vk::cmdDraw(cmd, 3, 1, 0, 0);
@@ -1150,7 +1154,7 @@ fn void? PostStage.record_compute(&self, vk::CommandBuffer cmd, PassIo io)
 {
 	if (io.dst != null)
 	{
-		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ storage_open_barrier(io.dst) }));
+		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ storage_open_barrier(io.dst, (int)io.layer) }));
 	}
 
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_COMPUTE, self.pipeline.handle);
@@ -1161,7 +1165,7 @@ fn void? PostStage.record_compute(&self, vk::CommandBuffer cmd, PassIo io)
 	{
 		bindings.add_storage(POST_OUTPUT_BINDING, io.dst_view);
 	}
-	self.add_images(&bindings);
+	self.add_images(&bindings, io.layer);
 	bindings.push(cmd, &self.pipeline);
 
 	float width  = (float)io.extent.width;
@@ -1214,17 +1218,19 @@ fn void PostStage.add_chain_samplers(&self, SampledBindings* samplers, PassIo io
 
 <*
  The chain images this pass declared, each a storage image in `GENERAL` at its
- own binding. One the compiler dropped - declared and never used - is skipped,
- as an unread sampler is.
+ own binding: the layer of the eye being run. One the compiler dropped -
+ declared and never used - is skipped, as an unread sampler is.
+
+ @param layer : "The eye being run"
 *>
-fn void PostStage.add_images(&self, SampledBindings* bindings)
+fn void PostStage.add_images(&self, SampledBindings* bindings, uint layer)
 {
 	for (uint i = 0; i < self.image_count; i++)
 	{
 		uint binding = POST_IMAGE_FIRST + i;
 		if (!pipeline_declares_binding(&self.pipeline, binding, DESCRIPTOR_TYPE_STORAGE_IMAGE)) continue;
 		if (!self.images[i].image.exists()) continue;
-		bindings.add_storage(binding, self.images[i].image.view);
+		bindings.add_storage(binding, self.images[i].image.layer_view(layer));
 	}
 }
 

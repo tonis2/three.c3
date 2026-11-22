@@ -152,3 +152,53 @@ fn void only_top_level_nodes_are_tracked_and_dead_ones_are_dropped() @test
 	scene.update_tracked(&hands);
 	test::eq(scene.tracked.len(), 0);
 }
+
+<*
+ What the runtime measured is the motion, turned into the world with the rig: a
+ hand moving along its +x moves along the world's -z once the player faces +x.
+*>
+fn void a_measured_motion_is_turned_into_the_world() @test
+{
+	three::Hands hands;
+	three::HandsReading reading = right_hand();
+	three::HandReading* hand = &reading.hand[three::Hand.RIGHT.ordinal];
+	hand.measured = true;
+	hand.motion[three::HandSpace.GRIP.ordinal] = { .linear = { 1, 0, 0 }, .angular = { 0, 0, 2 } };
+	hands.step(reading, 1.0f / 90.0f);
+	hands.to_world({ 3, 0, 0 }, 90);
+	three::HandMotion world = hands.hand[three::Hand.RIGHT.ordinal].world_motion[three::HandSpace.GRIP.ordinal];
+	test::@check(close(world.linear, { 0, 0, -1 }), "linear %s", world.linear);
+	test::@check(close(world.angular, { 2, 0, 0 }), "angular %s", world.angular);
+}
+
+<*
+ A hand that came without motion, the way a synthetic or emulated one does, has
+ it worked out from its poses: steady at the speed it moves and turns, and none
+ the moment it disconnects.
+*>
+fn void an_unmeasured_hand_works_out_its_motion() @test
+{
+	three::Hands hands;
+	float dt = 1.0f / 120.0f;
+	for (int i = 0; i <= 60; i++)
+	{
+		float t = (float)i * dt;
+		three::HandsReading reading = right_hand();
+		three::HandReading* hand = &reading.hand[three::Hand.RIGHT.ordinal];
+		three::HandPose pose = {
+			.position = { 0.5f * t, 1.0f, -0.3f },
+			.rotation = quaternion::from_axis_angle((Vec3){ 0, 1, 0 }, 2.0f * t),
+		};
+		hand.pose = { pose, pose };
+		hands.step(reading, dt);
+	}
+	hands.to_world({ 0, 0, 0 }, 0);
+	three::HandMotion motion = hands.hand[three::Hand.RIGHT.ordinal].world_motion[three::HandSpace.AIM.ordinal];
+	test::@check((motion.linear - (Vec3){ 0.5, 0, 0 }).length() < 0.001f, "linear %s", motion.linear);
+	test::@check((motion.angular - (Vec3){ 0, 2, 0 }).length() < 0.001f, "angular %s", motion.angular);
+
+	hands.step({ }, dt);
+	hands.to_world({ 0, 0, 0 }, 0);
+	motion = hands.hand[three::Hand.RIGHT.ordinal].world_motion[three::HandSpace.GRIP.ordinal];
+	test::@check(motion.linear.length() == 0 && motion.angular.length() == 0, "a hand that left is still");
+}

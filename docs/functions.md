@@ -1584,7 +1584,12 @@ into four spans, that splits two of those spans by name.
 A headset draws both eyes in one pass where the device can: every draw reaches both eyes, each into a layer of
 its own, and the tonemap puts the two side by side. Geometry, the depth prepass and the ambient occlusion
 depth are recorded once for both. A script sees nothing of it except in `three.stats()`, where the prepass
-counts in `sceneMs`. A post pass still gets the whole frame with the eyes side by side, copied there for it.
+counts in `sceneMs`.
+
+A post pass runs once per eye, and each eye is a frame of its own: `p.uv` runs 0..1 across one eye and
+`p.resolution` is one eye's, a blur's neighbours stop at the eye's edge instead of reaching into the other
+eye, and a pass image keeps one copy per eye, so a history is each eye's own. A pass costs two draws (or
+two dispatches) of half the pixels each.
 
 ## three.xr.refreshRate
 
@@ -1695,23 +1700,60 @@ the hand holds things, and an object added to it is carried; `aim` is where the 
 They cannot be moved, turned or shown by a script: that throws. Move a child instead. Give a controller model
 `collides = false`, or a raycast from `aim` hits it first.
 
-A tracked group has no body of its own, so `three.physics` cannot use it. To push things with a hand, copy the
-grip onto a top-level kinematic body each frame, and join what the hand holds to that body:
+A tracked group has no body of its own, so `three.physics` cannot use it. To push or hold things with a hand,
+keep a top-level kinematic body on it with `track`, and join what the hand holds to that body:
 
 ```js
 const palm = new three.Mesh(new three.SphereGeometry(0.03), material);
 palm.visible = false;
 scene.add(palm);
+three.xr.right.track(palm);
 three.physics.add(palm, { shape: 'sphere', kinematic: true });
-three.setAnimationLoop(() => {
-  const g = three.xr.right.grip.position;
-  palm.position.set(g.x, g.y, g.z);
-});
+// On a squeeze near something:
+three.physics.joint(palm, held, { type: 'fixed' });
 ```
+
+## three.xr.right.track(object, space) / untrack(object)
+
+Keep a top-level object on the hand's `'grip'` (the default) or `'aim'` from now on, and let it go. The engine
+places a tracked object before the physics step, so a kinematic body on it meets the solver where the hand is
+this frame. Copying `grip` onto a body in the animation callback reaches the solver a step late, and what the
+body holds trails the hand by however far it moved in that step.
+
+- The object has to be added straight to the shown scene, and not be a dynamic body: the solver moves those.
+  Anything else throws.
+- While it is tracked, writing its position, rotation or scale throws; move a child of it instead.
+  `untrack` leaves it where the hand last put it.
+- Its visibility stays the script's: unlike `grip` and `aim`, it is not hidden while the controller is away.
+  It stays where the hand was last seen.
+- Moving it under a parent, or removing it, ends the tracking.
+
+A body on a hand still moves only when the world steps, 60 times a second unless `three.physics.rate` says
+otherwise. On a 90 or 120 Hz headset, set the rate to the display's, or what the hand holds moves on every
+other frame.
 
 ## three.xr.right.aim.direction
 
 The way `aim` points, a unit vector in the world: what `scene.raycast(r.aim.position, r.aim.direction)` takes.
+
+## three.xr.right.grip.velocity / angularVelocity
+
+How fast the grip (or `aim`) moves, a Vector3 in metres a second, and how fast it turns, in radians a second
+about the axis it turns around, both in the world's axes. On a headset these are what the runtime measured,
+which is smoother than any difference of two poses; a synthetic or emulated hand has them worked out from its
+poses, averaged over 50 ms. They are relative to where the player stands, so moving the rig adds nothing.
+Zero while the controller is away.
+
+What a thrown object leaves with:
+
+```js
+if (r.released('squeeze') && held) {
+  three.physics.remove(palm);              // and the joint with it
+  const v = r.grip.velocity, w = r.grip.angularVelocity;
+  three.physics.setVelocity(held, [v.x, v.y, v.z]);
+  three.physics.setAngularVelocity(held, [w.x, w.y, w.z]);
+}
+```
 
 ## three.xr.right.profile
 
@@ -1809,8 +1851,8 @@ To step n frames, call it once per frame boundary — under `--mcp` that is n ro
 How many fixed steps a second of game time is worth — 60 by default, 1 to 240 — and the step that follows from
 it, in seconds.
 
-It does not change the solver's rate, which is 60 Hz and is the solver's business: a script asking for 30 Hz
-gameplay must not quietly halve the accuracy of every contact in the scene.
+It does not change the solver's rate, which is `three.physics.rate`: a script asking for 30 Hz gameplay must
+not quietly halve the accuracy of every contact in the scene.
 
 # Input
 
@@ -1976,13 +2018,32 @@ its exit event, so a script that destroys something in a trigger volume still he
 which is why it is not a live Vector3. It is per scene, like the world it belongs to — `scene.physics.gravity`
 for one that is not being rendered.
 
+## three.physics.rate
+
+How many steps the world takes a second: 60 by default, 30 to 240, rounded to whole Hz; 0 sets the default
+again. A headset game sets the display's rate, so a body, and whatever a hand holds, moves on every frame
+instead of every other one:
+
+```js
+three.physics.rate = three.xr.refreshRate || 60;
+```
+
+Each step costs the same solver time, so 120 costs twice what 60 does. Two worlds stepped at different rates
+are different simulations: the same throw lands in a slightly different place. A kinematic body is moved once
+per step, an equal share of the way its node went since the last one, so its velocity is the node's own at
+any frame rate. Per scene, like `gravity`; a RangeError outside the range.
+
 ## three.physics.substeps
 
-How many substeps each 1/60 s step is split into: a whole number from 1 to 32, 4 by default. More is the
-cheapest way to a stiffer world, and costs about that many times the solver's time. A tower of 8 cm cubes
-stands eight high at 4, fourteen at 8 and sixteen at 16. The step itself is fixed, because two worlds stepped
-at different rates are two different simulations. A soft body's `damping` is applied once per substep, so it
-damps harder with more of them. Per scene, like `gravity`; a RangeError outside 1–32.
+How many substeps each step is split into: a whole number from 1 to 32, 4 by default. More is the cheapest
+way to a stiffer world, and costs about that many times the solver's time. A tower of 8 cm cubes stands eight
+high at 4, fourteen at 8 and sixteen at 16. A soft body's `damping` is applied once per substep, so it damps
+harder with more of them. Per scene, like `gravity`; a RangeError outside 1–32.
+
+A body that moves further in a substep than its own half-size is swept along its path first, so a thrown stone
+stops at the first thing in its way, still or moving, rather than passing through a thin board between two
+substeps; a moving body it hits takes the momentum of the hit. Its turn during the sweep is not, so a long thin
+body spinning fast can still clip a corner.
 
 ## three.physics.iterations
 
@@ -3307,7 +3368,7 @@ beside it.
 - `color` — this pixel of what ran before this pass, already decoded to linear. The rendered scene, for the first
   pass of a chain.
 - `scene` — this pixel of the rendered scene whatever has run since; equal to `color` on the first pass.
-- `uv` — 0..1 across the frame, (0,0) top left.
+- `uv` — 0..1 across the frame, (0,0) top left. On a headset the frame is one eye: see the headset.
 - `resolution` — the frame in pixels. `1.0 / p.resolution` is one texel, which is what a blur steps by.
 - `time` — seconds since this shader was set, on the game clock, so a paused world has a still chain.
 - `depth` — how far this pixel is from the camera, in world units along the view direction. Already linearized,

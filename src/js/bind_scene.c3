@@ -117,6 +117,7 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "bindSocket", &js_bind_socket, self)!;
 	self.js.@method(node, "unbindSocket", &js_unbind_socket, self)!;
 	self.js.@method(node, "xrTrack", &js_xr_track, self)!;
+	self.js.@method(node, "xrUntrack", &js_xr_untrack, self)!;
 	self.js.@method(node, "footIk", &js_foot_ik, self)!;
 	self.js.@method(node, "footIkSet", &js_foot_ik_set, self)!;
 	self.js.@method(node, "footIkDrop", &js_foot_ik_drop, self)!;

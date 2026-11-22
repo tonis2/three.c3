@@ -41,14 +41,25 @@ const String PHYSICS_OWNS_SOFT_TRANSFORM = "this object's transform belongs to t
 	"three.physics.pin(object, i, [x, y, z]), or three.physics.removeSoft(object) "
 	"first.";
 
-// The fixed tick. Not a setting: two worlds stepped at different rates are two
-// different simulations, and the determinism `PhysicsWorld.state_hash` offers is
-// worth more than a knob.
-const double PHYSICS_STEP_MS = 1000.0 / 60.0;
+// The fixed tick a scene gets when the script says nothing. `three.physics.rate`
+// changes it per scene: two worlds stepped at different rates are two different
+// simulations, so `PhysicsWorld.state_hash` agrees only between worlds stepped at
+// one rate, but a headset drawing at 90 or 120 Hz wants a step every frame.
+const uint PHYSICS_RATE = 60;
+const double PHYSICS_STEP_MS = 1000.0 / (double)PHYSICS_RATE;
+// The rates `three.physics.rate` takes, in steps a second.
+const uint PHYSICS_MIN_RATE = 30;
+const uint PHYSICS_MAX_RATE = 240;
+
+// How far short of a whole step the accumulator may be and still take it: a
+// microsecond, under any frame a display has. Two 120 Hz frames are 16.666666 ms
+// from a headset's nanosecond clock, and a hair under the step without it, so
+// steps landed after one frame or three rather than every two.
+const double PHYSICS_STEP_SLACK_MS = 0.001;
 
 // How a step is solved when the script says nothing: split into four substeps,
 // each solving its constraints once. `three.physics.substeps` and `iterations`
-// change them per scene; the step itself stays 1/60 s (above).
+// change them per scene.
 const uint PHYSICS_SUBSTEPS = 4;
 const uint PHYSICS_ITERATIONS = 1;
 // Past these a setting is a mistake rather than a stiffer world: each multiplies
@@ -56,9 +67,10 @@ const uint PHYSICS_ITERATIONS = 1;
 const uint PHYSICS_MAX_SUBSTEPS = 32;
 const uint PHYSICS_MAX_ITERATIONS = 16;
 
-// The most steps one frame may run to catch up. Past this the backlog is dropped
-// rather than run, which is the difference between a stutter and a spiral: every
-// frame that ran long would otherwise ask the next one to run longer still.
+// The most steps one frame may run to catch up, at 60 Hz; a faster rate gets as
+// many as cover the same time. Past this the backlog is dropped rather than run,
+// which is the difference between a stutter and a spiral: every frame that ran
+// long would otherwise ask the next one to run longer still.
 const int PHYSICS_MAX_STEPS = 5;
 
 // How far a body may get from the origin before it is treated as lost rather than
@@ -230,12 +242,38 @@ struct Physics
 	// scene that never says steps as every scene did.
 	uint substeps;
 	uint iterations;
+	// Steps a second, from `three.physics.rate`; zero is `PHYSICS_RATE`.
+	uint rate;
 
 	bool opened;
 }
 
 <*
- How many substeps each 1/60 s step is split into.
+ Steps a second.
+*>
+fn uint Physics.rate_hz(&self) => self.rate > 0 ? self.rate : PHYSICS_RATE;
+
+<*
+ How long one step is, in milliseconds.
+*>
+fn double Physics.step_ms(&self) => 1000.0 / (double)self.rate_hz();
+
+<*
+ The most steps one frame may take: as many as `PHYSICS_MAX_STEPS` cover at 60 Hz.
+*>
+fn int Physics.max_steps(&self) => max(PHYSICS_MAX_STEPS, (int)(self.rate_hz() * PHYSICS_MAX_STEPS / PHYSICS_RATE));
+
+<*
+ Steps the world `hz` times a second from the next frame on. The accumulator is
+ kept, so a change mid-game costs no time.
+
+ @param hz : "Steps a second; 0 is the default"
+ @require hz == 0 || (hz >= PHYSICS_MIN_RATE && hz <= PHYSICS_MAX_RATE) : "Rate out of range"
+*>
+fn void Physics.set_rate(&self, uint hz) => self.rate = hz;
+
+<*
+ How many substeps each step is split into.
 *>
 fn uint Physics.substep_count(&self) => self.substeps > 0 ? self.substeps : PHYSICS_SUBSTEPS;
 
@@ -250,7 +288,7 @@ fn uint Physics.iteration_count(&self) => self.iterations > 0 ? self.iterations 
  solver's time. A soft body's `damping` is applied once per substep, so it damps
  harder with more of them.
 
- @param count : `Substeps per 1/60 s step`
+ @param count : `Substeps per step`
  @require count >= 1 && count <= PHYSICS_MAX_SUBSTEPS : `Substeps out of range`
 *>
 fn void Physics.set_substeps(&self, uint count) => self.substeps = count;
@@ -851,7 +889,7 @@ fn bool Physics.is_moving(&self)
 
 <*
  Pushes whatever a script wrote onto the kinematic bodies and the triggers,
- before the step.
+ before each step.
 
  `set_kinematic_target` derives a velocity from the delta, which is what lets a
  dynamic body bounce off a moving platform correctly instead of being teleported
@@ -859,15 +897,38 @@ fn bool Physics.is_moving(&self)
  integrates it and nothing bounces off it, but its overlap test reads the
  transform the solver was last handed — so a trigger whose node moves and is
  not driven here overlaps whatever it overlapped when it was added, forever.
+
+ Once a step, not once a frame. A frame that takes no step — every other one at
+ 120 Hz — leaves the body where the last step had it, so the next step's delta
+ is the whole way the node went since and the velocity is the node's own. Driven
+ every frame, the delta was one frame's worth over one step's time: half the
+ hand's speed on a 120 Hz headset. A frame that takes several steps moves the
+ body an equal share of the way at each.
+
+ @param remaining : "Steps left in this frame, this one included"
+ @require remaining > 0 : "At least this step remains"
 *>
-fn void Physics.drive_kinematic(&self, Scene* scene)
+fn void Physics.drive_kinematic(&self, Scene* scene, int remaining)
 {
+	float share = 1.0f / (float)remaining;
 	foreach (&body : self.bodies)
 	{
 		if (body.kind != BodyKind.KINEMATIC && body.kind != BodyKind.TRIGGER) continue;
 		Node* node = scene.node(body.node);
 		if (node == null) continue;
-		self.world.set_kinematic_target(body.id, node.position, node.rotation, (float)(PHYSICS_STEP_MS / 1000.0));
+		collision::Rigidbody*? rigid = self.world.find_body(body.id);
+		if (catch rigid) continue;
+		Vec3 position = node.position;
+		Quaternionf rotation = node.rotation;
+		if (remaining > 1)
+		{
+			Quaternionf from = rigid.collider.rotation;
+			// The short way round: q and -q are one rotation.
+			if (from.v.dot(rotation.v) < 0) rotation.v = -rotation.v;
+			position = rigid.collider.translation + (position - rigid.collider.translation) * share;
+			rotation = from.nlerp(rotation, share);
+		}
+		self.world.set_kinematic_target(body.id, position, rotation, (float)(self.step_ms() / 1000.0));
 	}
 }
 
@@ -986,8 +1047,9 @@ fn bool finite_and_near(Vec3 at) @local
  One frame's worth of physics.
 
  The accumulator is the whole of it: whatever the frame took, the world advances
- in fixed 60 Hz steps and keeps the remainder. `PHYSICS_MAX_STEPS` is where a
- frame that ran very long stops trying to catch up, and dropping the rest is
+ in fixed steps (60 a second unless `three.physics.rate` says otherwise) and
+ keeps the remainder. `Physics.max_steps` is where a frame that ran very long
+ stops trying to catch up, and dropping the rest is
  deliberate — carrying it is how one slow frame becomes a spiral that never
  recovers.
 *>
@@ -998,10 +1060,13 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 	self.evict_diverged();
 	if (self.bodies.len() == 0 && self.softs.len() == 0) return;
 
-	self.drive_kinematic(scene);
-
 	self.accumulator_ms += elapsed_ms;
 
+	// Counted before any is taken, so each step moves a kinematic body its share.
+	double step_ms = self.step_ms();
+	int max_steps = self.max_steps();
+	int due = 0;
+	for (double owed = self.accumulator_ms; owed >= step_ms - PHYSICS_STEP_SLACK_MS && due < max_steps; owed -= step_ms) due++;
 
 	int steps  = 0;
 	// `run_step` requires a rigid body — its broad phase, its islands and its
@@ -1012,9 +1077,10 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 	bool rigid = self.bodies.len() > 0;
 	uint substeps = self.substep_count();
 	uint iterations = self.iteration_count();
-	while (self.accumulator_ms >= PHYSICS_STEP_MS && steps < PHYSICS_MAX_STEPS)
+	while (steps < due)
 	{
-		float dt = (float)(PHYSICS_STEP_MS / 1000.0);
+		float dt = (float)(step_ms / 1000.0);
+		self.drive_kinematic(scene, due - steps);
 		if (rigid)
 		{
 			self.world.run_step(dt, iterations, substeps);
@@ -1028,11 +1094,11 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 		{
 			for (uint i = 0; i < substeps; i++) self.world.solve_soft_bodies(dt / (float)substeps);
 		}
-		self.accumulator_ms -= PHYSICS_STEP_MS;
+		self.accumulator_ms -= step_ms;
 		steps++;
 	}
 
-	if (self.accumulator_ms > PHYSICS_STEP_MS) self.accumulator_ms = 0;
+	if (self.accumulator_ms > step_ms) self.accumulator_ms = 0;
 
 	if (steps > 0)
 	{
@@ -1196,6 +1262,29 @@ fn bool push_limit(collision::Limits* limits, Vec3 axes, JointLimit limit) @loca
 	return true;
 }
 
+// A body's place and turn, in the world.
+struct BodyPose
+{
+	Vec3 position;
+	Quaternionf rotation;
+}
+
+<*
+ Where a body is, for a joint made now: a kinematic body's node, which the next
+ step takes it to, and the solver's pose for any other. A kinematic body reaches
+ its node only on a step, so on a frame with none the solver still has it where
+ the last step left it: a hand a frame behind the hand.
+*>
+fn BodyPose joint_pose(Scene* scene, PhysicsBody* record, collision::Rigidbody* rigid) @local
+{
+	if (record.kind == BodyKind.KINEMATIC)
+	{
+		Node* node = scene.node(record.node);
+		if (node != null) return { node.position, node.rotation };
+	}
+	return { rigid.collider.translation, rigid.collider.rotation };
+}
+
 <*
  Joins two body-backed nodes, held by the limits the spec carries.
 
@@ -1204,9 +1293,10 @@ fn bool push_limit(collision::Limits* limits, Vec3 axes, JointLimit limit) @loca
  relative to each other at this moment. So a script places both objects and then
  joins them, rather than describing the rest pose in numbers.
 
+ @param [&in] scene : "The scene this world belongs to, for a kinematic body's node"
  @return `The joint's id, for three.physics.removeJoint.`
 *>
-fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
+fn sz? Physics.add_joint(&self, Scene* scene, NodeId a, NodeId b, JointSpec spec)
 {
 	if (!self.opened) return JOINT_NEEDS_A_BODY~;
 	if (a == b) return JOINT_ON_ONE_BODY~;
@@ -1225,8 +1315,10 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 	collision::Rigidbody* rigid_b = self.rigidbody_for(b);
 	if (rigid_a == null || rigid_b == null) return JOINT_NEEDS_A_BODY~;
 
-	Vec3 at_a  = rigid_a.collider.translation;
-	Vec3 at_b  = rigid_b.collider.translation;
+	BodyPose pose_a = joint_pose(scene, record_a, rigid_a);
+	BodyPose pose_b = joint_pose(scene, record_b, rigid_b);
+	Vec3 at_a  = pose_a.position;
+	Vec3 at_b  = pose_b.position;
 	Vec3 pivot = spec.has_pivot ? spec.pivot : (at_a + at_b) * 0.5f;
 
 	sz id = self.next_id++;
@@ -1235,9 +1327,9 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 		.body_a = record_a.id,
 		.body_b = record_b.id,
 		.collides = spec.collide,
-		.anchor_a = rigid_a.collider.rotation.conjugate() * (pivot - at_a),
-		.anchor_b = rigid_b.collider.rotation.conjugate() * (pivot - at_b),
-		.relative_orientation = rigid_a.collider.rotation.conjugate() * rigid_b.collider.rotation,
+		.anchor_a = pose_a.rotation.conjugate() * (pivot - at_a),
+		.anchor_b = pose_b.rotation.conjugate() * (pivot - at_b),
+		.relative_orientation = pose_a.rotation.conjugate() * pose_b.rotation,
 		.stiffness = spec.stiffness,
 		.break_force = spec.break_force,
 		.break_torque = spec.break_torque,
@@ -1254,7 +1346,7 @@ fn sz? Physics.add_joint(&self, NodeId a, NodeId b, JointSpec spec)
 	// `solver/joint.c3` resolves it through `relative_orientation` and reads a
 	// linear one as a world direction with no resolution at all. The asymmetry is
 	// the library's and it shows: a slider's rail does not turn with the bodies.
-	Quaternionf into_b = rigid_b.collider.rotation.conjugate();
+	Quaternionf into_b = pose_b.rotation.conjugate();
 
 	foreach (limit : spec.limits)
 	{

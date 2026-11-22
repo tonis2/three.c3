@@ -346,7 +346,10 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { }, HandsRe
 	// Before the solver, so a kinematic body copied from a hand and the callback
 	// both see this frame's pose; and placed again last, after anything that
 	// moved the rig.
-	self.hands.step(hands);
+	// Wall time, read before `advance_frame` moves the clock: a hand moves in the
+	// player's seconds, paused game or not.
+	double hand_dt = self.pass.clock.started ? (elapsed_ms - self.pass.clock.last_wall_ms) / 1000.0 : 0.0;
+	self.hands.step(hands, hand_dt > 0 ? (float)hand_dt : 0.0f);
 	self.place_hands();
 	defer self.place_hands();
 

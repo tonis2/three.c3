@@ -52,10 +52,12 @@ const laserShape = new three.BoxGeometry(0.004, 0.004, 1);
 const palmShape = new three.SphereGeometry(0.03, 12, 8);
 
 // Per hand: a model on the grip and a laser on the aim, both left out of
-// raycasts, and a hidden ball the held cube is jointed to. The ball is a
-// kinematic body only while it holds something (`grab`). Solid all the time,
-// it shoved whatever the hand reached past, and on letting go it shoved the
-// cube itself, which the joint had been holding inside it.
+// raycasts, and a hidden ball the held cube is jointed to. The engine keeps
+// the ball on the grip (`track`), placed before the physics step, so the held
+// cube is where the hand is this frame. The ball is a kinematic body only while
+// it holds something (`grab`). Solid all the time, it shoved whatever the hand
+// reached past, and on letting go it shoved the cube itself, which the joint
+// had been holding inside it.
 const hands = [three.xr.left, three.xr.right].map((xr) => {
 	const model = new three.Mesh(controllerShape, matte);
 	model.color = [0.82, 0.82, 0.86];
@@ -71,8 +73,9 @@ const hands = [three.xr.left, three.xr.right].map((xr) => {
 	palm.visible = false;
 	palm.collides = false;
 	scene.add(palm);
+	xr.track(palm);
 
-	return { xr, laser, palm, held: null, last: null, velocity: [0, 0, 0] };
+	return { xr, laser, palm, held: null };
 });
 
 const REACH = 5;
@@ -105,11 +108,16 @@ function grab(hand, cube) {
 	hand.held = cube;
 }
 
+// Thrown with what the headset measured the hand doing: smoother than any
+// difference of two poses, and with the flick of the wrist as spin.
 function letGo(hand) {
 	if (hand.held === null) return;
 	// Taking the palm's body away takes its joint with it.
 	three.physics.remove(hand.palm);
-	three.physics.setVelocity(hand.held, hand.velocity);
+	const v = hand.xr.grip.velocity;
+	const w = hand.xr.grip.angularVelocity;
+	three.physics.setVelocity(hand.held, [v.x, v.y, v.z]);
+	three.physics.setAngularVelocity(hand.held, [w.x, w.y, w.z]);
 	hand.held = null;
 }
 
@@ -124,26 +132,17 @@ three.setAnimationLoop((ms) => {
 		three.camera.lookAt(0, three.xr.presenting ? 0 : 1.6, 0.3);
 		three.camera.orbit(0, three.xr.presenting ? 0 : 25, 0);
 	}
+	// A step every frame, so a held cube moves as smoothly as the hand.
+	three.physics.rate = three.xr.refreshRate || 60;
 
 	for (const hand of hands) {
 		const { xr } = hand;
 		if (!xr.connected) {
 			letGo(hand);
-			hand.last = null;
 			continue;
 		}
 		const g = xr.grip.position;
 		const at = [g.x, g.y, g.z];
-		// Averaged over about 50 ms. One frame's step at 120 Hz is mostly
-		// tracking noise, and handed to a cube set down gently it kicks it.
-		if (hand.last === null) {
-			hand.velocity = [0, 0, 0];
-		} else {
-			const k = Math.min(1, dt / 0.05);
-			hand.velocity = hand.velocity.map((v, i) => v + ((at[i] - hand.last[i]) / dt - v) * k);
-		}
-		hand.last = at;
-		hand.palm.position.set(...at);
 
 		const aim = xr.aim;
 		const hit = scene.raycast(aim.position, aim.direction);

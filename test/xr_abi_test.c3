@@ -66,6 +66,7 @@ fn void action_sizes() @test
 	test::eq(xr::ActionStatePose::size, 24);
 	test::eq(xr::ActionSpaceCreateInfo::size, 64);
 	test::eq(xr::SpaceLocation::size, 56);
+	test::eq(xr::SpaceVelocity::size, 48);
 	test::eq(xr::HapticActionInfo::size, 32);
 	test::eq(xr::HapticVibration::size, 32);
 	test::eq(xr::InteractionProfileState::size, 24);
@@ -100,6 +101,9 @@ fn void action_offsets() @test
 	test::eq((usz)$reflect(xr::ActionSpaceCreateInfo.subaction_path).offset, (usz)24);
 	test::eq((usz)$reflect(xr::ActionSpaceCreateInfo.pose_in_action_space).offset, (usz)32);
 	test::eq((usz)$reflect(xr::SpaceLocation.pose).offset, (usz)24);
+	test::eq((usz)$reflect(xr::SpaceVelocity.velocity_flags).offset, (usz)16);
+	test::eq((usz)$reflect(xr::SpaceVelocity.linear_velocity).offset, (usz)24);
+	test::eq((usz)$reflect(xr::SpaceVelocity.angular_velocity).offset, (usz)36);
 	test::eq((usz)$reflect(xr::HapticActionInfo.subaction_path).offset, (usz)24);
 	test::eq((usz)$reflect(xr::HapticVibration.frequency).offset, (usz)24);
 	test::eq((usz)$reflect(xr::HapticVibration.amplitude).offset, (usz)28);
@@ -141,6 +145,7 @@ fn void constants() @test
 	test::eq(xr::TYPE_ACTION_CREATE_INFO, 29);
 	test::eq(xr::TYPE_ACTION_SPACE_CREATE_INFO, 38);
 	test::eq(xr::TYPE_SPACE_LOCATION, 42);
+	test::eq(xr::TYPE_SPACE_VELOCITY, 43);
 	test::eq(xr::TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING, 51);
 	test::eq(xr::TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED, 52);
 	test::eq(xr::TYPE_INTERACTION_PROFILE_STATE, 53);

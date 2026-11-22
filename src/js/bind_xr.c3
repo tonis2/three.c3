@@ -20,6 +20,7 @@ fn void? JsRuntime.bind_xr_verbs(&self, js::Value host)
 	self.js.@bind(host, "xrHand", &js_xr_hand, self)!;
 	self.js.@bind(host, "xrHandProfile", &js_xr_hand_profile, self)!;
 	self.js.@bind(host, "xrHandPose", &js_xr_hand_pose, self)!;
+	self.js.@bind(host, "xrHandMotion", &js_xr_hand_motion, self)!;
 	self.js.@bind(host, "xrVibrate", &js_xr_vibrate, self)!;
 	self.js.@bind(host, "xrHandHold", &js_xr_hand_hold, self)!;
 	self.js.@bind(host, "xrHandTilt", &js_xr_hand_tilt, self)!;
@@ -97,6 +98,18 @@ fn HandPoseView js_xr_hand_pose(JsRuntime* self, int hand, int space)
 	self.hands.to_world(self.pass.camera.target, self.pass.camera.yaw);
 	HandPose pose = self.hands.hand[hand].world[space];
 	return { .position = pose.position, .rotation = euler_from_quat(pose.rotation), .direction = pose.forward() };
+}
+
+<*
+ `xrHandMotion(hand, space)` — how fast a grip or aim is moving, in the world:
+ `{ linear, angular }`, metres and radians a second. Relative to where the player
+ stands, so walking the rig does not add to it.
+*>
+fn HandMotion js_xr_hand_motion(JsRuntime* self, int hand, int space)
+{
+	if (!valid_hand(hand) || space < 0 || space >= HandSpace::len) return { };
+	self.hands.to_world(self.pass.camera.target, self.pass.camera.yaw);
+	return self.hands.hand[hand].world_motion[space];
 }
 
 <*
@@ -210,15 +223,23 @@ fn void js_xr_passthrough_set(JsRuntime* self, bool on)
 fn bool js_xr_passthrough_supported(JsRuntime* self) => self.renderer != null && self.renderer.xr_display.passthrough_supported;
 
 <*
- `node.xrTrack(hand, space)` — keep this top-level node on a hand from now on.
+ `node.xrTrack(hand, space, shownWithHand)` — keep this top-level node on a hand
+ from now on, hidden while the hand is away when `shownWithHand` is true.
 
  @return "False when the node is not top-level"
 *>
-fn bool js_xr_track(JsRuntime* self, NodeRef ref, int hand, int space)
+fn bool js_xr_track(JsRuntime* self, NodeRef ref, int hand, int space, bool shown_with_hand)
 {
 	if (!valid_hand(hand) || space < 0 || space >= HandSpace::len) return false;
-	return ref.scene.track_hand(ref.id, Hand::from_ordinal(hand), HandSpace::from_ordinal(space));
+	return ref.scene.track_hand(ref.id, Hand::from_ordinal(hand), HandSpace::from_ordinal(space), shown_with_hand);
 }
+
+<*
+ `node.xrUntrack()` — stop keeping this node on a hand.
+
+ @return "False when it was not on one"
+*>
+fn bool js_xr_untrack(JsRuntime* self, NodeRef ref) => ref.scene.untrack_hand(ref.id);
 
 // `xrEmulateGet()` — whether the mouse and keyboard are the hands.
 fn bool js_xr_emulate_get(JsRuntime* self) => self.hands.emulate;

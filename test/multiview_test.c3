@@ -48,9 +48,27 @@ const String SCENE = `
 	three.camera.orbit(30, 20, 7);
 `;
 
-// The same depth-reading pass for both paths: a script pass sees the eyes side by side.
+// The same depth-reading pass for both paths.
 const String FOG = `
 	three.setPost({ fragment: 'return mix(p.color, float3(0.2, 0.3, 0.4), clamp(p.depth * 0.06, 0.0, 0.8));' });
+`;
+
+// Where a pass thinks it is: u in red, and the frame's width in green, a
+// thousandth of it.
+const String WHERE = `
+	three.setPost({ fragment: 'return float3(p.uv.x, p.resolution.x / 1000.0, 0.0);' });
+`;
+
+// Half of this frame and half of the last one, through a history the size of
+// the frame. By the second frame of a still scene it is this frame, but only if
+// each eye's history held that eye's last frame.
+const String HISTORY = `
+	three.addPass({
+		compute: "fn void main(PostThread t) @compute @threads(8, 8, 1) { int2 px = int2(t.id.xy); "
+			+ "if (!inside(px)) return; float4 was = history[px]; float4 now = float4(color_at(px).rgb, 1.0); "
+			+ "history[px] = now; output[px] = now * 0.5 + was * 0.5; }",
+		images: { history: 'rgba16f' },
+	});
 `;
 
 struct Drawn
@@ -220,4 +238,49 @@ fn void the_eyes_of_a_multiview_pair_differ() @test
 		}
 	}
 	test::@check(differing > 500, "the two eyes drew the same picture: %d pixels differ", differing);
+}
+
+<*
+ A post pass runs once per eye, and each eye is a frame of its own: `p.uv` runs
+ 0..1 across one eye, so it jumps from 1 to 0 at the seam, and the resolution is
+ one eye's 96 pixels. Run once over both eyes side by side, a blur at the seam
+ read the other eye.
+*>
+fn void each_eye_is_a_frame_of_its_own_to_a_post_pass() @test
+{
+	String script = string::tformat("%s%s", SCENE, WHERE);
+	Drawn layered = draw_pair(script, 2);
+	defer layered.shot.free();
+	test::@check(layered.views == 2, "the target should have two layers");
+
+	sz last_left = ((sz)(H / 2) * W + W / 2 - 1) * 4;
+	sz first_right = ((sz)(H / 2) * W + W / 2) * 4;
+	char[] px = layered.shot.pixels;
+	// Half a pixel of u is 0.005, which the sRGB encode lifts to 17; the seam of
+	// one frame over both eyes is 0.5, which is 188.
+	test::@check(px[last_left] > 240 && px[first_right] < 30,
+		"u ends the left eye and starts the right one: %d then %d", px[last_left], px[first_right]);
+	// 0.096 linear is 87 encoded; the whole 192 would be 122.
+	test::@check(px[last_left + 1] >= 84 && px[last_left + 1] <= 91 && px[first_right + 1] == px[last_left + 1],
+		"each eye is 96 pixels wide to a pass: green %d and %d", px[last_left + 1], px[first_right + 1]);
+}
+
+<*
+ A pass's own image is kept per eye: a history blended with this frame comes
+ out as the side-by-side pair does, which it would not if the right eye read
+ back what the left eye wrote. Under the validation layer, like every pair.
+*>
+fn void a_pass_history_is_kept_per_eye() @test
+{
+	String script = string::tformat("%s%s", SCENE, HISTORY);
+	Drawn layered = draw_pair(script, 2);
+	defer layered.shot.free();
+	Drawn beside = draw_pair(script, 1);
+	defer beside.shot.free();
+
+	test::@check(layered.views == 2, "the target should have two layers");
+	test::@check(drawn_in(&layered.shot, 0, W / 2) > 1000 && drawn_in(&layered.shot, W / 2, W) > 1000,
+		"each eye drew its half of the picture");
+	uint difference = max_rgb_difference(&layered.shot, &beside.shot);
+	test::@check(difference <= 2, "multiview and side by side differ by %d through a history", difference);
 }

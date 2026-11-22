@@ -218,10 +218,19 @@ export function makeScenePhysics(scene) {
 			H.physicsGravitySet(scene._sid, x, y, z);
 		},
 
-		// How each 1/60 s step is solved. The step itself is fixed (two
-		// worlds stepped at different rates are two different simulations);
-		// these are how hard the solver works inside it, and each costs about
-		// its own multiple of the solver's time. Substeps buy the most: a
+		// Steps a second, 60 unless set: a headset game sets its display's
+		// rate, so what a hand holds moves on every frame and not every other
+		// one. Rounded to whole Hz; 0 is the default again.
+		get rate() { return H.physicsRateGet(scene._sid); },
+		set rate(value) {
+			const hz = Math.round(Number(value));
+			if (!(hz === 0 || (hz >= 30 && hz <= 240))) {
+				throw new RangeError(`three.physics.rate is steps a second from 30 to 240, or 0 for 60, not ${value}`);
+			}
+			H.physicsRateSet(scene._sid, hz);
+		},
+		// How each step is solved: how hard the solver works inside it, and
+		// each costs about its own multiple of the solver's time. Substeps buy the most: a
 		// tower of small boxes that topples at 4 stands at 8. Iterations
 		// re-solve each substep's constraints. contactMargin is how close, in metres, two bodies come
 		// before they get a contact; 0 is none before touching.

@@ -170,6 +170,9 @@ fn void the_docs_name_everything_the_api_exposes() @test
 			if (!named('three.xr.right', m)) missing.push('xr.right.' + m);
 		}
 		if (!named('three.xr.right.aim', 'direction')) missing.push('xr.right.aim.direction');
+		for (const m of ['velocity', 'angularVelocity']) {
+			if (!named('three.xr.right.grip', m)) missing.push('xr.right.grip.' + m);
+		}
 
 		// And the solver's: its settings are properties, and a property nobody
 		// can find is one nobody changes.

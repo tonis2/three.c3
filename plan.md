@@ -108,19 +108,23 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       script with their edges, `vr_controllers.js` grabs, throws and pushes cubes, and
       `vibrate` buzzes the controller. X, the stick clicks and menu were not pressed
       in that session.
-- [ ] **A grab lags its hand by a physics step.** A kinematic hand copied from
-      `r.grip` in the callback reaches the solver one step late, so a joint made the
-      frame a hand arrives holds the object that far off. `node.xrTrack` on a
-      top-level kinematic mesh would close it.
+- [x] **A grab lags its hand by a physics step.** `three.xr.right.track(object)`
+      keeps a top-level kinematic body on a hand, placed before the step, and a
+      joint reads a kinematic body's node rather than its last stepped pose.
+      Kinematic bodies are moved once a step, a share of the way each, so their
+      velocity is right at 90 and 120 Hz (it was half at 120), and
+      `three.physics.rate` lets a headset game step at its display's rate.
 
 ## 4. Stereo
 
 - [ ] **The UI layer is laid out over both eyes.** It draws once across the
       side-by-side target, so a HUD is split by the eye seam. In VR it wants a
       panel in the world or an OpenXR quad layer.
-- [ ] **Post passes sample across the eye seam.** The chain runs one viewport over
-      the whole target, so a blur or bloom a script adds bleeds from one eye
-      into the other. The tonemap is per pixel and fine.
+- [x] **Post passes sample across the eye seam.** On a multiview target every
+      chain image has a layer per eye and each pass runs once per eye, so a blur
+      clamps at the eye's edge and `p.uv` is the eye's. The copy that put the eyes
+      side by side for the passes is gone. A device without multiview still
+      draws both eyes into one flat frame, and a pass sees both there.
 
 ## 5. Android
 

@@ -251,10 +251,13 @@ fn void XrInput.read(&self, xr::Session session, xr::Space base, xr::Time time, 
 		if (self.bool_state(session, MENU, sub)) buttons |= HandButton.MENU.bit();
 		hand.buttons = buttons;
 
-		bool gripped = locate(self.grip_spaces[i], base, time, &hand.pose[HandSpace.GRIP.ordinal]);
-		bool aimed = locate(self.aim_spaces[i], base, time, &hand.pose[HandSpace.AIM.ordinal]);
-		if (!aimed) hand.pose[HandSpace.AIM.ordinal] = hand.pose[HandSpace.GRIP.ordinal];
-		hand.connected = gripped && self.pose_active(session, sub);
+		Located grip = locate(self.grip_spaces[i], base, time);
+		Located aim = locate(self.aim_spaces[i], base, time);
+		if (!aim.tracked) aim = grip;
+		hand.pose = { grip.pose, aim.pose };
+		hand.motion = { grip.motion, aim.motion };
+		hand.measured = grip.measured && aim.measured;
+		hand.connected = grip.tracked && self.pose_active(session, sub);
 		hand.profile = self.profiles[i].name;
 	}
 }
@@ -290,19 +293,39 @@ fn bool XrInput.pose_active(&self, xr::Session session, xr::Path sub)
 	return xr::cmd.get_action_state_pose(session, &info, &state) >= 0 && state.is_active != 0;
 }
 
-<*
- @return "False unless both position and orientation are known"
-*>
-fn bool locate(xr::Space space, xr::Space base, xr::Time time, HandPose* out) @local
+// Where a space is at a time, and how fast it is moving.
+struct Located
 {
-	xr::SpaceLocation location = { .type = xr::TYPE_SPACE_LOCATION };
-	if (xr::cmd.locate_space(space, base, time, &location) < 0) return false;
+	// Both its position and its orientation are known.
+	bool tracked;
+	HandPose pose;
+	// Both its linear and its angular velocity are known.
+	bool measured;
+	HandMotion motion;
+}
+
+fn Located locate(xr::Space space, xr::Space base, xr::Time time) @local
+{
+	xr::SpaceVelocity velocity = { .type = xr::TYPE_SPACE_VELOCITY };
+	xr::SpaceLocation location = { .type = xr::TYPE_SPACE_LOCATION, .next = &velocity };
+	if (xr::cmd.locate_space(space, base, time, &location) < 0) return { };
 	xr::Flags64 needed = xr::SPACE_LOCATION_ORIENTATION_VALID_BIT | xr::SPACE_LOCATION_POSITION_VALID_BIT;
-	if ((location.location_flags & needed) != needed) return false;
+	if ((location.location_flags & needed) != needed) return { };
 	xr::Posef pose = location.pose;
-	out.position = { pose.position.x, pose.position.y, pose.position.z };
-	out.rotation = { pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w };
-	return true;
+	Located out = {
+		.tracked = true,
+		.pose = {
+			.position = { pose.position.x, pose.position.y, pose.position.z },
+			.rotation = { pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w },
+		},
+	};
+	xr::Flags64 moving = xr::SPACE_VELOCITY_LINEAR_VALID_BIT | xr::SPACE_VELOCITY_ANGULAR_VALID_BIT;
+	if ((velocity.velocity_flags & moving) != moving) return out;
+	out.measured = true;
+	xr::Vector3f l = velocity.linear_velocity;
+	xr::Vector3f a = velocity.angular_velocity;
+	out.motion = { .linear = { l.x, l.y, l.z }, .angular = { a.x, a.y, a.z } };
+	return out;
 }
 
 <*

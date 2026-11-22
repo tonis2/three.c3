@@ -55,10 +55,24 @@ const float HAND_PULL_UP = 0.4f;
 // Every button that is a click, not a pull.
 const char HAND_CLICK_BITS = 0b0011_1111;
 
+// How long a hand's motion is averaged over when it is worked out from its poses,
+// in seconds. One frame's step at 120 Hz is mostly tracking noise.
+const float HAND_MOTION_SMOOTHING = 0.05f;
+
 struct HandPose
 {
 	Vec3 position;
 	Quaternionf rotation;
+}
+
+<*
+ How fast a hand space moves: metres a second, and radians a second about the
+ axis it turns around.
+*>
+struct HandMotion
+{
+	Vec3 linear;
+	Vec3 angular;
 }
 
 <*
@@ -69,6 +83,11 @@ struct HandReading
 	bool connected;
 	// By `HandSpace`.
 	HandPose[2] pose;
+	// By `HandSpace`, when the runtime measured it; see `measured`.
+	HandMotion[2] motion;
+	// Whether `motion` came with the reading. A hand without it, synthetic or
+	// emulated, has its motion worked out from its poses frame to frame.
+	bool measured;
 	float trigger;
 	float squeeze;
 	// +y is the stick pushed forward.
@@ -104,6 +123,11 @@ struct HandState
 	char released;
 	// By `HandSpace`, placed by `Hands.to_world`.
 	HandPose[2] world;
+	// By `HandSpace`, in tracking space: the reading's, or worked out from its
+	// poses. Turned into the world by `Hands.to_world`.
+	HandMotion[2] motion;
+	// By `HandSpace`, `motion` turned into the world.
+	HandMotion[2] world_motion;
 	Haptic haptic;
 }
 
@@ -151,14 +175,17 @@ fn HandReading SyntheticHand.merge(&self, HandReading real)
 }
 
 <*
- Takes one frame's reading: the synthetic hands folded in, then the edges.
- A hand that disconnects lets go of everything it held.
+ Takes one frame's reading: the synthetic hands folded in, then the edges and
+ the motion. A hand that disconnects lets go of everything it held.
+
+ @param dt : "Wall seconds since the last reading; 0 works out no motion"
 *>
-fn void Hands.step(&self, HandsReading reading)
+fn void Hands.step(&self, HandsReading reading, float dt = 0)
 {
 	foreach (i, &state : self.hand)
 	{
 		HandReading now = self.synthetic[i].merge(reading.hand[i]);
+		state.track_motion(now, dt);
 		char before = state.down;
 		char down = 0;
 		if (now.connected)
@@ -172,6 +199,55 @@ fn void Hands.step(&self, HandsReading reading)
 		state.pressed = down & ~before;
 		state.released = before & ~down;
 	}
+}
+
+<*
+ The hand's motion this frame: what the runtime measured, or else the change from
+ the last reading's poses, averaged over `HAND_MOTION_SMOOTHING`. Called before
+ `now` replaces the last reading.
+*>
+fn void HandState.track_motion(&self, HandReading now, float dt)
+{
+	if (!now.connected)
+	{
+		self.motion = { };
+		return;
+	}
+	if (now.measured)
+	{
+		self.motion = now.motion;
+		return;
+	}
+	// A hand just arrived has nothing to differ from.
+	if (!self.now.connected || dt <= 0)
+	{
+		self.motion = { };
+		return;
+	}
+	float k = min(1.0f, dt / HAND_MOTION_SMOOTHING);
+	foreach (s, &motion : self.motion)
+	{
+		HandPose was = self.now.pose[s];
+		HandPose is = now.pose[s];
+		Vec3 linear = (is.position - was.position) / dt;
+		Vec3 angular = turned(was.rotation, is.rotation) / dt;
+		motion.linear += (linear - motion.linear) * k;
+		motion.angular += (angular - motion.angular) * k;
+	}
+}
+
+<*
+ The turn from `from` to `to` as an axis scaled by its angle in radians, the
+ short way round.
+*>
+fn Vec3 turned(Quaternionf from, Quaternionf to) @local
+{
+	Quaternionf delta = to * from.conjugate();
+	if (delta.l < 0) delta.v = -delta.v;
+	Vec3 axis = delta.v.xyz;
+	float s = axis.length();
+	if (s < 1e-7f) return axis * 2.0f;
+	return axis / s * (2.0f * math::atan2(s, delta.l));
 }
 
 fn char pulled(char before, HandButton button, float value) @local
@@ -198,6 +274,8 @@ fn void Hands.to_world(&self, Vec3 rig, float yaw_degrees)
 			// A hand never seen has a zero quaternion; identity is the honest stand-in.
 			if (rotation.v == (float[<4>]){ 0, 0, 0, 0 }) rotation = { 0, 0, 0, 1 };
 			state.world[k] = { .position = rig + turn_y(pose.position, yaw), .rotation = turn * rotation };
+			HandMotion motion = state.motion[k];
+			state.world_motion[k] = { .linear = turn_y(motion.linear, yaw), .angular = turn_y(motion.angular, yaw) };
 		}
 	}
 }
@@ -248,6 +326,9 @@ struct TrackedNode
 	NodeId node;
 	Hand hand;
 	HandSpace space;
+	// Hidden while the hand is disconnected. The engine's own grip and aim
+	// groups are; a script's object keeps the visibility the script gave it.
+	bool shown_with_hand;
 }
 
 <*
@@ -256,9 +337,10 @@ struct TrackedNode
  Top-level only: the pose written is a world pose, and at the top level local
  and world are the same thing.
 
+ @param shown_with_hand : "Hide the node while the hand is disconnected"
  @return "False when the node is gone or is not top-level"
 *>
-fn bool Scene.track_hand(&self, NodeId id, Hand hand, HandSpace space)
+fn bool Scene.track_hand(&self, NodeId id, Hand hand, HandSpace space, bool shown_with_hand = true)
 {
 	Node* node = self.node(id);
 	if (node == null || node.parent != self.root) return false;
@@ -267,10 +349,27 @@ fn bool Scene.track_hand(&self, NodeId id, Hand hand, HandSpace space)
 		if (entry.node != id) continue;
 		entry.hand = hand;
 		entry.space = space;
+		entry.shown_with_hand = shown_with_hand;
 		return true;
 	}
-	self.tracked.push({ .node = id, .hand = hand, .space = space });
+	self.tracked.push({ .node = id, .hand = hand, .space = space, .shown_with_hand = shown_with_hand });
 	return true;
+}
+
+<*
+ Stops keeping a node on its hand. It stays where the hand last put it.
+
+ @return "False when the node was not tracked"
+*>
+fn bool Scene.untrack_hand(&self, NodeId id)
+{
+	foreach (i, entry : self.tracked)
+	{
+		if (entry.node != id) continue;
+		self.tracked.remove_at(i);
+		return true;
+	}
+	return false;
 }
 
 fn bool Scene.is_tracked(&self, NodeId id)
@@ -283,9 +382,12 @@ fn bool Scene.is_tracked(&self, NodeId id)
 }
 
 <*
- Moves every tracked node onto its hand, and hides it while that hand is
- disconnected. A node that died or was moved under a parent is dropped, and
- one the solver owns is left to the solver.
+ Moves every tracked node onto its hand, and hides the engine's own while that
+ hand is disconnected. A node that died or was moved under a parent is dropped,
+ and one the solver owns is left to the solver.
+
+ Called before the physics step, so a kinematic body on a hand reaches the
+ solver where the hand is this frame.
 *>
 fn void Scene.update_tracked(&self, Hands* hands)
 {
@@ -301,7 +403,7 @@ fn void Scene.update_tracked(&self, Hands* hands)
 		}
 		HandState* state = &hands.hand[entry.hand.ordinal];
 		bool connected = state.now.connected;
-		if (node.visible != connected) self.set_visible(entry.node, connected);
+		if (entry.shown_with_hand && node.visible != connected) self.set_visible(entry.node, connected);
 		if (!connected || self.physics.owns_transform(entry.node)) continue;
 		HandPose pose = state.world[entry.space.ordinal];
 		node.position = pose.position;

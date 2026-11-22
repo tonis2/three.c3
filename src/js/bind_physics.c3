@@ -43,6 +43,8 @@ fn void? JsRuntime.bind_physics_verbs(&self, js::Value host)
 	self.js.@bind(host, "physicsGravityGet", &js_physics_gravity_get, self)!;
 	self.js.@bind(host, "physicsSubstepsSet", &js_physics_substeps_set, self)!;
 	self.js.@bind(host, "physicsSubstepsGet", &js_physics_substeps_get, self)!;
+	self.js.@bind(host, "physicsRateSet", &js_physics_rate_set, self)!;
+	self.js.@bind(host, "physicsRateGet", &js_physics_rate_get, self)!;
 	self.js.@bind(host, "physicsIterationsSet", &js_physics_iterations_set, self)!;
 	self.js.@bind(host, "physicsIterationsGet", &js_physics_iterations_get, self)!;
 	self.js.@bind(host, "physicsMarginSet", &js_physics_margin_set, self)!;
@@ -225,6 +227,25 @@ fn void? js_physics_substeps_set(JsRuntime* self, uint scene_id, double count)
 }
 
 fn uint? js_physics_substeps_get(JsRuntime* self, uint scene_id) => physics_scene(self, scene_id)!.physics.substep_count();
+
+<*
+ `physicsRateSet(scene, hz)` — steps a second, rounded to a whole number; 0 is
+ the default.
+
+ @return? js::THREW
+*>
+fn void? js_physics_rate_set(JsRuntime* self, uint scene_id, double hz)
+{
+	double whole = math::round(hz);
+	if (!(whole == 0 || (whole >= PHYSICS_MIN_RATE && whole <= PHYSICS_MAX_RATE)))
+	{
+		return self.js.fail("three.physics.rate is steps a second from %d to %d, or 0 for %d, not %s",
+			PHYSICS_MIN_RATE, PHYSICS_MAX_RATE, PHYSICS_RATE, hz)~;
+	}
+	physics_scene(self, scene_id)!.physics.set_rate((uint)whole);
+}
+
+fn uint? js_physics_rate_get(JsRuntime* self, uint scene_id) => physics_scene(self, scene_id)!.physics.rate_hz();
 
 fn void? js_physics_iterations_set(JsRuntime* self, uint scene_id, double count)
 {
@@ -494,7 +515,7 @@ fn int? js_physics_joint(
 			.limits = limits,
 		};
 
-		sz? id = a.scene.physics.add_joint(a.id, b.id, spec);
+		sz? id = a.scene.physics.add_joint(a.scene, a.id, b.id, spec);
 		if (catch err = id) return self.js.fail("%s", joint_message(err))~;
 		return (int)id;
 	};
