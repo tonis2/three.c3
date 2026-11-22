@@ -52,7 +52,10 @@ const laserShape = new three.BoxGeometry(0.004, 0.004, 1);
 const palmShape = new three.SphereGeometry(0.03, 12, 8);
 
 // Per hand: a model on the grip and a laser on the aim, both left out of
-// raycasts, and a hidden kinematic ball the solver sees as the hand.
+// raycasts, and a hidden ball the held cube is jointed to. The ball is a
+// kinematic body only while it holds something (`grab`). Solid all the time,
+// it shoved whatever the hand reached past, and on letting go it shoved the
+// cube itself, which the joint had been holding inside it.
 const hands = [three.xr.left, three.xr.right].map((xr) => {
 	const model = new three.Mesh(controllerShape, matte);
 	model.color = [0.82, 0.82, 0.86];
@@ -68,9 +71,8 @@ const hands = [three.xr.left, three.xr.right].map((xr) => {
 	palm.visible = false;
 	palm.collides = false;
 	scene.add(palm);
-	three.physics.add(palm, { shape: 'sphere', kinematic: true });
 
-	return { xr, laser, palm, held: null, joint: -1, last: null, velocity: [0, 0, 0] };
+	return { xr, laser, palm, held: null, last: null, velocity: [0, 0, 0] };
 });
 
 const REACH = 5;
@@ -97,12 +99,18 @@ function nearestCube(at) {
 	return best;
 }
 
+function grab(hand, cube) {
+	three.physics.add(hand.palm, { shape: 'sphere', kinematic: true });
+	three.physics.joint(hand.palm, cube, { type: 'fixed' });
+	hand.held = cube;
+}
+
 function letGo(hand) {
 	if (hand.held === null) return;
-	three.physics.removeJoint(hand.joint);
+	// Taking the palm's body away takes its joint with it.
+	three.physics.remove(hand.palm);
 	three.physics.setVelocity(hand.held, hand.velocity);
 	hand.held = null;
-	hand.joint = -1;
 }
 
 three.setAnimationLoop((ms) => {
@@ -126,7 +134,14 @@ three.setAnimationLoop((ms) => {
 		}
 		const g = xr.grip.position;
 		const at = [g.x, g.y, g.z];
-		if (hand.last !== null) hand.velocity = at.map((v, i) => (v - hand.last[i]) / dt);
+		// Averaged over about 50 ms. One frame's step at 120 Hz is mostly
+		// tracking noise, and handed to a cube set down gently it kicks it.
+		if (hand.last === null) {
+			hand.velocity = [0, 0, 0];
+		} else {
+			const k = Math.min(1, dt / 0.05);
+			hand.velocity = hand.velocity.map((v, i) => v + ((at[i] - hand.last[i]) / dt - v) * k);
+		}
 		hand.last = at;
 		hand.palm.position.set(...at);
 
@@ -139,8 +154,7 @@ three.setAnimationLoop((ms) => {
 		if (xr.pressed('squeeze') && hand.held === null) {
 			const cube = nearestCube(at);
 			if (cube !== null) {
-				hand.held = cube;
-				hand.joint = three.physics.joint(hand.palm, cube, { type: 'fixed' });
+				grab(hand, cube);
 				xr.vibrate(0.8, 0.12);
 			}
 		}
