@@ -200,6 +200,23 @@ export class XrHand {
 const left = new XrHand(0);
 const right = new XrHand(1);
 
+// The player's head, in the world: between the eyes on a headset, the camera's
+// eye at a desk. Read-only; a script moves the player with `three.camera`.
+const head = {
+	get position() {
+		const p = H.xrHead().position;
+		return new Vector3(null, p[0], p[1], p[2]);
+	},
+	// Where the head looks, a unit vector.
+	get direction() {
+		const d = H.xrHead().direction;
+		return new Vector3(null, d[0], d[1], d[2]);
+	},
+	// Whether this frame's pose is known. While the headset has lost tracking
+	// the head stays where it was last seen.
+	get tracked() { return H.xrHead().tracked; },
+};
+
 // The headset. Off one, the rate reads 0, the list is empty and no hand is
 // connected.
 export const xr = {
@@ -240,6 +257,7 @@ export const xr = {
 
 	left,
 	right,
+	head,
 
 	// Lets go of everything `press`, `tilt`, `place` and `connect` held.
 	releaseAll() { H.xrHandsReleaseAll(); },

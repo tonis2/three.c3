@@ -102,6 +102,9 @@ struct HandsReading
 {
 	// By `Hand`.
 	HandReading[2] hand;
+	// Between the eyes, in tracking space, when `head_tracked`.
+	HandPose head;
+	bool head_tracked;
 }
 
 <*
@@ -156,6 +159,11 @@ struct Hands
 	SyntheticHand[2] synthetic;
 	// Mouse and keys drive the hands on a desktop run.
 	bool emulate;
+	// The last head pose read, in tracking space, kept while the head is not tracked.
+	HandPose head;
+	bool head_tracked;
+	// `head`, placed by `Hands.to_world`.
+	HandPose head_world;
 }
 
 fn char HandButton.bit(self) => (char)(1 << self.ordinal);
@@ -182,6 +190,8 @@ fn HandReading SyntheticHand.merge(&self, HandReading real)
 *>
 fn void Hands.step(&self, HandsReading reading, float dt = 0)
 {
+	self.head_tracked = reading.head_tracked;
+	if (reading.head_tracked) self.head = reading.head;
 	foreach (i, &state : self.hand)
 	{
 		HandReading now = self.synthetic[i].merge(reading.hand[i]);
@@ -257,7 +267,7 @@ fn char pulled(char before, HandButton button, float value) @local
 }
 
 <*
- Places both hands in the world from the rig.
+ Places both hands and the head in the world from the rig.
 
  @param rig : "Where the tracking space's origin sits in the world"
  @param yaw_degrees : "How far the tracking space is turned about +Y"
@@ -266,6 +276,9 @@ fn void Hands.to_world(&self, Vec3 rig, float yaw_degrees)
 {
 	float yaw = math::deg_to_rad(yaw_degrees);
 	Quaternionf turn = quaternion::from_axis_angle((Vec3){ 0, 1, 0 }, yaw);
+	Quaternionf head = self.head.rotation;
+	if (head.v == (float[<4>]){ 0, 0, 0, 0 }) head = { 0, 0, 0, 1 };
+	self.head_world = { .position = rig + turn_y(self.head.position, yaw), .rotation = turn * head };
 	foreach (&state : self.hand)
 	{
 		foreach (k, pose : state.now.pose)
@@ -469,6 +482,17 @@ fn HandsReading emulate_hands(Camera* camera, InputState* input, uint width, uin
 	if (input.down.has(M)) hand.buttons |= HandButton.MENU.bit();
 	hand.stick = keys_stick(input, W, S, A, D);
 	return reading;
+}
+
+<*
+ The head at a desk: the camera's eye, looking where the camera looks.
+
+ @param [&in] camera : "The view; its target and yaw are the rig"
+ @return "The head in tracking space"
+*>
+fn HandPose desk_head(Camera* camera)
+{
+	return from_world({ .position = camera.eye(), .rotation = facing(-camera.orbit_dir()) }, camera.target, camera.yaw);
 }
 
 fn void place_emulated(HandReading* hand, HandPose world, Camera* camera) @local

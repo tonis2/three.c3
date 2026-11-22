@@ -21,6 +21,7 @@ fn void? JsRuntime.bind_xr_verbs(&self, js::Value host)
 	self.js.@bind(host, "xrHandProfile", &js_xr_hand_profile, self)!;
 	self.js.@bind(host, "xrHandPose", &js_xr_hand_pose, self)!;
 	self.js.@bind(host, "xrHandMotion", &js_xr_hand_motion, self)!;
+	self.js.@bind(host, "xrHead", &js_xr_head, self)!;
 	self.js.@bind(host, "xrVibrate", &js_xr_vibrate, self)!;
 	self.js.@bind(host, "xrHandHold", &js_xr_hand_hold, self)!;
 	self.js.@bind(host, "xrHandTilt", &js_xr_hand_tilt, self)!;
@@ -110,6 +111,31 @@ fn HandMotion js_xr_hand_motion(JsRuntime* self, int hand, int space)
 	if (!valid_hand(hand) || space < 0 || space >= HandSpace::len) return { };
 	self.hands.to_world(self.pass.camera.target, self.pass.camera.yaw);
 	return self.hands.hand[hand].world_motion[space];
+}
+
+// What `xrHead` answers with, in the world.
+struct HeadView
+{
+	// Whether this frame's pose is known; the last one is kept when it is not.
+	bool tracked;
+	Vec3 position;
+	// Where the head looks.
+	Vec3 direction;
+}
+
+<*
+ `xrHead()` — the head between the eyes on a headset, the camera's eye at a desk,
+ placed from the rig as it is now.
+*>
+fn HeadView js_xr_head(JsRuntime* self)
+{
+	self.hands.to_world(self.pass.camera.target, self.pass.camera.yaw);
+	HandPose pose = self.hands.head_world;
+	return {
+		.tracked = self.hands.head_tracked,
+		.position = pose.position,
+		.direction = pose.forward(),
+	};
 }
 
 <*

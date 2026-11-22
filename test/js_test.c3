@@ -7634,6 +7634,44 @@ fn void a_headset_reading_reaches_the_script_with_its_edges() @test
 }
 
 <*
+ The headset's head is placed from the rig like a hand; at a desk it is the
+ camera's eye, looking where the camera looks.
+*>
+fn void the_head_is_the_headsets_or_the_cameras() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult setup = run.run(`
+			three.camera.lookAt(2, 0, 0);
+			three.camera.orbit(90, 0, 0);
+			globalThis.round = (v) => [v.x, v.y, v.z].map(n => Math.round(n * 100) / 100 + 0);`);
+		defer setup.free();
+		test::@check(setup.ok, "%s", setup.error);
+
+		// Turned 90 degrees, the rig's -Z is the world's -X.
+		three::HandsReading reading;
+		reading.head = { .position = { 0, 1.6, -0.5 }, .rotation = { 0, 0, 0, 1 } };
+		reading.head_tracked = true;
+		run.tick(16, { }, &reading);
+		three::RunResult worn = run.run("const h = three.xr.head; return [h.tracked, round(h.position), round(h.direction)];");
+		defer worn.free();
+		test::@check(worn.value == "[true,[1.5,1.6,0],[-1,0,0]]", "the headset's head: %s %s", worn.value, worn.error);
+
+		// Lost tracking keeps where it was.
+		three::HandsReading lost;
+		run.tick(32, { }, &lost);
+		three::RunResult kept = run.run("const h = three.xr.head; return [h.tracked, round(h.position)];");
+		defer kept.free();
+		test::@check(kept.value == "[false,[1.5,1.6,0]]", "a lost head stays put: %s %s", kept.value, kept.error);
+
+		run.tick(48);
+		three::RunResult desk = run.run("const h = three.xr.head; const e = three.camera.position(); return [h.tracked, round(h.position), round(e), round(h.direction)];");
+		defer desk.free();
+		test::@check(desk.value == "[true,[2,0,0],[2,0,0],[-1,0,0]]", "at a desk it is the camera's eye: %s %s", desk.value, desk.error);
+	};
+}
+
+<*
  The grip is a group the engine places from the rig, so it follows a camera the
  callback moved, and a child of it follows it.
 *>

@@ -340,6 +340,11 @@ fn bool JsRuntime.tick(&self, double elapsed_ms, InputState input = { }, HandsRe
 		hands = emulate_hands(&self.pass.camera, &frame, width, height);
 		frame = without_emulated(frame);
 	}
+	if (xr == null)
+	{
+		hands.head = desk_head(&self.pass.camera);
+		hands.head_tracked = true;
+	}
 
 	self.take_input(frame);
 

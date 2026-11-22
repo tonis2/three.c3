@@ -119,12 +119,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		bool focused = host.state == xr::SESSION_STATE_FOCUSED;
 		HandsReading hands;
 		host.input.read(host.session, host.space, frame.predicted_display_time, focused, &hands);
-		runtime.tick(elapsed_ms, { }, &hands);
-		host.input.send_haptics(host.session, &runtime.hands, focused);
-
+		// The eyes before the tick, so the script reads the head this frame is drawn from.
 		xr::View[2] views = { { .type = xr::TYPE_VIEW }, { .type = xr::TYPE_VIEW } };
-		bool drawn = false;
-		long wait_ns;
+		bool seen = false;
 		if (frame.should_render != 0)
 		{
 			xr::ViewState view_state = { .type = xr::TYPE_VIEW_STATE };
@@ -136,13 +133,24 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			};
 			uint count;
 			xr::check(xr::cmd.locate_views(host.session, &locate, &view_state, 2, &count, &views[0]), "xrLocateViews")!;
-			if (count == 2 && (view_state.view_state_flags & xr::VIEW_STATE_ORIENTATION_VALID_BIT) != 0)
+			seen = count == 2 && (view_state.view_state_flags & xr::VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+			if (seen && (view_state.view_state_flags & xr::VIEW_STATE_POSITION_VALID_BIT) != 0)
 			{
-				aim_eyes(renderer, views);
-				renderer.update_foveation(views)!;
-				draw_to_swapchain(host, renderer, &wait_ns)!;
-				drawn = true;
+				hands.head = between_eyes(views);
+				hands.head_tracked = true;
 			}
+		}
+		runtime.tick(elapsed_ms, { }, &hands);
+		host.input.send_haptics(host.session, &runtime.hands, focused);
+
+		bool drawn = false;
+		long wait_ns;
+		if (seen)
+		{
+			aim_eyes(renderer, views);
+			renderer.update_foveation(views)!;
+			draw_to_swapchain(host, renderer, &wait_ns)!;
+			drawn = true;
 		}
 		runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
 
@@ -182,6 +190,15 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			gpu_sum = {};
 		}
 	}
+}
+
+// The head as the point between the two eyes, turned the way the left one is.
+fn HandPose between_eyes(xr::View[2] views) @local
+{
+	xr::Posef l = views[0].pose;
+	xr::Posef r = views[1].pose;
+	Vec3 middle = { (l.position.x + r.position.x) * 0.5f, (l.position.y + r.position.y) * 0.5f, (l.position.z + r.position.z) * 0.5f };
+	return { .position = middle, .rotation = { l.orientation.x, l.orientation.y, l.orientation.z, l.orientation.w } };
 }
 
 // For the timing line: which controller a hand holds, or "-".

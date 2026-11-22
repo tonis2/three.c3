@@ -1652,6 +1652,22 @@ if (three.xr.passthroughSupported) three.xr.passthrough = true;
 
 Whether this headset can show the room: true on Quest 3 and 3S, false off a headset. Known at boot.
 
+## three.xr.head
+
+Where the player's head is, in the world: `position` (between the eyes), `direction` (where it looks, a unit
+Vector3) and `tracked`. At a desk it is the camera's eye, looking where the camera looks. Read-only: the player
+moves with `three.camera`, which is the rig.
+
+`three.camera.position()` is the rig's orbit point and does not follow the head, so this is what to place
+things by — a holster at the hip, a menu in front of the eyes. The tracking space's origin is the play area's
+centre, not where the player stands, so a game that needs the player at a mark reads the head. While the
+headset has lost tracking, `tracked` is false and the head stays where it was last seen.
+
+```js
+const h = three.xr.head.position;
+basket.position.set(h.x + 0.25, h.y - 0.8, h.z - 0.2);
+```
+
 ## three.xr.left / three.xr.right
 
 The two hand controllers, each an `XrHand`. Off a headset neither is connected and every value reads as nothing
