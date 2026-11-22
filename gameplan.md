@@ -92,6 +92,19 @@ Only what is comfortable in a headset.
       - Steps that run slower than real time are not caught up on: the next
         frame takes one, so the world slows down instead of the frame rate
         falling to 3 fps.
+- [x] **The head** (found by milestone 1). `three.xr.head.position` / `direction`:
+      the play area's centre is not where the player stands, so the basket and the
+      throwing line are placed from the head. At a desk it is the camera's eye.
+- [x] **A castle that never slept** (found by milestone 1). A tower and the wall
+      against it are two islands; settling at different moments, each woke the
+      other as it fell asleep, for ever: 8-10 ms of solver a frame for a castle
+      nobody touched. Islands whose boxes overlap now sleep together (1.1 ms).
+      A body added after the last joint also gets its own island now; it shared
+      island 0 with every other such body.
+- [x] **Bricks are cheaper to solve** (found by milestone 2). A box's inverse inertia
+      is applied by turning the vector into the body frame and back instead of
+      rebuilding the world tensor, which the solver did on nearly every query
+      because every correction turns the body. About 10% of a hit.
 - [ ] **Audio.** The engine has none, and a physics game feels hollow without impact
       sounds. A feature of its own (AAudio on Quest, CoreAudio on the Mac); haptics
       stand in until then.
@@ -125,8 +138,45 @@ desktop with `--xr-emulate`.
    it the broad phase scanning one 2 m cell (a cell size per world would fix it), and
    one island solves on one thread.
 1. **Throwing.** The basket, the stones, the throw with hand velocity, haptics.
+   In progress: `examples/siege/siege.js`. The basket sits at the right hip, the
+   player is put on the line facing the castle, and every throw is kept in
+   `siege.throws` (release speed, what it hit, the most any weld carried) for
+   reading over MCP while somebody throws.
+
+   **Found on the headset:**
+   - Unaided throws left at 4-6 m/s, lobbed. A 1.6x boost (`siege.tuning.scale`)
+     makes them 7-8 m/s, which reaches the castle on a flat arc.
+   - Reading the release at the fastest frame in the last 100 ms (`'peak'`)
+     rather than the frame squeeze opened: a hand that slowed 40 ms before letting
+     go read 3.4 m/s raw and 8.1 m/s peak.
+   - At 250 N / 40 N·m no weld broke: a hit put at most 141 N and 6.6 N·m on any
+     weld. At 100 N / 4 N·m an 8 m/s hit breaks about six, mostly on torque, but
+     one weld breaks as the castle settles (100.1 N when it is built), so
+     milestone 2 has to build a castle whose first moments stay under its rating.
+   - The `debug.oculus.refreshRate` property (120) overrides the script's 90 Hz.
 2. **Castle and textures.** One builder (`buildWall`, `buildTower`) for all three
    levels, and the materials.
+   In progress, in `siege.js`: a palisade (54 pieces), a keep (192) and a belfry
+   (89), built from bricks on a 10 cm grid in offset courses; stone, wood, plinth,
+   turf and pebble textures generated at load. X moves to the next castle.
+
+   **Found on the desktop:**
+   - Welded pieces that do not collide carry the weight above them through their
+     welds (40-110 N at the foot of a tower). Pieces resting on each other now
+     collide, so the weight goes through the contact.
+   - A weld's torque at rest is mostly the solver working against the contacts,
+     up to 3 N·m on a weld nothing pulls, so no rating below that survives
+     standing still. Welds are rated on force only (100 N stone, 60 N wood), for
+     collapses.
+   - A stone hitting a welded wall hands its momentum to the whole wall, and the
+     struck brick's friction with the bricks round it does the same once it is
+     free. So a stone frees the pieces round the point it is about to hit, the
+     frame before it lands, and pushes them with 80% of its momentum.
+   - Two substeps at 90 Hz halve the solver and let pieces slide out further,
+     but the belfry only keeps still at four: each castle names the substeps a
+     second it needs. A hit costs 1.3-2.8 ms on the Mac, about 5-9 ms on the
+     Quest by the probe's ratio. Not yet measured on the headset.
+   - Pieces are toy weight, 0.3 kg per stone cell, and the stone is 0.6 kg.
 3. **The catapult.**
 4. **Game loop.** Score, stones left, reset on B, level select, the scoreboard.
 5. **Post and polish.** Grade, bloom, slow motion, dust. Measure the cost: any script
