@@ -1907,3 +1907,98 @@ fn void a_soft_body_is_drawn_as_the_solver_left_it() @test
 		);
 	};
 }
+
+<*
+ How hard the solver works is a scene's to say, and says nothing until it does.
+
+ Per scene, like gravity, because it belongs to the world being stepped; read
+ back as set; and refused with a RangeError outside what it can mean, because the
+ host's own check behind it is a `@require` and a broken one stops the process.
+*>
+fn void the_solver_settings_are_per_scene_and_checked() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const first = new three.Scene();
+			const defaults = [three.physics.substeps, three.physics.iterations, three.physics.contactMargin];
+			three.physics.substeps = 8;
+			three.physics.iterations = 2;
+			three.physics.contactMargin = 0.01;
+			const set = [three.physics.substeps, three.physics.iterations, +three.physics.contactMargin.toFixed(3)];
+
+			const second = new three.Scene();
+			const other = [three.physics.substeps, three.physics.iterations];
+			const kept = first.physics.substeps;
+
+			const refused = [];
+			for (const [name, value] of [['substeps', 0], ['substeps', 33], ['substeps', 2.5], ['iterations', 17],
+				['iterations', 'many'], ['contactMargin', -0.1], ['contactMargin', NaN], ['contactMargin', 2]]) {
+				try { three.physics[name] = value; } catch (e) { if (e instanceof RangeError) refused.push(name); }
+			}
+			return { defaults, set, other, kept, refused: refused.length };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"defaults":[4,1,0.005`), "4 substeps, 1 iteration, 5 mm: %s", result.value);
+		test::@check(result.value.contains(`"set":[8,2,0.01]`), "read back as set: %s", result.value);
+		test::@check(result.value.contains(`"other":[4,1]`), "a new scene starts at the defaults: %s", result.value);
+		test::@check(result.value.contains(`"kept":8`), "and the first keeps its own: %s", result.value);
+		test::@check(result.value.contains(`"refused":8`), "every bad value is a RangeError: %s", result.value);
+	};
+}
+
+<*
+ Substeps reach the solver: a tower of ten 8 cm cubes, each dropped 2 mm onto
+ the one below, topples at the default four and stands at eight. (Eight cubes
+ stand at four; sixteen need sixteen.)
+
+ The toppling half is what proves the setting is used rather than stored. If
+ the solver gets good enough that four holds this tower, make it taller.
+*>
+fn void more_substeps_stand_a_taller_tower() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		double now = 0;
+		int[2] standing;
+		foreach (i, uint substeps : (uint[]){ 4, 8 })
+		{
+			three::RunResult built = run.run(string::tformat(`
+				const scene = new three.Scene();
+				three.physics.substeps = %d;
+				const floor = new three.Mesh(new three.BoxGeometry(20, 1, 20));
+				floor.position.y = -0.5;
+				scene.add(floor);
+				three.physics.add(floor, { shape: 'box', mass: 0 });
+				const shape = new three.BoxGeometry(0.08, 0.08, 0.08);
+				globalThis.tower = [];
+				for (let k = 0; k < 10; k++) {
+					const cube = new three.Mesh(shape);
+					cube.position.set(0, 0.04 + k * 0.082, 0);
+					scene.add(cube);
+					three.physics.add(cube, { shape: 'box', mass: 0.3, friction: 0.7 });
+					globalThis.tower.push(cube);
+				}
+				return three.physics.count;
+			`, substeps));
+			defer built.free();
+			test::@check(built.ok, "the tower built: %s", built.error);
+
+			for (int f = 0; f < 360; f++)
+			{
+				now += 1000.0 / 60.0;
+				run.tick(now);
+			}
+
+			three::RunResult counted = run.run(`
+				return globalThis.tower.filter((c, k) => Math.abs(c.position.y - (0.04 + k * 0.08)) < 0.01).length;
+			`);
+			defer counted.free();
+			test::@check(counted.ok, "read the tower back: %s", counted.error);
+			standing[i] = (int)(counted.value.to_int() ?? -1);
+		}
+		test::@check(standing[1] == 10, "at 8 substeps %d of 10 cubes stand", standing[1]);
+		test::@check(standing[0] < 10, "at 4 all 10 stood too, so this does not show the setting is used");
+	};
+}

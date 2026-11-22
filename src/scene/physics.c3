@@ -46,6 +46,16 @@ const String PHYSICS_OWNS_SOFT_TRANSFORM = "this object's transform belongs to t
 // worth more than a knob.
 const double PHYSICS_STEP_MS = 1000.0 / 60.0;
 
+// How a step is solved when the script says nothing: split into four substeps,
+// each solving its constraints once. `three.physics.substeps` and `iterations`
+// change them per scene; the step itself stays 1/60 s (above).
+const uint PHYSICS_SUBSTEPS = 4;
+const uint PHYSICS_ITERATIONS = 1;
+// Past these a setting is a mistake rather than a stiffer world: each multiplies
+// the solver's whole cost, and 32 x 16 is already 512 constraint passes a step.
+const uint PHYSICS_MAX_SUBSTEPS = 32;
+const uint PHYSICS_MAX_ITERATIONS = 16;
+
 // The most steps one frame may run to catch up. Past this the backlog is dropped
 // rather than run, which is the difference between a stutter and a spiral: every
 // frame that ran long would otherwise ask the next one to run longer still.
@@ -190,7 +200,64 @@ struct Physics
 	// The soft bodies, and the mesh each one deforms — `Physics.add_soft`.
 	List{SoftMesh} softs;
 
+	// How each step is solved, from `three.physics.substeps` / `iterations`. On
+	// this struct rather than the world so a scene can say before its first body
+	// exists. Zero is the default (`PHYSICS_SUBSTEPS`, `PHYSICS_ITERATIONS`), so a
+	// scene that never says steps as every scene did.
+	uint substeps;
+	uint iterations;
+
 	bool opened;
+}
+
+<*
+ How many substeps each 1/60 s step is split into.
+*>
+fn uint Physics.substep_count(&self) => self.substeps > 0 ? self.substeps : PHYSICS_SUBSTEPS;
+
+<*
+ How many times each substep's constraints are solved.
+*>
+fn uint Physics.iteration_count(&self) => self.iterations > 0 ? self.iterations : PHYSICS_ITERATIONS;
+
+<*
+ Splits each step into `count` substeps. More is the cheapest way to a stiffer
+ world — a taller stack, a tighter joint — and costs about that many times the
+ solver's time. A soft body's `damping` is applied once per substep, so it damps
+ harder with more of them.
+
+ @param count : `Substeps per 1/60 s step`
+ @require count >= 1 && count <= PHYSICS_MAX_SUBSTEPS : `Substeps out of range`
+*>
+fn void Physics.set_substeps(&self, uint count) => self.substeps = count;
+
+<*
+ Solves each substep's constraints `count` times, which costs about that many
+ times the constraint solve.
+
+ @param count : `Constraint passes per substep`
+ @require count >= 1 && count <= PHYSICS_MAX_ITERATIONS : `Iterations out of range`
+*>
+fn void Physics.set_iterations(&self, uint count) => self.iterations = count;
+
+<*
+ How close two bodies come before the solver gives them a contact, in world
+ units. Read without opening the world, so asking is not what creates one.
+*>
+fn float Physics.contact_margin(&self) => self.opened ? self.world.contact_margin : collision::DEFAULT_PHYSICS_WORLD.contact_margin;
+
+<*
+ Sets the contact margin (`collision::PhysicsWorld.contact_margin`): bodies this
+ close get a contact before they touch, which is what keeps a stack of small
+ boxes standing. Bodies already in the world are refiled for it.
+
+ @param margin : `World units`
+ @require margin >= 0 : `A negative margin`
+*>
+fn void Physics.set_contact_margin(&self, float margin)
+{
+	self.open();
+	self.world.set_contact_margin(margin);
 }
 
 fn void Physics.open(&self)
@@ -897,20 +964,22 @@ fn void Physics.step(&self, Scene* scene, double elapsed_ms)
 	int steps  = 0;
 	// `run_step` requires a rigid body — its broad phase, its islands and its
 	// event lists are all about them — and a scene may hold nothing but soft
-	// bodies. `solve_soft_bodies` is the phase `run_step` would have reached, with
-	// the same argument, so a soft-only world steps identically rather than
-	// needing an invisible box in it to be legal.
+	// bodies. `solve_soft_bodies` is the phase `run_step` reaches once a substep,
+	// so calling it once a substep with the substep's time steps a soft-only
+	// world identically rather than needing an invisible box in it to be legal.
 	bool rigid = self.bodies.len() > 0;
+	uint substeps = self.substep_count();
+	uint iterations = self.iteration_count();
 	while (self.accumulator_ms >= PHYSICS_STEP_MS && steps < PHYSICS_MAX_STEPS)
 	{
 		float dt = (float)(PHYSICS_STEP_MS / 1000.0);
 		if (rigid)
 		{
-			self.world.run_step(dt, 1, 4);
+			self.world.run_step(dt, iterations, substeps);
 		}
 		else
 		{
-			self.world.solve_soft_bodies(dt);
+			for (uint i = 0; i < substeps; i++) self.world.solve_soft_bodies(dt / (float)substeps);
 		}
 		self.accumulator_ms -= PHYSICS_STEP_MS;
 		steps++;
@@ -1575,16 +1644,16 @@ fn void? Physics.add_soft(&self, Scene* scene, Assets* assets, NodeId node_id, S
 		collision::SoftBody body = collision::create_softbody_from_mesh(&source, spec.mass, id, mem);
 		if (spec.softness > 0) body.set_distance_compliance(spec.softness);
 
-		// ONE substep, because the step above it already takes four.
-		// `Physics.step` calls `run_step(dt, 1, 4)`, and `run_step` runs the whole
-		// soft phase inside each of those four — so a body that also substeps four
-		// times is integrated SIXTEEN times a frame. The simulated time still adds
-		// up, but two things scale with the count and should not: the cost, four
-		// times over, and `damping`, which the solver applies once per substep.
-		// Sixteen applications of 0.99 is 0.85 a frame, which is a terminal
-		// velocity of about a unit a second — a jelly that sinks like it is in
-		// syrup instead of falling. One here means four a frame, the same as the
-		// rigid bodies beside it.
+		// ONE substep, because the step above it already takes several.
+		// `Physics.step` runs the whole soft phase once per world substep (four
+		// unless `three.physics.substeps` says otherwise) — so a body that also
+		// substepped four times would be integrated SIXTEEN times a frame. The
+		// simulated time still adds up, but two things scale with the count and
+		// should not: the cost, four times over, and `damping`, which the solver
+		// applies once per substep. Sixteen applications of 0.99 is 0.85 a frame,
+		// which is a terminal velocity of about a unit a second — a jelly that
+		// sinks like it is in syrup instead of falling. One here means one per
+		// world substep, the same as the rigid bodies beside it.
 		body.substeps = 1;
 		body.damping = spec.damping;
 		body.material.static_friction = spec.friction;

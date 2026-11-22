@@ -5,6 +5,7 @@
  three.physics.add(mesh)
  three.physics.remove(mesh)
  three.physics.gravity = [0, -9.8, 0]
+ three.physics.substeps = 8                       // and iterations, contactMargin
  three.physics.velocity(mesh)                     // and setVelocity
  three.physics.applyImpulse(mesh, [0, 5, 0])
  three.physics.joint(door, frame, { type: 'hinge', axis: [0, 1, 0] })
@@ -39,6 +40,12 @@ fn void? JsRuntime.bind_physics_verbs(&self, js::Value host)
 	self.js.@bind(host, "physicsRemove", &js_physics_remove, self)!;
 	self.js.@bind(host, "physicsGravitySet", &js_physics_gravity_set, self)!;
 	self.js.@bind(host, "physicsGravityGet", &js_physics_gravity_get, self)!;
+	self.js.@bind(host, "physicsSubstepsSet", &js_physics_substeps_set, self)!;
+	self.js.@bind(host, "physicsSubstepsGet", &js_physics_substeps_get, self)!;
+	self.js.@bind(host, "physicsIterationsSet", &js_physics_iterations_set, self)!;
+	self.js.@bind(host, "physicsIterationsGet", &js_physics_iterations_get, self)!;
+	self.js.@bind(host, "physicsMarginSet", &js_physics_margin_set, self)!;
+	self.js.@bind(host, "physicsMarginGet", &js_physics_margin_get, self)!;
 	self.js.@bind(host, "physicsCount", &js_physics_count, self)!;
 	self.js.@bind(host, "physicsTransform", &js_physics_transform, self)!;
 	self.js.@bind(host, "physicsVelocityGet", &js_physics_velocity_get, self)!;
@@ -191,6 +198,49 @@ fn Vec3? js_physics_gravity_get(JsRuntime* self, uint scene_id)
 	// that creates a world.
 	return scene.physics.opened ? scene.physics.world.gravity : PHYSICS_GRAVITY;
 }
+
+<*
+ A whole count from 1 to `max`, or a throw naming the setting. The prelude checks
+ first with a better message; this is the host not trusting it, because what it
+ guards is a `@require`, and a broken one takes the process down.
+
+ @return? js::THREW
+*>
+fn uint? solver_count(JsRuntime* self, double value, String what, uint max) @local
+{
+	if (!(value >= 1 && value <= max) || value != math::floor(value))
+	{
+		return self.js.fail("three.physics.%s is a whole number from 1 to %d, not %s", what, max, value)~;
+	}
+	return (uint)value;
+}
+
+fn void? js_physics_substeps_set(JsRuntime* self, uint scene_id, double count)
+{
+	uint checked = solver_count(self, count, "substeps", PHYSICS_MAX_SUBSTEPS)!;
+	physics_scene(self, scene_id)!.physics.set_substeps(checked);
+}
+
+fn uint? js_physics_substeps_get(JsRuntime* self, uint scene_id) => physics_scene(self, scene_id)!.physics.substep_count();
+
+fn void? js_physics_iterations_set(JsRuntime* self, uint scene_id, double count)
+{
+	uint checked = solver_count(self, count, "iterations", PHYSICS_MAX_ITERATIONS)!;
+	physics_scene(self, scene_id)!.physics.set_iterations(checked);
+}
+
+fn uint? js_physics_iterations_get(JsRuntime* self, uint scene_id) => physics_scene(self, scene_id)!.physics.iteration_count();
+
+fn void? js_physics_margin_set(JsRuntime* self, uint scene_id, double margin)
+{
+	if (!(margin >= 0 && margin <= 1))
+	{
+		return self.js.fail("three.physics.contactMargin is a distance from 0 to 1, not %s", margin)~;
+	}
+	physics_scene(self, scene_id)!.physics.set_contact_margin((float)margin);
+}
+
+fn float? js_physics_margin_get(JsRuntime* self, uint scene_id) => physics_scene(self, scene_id)!.physics.contact_margin();
 
 <*
  `physicsTransform(node)` — where the solver has put a node, as

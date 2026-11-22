@@ -1976,6 +1976,27 @@ its exit event, so a script that destroys something in a trigger volume still he
 which is why it is not a live Vector3. It is per scene, like the world it belongs to — `scene.physics.gravity`
 for one that is not being rendered.
 
+## three.physics.substeps
+
+How many substeps each 1/60 s step is split into: a whole number from 1 to 32, 4 by default. More is the
+cheapest way to a stiffer world, and costs about that many times the solver's time. A tower of 8 cm cubes
+stands eight high at 4, fourteen at 8 and sixteen at 16. The step itself is fixed, because two worlds stepped
+at different rates are two different simulations. A soft body's `damping` is applied once per substep, so it
+damps harder with more of them. Per scene, like `gravity`; a RangeError outside 1–32.
+
+## three.physics.iterations
+
+How many times each substep's constraints are solved: a whole number from 1 to 16, 1 by default. It costs
+about that many times the constraint solve. Per scene; a RangeError outside 1–16.
+
+## three.physics.contactMargin
+
+How close two bodies come, in metres, before the solver gives them a contact: 0.005 by default, 0 to 1. A
+contact that has not closed yet never pushes, so this is not a gap left between things. It is what keeps a
+stack standing while the solver moves the bodies under it, and raising it can help a stack of very small or
+very fast things. Pairs closer than half of it count as touching for `three.onContact`. Per scene; a
+RangeError outside 0–1.
+
 ## three.physics.count
 
 How many bodies the rendered scene's world holds. `scene.physics.count` is any scene's.

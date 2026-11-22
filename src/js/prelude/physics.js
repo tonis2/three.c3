@@ -127,6 +127,15 @@ function packJointLimits(limits) {
 	return new Float32Array(rows);
 }
 
+// A solver count — substeps, iterations — as the whole number it has to be.
+function solverCount(value, name, max) {
+	const n = Number(value);
+	if (!Number.isInteger(n) || n < 1 || n > max) {
+		throw new RangeError(`three.physics.${name} is a whole number from 1 to ${max}, not ${value}`);
+	}
+	return n;
+}
+
 // One scene's physics verbs. Called by the `Scene` constructor.
 export function makeScenePhysics(scene) {
 	return {
@@ -207,6 +216,32 @@ export function makeScenePhysics(scene) {
 		set gravity(value) {
 			const [x, y, z] = asTriple(value, 'three.physics.gravity');
 			H.physicsGravitySet(scene._sid, x, y, z);
+		},
+
+		// How each 1/60 s step is solved. The step itself is fixed (two
+		// worlds stepped at different rates are two different simulations);
+		// these are how hard the solver works inside it, and each costs about
+		// its own multiple of the solver's time. Substeps buy the most: a
+		// tower of small boxes that topples at 4 stands at 8. Iterations
+		// re-solve each substep's constraints. contactMargin is how close, in metres, two bodies come
+		// before they get a contact; 0 is none before touching.
+		get substeps() { return H.physicsSubstepsGet(scene._sid); },
+		set substeps(value) {
+			H.physicsSubstepsSet(scene._sid, solverCount(value, 'substeps', 32));
+		},
+		get iterations() { return H.physicsIterationsGet(scene._sid); },
+		set iterations(value) {
+			H.physicsIterationsSet(scene._sid, solverCount(value, 'iterations', 16));
+		},
+		// Stored as a 32-bit float: rounded to what one holds, so 0.005
+		// reads back as 0.005 rather than 0.004999999888.
+		get contactMargin() { return Number(H.physicsMarginGet(scene._sid).toPrecision(7)); },
+		set contactMargin(value) {
+			const margin = Number(value);
+			if (!(margin >= 0 && margin <= 1)) {
+				throw new RangeError(`three.physics.contactMargin is a distance from 0 to 1, not ${value}`);
+			}
+			H.physicsMarginSet(scene._sid, margin);
 		},
 
 		// How many bodies the world holds.
