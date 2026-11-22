@@ -615,7 +615,10 @@ struct ShadowPush
 	FrameBlock* frame;
 	Instance* instances;
 	DrawRecord* draw;
-	uint[<2>] padding;
+	// Nonzero draws each view with its own frame block's camera rather than
+	// `projection`: a multiview depth pass, where one push serves both eyes.
+	uint view_cameras;
+	uint padding;
 	Matrix4f projection;
 }
 
@@ -1560,7 +1563,10 @@ fn MeshPipeline? MeshPipeline.init(
 	if (state.skip_features != 0) stages[1].pSpecializationInfo = &lights;
 
 	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
+	// Every view of the target in one draw, which is how the scene is drawn into
+	// a multiview target.
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
+		.setViewMask(target.view_mask())
 		.setColorAttachmentFormats((vk::Format[]) { color })
 		.setDepthAttachmentFormat(target.depth_format);
 
@@ -1811,7 +1817,8 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.shady and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
-	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false, bool density_map = false)
+	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false, bool density_map = false,
+	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED)
 {
 	// The list is both the contract the module is held to and the names its
 	// stages are created under: one place, so the pipeline cannot check for one
@@ -1838,12 +1845,23 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 	// called with an empty slice, for the reason `init_post` leaves the depth
 	// format out: the zero the struct starts with already spells "there is none".
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
+		.setViewMask(view_mask)
 		.setDepthAttachmentFormat(depth_format);
 
 	// Zero attachments, which is legal precisely because the rendering info above
 	// declares none. Passed rather than left null so nothing has to reason about
 	// which of the two spellings a driver accepts.
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::pipelineColorBlendStateCreateInfo();
+
+	// Or a colour attachment it leaves alone, for a depth prepass drawn inside
+	// the scene's own rendering.
+	vk::Format[1] colors = { color };
+	vk::PipelineColorBlendAttachmentState[1] untouched = { { .colorWriteMask = (vk::ColorComponentFlags)0 } };
+	if (color != FORMAT_UNDEFINED)
+	{
+		rendering = rendering.setColorAttachmentFormats(colors[..]);
+		color_blend = color_blend.setAttachments(untouched[..]);
+	}
 
 	// Depth tested and written is the whole output; `CULL_MODE_NONE` statically for
 	// the two reasons in the header.

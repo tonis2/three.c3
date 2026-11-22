@@ -29,7 +29,14 @@ struct VertexIn
 {
 	uint vid @builtin(vertex_index);
 	uint iid @builtin(instance_index);
+	uint view @builtin(view_index);
 }
+
+// Which view's frame block the per-view fields are read from: the eye a
+// multiview pass is drawing, and 0 in any other pass, where `view_index` is 0.
+// The blocks sit one after another, so `push.frame[frame_view]` is that eye's.
+// Fields that are the same for every view keep reading `push.frame[0]`.
+private uint frame_view;
 
 // The interpolated surface frame, and the world position a shadow lookup needs.
 // In the fragment half's order, because the fragment half's parameter is this
@@ -48,7 +55,10 @@ struct VertexOutput
 	// This copy's world origin, flat because it is one value for the copy and
 	// interpolating a constant is three multiplies a frame to arrive back at it.
 	float3 origin @flat;
-	float4 sv_position @position;
+	// Invariant here and in the depth prepass, so the two land on the same depth
+	// to the bit and the scene's EQUAL test passes. Without it Adreno rounds the
+	// two differently once the prepass reads each eye's camera from memory.
+	float4 sv_position @position @invariant;
 
 	// This copy's variant, the row a material's uniform tables are indexed by.
 	// Carried unclamped: which row is in range is a fact about the material's
@@ -67,11 +77,12 @@ struct VertexOutput
 // and a builtin the rasteriser produces has no meaning on the way out.
 fn float4 mesh_fragment(VertexOutput input, bool front_facing) @required;
 
-// The rasteriser's own front-face flag, as an entry parameter of its own - the
-// port of Slang's `bool front_facing : SV_IsFrontFace`.
-struct FragmentFace
+// The rasteriser's own front-face flag and the view being drawn, as an entry
+// parameter of their own.
+struct FragmentBuiltins
 {
 	bool front_facing @builtin(front_facing);
+	uint view @builtin(view_index);
 }
 
 // One row of a material's uv variant table: a quarter turn, a flip, and a
@@ -201,7 +212,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	}
 	else
 	{
-		output.sv_position = push.frame[0].view_projection * world;
+		output.sv_position = push.frame[frame_view].view_projection * world;
 	}
 	output.world = world.xyz;
 	output.normal = (instance.normal * float4(v.normal, 0.0)).xyz;
@@ -237,12 +248,14 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 
 fn VertexOutput vertexMain(VertexIn input) @vertex
 {
+	frame_view = input.view;
 	VertexOutput output;
 	mesh_vertex(input, output);
 	return output;
 }
 
-fn float4 fragmentMain(VertexOutput input, FragmentFace face) @fragment
+fn float4 fragmentMain(VertexOutput input, FragmentBuiltins face) @fragment
 {
+	frame_view = face.view;
 	return mesh_fragment(input, face.front_facing);
 }

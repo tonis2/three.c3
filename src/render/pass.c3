@@ -142,6 +142,7 @@ struct SceneView
 struct PreparedSceneView
 {
 	vk::Rect2D rect;
+	Camera camera;
 	Matrix4f view_projection;
 	ulong frame_address;
 }
@@ -255,6 +256,10 @@ struct MeshPass
 	// place the resolution happens.
 	vk::Rect2D scene_rect;
 	bool scene_rect_partial;
+	// The target draws every view at once through a view mask, each into its own
+	// layer: the main camera into layer 0, the extra views after it. Set by
+	// `prepare` from the target.
+	bool multiview;
 	// The lights this frame is drawn with, and the floor and world under them. The
 	// active scene's own — `SceneLook` is where a script's writes land, and
 	// `activate_scene` is the only thing that copies one here.
@@ -274,9 +279,9 @@ struct MeshPass
 	uint scene_warn_at;
 
 	// Per frame in flight — see the header.
+	// The main view's frame block, then each extra view's, one after another.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] frame_blocks;
-	vk::Memory[MAX_FRAMES_IN_FLIGHT] extra_frame_blocks;
-	sz[MAX_FRAMES_IN_FLIGHT] extra_frame_capacity;
+	sz[MAX_FRAMES_IN_FLIGHT] frame_block_capacity;
 	// Variable-length GPU light registry. The frame block carries its address.
 	vk::Memory[MAX_FRAMES_IN_FLIGHT] light_buffers;
 	sz[MAX_FRAMES_IN_FLIGHT] light_capacity;
@@ -1061,18 +1066,55 @@ fn float[4] rect_floats(vk::Rect2D rect) => {
 	(float)rect.offset.x, (float)rect.offset.y, (float)rect.extent.width, (float)rect.extent.height
 };
 
-fn void MeshPass.prepare_extra_views(&self, vk::Extent2D extent)
+<*
+ Resolves the extra views against the target. A multiview target draws exactly
+ its own views, each over the whole of its layer: views it has no extra view for
+ see through the main camera, and extra views past its count are not drawn.
+*>
+fn void MeshPass.prepare_extra_views(&self, vk::Extent2D extent, uint views)
 {
 	self.prepared_views.clear();
+	if (views > 1)
+	{
+		float aspect = (float)extent.width / (float)extent.height;
+		for (uint i = 1; i < views; i++)
+		{
+			Camera camera = (sz)i <= self.extra_views.len() ? self.extra_views[(sz)i - 1].camera : self.camera;
+			self.prepared_views.push({
+				.rect = { .extent = extent },
+				.camera = camera,
+				.view_projection = camera.view_projection(aspect),
+			});
+		}
+		return;
+	}
 	foreach (view : self.extra_views)
 	{
 		vk::Rect2D rect = resolved_view_rect(view.rect, extent);
 		float aspect = (float)rect.extent.width / (float)rect.extent.height;
 		self.prepared_views.push({
 			.rect = rect,
+			.camera = view.camera,
 			.view_projection = view.camera.view_projection(aspect),
 		});
 	}
+}
+
+<*
+ Every view's view-projection, the main one first: what the sky draws a
+ multiview pass with.
+*>
+fn Matrix4f[MAX_VIEWS] MeshPass.view_projections(&self, uint* count)
+{
+	Matrix4f[MAX_VIEWS] all;
+	all[0] = self.frame_view_projection;
+	*count = 1;
+	foreach (view : self.prepared_views)
+	{
+		if (*count == MAX_VIEWS) break;
+		all[(*count)++] = view.view_projection;
+	}
+	return all;
 }
 
 <*
@@ -1127,7 +1169,14 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// texels — see `MeshPass.update_lightmap`.
 	self.update_lightmap(gpu);
 
-	self.resolve_view_rect(target.extent);
+	self.multiview = target.views > 1;
+	self.resolve_view_rect(target.view_extent);
+	// Each view of a multiview target covers its whole layer.
+	if (self.multiview)
+	{
+		self.scene_rect = { .extent = target.view_extent };
+		self.scene_rect_partial = false;
+	}
 	if (catch self.ltc.ensure(gpu))
 	{
 		io::eprintn("three: the area-light table could not be uploaded — area lights are integrated numerically");
@@ -1135,7 +1184,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	self.ambient_occlusion.live = false;
 	if (self.ambient_occlusion.enabled)
 	{
-		if (catch self.ambient_occlusion.ensure(gpu, target.extent))
+		bool cutouts = target.views > 1 && self.scene_has_cutouts();
+		if (catch self.ambient_occlusion.ensure(gpu, target.view_extent, target.views, cutouts))
 		{
 			io::eprintn("three: the ambient-occlusion depth buffer could not be created — ambient occlusion is off");
 			self.ambient_occlusion.enabled = false;
@@ -1156,7 +1206,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// and the sky draws for a scene with no geometry in it — which is exactly the
 	// case the `buckets.len() == 0` return further down takes.
 	self.frame_view_projection = view_projection;
-	self.prepare_extra_views(target.extent);
+	self.prepare_extra_views(target.view_extent, target.views);
 	self.frame_key = @hash_value(self.frame_key, self.prepared_views.len());
 	foreach (view : self.prepared_views)
 	{
@@ -1290,14 +1340,13 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.cluster_counts = self.view_cluster_counts(slot, 0),
 		.cluster_indices = self.view_cluster_indices(slot, 0),
 		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z, self.cluster_bruteforce ? 0 : CLUSTER_LIGHT_CAPACITY },
-		.cluster_screen = { (float)target.extent.width, (float)target.extent.height,
+		.cluster_screen = { (float)target.view_extent.width, (float)target.view_extent.height,
 			self.camera.near_plane, self.camera.far_plane },
 		.view_rect = rect_floats(self.scene_rect),
 		.directional_lights = self.directional_lights(),
 	};
 	self.live_address = live_address;
-	self.frame_address = self.write_frame_block(gpu, slot, &frame)!;
-	self.write_extra_frame_blocks(gpu, slot, &frame)!;
+	self.frame_address = self.write_frame_blocks(gpu, slot, &frame)!;
 	// Already written, unless the growth inside the callback faulted — in which
 	// case the copies went into `Scene.instances` and this is the retry that both
 	// uploads them and produces the fault the callback could not return.
@@ -1398,7 +1447,12 @@ fn bool MeshPass.prepassed(&self, Material* material)
 fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
 {
 	self.prepass.draws = 0;
-	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts(), target.foveation.exists());
+	// A multiview target draws its prepass inside the scene's rendering: carried
+	// from a rendering of its own, Quest 3 loads the depth back wrong along the
+	// edge of each foveation ring, and EQUAL leaves a band of holes there.
+	vk::Format inside = self.multiview ? POST_CHAIN_FORMAT : FORMAT_UNDEFINED;
+	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts(), target.foveation.exists(),
+		target.view_mask(), inside);
 	if (!self.prepass.live) return;
 
 	bool found = false;
@@ -1678,15 +1732,36 @@ fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
 *>
 fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
-	self.record_view(cmd, self.scene_rect, self.frame_view_projection, self.frame_address, true);
+	// Every view in one go: the pipelines carry the target's view mask, and each
+	// view's shaders read its own frame block, which follows the main one.
+	if (self.multiview)
+	{
+		// The prepass first, in this same rendering, so the draws below test
+		// EQUAL against depth that never left the tile. Every view with one set
+		// of draws; each takes its camera from its own block.
+		self.prepass.draws = 0;
+		if (self.prepared && self.prepass.live)
+		{
+			vk::Pipeline bound = (vk::Pipeline)null;
+			self.prepass.draws = self.record_prepass_draws(cmd, self.frame_view_projection, &bound, view_cameras: true);
+		}
+		uint count;
+		Matrix4f[MAX_VIEWS] skies = self.view_projections(&count);
+		self.record_view(cmd, self.scene_rect, skies[:count], self.frame_address, true);
+		return;
+	}
+	self.record_view(cmd, self.scene_rect, { self.frame_view_projection }, self.frame_address, true);
 	foreach (view : self.prepared_views)
 	{
-		self.record_view(cmd, view.rect, view.view_projection, view.frame_address, true);
+		self.record_view(cmd, view.rect, { view.view_projection }, view.frame_address, true);
 	}
 }
 
+<*
+ @param skies : "The view-projection of each view the draws reach: one, or every eye of a multiview pass"
+*>
 fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
-	Matrix4f view_projection, ulong frame_address, bool use_prepass)
+	Matrix4f[] skies, ulong frame_address, bool use_prepass)
 {
 	// Before the sky, so the background lands in the pane too — a sky drawn over
 	// the whole window behind an interface that only opens a hole for the pane
@@ -1705,7 +1780,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 	// ordinary thing rather than a corner case — a level being framed, a sky an
 	// agent asked to look at. What this actually needs is `ready`: a pipeline, and
 	// the view-projection `prepare` writes before that early return.
-	if (self.ready) self.record_sky(cmd, view_projection);
+	if (self.ready) self.record_sky(cmd, skies);
 
 	if (!self.prepared) return;
 
@@ -1791,7 +1866,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		samplers.add_if(pipeline, ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
 		samplers.add_if(pipeline, POINT_SHADOW_BINDING, white);
 		samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING,
-			self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : white);
+			self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : self.assets.white_layers_descriptor());
 		samplers.add_if(pipeline, SHADOW_ATLAS_BINDING, shadow);
 		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING,
 			atlas.compare_descriptor(self.shadow_manager.sample_static, shadowed));
@@ -1880,18 +1955,38 @@ fn void MeshPass.record_shadow(&self, vk::CommandBuffer cmd)
 fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 {
 	if (!self.prepared || !self.ambient_occlusion.live) return;
-	self.ambient_occlusion.begin(cmd);
+	AmbientOcclusion* ao = &self.ambient_occlusion;
+	ao.begin(cmd);
+	if (self.multiview)
+	{
+		// Both eyes' depth in one pass; each view takes its camera from its block.
+		ao.depth_view(cmd, self.scene_rect);
+		MeshPipeline* cutout = ao.eyes_cutout_pipeline.handle != null ? &ao.eyes_cutout_pipeline : null;
+		self.record_casters(cmd, CASTERS_VISIBLE, plain: &ao.eyes_pipeline, cutout: cutout, view_cameras: true);
+		ao.end(cmd);
+		// Then each eye's layer on its own.
+		self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
+		{
+			ao.begin_result(cmd, index);
+			ao.draw_view(cmd, rect, view_projection);
+			ao.end_result(cmd);
+		};
+		ao.finish(cmd);
+		return;
+	}
 	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
 	{
-		self.ambient_occlusion.depth_view(cmd, rect);
+		ao.depth_view(cmd, rect);
 		self.record_casters(cmd, CASTERS_VISIBLE, view_projection);
 	};
-	self.ambient_occlusion.end(cmd);
+	ao.end(cmd);
+	ao.begin_result(cmd, 0);
 	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
 	{
-		self.ambient_occlusion.draw_view(cmd, rect, view_projection);
+		ao.draw_view(cmd, rect, view_projection);
 	};
-	self.ambient_occlusion.finish(cmd);
+	ao.end_result(cmd);
+	ao.finish(cmd);
 }
 
 <*
@@ -1911,50 +2006,64 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 fn bool MeshPass.record_depth_prepass(&self, vk::CommandBuffer cmd, Target* target,
 	bool cached = false, bool sampled = false)
 {
-	if (!self.prepared || !self.prepass.live) return false;
+	// A multiview target's prepass is drawn by `record`, inside the scene's rendering.
+	if (!self.prepared || !self.prepass.live || self.multiview) return false;
 
 	if (cached) { target.begin_cached_depth(cmd, self.cache_rect, sampled); }
 	else { target.begin_depth(cmd); }
 
 	vk::Pipeline bound = (vk::Pipeline)null;
 	uint recorded = 0;
-
 	self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
 	{
 		if (self.scene_rect_partial || index > 0) set_viewport_rect(cmd, rect, true);
 		if (cached) vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { self.cache_rect });
-
-		foreach (i, bucket : self.scene.buckets)
-		{
-			uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
-			if (at == NOT_DRAWN || bucket.visible == 0) continue;
-
-			GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
-			Material* material = self.material(bucket.material);
-			if (mesh == null || material == null) continue;
-			if (!self.prepassed(material)) continue;
-
-			bool cutout            = material.alpha_test > 0.0f;
-			MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
-
-			if (pipeline.handle != bound)
-			{
-				vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
-				// Beside the pipeline bind, because set 0 differs per shader and a set
-				// binding survives only while the layouts stay compatible up to its own
-				// number. A no-op on a device without the table.
-				self.assets.bind_texture_table(cmd, pipeline.layout);
-				bound = pipeline.handle;
-			}
-			vk::cmdSetCullMode(cmd, material.cull);
-
-			recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, view_projection);
-		}
+		recorded += self.record_prepass_draws(cmd, view_projection, &bound);
 	};
 
 	vk::cmdEndRendering(cmd);
 	self.prepass.draws = recorded;
 	return true;
+}
+
+<*
+ One view's prepass draws, or every view's when `view_cameras` is set.
+
+ @param [&inout] bound : "The pipeline bound last, so a run of one material binds once"
+ @return "How many draws were recorded"
+*>
+fn uint MeshPass.record_prepass_draws(&self, vk::CommandBuffer cmd, Matrix4f view_projection, vk::Pipeline* bound,
+	bool view_cameras = false)
+{
+	uint recorded = 0;
+	foreach (i, bucket : self.scene.buckets)
+	{
+		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
+		if (at == NOT_DRAWN || bucket.visible == 0) continue;
+
+		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
+		Material* material = self.material(bucket.material);
+		if (mesh == null || material == null) continue;
+		if (!self.prepassed(material)) continue;
+
+		bool cutout            = material.alpha_test > 0.0f;
+		MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
+
+		if (pipeline.handle != *bound)
+		{
+			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+			// Beside the pipeline bind, because set 0 differs per shader and a set
+			// binding survives only while the layouts stay compatible up to its own
+			// number. A no-op on a device without the table.
+			self.assets.bind_texture_table(cmd, pipeline.layout);
+			*bound = pipeline.handle;
+		}
+		vk::cmdSetCullMode(cmd, material.cull);
+
+		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, view_projection,
+			view_cameras: view_cameras);
+	}
+	return recorded;
 }
 
 fn uint point_hash(uint hash, uint value) @local @inline => (hash ^ value) * 16777619;
@@ -2023,10 +2132,14 @@ fn bool MeshPass.point_range_visible(&self, GpuMesh* mesh, Material* material, B
  Draws one half of the casters, or both, into whatever depth attachment is open.
 
  @param which : `CASTERS_ALL, CASTERS_STATIC or CASTERS_DYNAMIC — see Bucket.static_first for the layout these select out of each bucket.`
+ @param plain : "The pipeline to draw with instead of the shadow map's, or null"
+ @param cutout : "The same for alpha-tested casters"
+ @param view_cameras : "Each view draws with its own frame block's camera rather than projection"
  @return `How many draw calls were recorded, which is what stats() reports.`
 *>
 fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
-	Matrix4f projection = self.shadows.light_view_projection, Light* point = null, uint point_face = 0)
+	Matrix4f projection = self.shadows.light_view_projection, Light* point = null, uint point_face = 0,
+	MeshPipeline* plain = null, MeshPipeline* cutout = null, bool view_cameras = false)
 {
 	// Two pipelines at most, and one in nearly every scene. There is no material
 	// in a depth pass and so nothing to change pipelines for — except
@@ -2059,8 +2172,9 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		// `cutout_refused` set — either way the caster falls back to the pipeline
 		// every other one uses and casts its whole geometry, which is the picture
 		// this pass drew before cut-outs existed.
-		bool cutout            = self.shadows.cutout_ready && material.alpha_test > 0.0f;
-		MeshPipeline* pipeline = cutout ? &self.shadows.cutout_pipeline : &self.shadows.pipeline;
+		MeshPipeline* solid = plain != null ? plain : &self.shadows.pipeline;
+		MeshPipeline* cut = plain != null ? cutout : (self.shadows.cutout_ready ? &self.shadows.cutout_pipeline : null);
+		MeshPipeline* pipeline = cut != null && material.alpha_test > 0.0f ? cut : solid;
 
 		if (pipeline.handle != bound)
 		{
@@ -2079,7 +2193,8 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		switch (which)
 		{
 			case CASTERS_VISIBLE:
-				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, projection);
+				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, projection,
+					view_cameras: view_cameras);
 			case CASTERS_ALL:
 				// `count`, not `visible` — the counterpart of the line in `record`.
 				// This pass wants every copy the light's box kept, which is the
@@ -2134,7 +2249,8 @@ fn uint MeshPass.draw_casters(
 	uint at,
 	uint offset,
 	uint count,
-	Matrix4f projection
+	Matrix4f projection,
+	bool view_cameras = false
 )
 {
 	if (count == 0) return 0;
@@ -2152,6 +2268,7 @@ fn uint MeshPass.draw_casters(
 		.frame = (FrameBlock*)self.frame_address,
 		.instances = (Instance*)(self.instance_address + (ulong)(bucket.first + offset) * Instance::size),
 		.draw = (DrawRecord*)(self.draw_address + (ulong)at * DrawRecord::size),
+		.view_cameras = view_cameras ? 1 : 0,
 		.projection = projection,
 	};
 
@@ -2245,42 +2362,36 @@ fn void MeshPass.fold_frame_key(&self, uint slot, FrameBlock* frame)
 	self.frame_key = key;
 }
 
-fn ulong? MeshPass.write_frame_block(&self, Gpu* gpu, uint slot, FrameBlock* frame)
+<*
+ Writes this frame's blocks into the slot's buffer: the main view's, then each
+ extra view's right after it, so a multiview shader finds a view's block at
+ `frame[view]`. Answers the main block's address.
+*>
+fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* main)
 {
-	if (self.frame_blocks[slot].buffer == null)
-	{
-		self.frame_blocks[slot] = gpu.create_dynamic(FrameBlock::size)!;
-	}
-	self.frame_blocks[slot].upload(frame, FrameBlock::size);
-	return self.frame_blocks[slot].address;
-}
+	sz count = (sz)self.prepared_views.len() + 1;
+	gpu.grow_slot_buffer(&self.frame_blocks[slot], &self.frame_block_capacity[slot], count, 2, FrameBlock::size)!;
+	ulong address = self.frame_blocks[slot].address;
 
-fn void? MeshPass.write_extra_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* main)
-{
-	sz needed = (sz)self.prepared_views.len();
-	if (needed == 0) return;
-
-	gpu.grow_slot_buffer(&self.extra_frame_blocks[slot], &self.extra_frame_capacity[slot], needed, 2,
-		FrameBlock::size)!;
-
-	FrameBlock[] blocks = alloc::new_array(tmem, FrameBlock, needed);
+	FrameBlock[] blocks = alloc::new_array(tmem, FrameBlock, count);
+	blocks[0] = *main;
 	foreach (i, view : self.prepared_views)
 	{
-		SceneView source = self.extra_views[i];
-		blocks[i] = *main;
-		blocks[i].view_projection = view.view_projection;
-		blocks[i].inverse_view_projection = invert(view.view_projection);
-		Vec3 eye = source.camera.eye();
-		blocks[i].camera = { eye.x, eye.y, eye.z, 0 };
-		blocks[i].cluster_counts = self.view_cluster_counts(slot, (uint)i + 1);
-		blocks[i].cluster_indices = self.view_cluster_indices(slot, (uint)i + 1);
-		blocks[i].cluster_screen[2] = source.camera.near_plane;
-		blocks[i].cluster_screen[3] = source.camera.far_plane;
-		blocks[i].view_rect = rect_floats(view.rect);
-		self.prepared_views[i].frame_address = self.extra_frame_blocks[slot].address
-			+ (ulong)i * FrameBlock::size;
+		FrameBlock* block = &blocks[i + 1];
+		*block = *main;
+		block.view_projection = view.view_projection;
+		block.inverse_view_projection = invert(view.view_projection);
+		Vec3 eye = view.camera.eye();
+		block.camera = { eye.x, eye.y, eye.z, 0 };
+		block.cluster_counts = self.view_cluster_counts(slot, (uint)i + 1);
+		block.cluster_indices = self.view_cluster_indices(slot, (uint)i + 1);
+		block.cluster_screen[2] = view.camera.near_plane;
+		block.cluster_screen[3] = view.camera.far_plane;
+		block.view_rect = rect_floats(view.rect);
+		self.prepared_views[i].frame_address = address + (ulong)(i + 1) * FrameBlock::size;
 	}
-	self.extra_frame_blocks[slot].upload(blocks.ptr, needed * FrameBlock::size);
+	self.frame_blocks[slot].upload(blocks.ptr, count * FrameBlock::size);
+	return address;
 }
 
 // A material's pipeline and the variant of it this frame's lights draw with.
@@ -2472,7 +2583,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 fn ClusterPush MeshPass.cluster_view(&self, uint view)
 {
 	sz extra = (sz)view - 1;
-	Camera* camera = view == 0 ? &self.camera : &self.extra_views[extra].camera;
+	Camera* camera = view == 0 ? &self.camera : &self.prepared_views[extra].camera;
 	Vec3 eye = camera.eye();
 	return {
 		.view_projection = view == 0 ? self.frame_view_projection : self.prepared_views[extra].view_projection,
@@ -3959,8 +4070,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 	for (uint i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		if (self.frame_blocks[i].buffer != null) self.frame_blocks[i].free();
-		if (self.extra_frame_blocks[i].buffer != null) self.extra_frame_blocks[i].free();
-		self.extra_frame_capacity[i] = 0;
+		self.frame_block_capacity[i] = 0;
 		if (self.light_buffers[i].buffer != null) self.light_buffers[i].free();
 		if (self.shadow_view_buffers[i].buffer != null) self.shadow_view_buffers[i].free();
 		if (self.cluster_counts[i].buffer != null) self.cluster_counts[i].free();

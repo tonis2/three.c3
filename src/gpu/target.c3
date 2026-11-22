@@ -81,15 +81,36 @@ struct Target
 	// Where the scene and the prepass shade coarsely; none unless the device was
 	// opened for a headset that can.
 	FoveationMap foveation;
+
+	// The views the scene is drawn in, each into its own layer of the depth and
+	// the scene images, with one draw for all of them. 1 is the ordinary target;
+	// 2 is a headset's eyes, side by side in `color`.
+	uint views;
+	// One view's layer: `extent` itself with one view, half its width with two.
+	vk::Extent2D view_extent;
+	// Each layer of the depth image alone, for a pass that samples one eye.
+	vk::ImageView[MAX_VIEWS] depth_layers;
 }
 
 <*
- @param width : `Independent of any window. Nothing here consults a surface.`
- @require width > 0 && height > 0
+ The view mask a rendering over every view of this target draws with: 0 for
+ the ordinary one-view target, one bit per view otherwise.
 *>
-fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
+fn uint Target.view_mask(&self) => self.views > 1 ? (1u << self.views) - 1 : 0;
+
+fn vk::ImageView Target.depth_layer(&self, uint view) => self.views > 1 ? self.depth_layers[view] : self.depth_view;
+
+<*
+ @param width : `Independent of any window. Nothing here consults a surface.`
+ @param views : "Views drawn side by side in one multiview pass; more than one only where the device has multiview"
+ @require width > 0 && height > 0
+ @require views >= 1 && views <= MAX_VIEWS && width >= views : "Between one view and MAX_VIEWS"
+*>
+fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1)
 {
 	self.extent = { .width = width, .height = height };
+	self.views = views > 1 && gpu.limits.multiview ? views : 1;
+	self.view_extent = { .width = width / self.views, .height = height };
 	self.color_format = TARGET_COLOR_FORMAT;
 	// Both features, for the shared shadow atlas's reason. The depth buffer is an
 	// attachment first and a sampled image second — `p.depth` in a post body
@@ -109,16 +130,20 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height)
 	defer catch color.destroy(gpu);
 	// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
 	// this image to every pass so a body can read `p.depth`.
-	GpuImage depth = gpu.create_image_2d(self.depth_format, self.extent,
-		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT, IMAGE_ASPECT_DEPTH_BIT)!;
+	// One layer per view; TRANSFER_SRC so the eyes can be copied side by side
+	// for a script's post pass.
+	LayeredImage depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
+		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT,
+		IMAGE_ASPECT_DEPTH_BIT)!;
 
 	self.color = color.image;
 	self.color_view = color.view;
 	self.color_memory = color.memory;
-	self.depth = depth.image;
-	self.depth_view = depth.view;
-	self.depth_memory = depth.memory;
-	if (gpu.limits.fragment_density_map) self.foveation.init(gpu, self.extent, Foveation.MEDIUM)!;
+	self.depth = depth.whole.image;
+	self.depth_view = depth.whole.view;
+	self.depth_memory = depth.whole.memory;
+	self.depth_layers = depth.layers;
+	if (gpu.limits.fragment_density_map) self.foveation.init(gpu, self.view_extent, self.views, Foveation.MEDIUM)!;
 
 	return *self;
 }
@@ -131,6 +156,7 @@ fn void Target.free(&self, Gpu* gpu)
 {
 	if (self.color_view != null) self.color_view.free(gpu.handle);
 	if (self.depth_view != null) self.depth_view.free(gpu.handle);
+	foreach (view : self.depth_layers) if (view != null) view.free(gpu.handle);
 	self.color_memory.free();
 	self.depth_memory.free();
 	self.foveation.free(gpu);
@@ -143,7 +169,7 @@ fn void Target.free(&self, Gpu* gpu)
 
 <*
  The parts every image barrier in this project agrees on: the type tag, and one
- mip level of the colour aspect of a single-layer image.
+ mip level of the colour aspect of every layer the image has.
 
  Splatted rather than passed as arguments — `{ ...IMAGE_BARRIER, .image = x, … }`
  — so each barrier below still names every field it sets. A function taking four
@@ -161,7 +187,8 @@ const vk::ImageSubresourceRange COLOR_LEVEL = {
 	.baseMipLevel = 0,
 	.levelCount = 1,
 	.baseArrayLayer = 0,
-	.layerCount = 1,
+	// Every layer, so one barrier opens or closes both eyes of a multiview image.
+	.layerCount = vk::REMAINING_ARRAY_LAYERS,
 };
 const vk::ImageSubresourceRange DEPTH_LEVEL = { ...COLOR_LEVEL, .aspectMask = IMAGE_ASPECT_DEPTH_BIT };
 const vk::ImageMemoryBarrier2 IMAGE_BARRIER = {
@@ -174,7 +201,7 @@ const vk::ImageMemoryBarrier2 IMAGE_BARRIER = {
  about to write.
 
  Takes the image rather than reading `self.color`, and sits beside
- `vk::depthBarrier` rather than being a method, because the scene does not always
+ `depth_discard_barrier` rather than being a method, because the scene does not always
  draw into the target: a pass that post-processes it draws into `self.color`
  while the scene draws into an image that pass then samples. `begin_render_to` is
  the other half.
@@ -339,7 +366,7 @@ fn void compute_to_stage_barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 
  `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than `SHADER_READ_ONLY_OPTIMAL`.
 
  Issued once per frame by `PostPass.record_chain`, beside the one for image A.
- There is no barrier back: `vk::depthBarrier` opens the next frame's geometry
+ There is no barrier back: `depth_discard_barrier` opens the next frame's geometry
  pass from `UNDEFINED`, discarding contents this pass has finished reading.
 
  Only the post chain reads depth, and only when there is a chain — a frame with
@@ -422,7 +449,8 @@ fn vk::ImageMemoryBarrier2 depth_reopen_barrier(vk::Image image, bool sampled)
 <*
  Begins a depth-only rendering over `extent`, cleared to the far plane.
 *>
-fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent, void* next = null)
+fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Extent2D extent, void* next = null,
+	uint view_mask = 0)
 {
 	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -431,6 +459,7 @@ fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Ext
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
+		.setViewMask(view_mask)
 		.setDepthAttachment(&depth_attachment)
 		.setNext(next);
 
@@ -446,20 +475,38 @@ fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Ext
  part of what `fragmentsShaded` is meant to measure. `begin_render` is then asked
  to keep what this left behind.
 
- `vk::depthBarrier` opens from `UNDEFINED`, which is right here for the same
+ `depth_discard_barrier` opens from `UNDEFINED`, which is right here for the same
  reason it is right there: the attachment is cleared on load.
 *>
 fn void Target.begin_depth(&self, vk::CommandBuffer cmd)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ vk::depthBarrier(self.depth) }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_discard_barrier(self.depth) }));
 	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
-	begin_depth_rendering(cmd, self.depth_view, self.extent, self.foveation.attach(&density));
+	begin_depth_rendering(cmd, self.depth_view, self.view_extent, self.foveation.attach(&density), self.view_mask());
+}
+
+<*
+ Opens a depth attachment that is cleared on load, from `UNDEFINED`. Every
+ layer, which `vk::depthBarrier` does not cover: a multiview depth has two.
+*>
+fn vk::ImageMemoryBarrier2 depth_discard_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
 }
 
 <*
  The depth attachment carried from one rendering into the next inside a frame.
 
- Not `vk::depthBarrier`, which comes from `UNDEFINED` and so discards — which is
+ Not `depth_discard_barrier`, which comes from `UNDEFINED` and so discards — which is
  exactly what a prepass must not have happen to its result.
 *>
 fn vk::ImageMemoryBarrier2 depth_keep_barrier(vk::Image image)
@@ -482,6 +529,7 @@ fn vk::ImageMemoryBarrier2 depth_keep_barrier(vk::Image image)
  into the target's own colour image.
 
  @param clear : `sRGB - the same units a script writes scene.background in - and decoded here. The attachment carries the sRGB transfer function, so Vulkan encodes whatever it is handed; an already-linear value would come out as a far too bright frame with nothing in the API saying which space it wanted. Alpha passes through untouched.`
+ @require self.views == 1 : "A multiview target's colour holds the eyes side by side, not a layer each"
 *>
 fn void Target.begin_render(
 	&self,
@@ -521,7 +569,7 @@ fn void Target.begin_render_to(
 	// is the piecewise one.
 	float[4] clear_linear               = srgb_to_linear_rgb(clear);
 	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image),
-		keep_depth ? depth_keep_barrier(self.depth) : vk::depthBarrier(self.depth) };
+		keep_depth ? depth_keep_barrier(self.depth) : depth_discard_barrier(self.depth) };
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
 
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
@@ -539,20 +587,23 @@ fn void Target.begin_render_to(
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
 	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
-	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.extent }).setLayerCount(1)
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.view_extent }).setLayerCount(1)
+		.setViewMask(self.view_mask())
 		.setColorAttachments({ color_attachment })
 		.setDepthAttachment(&depth_attachment)
 		.setNext(self.foveation.attach(&density));
 
 	vk::cmdBeginRendering(cmd, &rendering);
 
-	set_full_viewport(cmd, self.extent, true);
+	set_full_viewport(cmd, self.view_extent, true);
 }
 
 <*
  Reopens a cached scene attachment and clears only the region which will be
  replayed. `sampled` describes the layouts left by a post chain; otherwise the
  colour is the final transfer source and depth is still an attachment.
+
+ @require self.views == 1 : "The scene cache is for one view"
 *>
 fn void Target.begin_cached_render_to(
 	&self,
@@ -603,7 +654,10 @@ fn void Target.begin_cached_render_to(
 	vk::cmdSetScissor(cmd, 0, 1, (vk::Rect2D[]) { dirty });
 }
 
-// Rebuilds depth only inside a cached scene's dirty region.
+<*
+ Rebuilds depth only inside a cached scene's dirty region.
+ @require self.views == 1 : "The scene cache is for one view"
+*>
 fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty, bool sampled)
 {
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_reopen_barrier(self.depth, sampled) }));

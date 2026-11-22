@@ -39,12 +39,12 @@ const vk::ImageUsageFlags CHAIN_IMAGE_USAGE = IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
  @param max_bytes : `IMAGE_OVER_BUDGET when the image needs more than this`
 *>
 fn vk::Memory? Gpu.create_device_image(&self, vk::Format format, uint width, uint height,
-	vk::ImageUsageFlags usage, uint levels = 1, usz max_bytes = usz::max)
+	vk::ImageUsageFlags usage, uint levels = 1, usz max_bytes = usz::max, uint layers = 1)
 {
 	vk::Image image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format)
 		.setExtent({ .width = width, .height = height, .depth = 1 })
 		.setMipLevels(levels)
-		.setArrayLayers(1)
+		.setArrayLayers(layers)
 		.setSamples(SAMPLE_COUNT_1_BIT)
 		.setTiling(IMAGE_TILING_OPTIMAL)
 		.setUsage(usage)
@@ -70,9 +70,81 @@ fn vk::ImageView? Gpu.create_view_2d(&self, vk::Image image, vk::Format format,
 	vk::ImageAspectFlags aspect = IMAGE_ASPECT_COLOR_BIT, uint levels = 1)
 {
 	return vk::imageViewCreateInfo().setViewType(IMAGE_VIEW_TYPE_2D).setFormat(format)
-		.setSubresourceRange({ ...COLOR_LEVEL, .aspectMask = aspect, .levelCount = levels })
+		.setSubresourceRange({ ...COLOR_LEVEL, .aspectMask = aspect, .levelCount = levels, .layerCount = 1 })
 		.setImage(image)
 		.build(self.handle);
+}
+
+<*
+ A view of `count` layers from `first`: a plain 2D view of one layer, or an
+ array view of several, or of one when `array` asks for the array type.
+*>
+fn vk::ImageView? Gpu.create_layer_view(&self, vk::Image image, vk::Format format, vk::ImageAspectFlags aspect,
+	uint first, uint count, bool array = false)
+{
+	vk::ImageViewType type = count > 1 || array ? IMAGE_VIEW_TYPE_2D_ARRAY : IMAGE_VIEW_TYPE_2D;
+	return vk::imageViewCreateInfo().setViewType(type).setFormat(format)
+		.setSubresourceRange({ ...COLOR_LEVEL, .aspectMask = aspect, .baseArrayLayer = first, .layerCount = count })
+		.setImage(image)
+		.build(self.handle);
+}
+
+// The most views a multiview pass draws: the two eyes of a headset.
+const uint MAX_VIEWS = 2;
+
+<*
+ An image with a layer per view, for a multiview pass. `whole.view` sees every
+ layer, which is what a multiview rendering draws into; `layer_view(i)` sees
+ layer `i` alone, as a sampler or a one-view rendering reads it.
+*>
+struct LayeredImage
+{
+	GpuImage whole;
+	// Only when there is more than one layer; with one, `whole.view` is the layer.
+	vk::ImageView[MAX_VIEWS] layers;
+	uint count;
+}
+
+<*
+ @param array : "Make whole.view an array view even of one layer, for a shader that samples it as one"
+ @require layers >= 1 && layers <= MAX_VIEWS : "One layer per view"
+*>
+fn LayeredImage? Gpu.create_layered_image(&self, vk::Format format, vk::Extent2D extent, uint layers,
+	vk::ImageUsageFlags usage, vk::ImageAspectFlags aspect = IMAGE_ASPECT_COLOR_BIT, bool array = false)
+{
+	vk::Memory memory = self.create_device_image(format, extent.width, extent.height, usage, layers: layers)!;
+	LayeredImage made = { .whole = { .image = memory.image, .memory = memory }, .count = layers };
+	defer catch made.destroy(self);
+	made.whole.view = self.create_layer_view(memory.image, format, aspect, 0, layers, array)!;
+	if (layers > 1)
+	{
+		for (uint i = 0; i < layers; i++) made.layers[i] = self.create_layer_view(memory.image, format, aspect, i, 1)!;
+	}
+	return made;
+}
+
+fn vk::ImageView LayeredImage.layer_view(&self, uint layer) => self.count > 1 ? self.layers[layer] : self.whole.view;
+
+fn bool LayeredImage.exists(&self) => self.whole.exists();
+
+<*
+ Hands every handle to the deferred-deletion queue. Idempotent.
+*>
+fn void LayeredImage.free(&self, Gpu* gpu)
+{
+	foreach (view : self.layers) if (view != null) gpu.retire_memory({}, view);
+	self.whole.free(gpu);
+	*self = { };
+}
+
+<*
+ Destroys every handle now. Only for an image no submitted work can touch.
+*>
+fn void LayeredImage.destroy(&self, Gpu* gpu)
+{
+	foreach (view : self.layers) if (view != null) vk::destroyImageView(gpu.handle, view, null);
+	self.whole.destroy(gpu);
+	*self = { };
 }
 
 <*

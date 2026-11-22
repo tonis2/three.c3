@@ -53,9 +53,18 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       `three.xr.refreshRates`. The runtime had been ignoring requests because the
       headset's `debug.oculus.refreshRate` property forces a rate; without it an
       app starts at 72 Hz.
-- [ ] **Multiview.** One draw for both eyes through `viewMask` and a two-layer
-      target. Saves CPU and vertex work, not fragment work. `view_index` is in
-      shady now; every per-view pass still has to move from rects to layers.
+- [x] **Multiview.** Both eyes in one pass through `viewMask` and a two-layer
+      target; the tonemap writes them side by side into the swapchain image.
+      `vr_lights` went from 7.29 to 7.10 ms GPU at 120 Hz; it has few draws, so
+      the CPU and vertex savings show on heavier scenes. The prepass is drawn
+      inside the scene rendering: carried across renderings with foveation on,
+      Quest 3 loads the depth back wrong along each density ring's edge.
+- [ ] **AO result in one multiview rendering.** The result pass still runs once
+      per eye, which made AO 0.09 ms dearer than side by side. The inverse
+      matrices could come from the frame blocks instead of the push block.
+- [ ] **Script post passes on a multiview target** read the eyes copied side by
+      side into A, a full-frame copy that only they pay for. Running the chain
+      per layer would drop the copy and the seam bleed below.
 - [ ] **Tonemap in the scene pass.** Without script post passes the RGBA16F image
       exists only to be tonemapped; the mesh shaders could write display colour
       directly.
@@ -73,6 +82,10 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       an undecorated twin of the type, and memory is read member by member.
 - [x] **`view_index`.** The built-in multiview needs: MultiView capability, and
       Flat on a fragment input.
+- [x] **Private variables.** `private uint frame_view;` at module scope, so an
+      entry point hands the view index to every helper without a parameter.
+- [x] **`@invariant` on a position**, so the depth prepass and the scene that
+      tests EQUAL against it compute the same depth.
 - [x] **The shader cache key does not know the compiler.** It hashes `"shady"`
       and the source, so a codegen change serves stale SPIR-V until
       `SHADER_CACHE_FORMAT_VERSION` is bumped by hand. A shady revision constant

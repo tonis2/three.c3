@@ -35,6 +35,10 @@ struct DepthPrepass
 	bool refused;
 	bool cutout_refused;
 	vk::Format format;
+	// What the pipelines were built for: a view mask, and the colour format of
+	// the scene rendering they draw inside, or none for a rendering of their own.
+	uint view_mask;
+	vk::Format color;
 	// Last frame's draw calls, which is what `stats().prepassDraws` reports.
 	uint draws;
 }
@@ -52,7 +56,8 @@ struct DepthPrepass
  @return ? SHADER_MISSING_ENTRY_POINT : `The shader would not compile. The diagnostic is printed.`
 *>
 fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format format,
-	bool cutout = false, bool dynamic_cull = false, bool density_map = false)
+	bool cutout = false, bool dynamic_cull = false, bool density_map = false, uint view_mask = 0,
+	vk::Format color = FORMAT_UNDEFINED)
 {
 	ShaderPass pass = cutout ? ShaderPass.SHADOW_CUTOUT : ShaderPass.SHADOW;
 	// Entry names are how the host tells stages apart. The cut-out module carries
@@ -69,30 +74,37 @@ fn void? build_depth_pipeline(Gpu* gpu, MeshPipeline* pipeline, vk::Format forma
 		return SHADER_MISSING_ENTRY_POINT~;
 	}
 
-	pipeline.init_shadow(gpu, &mod, format, entries, dynamic_cull: dynamic_cull, density_map: density_map)!;
+	pipeline.init_shadow(gpu, &mod, format, entries, dynamic_cull: dynamic_cull, density_map: density_map,
+		view_mask: view_mask, color: color)!;
 }
 
 <*
  Builds whichever of the two pipelines this frame still needs.
 
  @param cutouts : `Whether anything in the scene is drawn with material.alphaTest. The second pipeline is a compile charged to the first frame that actually asks.`
+ @param color : "The scene's colour format, to draw inside its rendering; FORMAT_UNDEFINED for a rendering of its own"
 *>
-fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts, bool density_map = false)
+fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts, bool density_map = false,
+	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED)
 {
 	self.live = false;
 	if (!self.enabled) return;
 
 	// A format change retires both — the target is recreated on a resize and the
 	// depth format could in principle follow it.
-	if (self.format != format && (self.ready || self.cutout_ready))
+	bool moved = self.format != format || self.view_mask != view_mask || self.color != color;
+	if (moved && (self.ready || self.cutout_ready))
 	{
 		self.free(gpu);
 	}
 	self.format = format;
+	self.view_mask = view_mask;
+	self.color = color;
 
 	if (!self.ready && !self.refused)
 	{
-		if (catch build_depth_pipeline(gpu, &self.pipeline, format, dynamic_cull: true, density_map: density_map))
+		if (catch build_depth_pipeline(gpu, &self.pipeline, format, dynamic_cull: true, density_map: density_map,
+			view_mask: view_mask, color: color))
 		{
 			self.refused = true;
 		}
@@ -103,7 +115,7 @@ fn void DepthPrepass.ensure(&self, Gpu* gpu, vk::Format format, bool cutouts, bo
 	if (cutouts && !self.cutout_ready && !self.cutout_refused)
 	{
 		if (catch build_depth_pipeline(gpu, &self.cutout_pipeline, format, cutout: true, dynamic_cull: true,
-			density_map: density_map))
+			density_map: density_map, view_mask: view_mask, color: color))
 		{
 			self.cutout_refused = true;
 		}

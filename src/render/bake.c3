@@ -82,7 +82,7 @@ faultdef BAKE_NEEDS_A_DEVICE;
 // The frame images a bake has none of, each bound to the white 1x1.
 const uint[*] BAKE_WHITE_BINDINGS = {
 	SHADOW_BINDING, POINT_SHADOW_BINDING, SHADOW_ATLAS_BINDING, LTC_LUT_BINDING,
-	LIGHTMAP_BINDING, ENVIRONMENT_BINDING, AMBIENT_OCCLUSION_BINDING,
+	LIGHTMAP_BINDING, ENVIRONMENT_BINDING,
 };
 
 <*
@@ -323,6 +323,8 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		// even when no load reaches it.
 		vk::DescriptorImageInfo white = self.pass.assets.texture_at(NO_TEXTURE).descriptor();
 		foreach (binding : BAKE_WHITE_BINDINGS) samplers.add_if(pipeline, binding, white);
+		// Sampled as an array of layers, so its white is one too.
+		samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING, self.pass.assets.white_layers_descriptor());
 		vk::DescriptorImageInfo unlit = self.pass.shadow_manager.atlas.compare_descriptor(false, false);
 		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, unlit);
 		samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, unlit);

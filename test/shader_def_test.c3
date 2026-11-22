@@ -174,9 +174,9 @@ fn void the_ported_sky_module_is_generated() @test
 	// The generated entry points around it.
 	test::@check(source.contains("fn VertexOutput vertexMain(VertexIn input) @vertex"),
 		"the entry point wraps the ported vertex");
-	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input) @fragment"),
-		"and the fragment entry wraps the fragment");
-	test::@check(source.contains("return sky_fragment(input);"), "each stage is a call and nothing else");
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input, FragmentView view) @fragment"),
+		"and the fragment entry wraps the fragment, with the view a multiview pass draws");
+	test::@check(source.contains("return sky_fragment(input, view.index);"), "each stage is a call and nothing else");
 	test::@check(!source.contains("#define") && !source.contains("#if") && !source.contains("//@"),
 		"with no markers, no macros and no #ifdef anywhere:\n%s", source);
 
@@ -471,8 +471,8 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("fn LightTerms shade_lights("), "the lighting block is carried");
 	test::@check(source.contains("uint cluster = fragment_cluster(frame, screen_position, position);"),
 		"and the cluster a fragment is lit by is the culling pass's own index");
-	test::@check(source.contains("frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]"),
-		"read out of the frame block's list, overflow bit and all");
+	test::@check(source.contains("frame[frame_view].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]"),
+		"read out of this view's frame block list, overflow bit and all");
 	test::@check(source.contains("i = frame[0].directional_lights[at + 1u];"),
 		"directionals come from the frame's list, punctuals from the cluster");
 
@@ -530,7 +530,7 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("float3 energy = sun.color.rgb * sun.color.w * reach * sun_shadow;")
 		&& source.contains("if (LIGHTS_LOCAL_SHADOWS) visibility = point_shadow_factor(i, light, position, receiver_normal);"),
 		"and the direct light folds it in, the sun from the surface and every other light from its own view");
-	test::@check(source.contains("Sampler2D ambient_occlusion_map @set(0) @binding(4);"),
+	test::@check(source.contains("Sampler2DArray ambient_occlusion_map @set(0) @binding(4);"),
 		"the occlusion the occlusion pass worked out is declared at the engine's own binding");
 	test::@check(source.contains("s.crevice = occlusion;")
 		&& source.contains("float visibility = ao * s.crevice * screen_occlusion(s.screen_position);"),
@@ -1086,14 +1086,14 @@ fn void the_ported_mesh_module_is_generated() @test
 		"the vertex stage takes the two builtins");
 	test::@check(source.contains("uint vid @builtin(vertex_index);") && source.contains("uint iid @builtin(instance_index);"),
 		"as builtins rather than as vertex attributes");
-	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input, FragmentFace face) @fragment"),
+	test::@check(source.contains("fn float4 fragmentMain(VertexOutput input, FragmentBuiltins face) @fragment"),
 		"and the fragment stage is the second entry point, with the front-face builtin beside it");
 
 	// The varyings are the wire format between the two halves, in the order the
 	// material half declares them.
 	test::@check(source.contains("float3 normal;") && source.contains("float2 uv;")
 		&& source.contains("float3 world;") && source.contains("float4 vertex_color;")
-		&& source.contains("float3 lightmap;") && source.contains("float4 sv_position @position;"),
+		&& source.contains("float3 lightmap;") && source.contains("float4 sv_position @position @invariant;"),
 		"every varying the fragment half reads is declared here");
 	sz normal_at = source.index_of("float3 normal;")!!;
 	sz world_at  = source.index_of("float3 world;")!!;
@@ -1157,7 +1157,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 		"and takes the instance id as a builtin");
 	test::@check(!source.contains("@fragment"), "a depth pass has no fragment stage");
 	test::@check(!source.contains("@set("), "and no descriptors at all");
-	test::@check(source.contains("output.sv_position = posed_clip(input.vid, input.iid);"),
+	test::@check(source.contains("output.sv_position = posed_clip(input.vid, input.iid, input.view);"),
 		"the stage body is a call to the shared vertex path");
 
 	// The push block and the structs behind it, from C3.
@@ -1167,7 +1167,9 @@ fn void the_ported_shadow_modules_are_generated() @test
 		"and the structs the pass points at are the shared wire ones");
 
 	// The port itself, which both modules share.
-	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid)"), "the body survived the port");
+	test::@check(source.contains("fn float4 posed_clip(uint vid, uint iid, uint view)"), "the body survived the port");
+	test::@check(source.contains("if (push.view_cameras != 0u) projection = push.frame[view].view_projection;"),
+		"and a multiview pass takes each view's camera from its frame block");
 	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);"),
 		"the pose is the shared block's, not a copy of it");
 	test::@check(source.contains("(pose * float4(position, 1.0)).xyz")
@@ -1183,7 +1185,7 @@ fn void the_ported_shadow_modules_are_generated() @test
 	String cutout_source = cutout.str_view();
 
 	// The same vertex path, the same lines - the def handed the same text twice.
-	test::@check(cutout_source.contains("fn float4 posed_clip(uint vid, uint iid)"),
+	test::@check(cutout_source.contains("fn float4 posed_clip(uint vid, uint iid, uint view)"),
 		"the cut-out module carries the shared vertex path too");
 	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw, instance_at(push.instances, input.iid), input.vid);"),
 		"beside the uv only it carries");

@@ -23,7 +23,7 @@
 // interface the two have in common.
 struct CutoutOutput
 {
-	float4 sv_position @position;
+	float4 sv_position @position @invariant;
 	float2 uv;
 }
 
@@ -102,7 +102,7 @@ Sampler2D three_textures[] @set(1) @binding(0);
 fn CutoutOutput cutoutVertexMain(VertexIn input) @vertex
 {
 	CutoutOutput output;
-	output.sv_position = posed_clip(input.vid, input.iid);
+	output.sv_position = posed_clip(input.vid, input.iid, input.view);
 	output.uv = shadow_uv(push.draw, instance_at(push.instances, input.iid), input.vid);
 	return output;
 }

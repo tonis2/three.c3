@@ -1581,6 +1581,11 @@ into four spans, that splits two of those spans by name.
 
 # The headset
 
+A headset draws both eyes in one pass where the device can: every draw reaches both eyes, each into a layer of
+its own, and the tonemap puts the two side by side. Geometry, the depth prepass and the ambient occlusion
+depth are recorded once for both. A script sees nothing of it except in `three.stats()`, where the prepass
+counts in `sceneMs`. A post pass still gets the whole frame with the eyes side by side, copied there for it.
+
 ## three.xr.refreshRate
 
 The headset display's rate in Hz, and `0` off a headset. Setting it asks for the rate in `three.xr.refreshRates`

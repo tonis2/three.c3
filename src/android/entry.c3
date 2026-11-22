@@ -102,7 +102,8 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	Engine* engine = mem::new(Engine);
 	defer mem::free(engine);
 	defer engine.close();
-	engine.open(opts.width, opts.height, headless: true)!;
+	// Both eyes in one multiview pass where the device can.
+	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1)!;
 	engine.renderer.gpu.report();
 	// Runs before `engine.close`: the session holds the engine's device.
 	defer host.close();

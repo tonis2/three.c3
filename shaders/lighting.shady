@@ -656,15 +656,15 @@ fn float3 baked_dynamic_delta(FrameBlock* frame, float3 normal, float3 receiver_
 fn uint fragment_cluster(FrameBlock* frame, float4 screen_position, float3 position)
 {
 	uint3 grid = frame[0].cluster_grid.xyz;
-	float2 origin = frame[0].view_rect.xy;
-	float2 extent = max(frame[0].view_rect.zw, float2(1.0));
+	float2 origin = frame[frame_view].view_rect.xy;
+	float2 extent = max(frame[frame_view].view_rect.zw, float2(1.0));
 
 	uint x = min((uint)((screen_position.x - origin.x) * float(grid.x) / extent.x), grid.x - 1u);
 	uint y = min((uint)((screen_position.y - origin.y) * float(grid.y) / extent.y), grid.y - 1u);
 
-	float near_plane = frame[0].cluster_screen.z;
-	float far_plane = frame[0].cluster_screen.w;
-	float depth = max(distance(position, frame[0].camera.xyz), near_plane);
+	float near_plane = frame[frame_view].cluster_screen.z;
+	float far_plane = frame[frame_view].cluster_screen.w;
+	float depth = max(distance(position, frame[frame_view].camera.xyz), near_plane);
 	uint z = min((uint)(saturate(log(depth / near_plane) / log(far_plane / near_plane)) * float(grid.z)),
 		grid.z - 1u);
 
@@ -720,7 +720,7 @@ fn LightTerms shade_lights(
 	float sun_shadow,
 	bool skip_baked_diffuse)
 {
-	float3 view = normalize(frame[0].camera.xyz - position);
+	float3 view = normalize(frame[frame_view].camera.xyz - position);
 	float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
 	float f90 = clamp(dot(f0, float3(16.5)), 0.0, 1.0);
 	float a = max(roughness * roughness, 1e-3);
@@ -749,7 +749,7 @@ fn LightTerms shade_lights(
 	uint listed = frame[0].directional_lights.x;
 	uint extra = listed == 0u || !LIGHTS_EXTRA_DIRECTIONAL ? 0u : listed - 1u;
 	uint cluster = fragment_cluster(frame, screen_position, position);
-	uint packed = frame[0].cluster_grid.w == 0u ? 0x80000000u : frame[0].cluster_counts[cluster];
+	uint packed = frame[0].cluster_grid.w == 0u ? 0x80000000u : frame[frame_view].cluster_counts[cluster];
 	bool scan = listed == 0u || (packed & 0x80000000u) != 0u;
 	uint total = scan ? count : extra + packed;
 
@@ -766,7 +766,7 @@ fn LightTerms shade_lights(
 		if (!scan)
 		{
 			if (LIGHTS_EXTRA_DIRECTIONAL && at < extra) { i = frame[0].directional_lights[at + 1u]; }
-			else { i = frame[0].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]; }
+			else { i = frame[frame_view].cluster_indices[cluster * frame[0].cluster_grid.w + (at - extra)]; }
 		}
 		if (i == 0u) continue;
 		Light light = frame[0].lights[i];

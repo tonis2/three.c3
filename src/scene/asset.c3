@@ -991,6 +991,8 @@ struct Assets
 
 	Texture white;
 	bool has_white;
+	// The same white as a one-layer array, for a binding a shader samples as one.
+	vk::ImageView white_layers;
 
 	// Bumped whenever a texture's contents or its slot changed. Nothing about a
 	// texture appears in the buffers a frame uploads — a re-decoded image keeps
@@ -5098,7 +5100,16 @@ fn void? Assets.ensure_white(&self, Gpu* gpu)
 	self.white = gpu.create_white_texture()!;
 	self.has_white = true;
 	gpu.texture_table.set_fallback(gpu, self.white.descriptor());
+	self.white_layers = gpu.create_layer_view(self.white.image, self.white.format.vk(), IMAGE_ASPECT_COLOR_BIT, 0, 1,
+		array: true)!;
 }
+
+// The white stand-in for a binding sampled as an array of layers.
+fn vk::DescriptorImageInfo Assets.white_layers_descriptor(&self) => {
+	.sampler = self.white.sampler,
+	.imageView = self.white_layers,
+	.imageLayout = self.white.resting_layout(),
+};
 
 <*
  The descriptor write for a texture, ready to push.
@@ -5308,6 +5319,7 @@ fn void Assets.free(&self, Gpu* gpu)
 	{
 		// The table's fallback is this white's view; it must not outlive it.
 		gpu.texture_table.clear_fallback();
+		if (self.white_layers != null) gpu.retire_memory({}, self.white_layers);
 		self.white.free(gpu);
 		self.has_white = false;
 	}

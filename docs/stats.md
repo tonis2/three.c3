@@ -95,7 +95,8 @@
   scene it cannot help. It is at most `drawCalls` minus the transparent buckets and helpers; the gap
   is the materials the prepass has to leave out — a `vertex:` body, a `fragment:` body that
   discards, a stochastically sampled cut-out. A scene where this stays 0 while `fragmentsShaded` is
-  high is one paying for its overdraw and not getting the saving.
+  high is one paying for its overdraw and not getting the saving. On a headset one set of draws
+  covers both eyes.
 - `shadowStaticDraws` — Draw calls into the cached half of the shadow map, and 0 on every frame that
   did not rebuild it — which should be nearly all of them. Equal to the caster count every frame
   means something is invalidating the cache: an unsettled camera, or a static node still being moved.
@@ -143,7 +144,8 @@
   `three.light.shadow.size` is the knob.
 - `occlusionMs` — Of `gpuMs`: ambient occlusion's depth pass and the pass that works out the
   occlusion from it, 0 with occlusion off. The scene's one read per pixel lands in `sceneMs`.
-- `prepassMs` — Of `gpuMs`: the depth prepass, 0 with `three.depthPrepass` off.
+- `prepassMs` — Of `gpuMs`: the depth prepass, 0 with `three.depthPrepass` off. Also 0 on a headset,
+  where the prepass is drawn inside the scene pass and counts in `sceneMs`.
 - `sceneMs` — Of `gpuMs`: the pass that draws the picture.
 - `postMs` — Of `gpuMs`: the post chain, 0 with no post shader.
 - `presentMs` — Of `gpuMs`: getting the finished image out — the blit to the window, or the readback
@@ -153,8 +155,9 @@
   is the scene pass alone. Overdraw is `fragmentsShaded` divided by `width * height` of
   `renderSize()`: 1 is a frame where every pixel was shaded once, and 3 is a frame paying for its
   lighting three times over. With `three.depthPrepass` on it should sit near 1 — the prepass's own
-  cut-out fragments are not in here, and `prepassDraws` is what says the prepass ran. Same "which
-  frame" rules as `gpuMs`, and 0 on a device without `pipelineStatisticsQuery`.
+  cut-out fragments are not in here, except on a headset, where the prepass is part of the scene pass,
+  and `prepassDraws` is what says the prepass ran. Same "which frame" rules as `gpuMs`, and 0 on a
+  device without `pipelineStatisticsQuery`.
 - `skippedFrames` — Frames the renderer found identical to the one already on screen and presented
   again instead of drawing — see `three.alwaysRender`. A running total over the process, so the number
   worth reading is how fast it moves: a paused game should add one per frame and a moving one none.

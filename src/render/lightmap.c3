@@ -1299,7 +1299,9 @@ fn void MeshPass.push_lightmap_samplers(&self, vk::CommandBuffer cmd, MeshPipeli
 		if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
 		if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
 			|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
-		samplers.add(declared.binding, self.assets.texture_at(NO_TEXTURE).descriptor());
+		// The occlusion map is sampled as an array of layers, so its white is one too.
+		samplers.add(declared.binding, declared.binding == AMBIENT_OCCLUSION_BINDING
+			? self.assets.white_layers_descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
 	}
 	ShadowAtlas* atlas = &self.shadow_manager.atlas;
 	vk::DescriptorImageInfo statics = atlas.compare_descriptor(true, atlas.static_initialized);

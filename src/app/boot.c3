@@ -273,8 +273,10 @@ struct Engine
 
  Call `close` either way: on the failure path it undoes the stages that
  succeeded, which is what the `defer`s did before it.
+
+ @param views : "Views drawn side by side in one multiview pass, where the device has multiview: 2 for a headset"
 *>
-fn void? Engine.open(&self, uint width, uint height, bool headless = false)
+fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint views = 1)
 {
 	// The window is a viewer, never a render target. It is opened first only
 	// because the surface has to come from somewhere; nothing about it reaches the
@@ -301,7 +303,7 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false)
 	}
 	self.stage = 3;
 
-	self.renderer.init(self.instance, self.surface, width, height, debugging)!;
+	self.renderer.init(self.instance, self.surface, width, height, debugging, views)!;
 	self.stage = 4;
 
 	// The device table on every debug run, where it used to take a flag of its own.

@@ -55,19 +55,28 @@ const vk::Format AO_FORMAT = FORMAT_R8_UNORM;
  Screen-space ambient occlusion in two passes at half the target's size: the
  visible geometry depth-only into `depth`, then `ambient_occlusion.shady` over it
  into `result`. The mesh shader reads `result` once per pixel, late, so the
- occlusion is no weight on the lighting loop. `extent` is the target's.
+ occlusion is no weight on the lighting loop.
+
+ Both images have a layer per view of the target. A multiview target draws the
+ depth of both eyes in one pass and then works out each eye's layer on its own;
+ the mesh shader reads `result` as an array either way. `extent` is one view's.
 *>
 struct AmbientOcclusion
 {
 	inline AmbientOcclusionSettings settings;
-	GpuImage depth;
-	GpuImage result;
+	LayeredImage depth;
+	LayeredImage result;
 	vk::Sampler sampler;
 	vk::Sampler linear;
 	vk::Format format;
 	vk::Extent2D extent;
 	vk::Extent2D result_extent;
+	uint views;
 	MeshPipeline pipeline;
+	// The depth programs with a view mask, for a multiview target. A one-view
+	// target draws with the shadow map's own.
+	MeshPipeline eyes_pipeline;
+	MeshPipeline eyes_cutout_pipeline;
 	bool live;
 }
 
@@ -77,8 +86,14 @@ fn void AmbientOcclusion.apply(&self, AmbientOcclusionSettings settings)
 	self.live = false;
 }
 
-// The pipeline and samplers once, the two images whenever the target's size changes.
-fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent)
+<*
+ The pipelines and samplers once, the two images whenever the target's size or
+ view count changes.
+
+ @param extent : "One view's size, full resolution"
+ @param cutouts : "Whether the scene has alpha-tested casters a multiview depth pass needs a pipeline for"
+*>
+fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent, uint views = 1, bool cutouts = false)
 {
 	if (self.pipeline.handle == null)
 	{
@@ -96,8 +111,6 @@ fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent)
 	}
 	if (self.sampler == null) self.sampler = gpu.clamp_sampler(FILTER_NEAREST)!;
 	if (self.linear == null) self.linear = gpu.clamp_sampler(FILTER_LINEAR)!;
-	if (self.depth.exists() && self.extent.width == extent.width && self.extent.height == extent.height) return;
-	if (self.depth.exists()) self.destroy_image(gpu);
 
 	vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 	self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
@@ -105,19 +118,37 @@ fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent)
 	vk::getPhysicalDeviceFormatProperties(gpu.pdevice, self.format, &properties);
 	if ((properties.optimalTilingFeatures & wanted) != wanted) return SHADOW_FORMAT_UNSUPPORTED~;
 
+	if (views > 1)
+	{
+		uint mask = (1u << views) - 1;
+		if (self.eyes_pipeline.handle == null) build_depth_pipeline(gpu, &self.eyes_pipeline, self.format, view_mask: mask)!;
+		if (cutouts && self.eyes_cutout_pipeline.handle == null)
+		{
+			build_depth_pipeline(gpu, &self.eyes_cutout_pipeline, self.format, cutout: true, view_mask: mask)!;
+		}
+	}
+
+	if (self.depth.exists() && self.views == views && self.extent.width == extent.width
+		&& self.extent.height == extent.height) return;
+	if (self.depth.exists()) self.destroy_image(gpu);
+
 	vk::Extent2D half = { (extent.width + 1) / 2, (extent.height + 1) / 2 };
-	self.depth = gpu.create_image_2d(self.format, half,
+	self.depth = gpu.create_layered_image(self.format, half, views,
 		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT, IMAGE_ASPECT_DEPTH_BIT)!;
 	defer catch self.depth.destroy(gpu);
-	self.result = gpu.create_image_2d(AO_FORMAT, half, IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT)!;
+	// An array view even of one layer: the mesh shader samples it as one.
+	self.result = gpu.create_layered_image(AO_FORMAT, half, views,
+		IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT, array: true)!;
 	self.extent = extent;
 	self.result_extent = half;
+	self.views = views;
 }
 
 fn void AmbientOcclusion.begin(&self, vk::CommandBuffer cmd)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_open_barrier(self.depth.image, true) }));
-	begin_depth_rendering(cmd, self.depth.view, self.result_extent);
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_open_barrier(self.depth.whole.image, true) }));
+	uint mask = self.views > 1 ? (1u << self.views) - 1 : 0;
+	begin_depth_rendering(cmd, self.depth.whole.view, self.result_extent, view_mask: mask);
 }
 
 <*
@@ -148,16 +179,24 @@ fn vk::Rect2D half_rect(vk::Rect2D rect) @local
 }
 
 <*
- Ends the depth pass and opens `result` for `draw_view`. Every texel a view
- covers is drawn, and nothing reads outside the views, so nothing is cleared.
+ Ends the depth pass and readies both images: depth to be sampled, `result` to
+ be drawn by `begin_result`.
 *>
 fn void AmbientOcclusion.end(&self, vk::CommandBuffer cmd)
 {
 	vk::cmdEndRendering(cmd);
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({
-		depth_sample_barrier(self.depth.image), color_attachment_barrier(self.result.image) }));
+		depth_sample_barrier(self.depth.whole.image), color_attachment_barrier(self.result.whole.image) }));
+}
 
-	vk::RenderingAttachmentInfo color = vk::renderingAttachmentInfo().setImageView(self.result.view)
+<*
+ Opens one layer of `result` for `draw_view`, reading the same layer of depth.
+ Every texel a view covers is drawn, and nothing reads outside the views, so
+ nothing is cleared.
+*>
+fn void AmbientOcclusion.begin_result(&self, vk::CommandBuffer cmd, uint layer)
+{
+	vk::RenderingAttachmentInfo color = vk::renderingAttachmentInfo().setImageView(self.result.layer_view(layer))
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
 		.setLoadOp(ATTACHMENT_LOAD_OP_DONT_CARE)
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE);
@@ -166,9 +205,11 @@ fn void AmbientOcclusion.end(&self, vk::CommandBuffer cmd)
 	vk::cmdBeginRendering(cmd, &rendering);
 	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
 	SampledBindings samplers;
-	samplers.add(0, sampled_with(self.sampler, self.depth.view));
+	samplers.add(0, sampled_with(self.sampler, self.depth.layer_view(layer)));
 	samplers.push(cmd, &self.pipeline);
 }
+
+fn void AmbientOcclusion.end_result(&self, vk::CommandBuffer cmd) => vk::cmdEndRendering(cmd);
 
 <*
  Works out one view's occlusion into its half-size rectangle of `result`.
@@ -193,24 +234,21 @@ fn void AmbientOcclusion.draw_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect
 // Closes `result` for the scene pass to sample.
 fn void AmbientOcclusion.finish(&self, vk::CommandBuffer cmd)
 {
-	vk::cmdEndRendering(cmd);
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(self.result.image) }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ shader_read_barrier(self.result.whole.image) }));
 }
 
-fn vk::DescriptorImageInfo AmbientOcclusion.descriptor(&self) => sampled_with(self.linear, self.result.view);
+fn vk::DescriptorImageInfo AmbientOcclusion.descriptor(&self) => sampled_with(self.linear, self.result.whole.view);
 
 fn usz AmbientOcclusion.bytes(&self)
 {
-	usz bytes = self.depth.exists() ? (usz)self.depth.memory.size : 0;
-	return bytes + (self.result.exists() ? (usz)self.result.memory.size : 0);
+	usz bytes = self.depth.exists() ? (usz)self.depth.whole.memory.size : 0;
+	return bytes + (self.result.exists() ? (usz)self.result.whole.memory.size : 0);
 }
 
 fn void AmbientOcclusion.destroy_image(&self, Gpu* gpu)
 {
-	gpu.retire_memory(self.depth.memory, self.depth.view);
-	if (self.result.exists()) gpu.retire_memory(self.result.memory, self.result.view);
-	self.depth = { };
-	self.result = { };
+	self.depth.free(gpu);
+	self.result.free(gpu);
 	self.extent = { };
 	self.result_extent = { };
 }
@@ -221,5 +259,7 @@ fn void AmbientOcclusion.free(&self, Gpu* gpu)
 	if (self.sampler != null) gpu.retire_memory({}, sampler: self.sampler);
 	if (self.linear != null) gpu.retire_memory({}, sampler: self.linear);
 	if (self.pipeline.handle != null) gpu.retire_pipeline(self.pipeline);
+	if (self.eyes_pipeline.handle != null) gpu.retire_pipeline(self.eyes_pipeline);
+	if (self.eyes_cutout_pipeline.handle != null) gpu.retire_pipeline(self.eyes_cutout_pipeline);
 	*self = { };
 }

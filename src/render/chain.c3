@@ -253,9 +253,15 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	// After the extent, because that is what they are created at.
 	self.ensure_keeps(gpu)!;
 
+	self.ensure_eyes(gpu, target, stages)!;
+
 	// The scene stays linear and unclamped until the final display encode. Mesh
-	// pipelines declare this same format in `MeshPipeline.init`.
-	if (!self.scene.exists()) self.scene = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, CHAIN_IMAGE_USAGE)!;
+	// pipelines declare this same format in `MeshPipeline.init`. A multiview
+	// target renders into `eyes` and needs A only for a script's passes.
+	bool flat = target.views == 1 || stages > 0;
+	vk::ImageUsageFlags scene_usage = target.views > 1 ? CHAIN_IMAGE_USAGE | IMAGE_USAGE_TRANSFER_DST_BIT
+		: CHAIN_IMAGE_USAGE;
+	if (flat && !self.scene.exists()) self.scene = gpu.create_image_2d(POST_CHAIN_FORMAT, self.extent, scene_usage)!;
 
 	// P0 from the first script pass on, because the tonemap reads a pong image
 	// rather than A once there is one; P1 only from the second. A chain that is
@@ -269,6 +275,41 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 	self.ensure_post_images(gpu)!;
 	self.ensure_sampler(gpu)!;
 }
+
+<*
+ The images a multiview target needs: the scene's layers always, and the depth
+ the eyes are copied into once a script pass might read it. Freed again for a
+ one-view target.
+*>
+fn void? PostPass.ensure_eyes(&self, Gpu* gpu, Target* target, sz stages)
+{
+	if (target.views == 1)
+	{
+		if (self.eyes.exists()) self.eyes.free(gpu);
+		if (self.eyes_depth.exists()) self.eyes_depth.free(gpu);
+		return;
+	}
+	// A that was made for a one-view target cannot be copied into.
+	if (!self.eyes.exists() && self.scene.exists()) self.scene.free(gpu);
+	if (!self.eyes.exists())
+	{
+		self.eyes = gpu.create_layered_image(POST_CHAIN_FORMAT, target.view_extent, target.views,
+			CHAIN_IMAGE_USAGE | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	}
+	if (stages > 0 && !self.eyes_depth.exists())
+	{
+		// An attachment usage only so it may sit in the read-only depth layout the
+		// chain samples depth in.
+		self.eyes_depth = gpu.create_image_2d(target.depth_format, target.extent,
+			IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+			IMAGE_ASPECT_DEPTH_BIT)!;
+	}
+}
+
+<*
+ Where the scene renders: A, or a multiview target's layers.
+*>
+fn GpuImage* PostPass.scene_target(&self) => self.eyes.exists() ? &self.eyes.whole : &self.scene;
 
 <*
  What a pass's destination is created with: an attachment, and a storage image
@@ -332,6 +373,8 @@ fn void? PostPass.ensure_sampler(&self, Gpu* gpu)
 fn void PostPass.destroy_images(&self, Gpu* gpu)
 {
 	self.scene.free(gpu);
+	self.eyes.free(gpu);
+	self.eyes_depth.free(gpu);
 	self.pong[0].free(gpu);
 	self.pong[1].free(gpu);
 	self.extent = { };
@@ -1062,7 +1105,20 @@ fn void? PostPass.record_chain(
 	// `set` call site would put the same number in two places for that.
 	self.now = now;
 
-	if (!scene_cached)
+	// A multiview frame with nothing but the tonemap reads its eyes in place.
+	if (self.eyes.exists() && count == 0)
+	{
+		self.record_tonemap_eyes(cmd, target, assets, now, near_plane, far_plane, output, output_view);
+		return;
+	}
+
+	vk::ImageView depth = target.depth_view;
+	if (self.eyes.exists())
+	{
+		self.gather_eyes(cmd, target, self.reads_depth());
+		depth = self.eyes_depth.view;
+	}
+	else if (!scene_cached)
 	{
 		vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo()
 			.setImageMemoryBarriers(
@@ -1106,7 +1162,7 @@ fn void? PostPass.record_chain(
 				.dst_view = dst == null ? (vk::ImageView)null : dst.view,
 				.extent = self.extent,
 				.sampler = self.sampler,
-				.depth = target.depth_view,
+				.depth = depth,
 				.depth_sampler = self.depth_sampler,
 				.near_plane = near_plane,
 				.far_plane = far_plane,
@@ -1145,7 +1201,7 @@ fn void? PostPass.record_chain(
 			.dst_view = output != null ? output_view : target.color_view,
 			.extent = self.extent,
 			.sampler = self.sampler,
-			.depth = target.depth_view,
+			.depth = depth,
 			.depth_sampler = self.depth_sampler,
 			.near_plane = near_plane,
 			.far_plane = far_plane, // The tonemap is the engine's and reads no third source. Image A, for the
@@ -1155,4 +1211,116 @@ fn void? PostPass.record_chain(
 			.time = now,
 		}
 	)!;
+}
+
+<*
+ The tonemap alone over a multiview frame: each eye's layer into its half of
+ `output`, or of `target.color`, in one rendering.
+*>
+fn void PostPass.record_tonemap_eyes(&self, vk::CommandBuffer cmd, Target* target, Assets* assets, double now,
+	float near_plane, float far_plane, vk::Image output, vk::ImageView output_view)
+{
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({
+		shader_read_barrier(self.eyes.whole.image), depth_read_barrier(target.depth) }));
+	PassIo[MAX_VIEWS] views;
+	for (uint i = 0; i < target.views; i++)
+	{
+		vk::ImageView eye = self.eyes.layer_view(i);
+		views[i] = {
+			.prev = eye,
+			.scene = eye,
+			.dst = output != null ? output : target.color,
+			.dst_view = output != null ? output_view : target.color_view,
+			.extent = target.view_extent,
+			.sampler = self.sampler,
+			.depth = target.depth_layer(i),
+			.depth_sampler = self.depth_sampler,
+			.near_plane = near_plane,
+			.far_plane = far_plane,
+			.tap = eye,
+			.assets = assets,
+			.time = now,
+		};
+	}
+	self.tonemap.record_side_by_side(cmd, views[:target.views], target.extent);
+}
+
+<*
+ Copies a multiview frame's eyes side by side into A, and its depth into
+ `eyes_depth` when a pass reads it, so a script's passes read one frame as they
+ do on any target. Leaves both ready to be sampled.
+*>
+fn void PostPass.gather_eyes(&self, vk::CommandBuffer cmd, Target* target, bool depth)
+{
+	vk::ImageMemoryBarrier2 eyes_out = {
+		...IMAGE_BARRIER,
+		.image = self.eyes.whole.image,
+		.srcStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	};
+	vk::ImageMemoryBarrier2 depth_out = {
+		...eyes_out,
+		.image = target.depth,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::ImageMemoryBarrier2 flat_in = {
+		...IMAGE_BARRIER,
+		.image = self.scene.image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.dstAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	};
+	vk::ImageMemoryBarrier2 flat_depth_in = { ...flat_in, .image = self.eyes_depth.image, .subresourceRange = DEPTH_LEVEL };
+	vk::ImageMemoryBarrier2[4] opened = { eyes_out, flat_in, depth_out, flat_depth_in };
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(opened[:depth ? 4 : 2]));
+
+	vk::ImageCopy[MAX_VIEWS] color_regions;
+	vk::ImageCopy[MAX_VIEWS] depth_regions;
+	for (uint i = 0; i < target.views; i++)
+	{
+		color_regions[i] = {
+			.srcSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .baseArrayLayer = i, .layerCount = 1 },
+			.dstSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
+			.dstOffset = { (int)(i * target.view_extent.width), 0, 0 },
+			.extent = { target.view_extent.width, target.view_extent.height, 1 },
+		};
+		depth_regions[i] = color_regions[i];
+		depth_regions[i].srcSubresource.aspectMask = IMAGE_ASPECT_DEPTH_BIT;
+		depth_regions[i].dstSubresource.aspectMask = IMAGE_ASPECT_DEPTH_BIT;
+	}
+	vk::cmdCopyImage(cmd, self.eyes.whole.image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, self.scene.image,
+		IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, target.views, &color_regions[0]);
+	if (depth)
+	{
+		vk::cmdCopyImage(cmd, target.depth, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, self.eyes_depth.image,
+			IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, target.views, &depth_regions[0]);
+	}
+
+	vk::ImageMemoryBarrier2 flat_ready = {
+		...IMAGE_BARRIER,
+		.image = self.scene.image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+		.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+		.dstStageMask = CHAIN_READERS,
+		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
+		.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		.newLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	vk::ImageMemoryBarrier2 flat_depth_ready = {
+		...flat_ready,
+		.image = self.eyes_depth.image,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+	vk::ImageMemoryBarrier2[2] ready = { flat_ready, flat_depth_ready };
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(ready[:depth ? 2 : 1]));
 }

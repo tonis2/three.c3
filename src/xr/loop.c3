@@ -1,10 +1,12 @@
 <*
  The XR frame loop: OpenXR's wait, begin, locate, draw and end around the
- engine's own tick, with both eyes drawn side by side in one pass.
+ engine's own tick, with both eyes drawn in one pass.
 
  The right eye is an extra `SceneView` beside the main camera, so geometry,
  lights and shadows are prepared once for both. Each eye gets its own light
- clusters, AO and depth prepass over its half of the target.
+ clusters and AO. On a multiview target every draw reaches both eyes, each
+ into its own layer, and the tonemap puts them side by side in the swapchain
+ image; otherwise each eye is drawn over its half of the target in turn.
 *>
 module three @feat(ANDROID);
 
@@ -74,6 +76,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 
 	// Frames are left in flight, so the swapchain must not go before they finish.
 	defer renderer.gpu.wait_idle();
+	io::printfn("xr: multiview %s", renderer.target.views > 1 ? "on" : "off");
 	host.display = &renderer.xr_display;
 	defer host.display = null;
 
@@ -168,8 +171,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 }
 
 <*
- Left eye on the main camera over the left half of the target, right eye as an
- extra view over the right half, both seen from the rig the script's camera is.
+ Left eye on the main camera, right eye as an extra view, both seen from the rig
+ the script's camera is. Each covers its own layer of a multiview target, or
+ its half of a target that draws them side by side.
 *>
 fn void aim_eyes(Renderer* renderer, xr::View[2] views) @local
 {
@@ -179,8 +183,12 @@ fn void aim_eyes(Renderer* renderer, xr::View[2] views) @local
 	Camera right = *camera;
 	head_lock(camera, rig, yaw, views[0]);
 	head_lock(&right, rig, yaw, views[1]);
-	renderer.pass.view_rect = { 0, 0, 0.5f, 1 };
-	SceneView[1] extra = { { .camera = right, .rect = { 0.5f, 0, 0.5f, 1 } } };
+	bool layered = renderer.target.views > 1;
+	float[4] whole = { 0, 0, 1, 1 };
+	float[4] left_half = { 0, 0, 0.5f, 1 };
+	float[4] right_half = { 0.5f, 0, 0.5f, 1 };
+	renderer.pass.view_rect = layered ? whole : left_half;
+	SceneView[1] extra = { { .camera = right, .rect = layered ? whole : right_half } };
 	renderer.pass.set_extra_views(extra[..]);
 }
 
@@ -206,7 +214,7 @@ fn void? Renderer.update_foveation(&self, xr::View[2] views)
 	foreach (i, c : centers) moved |= math::abs(c - map.centers[i]) > 0.01f;
 	if (level == map.level && !moved) return;
 	self.gpu.wait_idle();
-	map.fill(&self.gpu, self.target.extent, level, centers)!;
+	map.fill(&self.gpu, self.target.view_extent, level, centers)!;
 	io::printfn("xr: foveation %s, lens centres %.2f %.2f and %.2f %.2f", level.name,
 		centers[0], centers[1], centers[2], centers[3]);
 }

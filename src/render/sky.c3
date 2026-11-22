@@ -44,6 +44,7 @@ module three;
 
 import vk;
 import std::math::matrix;
+import std::math::vector;
 
 <*
  What the sky draws with: solid triangles, depth tested, depth not written,
@@ -72,24 +73,46 @@ const PipelineState SKY_STATE = {
  has no geometry, no instances and no draw record, so a contract requiring
  `positions` would require a pointer nothing could supply.
 
- The inverse view-projection rather than the view-projection: the shader's
- question is "which way is this pixel looking", which is the matrix run backwards,
- and inverting it once on the CPU beats inverting it per fragment by every
- measure there is.
+ The shader's question is "which way is this pixel looking". Under a
+ perspective projection that direction is affine in the pixel's clip xy, so three
+ vectors per view answer it: `x * across + y * down + ahead`, normalised. Three
+ rather than an inverse matrix so both eyes of a multiview pass fit in one push.
 *>
 struct SkyPush
 {
-	Matrix4f inverse_view_projection;
+	// across, down, ahead for view 0, then for view 1. xyz only.
+	float[<4>][6] rays;
 	// x intensity, y rotation in radians about world Y, zw unused.
 	float[4] params;
 }
 
 const PushFieldLayout[*] SKY_PUSH_FIELDS = {
-	{ "inverse_view_projection", 0, 64 },
-	{ "params", 64, 16 },
+	{ "rays", 0, 96 },
+	{ "params", 96, 16 },
 };
 
-$assert SkyPush::size == 80 : "SkyPush no longer matches shaders/sky.shady";
+$assert SkyPush::size == 112 : "SkyPush no longer matches shaders/sky.shady";
+
+<*
+ The three vectors a view's rays are made of: the direction through clip xy is
+ `x * across + y * down + ahead`, up to its length.
+*>
+fn float[<4>][3] sky_rays(Matrix4f view_projection)
+{
+	Matrix4f inverse = invert(view_projection);
+	Vec3 ahead = sky_ray(&inverse, 0, 0);
+	Vec3 across = sky_ray(&inverse, 1, 0) - ahead;
+	Vec3 down = sky_ray(&inverse, 0, 1) - ahead;
+	return { { across.x, across.y, across.z, 0 }, { down.x, down.y, down.z, 0 }, { ahead.x, ahead.y, ahead.z, 0 } };
+}
+
+// Far plane minus near plane through clip xy, each divided by its own w first.
+fn Vec3 sky_ray(Matrix4f* inverse, float x, float y) @local
+{
+	Vec4 near = inverse.apply({ x, y, 0, 1 });
+	Vec4 far = inverse.apply({ x, y, 1, 1 });
+	return far.xyz / far.w - near.xyz / near.w;
+}
 
 <*
  What a scene's sky is — `scene.background` and `scene.environment`.
@@ -164,7 +187,7 @@ fn float[4] MeshPass.environment_params(&self)
  and for the same reason: building it the first time somebody assigns a sky would
  put a shader compile inside that frame.
 *>
-fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f view_projection)
+fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f[] view_projections)
 {
 	if (self.sky_pipeline == null || self.scene == null) return;
 
@@ -187,10 +210,9 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f view_projecti
 	samplers.add(0, self.assets.texture_at(sky.background).descriptor());
 	samplers.push(cmd, self.sky_pipeline);
 
-	SkyPush push = {
-		.inverse_view_projection = invert(view_projection),
-		.params = { sky.background_intensity, sky.rotation, 0, 0 },
-	};
+	// One view, or each eye of a multiview pass.
+	SkyPush push = { .params = { sky.background_intensity, sky.rotation, 0, 0 } };
+	foreach (i, view_projection : view_projections) push.rays[i * 3 : 3] = sky_rays(view_projection)[..];
 	vk::cmdPushConstants(cmd, self.sky_pipeline.layout, self.sky_pipeline.shader.stages, 0, SkyPush::size, &push);
 
 	// No index buffer and no vertex input: `SV_VertexID` is all the vertex stage

@@ -371,6 +371,7 @@ fn float XrDisplay.nearest_offered(&self, float hz)
 <*
  @param surface : `Null for headless: no viewer, no swapchain, and render + screenshot still work.`
  @param width : `The offscreen target's extent. Not the window's, ever.`
+ @param views : "Views drawn side by side in one multiview pass, where the device has multiview"
 *>
 fn Renderer? Renderer.init(
 	&self,
@@ -378,14 +379,15 @@ fn Renderer? Renderer.init(
 	vk::SurfaceKHR surface,
 	uint width,
 	uint height,
-	bool validate = false
+	bool validate = false,
+	uint views = 1
 )
 {
 	self.windowed = surface != null;
 	self.clear = DEFAULT_CLEAR;
 
 	self.gpu.init(instance, surface, validate)!;
-	self.target.init(&self.gpu, width, height)!;
+	self.target.init(&self.gpu, width, height, views)!;
 	// After the device and before anything that could dispatch: a kernel's
 	// buffers are the script's, so this outlives every frame and owns nothing
 	// the render path frees.
@@ -455,18 +457,20 @@ fn Renderer? Renderer.init(
  resolution change is a menu click, not a per-frame cost.
 
  @param width : `Device pixels. Nothing about the window is consulted.`
+ @param views : "Views the target draws in one multiview pass; 0 keeps what it has"
  @require width > 0 && height > 0
 *>
-fn void? Renderer.resize_target(&self, uint width, uint height)
+fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0)
 {
-	if (width == self.target.extent.width && height == self.target.extent.height) return;
+	if (views == 0) views = self.target.views;
+	if (width == self.target.extent.width && height == self.target.extent.height && views == self.target.views) return;
 
 	// The new one before the old one goes, so a size the device will not
 	// allocate leaves the renderer exactly as it was rather than with no target
 	// at all. Both are resident for the length of this call, which is the price
 	// of the failure being recoverable.
 	Target next;
-	next.init(&self.gpu, width, height)!;
+	next.init(&self.gpu, width, height, views)!;
 
 	self.gpu.handle.waitIdle();
 	self.target.free(&self.gpu);
@@ -721,8 +725,8 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		// Kept for a later frame's cache or a post pass that samples it, and
 		// otherwise not written back at all.
 		bool store_depth = cache_safe || self.post.reads_depth();
-		self.target.begin_render_to(cmd, self.post.scene.image, self.post.scene.view, self.clear, prepassed,
-			store_depth);
+		GpuImage* scene = self.post.scene_target();
+		self.target.begin_render_to(cmd, scene.image, scene.view, self.clear, prepassed, store_depth);
 	}
 	else
 	{

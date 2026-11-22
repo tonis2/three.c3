@@ -451,6 +451,25 @@ fn void collect_deltas(List{Delta}* out)
 	delta(out, "tonemap_agx_blender", "descriptor depth_buffer set=0 binding=2 count=1 type=COMBINED_IMAGE_SAMPLER", "",
 		NO_DEPTH);
 
+	// A multiview depth pass takes each eye's camera from its frame block, which
+	// the push block says with a flag where it had padding.
+	const String VIEW_CAMERAS = "a multiview depth pass reads each view's camera from its frame block";
+	foreach (variant : (String[]) { "shadow", "shadow_cutout" })
+	{
+		delta(out, variant, "push_field padding offset=24 size=8 indirect=no",
+			"push_field view_cameras offset=24 size=4 indirect=no", VIEW_CAMERAS);
+		delta(out, variant, "", "push_field padding offset=28 size=4 indirect=no", VIEW_CAMERAS);
+	}
+
+	// The sky carries three ray vectors per view instead of an inverse matrix, so
+	// both eyes of a multiview pass fit in one push.
+	const String SKY_RAYS = "the sky's push block carries each view's rays, for a multiview pass";
+	delta(out, "sky", "push_size 80", "push_size 112", SKY_RAYS);
+	delta(out, "sky", "push_field inverse_view_projection offset=0 size=64 indirect=no",
+		"push_field rays offset=0 size=96 indirect=no", SKY_RAYS);
+	delta(out, "sky", "push_field params offset=64 size=16 indirect=no",
+		"push_field params offset=96 size=16 indirect=no", SKY_RAYS);
+
 	// The cut-out module is `shadow.shady` plus its own vertex entry, so the pose
 	// file's `vertexMain` reaches the module beside `cutoutVertexMain`.
 	delta(out, "shadow_cutout", "", "entry cutoutVertexMain vertex",

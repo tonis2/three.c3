@@ -192,6 +192,13 @@ struct PostPass
 	// second stage on. `render/chain.c3` has the two rules that index them.
 	GpuImage[2] pong;
 
+	// A multiview target's scene, one layer per eye, in `POST_CHAIN_FORMAT`. The
+	// tonemap reads each layer into its half of the frame. A script's passes read
+	// A instead, which the eyes are copied into side by side, beside the depth in
+	// `eyes_depth`, so a body sees the frame it always did.
+	LayeredImage eyes;
+	GpuImage eyes_depth;
+
 	// What the images were created at. Compared against `target.extent` every time
 	// a stage is built, so a target that ever *does* change size takes them with
 	// it; today it never does — `Target.init` is called once, and a window resize
@@ -1087,6 +1094,43 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// triangle is `SV_VertexID` arithmetic in `shaders/post.shady`.
 	vk::cmdDraw(cmd, 3, 1, 0, 0);
 
+	vk::cmdEndRendering(cmd);
+}
+
+<*
+ The same pass drawn once per view into one destination, each view into its
+ own rectangle side by side: how the tonemap writes a multiview frame. Each
+ `PassIo` names one view's images and extent; their `dst` is the same.
+
+ @require views.len > 0 : "At least one view"
+ @param extent : "The destination's whole size"
+*>
+fn void PostStage.record_side_by_side(&self, vk::CommandBuffer cmd, PassIo[] views, vk::Extent2D extent)
+{
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ color_attachment_barrier(views[0].dst) }));
+	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(views[0].dst_view)
+		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+		.setLoadOp(ATTACHMENT_LOAD_OP_CLEAR)
+		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
+		.setClearValue({ .color = { .float32 = { 0, 0, 0, 1 } } });
+	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = extent }).setLayerCount(1)
+		.setColorAttachments({ color_attachment });
+	vk::cmdBeginRendering(cmd, &rendering);
+
+	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+	if (views[0].assets != null) views[0].assets.bind_texture_table(cmd, self.pipeline.layout);
+	int left = 0;
+	foreach (io : views)
+	{
+		set_viewport_rect(cmd, { .offset = { left, 0 }, .extent = io.extent }, false);
+		SampledBindings samplers;
+		self.add_chain_samplers(&samplers, io);
+		self.add_images(&samplers);
+		samplers.push(cmd, &self.pipeline);
+		self.push_info(cmd, io, (float)io.extent.width, (float)io.extent.height);
+		vk::cmdDraw(cmd, 3, 1, 0, 0);
+		left += (int)io.extent.width;
+	}
 	vk::cmdEndRendering(cmd);
 }
 

@@ -35,10 +35,10 @@ fn void displace(inout Vertex v) @fallback
 }
 
 // How much of the sky each pixel sees, worked out by the occlusion pass at half
-// resolution. It carries the 1x1 white when that pass did not run, and
-// `frame.ambient_occlusion.x` is zero then - which is the branch that answers
-// "no crevice" without a read.
-Sampler2D ambient_occlusion_map @set(0) @binding(4);
+// resolution, one layer per view of a multiview pass. It carries the 1x1 white
+// when that pass did not run, and `frame.ambient_occlusion.x` is zero then -
+// which is the branch that answers "no crevice" without a read.
+Sampler2DArray ambient_occlusion_map @set(0) @binding(4);
 
 // The sky the surfaces reflect, in every shader that shades one. Always bound
 // and always valid, white when the scene has no sky; what stops that white from
@@ -91,10 +91,10 @@ fn float screen_occlusion(float4 frag)
 	if (push.frame[0].ambient_occlusion.x <= 0.0) return 1.0;
 	// Texel centre `t` is full-resolution point `2t`. The read is kept inside
 	// this view's texels so filtering never reaches the other eye.
-	float4 view = push.frame[0].view_rect;
-	float2 size = ceil(max(push.frame[0].cluster_screen.xy, float2(1.0)) * 0.5);
+	float4 view = push.frame[frame_view].view_rect;
+	float2 size = ceil(max(push.frame[frame_view].cluster_screen.xy, float2(1.0)) * 0.5);
 	float2 at = clamp(frag.xy * 0.5, view.xy * 0.5 + 0.5, (view.xy + view.zw) * 0.5 - 0.5);
-	return ambient_occlusion_map.SampleLevel(at / size, 0.0).r;
+	return ambient_occlusion_map.SampleLevel(float3(at / size, float(frame_view)), 0.0).r;
 }
 
 // A world direction to a texel of the equirectangular environment image, with
@@ -138,7 +138,7 @@ fn float3 environment_light(
 	float intensity = push.frame[0].environment.x;
 	if (intensity <= 0.0) return float3(0.0);
 
-	float3 view = normalize(push.frame[0].camera.xyz - position);
+	float3 view = normalize(push.frame[frame_view].camera.xyz - position);
 	float3 reflected = reflect(-view, normal);
 
 	float3 f0 = lerp(float3(0.16 * reflectance * reflectance), albedo, metalness);
@@ -673,7 +673,7 @@ fn bool parallax_basis(
 	out float pixel)
 {
 	n = normalize(s.normal);
-	view = normalize(push.frame[0].camera.xyz - s.position);
+	view = normalize(push.frame[frame_view].camera.xyz - s.position);
 	du = float3(0.0);
 	dv = float3(0.0);
 	pixel = 1.0;

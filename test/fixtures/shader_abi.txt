@@ -195,9 +195,9 @@ descriptor sky_map set=0 binding=0 count=1 type=COMBINED_IMAGE_SAMPLER
 push_size 80
 push_field inverse_view_projection offset=0 size=64 indirect=no
 push_field params offset=64 size=16 indirect=no
-struct SkyPush size=80 stride=80
-struct_field SkyPush.inverse_view_projection offset=0 size=64
-struct_field SkyPush.params offset=64 size=16
+struct SkyPush size=112 stride=112
+struct_field SkyPush.rays offset=0 size=96
+struct_field SkyPush.params offset=96 size=16
 [variant mesh]
 source shaders/mesh.slang
 entry vertexMain vertex

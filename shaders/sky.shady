@@ -12,9 +12,9 @@
 //    visited once and there is no seam down a screen-space diagonal;
 //  - z = 1, the far plane, so the sky is behind everything by construction
 //    rather than by being drawn first and hoping;
-//  - the direction through a pixel comes from unprojecting the vertex's own
-//    clip xy rather than from `sv_position`, which is the only version that
-//    survives a flipped viewport;
+//  - the direction through a pixel comes from the vertex's own clip xy rather
+//    than from `sv_position`, which is the only version that survives a
+//    flipped viewport;
 //  - equirectangular rather than a cube: one 2D image, sampled with `REPEAT` in
 //    u so the seam at longitude ±π wraps.
 
@@ -24,6 +24,12 @@
 struct VertexIn
 {
 	uint vid @builtin(vertex_index);
+}
+
+// Which eye a multiview pass is drawing; 0 in any other pass.
+struct FragmentView
+{
+	uint index @builtin(view_index);
 }
 
 struct VertexOutput
@@ -68,15 +74,14 @@ fn VertexOutput sky_vertex(VertexIn input)
 	return output;
 }
 
-fn float4 sky_fragment(VertexOutput input)
+fn float4 sky_fragment(VertexOutput input, uint view)
 {
-	// Two points on the ray through this pixel, un-projected from the same clip
-	// xy at the near and far planes. Their difference is the direction; the
-	// perspective divide has to happen before the subtraction, because the two
-	// w's are different and subtracting before dividing is a different ray.
-	float4 near = push.inverse_view_projection * float4(input.clip, 0.0, 1.0);
-	float4 far = push.inverse_view_projection * float4(input.clip, 1.0, 1.0);
-	float3 direction = normalize(far.xyz / far.w - near.xyz / near.w);
+	// The ray through this pixel is affine in its clip xy under a perspective
+	// projection, so the CPU hands each view three vectors rather than a matrix
+	// to unproject with - see `SkyPush`.
+	uint at = view * 3u;
+	float3 direction = normalize(input.clip.x * push.rays[at].xyz + input.clip.y * push.rays[at + 1u].xyz
+		+ push.rays[at + 2u].xyz);
 
 	// The rotation is applied to the *look* direction rather than to the uv, so
 	// it is a rotation of the world around the camera and not a slide of the
@@ -97,7 +102,7 @@ fn VertexOutput vertexMain(VertexIn input) @vertex
 	return sky_vertex(input);
 }
 
-fn float4 fragmentMain(VertexOutput input) @fragment
+fn float4 fragmentMain(VertexOutput input, FragmentView view) @fragment
 {
-	return sky_fragment(input);
+	return sky_fragment(input, view.index);
 }

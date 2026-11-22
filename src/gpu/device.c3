@@ -82,6 +82,9 @@ struct GpuLimits
 	bool fragment_density_map;
 	vk::Extent2D fragment_density_texel_min;
 	vk::Extent2D fragment_density_texel_max;
+	// One draw for both eyes through a view mask. Core since 1.1 and enabled
+	// with the rest of `v11`; the pipelines that use it also need two views.
+	bool multiview;
 	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
 	// instanced draw tells six vertices which drawing they belong to. A
 	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
@@ -765,6 +768,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 			&& density.fragmentDensityMapNonSubsampledImages == vk::TRUE,
 		.fragment_density_texel_min = density_properties.minFragmentDensityTexelSize,
 		.fragment_density_texel_max = density_properties.maxFragmentDensityTexelSize,
+		.multiview = v11.multiview == vk::TRUE && v11_properties.maxMultiviewViewCount >= MAX_VIEWS,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim
@@ -989,6 +993,7 @@ fn void Gpu.report(&self)
 	io::printfn("  dynamicRendering     %s", self.limits.dynamic_rendering);
 	io::printfn("  pushDescriptor       %s", self.limits.push_descriptor);
 	io::printfn("  shaderDrawParameters %s", self.limits.shader_draw_parameters);
+	io::printfn("  multiview            %s", self.limits.multiview);
 	io::printfn("  localRead            %s", self.limits.dynamic_rendering_local_read);
 	io::printfn("  fillModeNonSolid     %s", self.limits.fill_mode_non_solid);
 	io::printfn("  maxPushConstantsSize %d", self.limits.max_push_constants_size);

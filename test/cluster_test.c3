@@ -285,8 +285,8 @@ fn void asymmetric_vertical_clusters_match_both_material_oracles() @test
 fn three::FrameBlock* last_frame_blocks(three::Renderer* renderer, bool extra = false)
 {
 	uint slot = (renderer.frames.slot + three::MAX_FRAMES_IN_FLIGHT - 1) % three::MAX_FRAMES_IN_FLIGHT;
-	vk::Memory* blocks = extra ? &renderer.pass.extra_frame_blocks[slot] : &renderer.pass.frame_blocks[slot];
-	return (three::FrameBlock*)blocks.data();
+	three::FrameBlock* blocks = (three::FrameBlock*)renderer.pass.frame_blocks[slot].data();
+	return extra ? blocks + 1 : blocks;
 }
 
 <*

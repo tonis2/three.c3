@@ -33,13 +33,16 @@ struct VertexIn
 {
 	uint vid @builtin(vertex_index);
 	uint iid @builtin(instance_index);
+	// 0 outside a multiview pass.
+	uint view @builtin(view_index);
 }
 
 // Depth, and nothing else: no normal and no colour ride along, and a uv rides
 // along only in the cut-out module.
 struct VertexOutput
 {
-	float4 sv_position @position;
+	// Invariant for the depth prepass: `mesh.shady` tests EQUAL against it.
+	float4 sv_position @position @invariant;
 }
 
 // Where one vertex of one copy lands in the light's clip space.
@@ -47,7 +50,7 @@ struct VertexOutput
 // Split out of the entry points because there are two of them: the depth-only
 // one and the cut-out one, which needs a uv beside the position. Both have to
 // pose a vertex identically.
-fn float4 posed_clip(uint vid, uint iid)
+fn float4 posed_clip(uint vid, uint iid, uint view)
 {
 	DrawRecord* draw = push.draw;
 	InstanceData instance = instance_at(push.instances, iid);
@@ -67,12 +70,16 @@ fn float4 posed_clip(uint vid, uint iid)
 	// camera, and the only order that makes sense: a joint matrix is in the
 	// character's space, the model matrix puts the character in the world, and the
 	// light looks at the world.
-	return push.projection * (instance.model * float4(position, 1.0));
+	// A multiview depth pass draws both eyes with one push, so each view takes its
+	// own camera from its frame block - the blocks sit one after another.
+	float4x4 projection = push.projection;
+	if (push.view_cameras != 0u) projection = push.frame[view].view_projection;
+	return projection * (instance.model * float4(position, 1.0));
 }
 
 fn VertexOutput vertexMain(VertexIn input) @vertex
 {
 	VertexOutput output;
-	output.sv_position = posed_clip(input.vid, input.iid);
+	output.sv_position = posed_clip(input.vid, input.iid, input.view);
 	return output;
 }
