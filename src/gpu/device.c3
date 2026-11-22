@@ -85,6 +85,13 @@ struct GpuLimits
 	// One draw for both eyes through a view mask. Core since 1.1 and enabled
 	// with the rest of `v11`; the pipelines that use it also need two views.
 	bool multiview;
+	// The driver's pipeline cache cannot be trusted with a multiview pipeline,
+	// so those are built without it (`GraphicsPipeline.build`). KosmicKrisp
+	// lowers a vertex shader for its view mask but leaves the mask out of the
+	// vertex stage's cache key (`kk_hash_graphics_state`, Mesa main as of
+	// 2026-11): a pipeline cached for one view hands its vertex shader to a
+	// two-view one, and the second eye draws nothing.
+	bool multiview_cache_broken;
 	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
 	// instanced draw tells six vertices which drawing they belong to. A
 	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
@@ -769,6 +776,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.fragment_density_texel_min = density_properties.minFragmentDensityTexelSize,
 		.fragment_density_texel_max = density_properties.maxFragmentDensityTexelSize,
 		.multiview = v11.multiview == vk::TRUE && v11_properties.maxMultiviewViewCount >= MAX_VIEWS,
+		.multiview_cache_broken = v12_properties.driverID == DRIVER_ID_MESA_KOSMICKRISP,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim

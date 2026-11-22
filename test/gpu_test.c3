@@ -876,22 +876,18 @@ fn void capture_updates_the_gpu_time_it_measured() @test
  the pool sized for pairs — produces stamps from two different frames in one
  reading, and the sum stops matching immediately.
 
- **Proved by injection**, twice, and both are the same mistake at different
- marks — a phase boundary that is not recorded. The stamp read back is then
- whatever the host reset left in the query, so the span before it runs from zero
- and the sum leaves the frame far behind rather than falling just short of it:
+ **Proved by injection**: a phase boundary left out of `record_scene` (the
+ `SCENE` mark dropped, or the `POST` mark made conditional on `posted`, the
+ tempting shape since an unposted frame records no chain). The timer keeps which
+ marks a frame recorded and gives no reading for one missing any, so this reads
+ "the frame was not measured at all: 0.000000 ms". Before it did, the stamp read
+ back was whatever the query held and the sum left the frame far behind.
 
- - the `SCENE` mark dropped: "the phases sum to 197699740.423692 ms but the
-   frame was 0.254000 ms (prepare 0.000000, shadow 0.000000, scene 0.000000,
-   post 197907073.828811, present 0.000000)";
- - the `POST` mark made conditional on `posted` — the tempting shape, since an
-   unposted frame records no chain: "the phases sum to 197845015.740876 ms but
-   the frame was 0.264292 ms (... post 0.000000, present 197845015.476584)".
-
- The second is the one to notice: it is invisible to every other check in this
- file, `gpu_ms` is unchanged and correct throughout, and the frame it breaks is
- the ordinary unposted one that almost every test here draws. Restored, green
- again.
+ That is also what a mark the driver never wrote looks like, and KosmicKrisp
+ writes only four timestamps between two render passes: here, the fifth mark
+ (`PREPASS`) read 0 and the scene phase came out at the machine's uptime. The
+ timer now takes such a mark to be the previous one (`gpu/timing.c3`), so this
+ frame sums exactly on that driver too.
 *>
 fn void the_phases_account_for_the_whole_frame() @test
 {

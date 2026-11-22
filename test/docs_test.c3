@@ -84,12 +84,17 @@ fn void the_docs_name_everything_the_api_exposes() @test
 	three::append_json_string(&source, doc("classes.md"));
 	source.append_string(`;
 		// One entry per '## Name' heading: its text is the key, and everything
-		// down to the next one is the entry.
+		// down to the next one is the entry. Found with indexOf rather than a
+		// split on /^## /m: a split runs the expression at every character, which
+		// under the leak-checking allocator took longer than the script budget.
 		const entries = {};
-		for (const part of classes.split(/^## /m).slice(1)) {
+		const heads = classes.startsWith('## ') ? [0] : [];
+		for (let at = classes.indexOf('\n## '); at >= 0; at = classes.indexOf('\n## ', at + 1)) heads.push(at + 1);
+		heads.forEach((start, i) => {
+			const part = classes.slice(start + 3, i + 1 < heads.length ? heads[i + 1] : classes.length);
 			const newline = part.indexOf('\n');
 			entries[part.slice(0, newline).trim()] = part.slice(newline);
-		}
+		});
 
 		// What an entry documents, as names: the leading identifier of every
 		// "- 'name'" or "- 'sig(args)'" list item, in code quotes — a span may wrap, a list of

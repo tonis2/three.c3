@@ -33,7 +33,27 @@
  Every mark is written every frame, including ones bounding a phase that
  recorded nothing. A query the GPU never wrote has no result, and the whole set
  then reads back `VK_NOT_READY` — so skipping the shadow mark on an unshadowed
- frame would report no timings at all rather than a zero for that phase.
+ frame would report no timings at all rather than a zero for that phase. The
+ timer keeps which marks a frame recorded, and a frame missing one gives no
+ reading at all, so a mark left out of `record_scene` shows as a frame that was
+ never measured rather than as a wrong phase.
+
+ ## A mark the driver did not write
+
+ KosmicKrisp writes only the first four timestamps recorded between two render
+ passes; every later one in the run is never written (seen on the Vulkan SDK
+ 1.4.363 build and on Mesa main as of 2026-11, with nothing but timestamps, with a
+ fill between each, and across a pipeline barrier). An unshadowed frame with no
+ occlusion and no prepass records five marks before the scene pass, and a frame
+ that reuses the cached scene records six. The query then holds 0, or the stamp
+ an earlier frame left in it, since a host reset does not clear one there.
+
+ Every mark is recorded after the previous one and before `END`, so a stamp
+ outside that range is one the driver did not write, and `collect` takes it to be
+ the previous mark: its phase reads 0 and the next phase takes the time. That is
+ also the right answer on that driver. Only a run of marks with no render pass
+ between them loses any, and the phases between such marks recorded nothing.
+ `FrameTimer.unwritten` counts them.
 
  The marks sit between renderings, never inside one. That is the only place a
  timestamp is portable: an implementation may defer a write issued inside a
@@ -99,6 +119,7 @@ enum FrameMark : char
 }
 
 const uint FRAME_MARKS = FrameMark.END.ordinal + 1;
+const ushort ALL_MARKS = (ushort)((1 << FRAME_MARKS) - 1);
 
 <*
  What one frame cost, split by phase, in milliseconds.
@@ -145,6 +166,11 @@ struct FrameTimer
 	// ending, or ends twice, cannot leave a stale run to be read as a fresh one.
 	bool[MAX_FRAMES_IN_FLIGHT] armed;
 	FrameTiming timing;
+	// Which marks slot `i`'s frame recorded, one bit per `FrameMark`. `end` arms
+	// the slot only when all of them were.
+	ushort[MAX_FRAMES_IN_FLIGHT] recorded;
+	// Marks the driver did not write, over the timer's life — see the header.
+	ulong unwritten;
 
 	// One pipeline statistics query per slot, wrapping the scene rendering.
 	// Null when the device does not offer `pipelineStatisticsQuery`, and then
@@ -245,6 +271,15 @@ fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 
 	if (stamps[FrameMark.END.ordinal] <= stamps[FrameMark.BEGIN.ordinal]) return;
 
+	// A mark outside [previous mark, END] was not written — see the header.
+	ulong end = stamps[FrameMark.END.ordinal];
+	for (uint i = FrameMark.BEGIN.ordinal + 1; i < FrameMark.END.ordinal; i++)
+	{
+		if (stamps[i] >= stamps[i - 1] && stamps[i] <= end) continue;
+		stamps[i] = stamps[i - 1];
+		self.unwritten++;
+	}
+
 	self.timing = {
 		.total = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.END.ordinal]),
 		.prepare = self.span(stamps[FrameMark.BEGIN.ordinal], stamps[FrameMark.PREPARE.ordinal]),
@@ -272,6 +307,7 @@ fn void? FrameTimer.begin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 	if (self.pool == null && self.stats_pool == null) return;
 
 	self.collect(gpu, slot)!;
+	self.recorded[slot] = 1 << FrameMark.BEGIN.ordinal;
 
 	if (self.stats_pool != null) vk::resetQueryPool(gpu.handle, self.stats_pool, slot, 1);
 	if (self.pool == null) return;
@@ -289,6 +325,7 @@ fn void? FrameTimer.begin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 *>
 fn void FrameTimer.mark(&self, vk::CommandBuffer cmd, uint slot, FrameMark at)
 {
+	self.recorded[slot] |= (ushort)(1 << at.ordinal);
 	if (self.pool == null) return;
 
 	vk::cmdWriteTimestamp2(cmd, PIPELINE_STAGE_2_ALL_COMMANDS_BIT, self.pool, slot * FRAME_MARKS + at.ordinal);
@@ -306,7 +343,8 @@ fn void FrameTimer.end(&self, vk::CommandBuffer cmd, uint slot)
 	if (self.pool == null && self.stats_pool == null) return;
 
 	self.mark(cmd, slot, FrameMark.END);
-	self.armed[slot] = true;
+	// A frame that left a mark out has a run that is not one frame's partition.
+	self.armed[slot] = self.recorded[slot] == ALL_MARKS;
 }
 
 <*

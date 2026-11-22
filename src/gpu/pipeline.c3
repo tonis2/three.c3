@@ -1462,6 +1462,9 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 
 	vk::PipelineCreateFlags flags = desc.density_map
 		? PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT : (vk::PipelineCreateFlags)0;
+	// See `GpuLimits.multiview_cache_broken`.
+	bool multiview = desc.rendering != null && desc.rendering.viewMask != 0;
+	vk::PipelineCache cache = multiview && gpu.limits.multiview_cache_broken ? (vk::PipelineCache)null : gpu.driver_cache.handle;
 	self.handle = vk::graphicsPipelineCreateInfo().setFlags(flags).setNext(desc.rendering).setStages(desc.stages)
 		.setVertexInputState(&vertex_input)
 		.setInputAssemblyState(&input_assembly)
@@ -1472,7 +1475,7 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.setDepthStencilState(&depth)
 		.setDynamicState(&dynamic)
 		.setLayout(self.layout)
-		.build(gpu.handle, gpu.driver_cache.handle)!;
+		.build(gpu.handle, cache)!;
 
 	// A copy, not a move. A module now produces one pipeline per render state —
 	// the line pass and the solid pass are one built-in module, and a material's

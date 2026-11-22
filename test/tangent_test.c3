@@ -27,6 +27,7 @@ import three;
 import three_tests::device;
 import vk;
 import image;
+import gltf;
 import std::core::test;
 
 const uint W = 120;
@@ -65,8 +66,13 @@ fn uint pixel(three::Renderer* renderer, uint x, uint y)
 <*
  Both encodings come off the file as tangents, and neither is dropped.
 
- Read off the uploaded mesh rather than the picture, so this is the half that says
- the stream arrived and the picture below says what it did there.
+ Read off the loader and the uploaded mesh rather than the picture, so this is the
+ half that says the stream arrived and the picture below says what it did there.
+
+ The width is checked on what the loader hands to the upload, not on the device
+ buffer: a buffer's size is the driver's memory requirement, and a driver that
+ rounds small buffers up (KosmicKrisp makes 64 bytes 256) would make four float4s
+ and four packed bytes look the same.
 *>
 fn void the_loader_reads_a_tangent_at_either_width() @test
 {
@@ -79,12 +85,31 @@ fn void the_loader_reads_a_tangent_at_either_width() @test
 	three::AssetId id   = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
 	three::Asset* asset = renderer.pass.assets.slot(id);
 	test::@check(asset.meshes.len() == 3, "the fixture has three planes, got %d", asset.meshes.len());
+
+	// `float` as stored, `bytes` scaled back from (-127, 0, 0, 127), `bare` none.
+	float[<4>][3] expected = { { 1, 0, 0, 1 }, { -1, 0, 0, 1 }, { 0, 0, 0, 0 } };
 	foreach (i, &mesh : asset.meshes)
 	{
 		// Index 2 is the plane with none.
 		test::@check(mesh.has_tangents == (i != 2), "mesh %d: has_tangents is %s", i, mesh.has_tangents);
-		if (!mesh.has_tangents) continue;
-		test::@check(mesh.tangents.size == 4 * 16, "and it is four float4s on the device, got %d bytes", mesh.tangents.size);
+
+		three::GeometryBuilder geometry;
+		geometry.init();
+		defer geometry.free();
+		gltf::Primitive primitive = asset.stream.gltf.meshes[mesh.gltf_mesh].primitives[mesh.gltf_primitive];
+		test::@check(three::read_primitive_streams(&asset.stream, primitive, &geometry), "mesh %d has positions", i);
+
+		if (!mesh.has_tangents)
+		{
+			test::@check(geometry.tangents.len() == 0, "mesh %d read %d tangents from no stream", i, geometry.tangents.len());
+			continue;
+		}
+		test::@check(geometry.tangents.len() == 4, "mesh %d: one float4 a corner, got %d", i, geometry.tangents.len());
+		foreach (t : geometry.tangents)
+		{
+			test::@check((t - expected[i]).length() < 1e-6, "mesh %d: tangent %s, not %s", i, t, expected[i]);
+		}
+		test::@check(mesh.tangents.size >= 4 * 16, "and the device holds them all: %d bytes", mesh.tangents.size);
 	}
 }
 
