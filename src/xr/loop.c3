@@ -72,6 +72,8 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 
 	// Frames are left in flight, so the swapchain must not go before they finish.
 	defer renderer.gpu.wait_idle();
+	host.display = &renderer.xr_display;
+	defer host.display = null;
 
 	xr::Time first_time = 0;
 	// For the once-every-few-seconds line saying how it is going.
@@ -88,6 +90,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		host.poll();
 		if (host.exit_wanted || app.destroy_requested != 0) break;
 		if (!host.running) continue;
+		host.apply_refresh_rate();
 
 		xr::FrameWaitInfo wait_info = { .type = xr::TYPE_FRAME_WAIT_INFO };
 		xr::FrameState frame = { .type = xr::TYPE_FRAME_STATE };

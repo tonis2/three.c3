@@ -50,10 +50,10 @@ how much a pixel executes. That is why the frame's unused features are compiled 
       post stage reads it — `post.shady` samples it whether or not it is used.
 - [x] **CPU/GPU levels.** `XR_EXT_performance_settings` asks for sustained high
       at session start; light scenes got about 30% faster.
-- [ ] **A refresh-rate knob for scripts.** `XR_FB_display_refresh_rate` is bound
-      and the offered rates are logged (72, 80, 90, 120), but the runtime accepts
-      a request at READY or FOCUSED and keeps 120 Hz. Find when it honours one,
-      then expose it as `three.xr.refreshRate`.
+- [x] **A refresh-rate knob for scripts.** `three.xr.refreshRate` and
+      `three.xr.refreshRates`. The runtime had been ignoring requests because the
+      headset's `debug.oculus.refreshRate` property forces a rate; without it an
+      app starts at 72 Hz.
 - [ ] **Multiview.** One draw for both eyes through `viewMask` and a two-layer
       target. Saves CPU and vertex work, not fragment work. `view_index` is in
       shady now; every per-view pass still has to move from rects to layers.

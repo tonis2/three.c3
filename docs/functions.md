@@ -1579,6 +1579,30 @@ without drawing reports the residual work around its tick alone.
 `three.systems.report()` is the rolling per-system version and the one to reach for next: this splits a frame
 into four spans, that splits two of those spans by name.
 
+# The headset
+
+## three.xr.refreshRate
+
+The headset display's rate in Hz, and `0` off a headset. Setting it asks for the rate in `three.xr.refreshRates`
+nearest to the one given; the display switches a few frames later, so reading it straight back still gives the
+old rate. `0` hands the choice back to the runtime.
+
+A lower rate is more time for every frame: 120 Hz leaves 8.3 ms, 90 Hz 11.1 ms and 72 Hz 13.9 ms. A scene that
+cannot keep up at one rate is smoother at a lower one it can hold than at a higher one it drops frames at.
+
+Like the depth prepass it belongs to the renderer: `new three.Scene()` does not reset it. On Quest the
+`debug.oculus.refreshRate` system property overrides any request until it is cleared with
+`adb shell setprop debug.oculus.refreshRate ""` or the headset restarts.
+
+```js
+three.xr.refreshRate = 90;
+```
+
+## three.xr.refreshRates
+
+The display rates the headset offers, lowest first on Quest 3 — `[72, 80, 90, 120]` — and `[]` off a headset.
+Filled once the session is focused, so a script that reads it at boot sees `[]` on the headset too.
+
 # The clock
 
 ## three.clock.wall

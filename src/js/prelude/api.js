@@ -1552,6 +1552,20 @@ const clock = {
 // to reach for next: this splits the frame into four spans, that splits
 // two of those spans by name.
 
+// The headset. Off one, the rate reads 0 and the list is empty.
+const xr = {
+	// The display's rate in Hz. Setting it asks the headset for the offered
+	// rate nearest to it, and the display switches a few frames later; 0
+	// hands the choice back to the runtime.
+	get refreshRate() { return H.xrRefreshRateGet(); },
+	set refreshRate(hz) {
+		hz = +hz;
+		if (!(hz >= 0)) throw new RangeError('three.xr.refreshRate wants Hz, 0 or more');
+		H.xrRefreshRateSet(hz);
+	},
+	get refreshRates() { return H.xrRefreshRatesGet(); },
+};
+
 const frame = {
 	get running() { return H.frameStats().running; },
 	get ticks() { return H.frameStats().ticks; },
@@ -1879,6 +1893,7 @@ export const three = {
 	clock,
 	frame,
 	debug,
+	xr,
 
 	// The interface — `three:ui.js`. `set` a tree, `patch` a value, `draw` a
 	// list of primitives in frame pixels. Drawn over the finished frame and

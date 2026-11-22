@@ -34,6 +34,7 @@ module three;
 import vk;
 import image;
 import std::time;
+import std::math;
 
 const uint MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -313,6 +314,9 @@ struct Renderer
 	*>
 	bool always_render;
 
+	// The headset's display rate, `three.xr.refreshRate`. Untouched off a headset.
+	XrDisplay xr_display;
+
 	// Frames the key said were already on screen — `stats().skippedFrames`.
 	ulong skipped_frames;
 	// Frames that were drawn — `stats().renderedFrames`.
@@ -330,6 +334,36 @@ struct Renderer
  ask to be restored to and two spellings of it would drift.
 *>
 const float[4] DEFAULT_CLEAR = { 0.10, 0.11, 0.13, 1.0 };
+
+<*
+ Where a script and the XR loop meet over the display rate. The script writes
+ `wanted`; the loop requests it once a session runs and fills in the rest.
+*>
+struct XrDisplay
+{
+	// Hz asked for; 0 leaves the choice to the runtime.
+	float wanted;
+	// The last `wanted` passed on, so a request goes out once per change.
+	float requested;
+	// What the display runs at now; 0 off a headset.
+	float now;
+	float[8] offered;
+	uint offered_count;
+}
+
+<*
+ The offered rate closest to `hz`, or `hz` itself when none were offered.
+*>
+fn float XrDisplay.nearest_offered(&self, float hz)
+{
+	if (self.offered_count == 0) return hz;
+	float best = self.offered[0];
+	foreach (rate : self.offered[:self.offered_count])
+	{
+		if (math::abs(rate - hz) < math::abs(best - hz)) best = rate;
+	}
+	return best;
+}
 
 <*
  @param surface : `Null for headless: no viewer, no swapchain, and render + screenshot still work.`

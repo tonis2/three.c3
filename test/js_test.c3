@@ -7512,3 +7512,37 @@ fn void a_post_pass_samples_a_compute_image() @test
 		defer cleared.free();
 	};
 }
+
+<*
+ Off a headset the display rate reads as none, and a request is kept for the XR
+ loop to pass on, snapped to an offered rate.
+*>
+fn void the_headset_refresh_rate_is_a_request() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		// The device is shared by the whole binary.
+		defer run.renderer.xr_display = {};
+
+		three::RunResult off = run.run("return [three.xr.refreshRate, three.xr.refreshRates.length];");
+		defer off.free();
+		test::@check(off.ok && off.value == "[0,0]", "off a headset there is no rate: %s %s", off.value, off.error);
+
+		three::RunResult asked = run.run("three.xr.refreshRate = 90;");
+		defer asked.free();
+		test::@check(asked.ok, "a rate can be asked for: %s", asked.error);
+		test::@check(run.renderer.xr_display.wanted == 90, "the request is kept, got %f", run.renderer.xr_display.wanted);
+
+		three::RunResult wrong = run.run("three.xr.refreshRate = -1;");
+		defer wrong.free();
+		test::@check(!wrong.ok, "a negative rate is refused");
+
+		run.renderer.xr_display.offered[:4] = (float[4]) { 72, 80, 90, 120 }[..];
+		run.renderer.xr_display.offered_count = 4;
+		test::@check(run.renderer.xr_display.nearest_offered(100) == 90, "100 Hz snaps to 90");
+		test::@check(run.renderer.xr_display.nearest_offered(200) == 120, "and anything past the top to 120");
+		three::RunResult listed = run.run("return three.xr.refreshRates;");
+		defer listed.free();
+		test::@check(listed.value == "[72,80,90,120]", "the offered rates read back, got %s", listed.value);
+	};
+}

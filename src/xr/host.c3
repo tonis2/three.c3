@@ -40,6 +40,8 @@ struct XrHost
 	List {ZString} instance_extensions;
 	List {ZString} device_extensions;
 	VulkanRequest request;
+	// The renderer's, so a script's `three.xr.refreshRate` reaches the runtime.
+	XrDisplay* display;
 }
 
 <*
@@ -307,6 +309,7 @@ fn void XrHost.poll(&self)
 			case xr::TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB:
 				xr::EventDataDisplayRefreshRateChangedFB* rate = (xr::EventDataDisplayRefreshRateChangedFB*)&event;
 				io::printfn("xr: display now %.0f Hz, was %.0f", rate.to_display_refresh_rate, rate.from_display_refresh_rate);
+				if (self.display != null) self.display.now = rate.to_display_refresh_rate;
 			default:
 		}
 	}
@@ -353,9 +356,8 @@ fn void XrHost.tune_session(&self)
 }
 
 <*
- Logs the display rates the runtime offers and the one it runs at. It picks the
- rate itself: a request for another, made at READY or at FOCUSED, is accepted
- and ignored by the Quest 3 runtime (Oculus 210.137).
+ Logs the display rates the runtime offers and the one it runs at, and keeps
+ both in `display` for scripts to read.
 *>
 fn void XrHost.report_refresh_rates(&self)
 {
@@ -367,6 +369,29 @@ fn void XrHost.report_refresh_rates(&self)
 	foreach (rate : rates[:count]) io::printfn("xr: display offers %.0f Hz", rate);
 	float now;
 	if (xr::cmd.get_display_refresh_rate(self.session, &now) >= 0) io::printfn("xr: display at %.0f Hz", now);
+	if (self.display == null) return;
+	self.display.offered_count = min(count, (uint)self.display.offered.len);
+	self.display.offered[:self.display.offered_count] = rates[:self.display.offered_count];
+	self.display.now = now;
+}
+
+<*
+ Passes a changed `three.xr.refreshRate` to the runtime, snapped to a rate it
+ offers. The switch lands a few frames later, with the changed event.
+
+ The `debug.oculus.refreshRate` system property overrides any request:
+ `adb shell setprop debug.oculus.refreshRate ""` clears it.
+*>
+fn void XrHost.apply_refresh_rate(&self)
+{
+	if (self.display == null || !self.running || xr::cmd.request_display_refresh_rate == null) return;
+	XrDisplay* display = self.display;
+	// Waits for FOCUSED to list the rates, so a request is always one of them.
+	if (display.wanted == display.requested || display.offered_count == 0) return;
+	display.requested = display.wanted;
+	float hz = display.wanted > 0 ? display.nearest_offered(display.wanted) : 0;
+	if (catch xr::check(xr::cmd.request_display_refresh_rate(self.session, hz), "xrRequestDisplayRefreshRateFB")) return;
+	io::printfn("xr: asked for %.0f Hz", hz);
 }
 
 // Asks the runtime to wind the session down; `poll` sees it through.

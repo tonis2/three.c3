@@ -211,6 +211,9 @@ fn void? JsRuntime.bind_scene_verbs(&self, js::Value host)
 	self.js.@bind(host, "alwaysRenderSet", &js_always_render_set, self)!;
 	self.js.@bind(host, "sceneCacheGet", &js_scene_cache_get, self)!;
 	self.js.@bind(host, "sceneCacheSet", &js_scene_cache_set, self)!;
+	self.js.@bind(host, "xrRefreshRateGet", &js_xr_refresh_rate_get, self)!;
+	self.js.@bind(host, "xrRefreshRateSet", &js_xr_refresh_rate_set, self)!;
+	self.js.@bind(host, "xrRefreshRatesGet", &js_xr_refresh_rates_get, self)!;
 	self.js.@bind(host, "shadowFit", &js_shadow_fit, self)!;
 	self.js.@bind(host, "debugViewGet", &js_debug_view_get, self)!;
 	self.js.@bind(host, "debugViewSet", &js_debug_view_set, self)!;
@@ -2704,6 +2707,31 @@ fn void js_scene_cache_set(JsRuntime* self, bool on)
 	if (self.renderer == null) return;
 	self.renderer.scene_cache_disabled = !on;
 	if (!on) self.renderer.scene_cache.invalidate();
+}
+
+// `xrRefreshRateGet()` — the headset display's rate in Hz, 0 off a headset.
+fn float js_xr_refresh_rate_get(JsRuntime* self) => self.renderer == null ? 0 : self.renderer.xr_display.now;
+
+<*
+ `xrRefreshRateSet(hz)` — ask the headset for a display rate; 0 hands the
+ choice back to the runtime. A property of the renderer, so a new scene keeps it.
+*>
+fn void js_xr_refresh_rate_set(JsRuntime* self, float hz)
+{
+	if (self.renderer != null) self.renderer.xr_display.wanted = max(hz, 0);
+}
+
+<*
+ `xrRefreshRatesGet()` — the display rates the headset offers, empty off one.
+
+ @return? js::THREW
+*>
+fn js::Value? js_xr_refresh_rates_get(JsRuntime* self)
+{
+	double[8] rates;
+	uint count = self.renderer == null ? 0 : self.renderer.xr_display.offered_count;
+	for (uint i = 0; i < count; i++) rates[i] = self.renderer.xr_display.offered[i];
+	return self.js.numbers(rates[:count]);
 }
 
 // `depthPrepassGet()` — whether the depth prepass is on.
