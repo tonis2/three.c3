@@ -10,6 +10,9 @@
 .vscode
 .codex
 node_modules
+# Plans are local notes, not part of the repo.
+plan.md
+gameplan.md
 
 # Linker output
 *.ilk
