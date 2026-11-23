@@ -313,6 +313,48 @@ fn void the_step_is_fixed_whatever_the_frame_rate() @test
 	};
 }
 
+<*
+ A damping is a rate bled off per second. The solver keeps a share of velocity
+ per second instead, and was handed the rate as that share: a damping of 2
+ doubled a spin every second instead of slowing it.
+*>
+fn void damping_slows_a_body_down() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult built = run.run(`
+			const scene = new three.Scene();
+			const spin = (x, damping) => {
+				const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				box.position.set(x, 0, 0);
+				scene.add(box);
+				three.physics.add(box, { shape: 'box', mass: 1, gravityFactor: 0, angularDamping: damping });
+				three.physics.setAngularVelocity(box, [0, 4, 0]);
+				return box;
+			};
+			globalThis.damped = spin(-3, 2);
+			globalThis.plain = spin(3, 0);
+			return 'ok';
+		`);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+
+		for (int i = 1; i <= 60; i++) run.tick((double)i * (1000.0 / 60.0));
+
+		three::RunResult damped = run.run("return three.physics.velocity(globalThis.damped)[4];");
+		defer damped.free();
+		three::RunResult plain = run.run("return three.physics.velocity(globalThis.plain)[4];");
+		defer plain.free();
+		test::@check(damped.ok && plain.ok, "the spins were read back: %s %s", damped.error, plain.error);
+		double kept = damped.value.to_double() ?? 999.0;
+		double undamped = plain.value.to_double() ?? 999.0;
+		// e^-2 of 4 rad/s is 0.54 after a second.
+		test::@check(kept > 0.3 && kept < 0.9, "a damping of 2 kept about e^-2 of the spin, read %f rad/s", kept);
+		// No damping is the world's own, 0.9 kept a second.
+		test::@check(undamped > 3.0 && undamped < 4.0, "no damping kept the world's default, read %f rad/s", undamped);
+	};
+}
+
 // G5/S7 and S5, together: a body destroyed inside a trigger is still seen to
 // leave it. The library half of this is `test_remove_body_emits_exit_events`;
 // this is the half that gets it to a script.

@@ -2016,8 +2016,9 @@ and tweaked at the call: `{ shape: 'box' | 'sphere' | 'capsule' | 'hull' | 'heig
 friction: 0.5, restitution: 0.2, kinematic: false, trigger: false }`. Mass 0 means static.
 
 `{ gravityFactor: 1, linearDamping: 0, angularDamping: 0 }` are the three knobs a glTF `motion` block
-carries and are read only on a dynamic body: all of gravity and no drag, which is what every body here had
-before they were options. `gravityFactor: 0` floats.
+carries and are read only on a dynamic body. `gravityFactor: 0` floats. A damping is a rate per second:
+2 leaves e⁻², about an eighth, of the velocity after a second. 0 leaves the world's own light drag, which
+keeps 90% a second and is what every body here had before they were options.
 
 The object has to be in the scene already — a body is placed at a world position — and has to be a child of
 the scene rather than of another object, because the solver works in world space and a parent transform would

@@ -639,6 +639,20 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
 }
 
 <*
+ The solver's dampening is the share of velocity a body keeps after a second,
+ and 0 there takes the world's own; a script and a glTF file give a rate bled
+ off per second. Handed over unconverted, a damping of 5 kept 5 times the
+ velocity every second and spun a ball up instead of slowing it.
+
+ @param damping : "A rate per second, 0 or more"
+ @return "The share kept after a second, or 0 for the world's default"
+*>
+fn float kept_per_second(float damping) @local
+{
+	return damping > 0 ? collision::dmath::pow((float)math::E, -damping) : 0;
+}
+
+<*
  Gives a node a body.
 
  Adding twice replaces rather than stacks, which is what a script re-running its
@@ -647,7 +661,7 @@ fn collision::TransformedShape Physics.transformed(&self, PhysicsBody* body, Nod
 
  @param mass : `Ignored for anything but a dynamic body — a static one is mass 0 by definition.`
  @param gravity_factor : `How much of the world's gravity this body feels. 1 is all of it, 0 floats. Ignored for anything but a dynamic body, which is the only kind gravity acts on.`
- @param linear_damping : `Velocity bled off per second, 0 for none. A glTF motion block carries both of these, which is why they are parameters rather than constants.`
+ @param linear_damping : `How fast velocity bleeds off, per second, 0 for the world's default. A glTF motion block carries both of these, which is why they are parameters rather than constants.`
 *>
 fn void? Physics.add(
 	&self,
@@ -698,8 +712,8 @@ fn void? Physics.add(
 		.collider = self.transformed(&body, node),
 		.mass = dynamic ? mass : 0,
 		.gravity_factor = dynamic ? gravity_factor : 0,
-		.linear_dampening = linear_damping,
-		.angular_dampening = angular_damping,
+		.linear_dampening = kept_per_second(linear_damping),
+		.angular_dampening = kept_per_second(angular_damping),
 		.is_kinematic = kind == BodyKind.KINEMATIC,
 		.can_sleep = dynamic,
 		.material = {
