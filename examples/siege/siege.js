@@ -4,8 +4,9 @@
 //   ./build/three --script examples/siege/siege.js
 //
 // Reach into the basket at your right hip, squeeze to take a stone and let go
-// to throw it. B or Y rebuilds the castle, refills the basket and puts you back
-// on the line facing the castle; X moves on to the next castle.
+// to throw it. Eight stones a round; the board beside the castle keeps the
+// score, the best for this castle, which castle it is and the stones left. B or
+// Y starts the round again, X moves on to the next castle.
 //
 // At a desk the pointer is the right hand: point at the basket and hold the
 // right button to take a stone, point at the castle and let go to throw it.
@@ -62,6 +63,13 @@ const DESK_EYE = 1.6;
 // `scale` is a throw boost: with nothing in the hand people throw gently, and
 // the first throws on the headset left at 4-6 m/s.
 const tuning = { mode: 'peak', window: 0.1, scale: 1.6 };
+
+// Best scores are kept in the game's save folder, named before anything else.
+try {
+	three.configure({ saveDir: 'siege' });
+} catch {
+	// Already named by the run this one reloaded.
+}
 
 const scene = new three.Scene();
 scene.background = 0x8aa4c0;
@@ -184,9 +192,10 @@ plinthMaterial.repeat = [2, 1.5];
 
 const matte = new three.MeshLambertMaterial({});
 
-function box(size, at, material, color, body) {
+function box(size, at, material, color, body, yaw = 0) {
 	const mesh = new three.Mesh(new three.BoxGeometry(...size), material);
 	mesh.position.set(...at);
+	mesh.rotation.y = yaw;
 	if (color) mesh.color = color;
 	scene.add(mesh);
 	if (body) three.physics.add(mesh, { shape: 'box', mass: 0, friction: 0.8, ...body });
@@ -356,8 +365,8 @@ function keep() {
 	return [hall, ...towers, curtain];
 }
 
-// Level 3: a tall bell tower, open at the top with the bell hung inside, and
-// a churchyard wall in front.
+// Level 3: a tall bell tower, open at the top with a bell hung inside, and a
+// churchyard wall in front.
 function belfry() {
 	const tower = new Section('tower');
 	for (let y = 0; y < 16; y++) ring(tower, 'stone', -2, -4, 4, y);
@@ -373,11 +382,21 @@ function belfry() {
 
 // How many substeps a second each castle needs to stand still: two a step at
 // 90 Hz is half the solver's time of four and lets struck pieces slide out
-// further, but the belfry's tall tower only keeps still at four.
+// further, but the belfry's tall tower only keeps still at four. `soldiers` is
+// where each stands, in cells: the middle of its feet, y the top it stands on.
 const LEVELS = [
-	{ name: 'palisade', build: palisade, substepRate: 180 },
-	{ name: 'keep', build: keep, substepRate: 180 },
-	{ name: 'belfry', build: belfry, substepRate: 360 },
+	{
+		name: 'palisade', build: palisade, substepRate: 180,
+		soldiers: [[-0.5, 7.5, -4.5], [0.5, 7.5, -3.5], [-3, 0, 1.5], [3, 0, 1.5]],
+	},
+	{
+		name: 'keep', build: keep, substepRate: 180,
+		soldiers: [[-2, 6, 3.5], [2, 6, 3.5], [-5, 10, 4.5], [5, 10, 4.5], [1, 9, -0.5]],
+	},
+	{
+		name: 'belfry', build: belfry, substepRate: 360,
+		soldiers: [[-4.5, 3, 4.5], [4.5, 3, 4.5], [0, 16, -0.5], [0, 16, -3.5]],
+	},
 ];
 
 const bronzeMaterial = new three.MeshLambertMaterial({});
@@ -405,6 +424,8 @@ function geometryFor(piece) {
 const tipGeometry = new three.ConeGeometry(CELL / Math.SQRT2, CELL * 0.6, 4);
 // Each piece's half size in metres, along x, y and z as built.
 const halfSizes = new Map();
+// Each piece's height as built and its mass, which the score is counted from.
+const homes = new Map();
 
 function centreOf(piece) {
 	const [x, y, z] = piece.at;
@@ -431,13 +452,16 @@ function placePiece(piece, n) {
 	const [sx, sy, sz] = piece.size;
 	// A roof is a thin shell, a tenth of the box it fills.
 	const fill = piece.roof ? 0.1 : 1;
+	const mass = KINDS[piece.kind].density() * sx * sy * sz * fill;
+	homes.set(mesh, { y: mesh.position.y, mass });
 	three.physics.add(mesh, {
 		shape: piece.roof || piece.kind === 'bell' ? 'hull' : 'box',
-		mass: KINDS[piece.kind].density() * sx * sy * sz * fill,
+		mass,
 		friction: 0.4,
 		restitution: 0.05,
-		// A bell left to swing would keep its tower awake for ever.
-		angularDamping: piece.kind === 'bell' ? 3 : 0,
+		// Knocked down, thin stakes and rails jittered on the plinth until they
+		// walked off it.
+		angularDamping: 1,
 	});
 	if (piece.tip) {
 		// A point on the stake, drawn only.
@@ -473,9 +497,13 @@ function contact(a, b) {
 
 // A weld is rated for the weaker of its two materials, and by how much face it
 // holds: a brick on two bricks holds each by half as much as a block on one.
+// Four times that on a roof and on what it rests on: the solver loads the welds
+// of posts holding up a hull hard while it stands still (130 N on a watchtower
+// post), and a stone that frees the posts still brings the roof down.
 function ratingFor(a, b, area) {
 	const r = a.kind === 'wood' || b.kind === 'wood' ? ratings.wood : ratings.stone;
-	return r.force * Math.min(Math.max(area, 0.5), 2);
+	const roofed = a.roof || b.roof || a.bearing || b.bearing;
+	return r.force * Math.min(Math.max(area, 0.5), 2) * (roofed ? 4 : 1);
 }
 
 let level = 0;
@@ -496,6 +524,7 @@ function buildCastle() {
 	welds = [];
 	blockSet.clear();
 	halfSizes.clear();
+	homes.clear();
 	const sections = LEVELS[level].build();
 	let n = 0;
 	for (const section of sections) {
@@ -505,23 +534,34 @@ function buildCastle() {
 			blockSet.add(mesh);
 		}
 		const solid = section.pieces.filter((p) => p.kind !== 'bell');
+		const faces = [];
 		for (let i = 0; i < solid.length; i++) {
 			for (let j = i + 1; j < solid.length; j++) {
 				const face = contact(solid[i], solid[j]);
-				if (face === null || face.area < 0.25) continue;
-				const a = solid[i].mesh;
-				const b = solid[j].mesh;
-				// A piece resting on another still touches it, so the weight goes
-				// down through the contact and the weld holds only what pulls the
-				// two apart. Pieces side by side need no contact for that.
-				const collide = face.axis === 1;
-				const id = three.physics.joint(a, b, { type: 'fixed', collide });
-				welds.push({ a, b, collide, force: ratingFor(solid[i], solid[j], face.area), id });
+				if (face !== null && face.area >= 0.25) faces.push({ p: solid[i], q: solid[j], face });
 			}
 		}
+		// What a roof rests on carries it, see `ratingFor`.
+		for (const { p, q } of faces) {
+			if (p.roof) q.bearing = true;
+			if (q.roof) p.bearing = true;
+		}
+		for (const { p, q, face } of faces) {
+			// A piece resting on another still touches it, so the weight goes
+			// down through the contact and the weld holds only what pulls the
+			// two apart. Pieces side by side need no contact for that, and nor
+			// does a roof: a hull resting on a box fought its weld with 500 N of
+			// contact standing still, where a light roof's weld carries it alone.
+			const collide = face.axis === 1 && !p.roof && !q.roof;
+			const id = three.physics.joint(p.mesh, q.mesh, { type: 'fixed', collide });
+			welds.push({ a: p.mesh, b: q.mesh, collide, force: ratingFor(p, q, face.area), id });
+		}
+		// Hung things are welded to what they hang from: a bell left free to
+		// swing on a point joint spun up and kept its tower awake for ever. A
+		// stone that frees it brings it down.
 		for (const piece of section.pieces.filter((p) => p.hang)) {
-			const [x, y, z] = centreOf(piece);
-			three.physics.joint(piece.hang.mesh, piece.mesh, { type: 'point', pivot: [x, y + (piece.size[1] / 2 + 0.4) * CELL, z] });
+			const id = three.physics.joint(piece.hang.mesh, piece.mesh, { type: 'fixed' });
+			welds.push({ a: piece.hang.mesh, b: piece.mesh, collide: false, force: ratingFor(piece.hang, piece, 1), id });
 		}
 	}
 	builtAt = three.clock.time;
@@ -532,6 +572,8 @@ function buildCastle() {
 // Once the castle has settled, each weld is made again where its pieces now
 // are, with its rating.
 function arm() {
+	// Heights are counted from here too: settling is not a hit.
+	for (const block of blocks) homes.get(block).y = block.position.y;
 	for (const weld of welds) {
 		if (weld.id === null) continue;
 		three.physics.removeJoint(weld.id);
@@ -632,7 +674,9 @@ function inBasket(p, margin) {
 }
 
 const stoneShape = new three.SphereGeometry(STONE_RADIUS, 12, 8);
-const stoneBody = { shape: 'sphere', mass: STONE_MASS, friction: 0.6, restitution: 0.1 };
+// Angular damping stands in for rolling resistance: a sphere on flat ground
+// otherwise rolls for ever, and keeps awake the rubble it lies in.
+const stoneBody = { shape: 'sphere', mass: STONE_MASS, friction: 0.6, restitution: 0.1, angularDamping: 2 };
 const stones = [];
 for (let k = 0; k < STONES; k++) {
 	const stone = new three.Mesh(stoneShape, pebbleMaterial);
@@ -765,10 +809,12 @@ function launch(stone, from, v, w, record) {
 	flying.set(stone, record);
 	striking.set(stone, record);
 	lastThrow = record;
+	lastLaunch = three.clock.time;
 	return record;
 }
 
 let lastThrow = null;
+let lastLaunch = 0;
 
 function letGo(hand, now) {
 	const stone = hand.stone;
@@ -814,6 +860,7 @@ function what(object) {
 	if (object === ground) return 'ground';
 	if (basketSet.has(object)) return 'basket';
 	if (stoneSet.has(object)) return 'stone';
+	if (soldiers.some((s) => s.mesh === object)) return 'soldier';
 	return 'other';
 }
 
@@ -866,17 +913,256 @@ three.onJointBreak(({ id }) => {
 	if (lastThrow !== null) lastThrow.broke++;
 });
 
-// Blocks knocked off the plinth.
-let down = 0;
-let nextCount = 0;
-function countDown(now) {
-	if (now < nextCount) return;
-	nextCount = now + 0.5;
-	const fallen = blocks.filter((block) => block.position.y < PLINTH_TOP).length;
-	if (fallen !== down) {
-		down = fallen;
-		console.log(`siege: ${down} of ${blocks.length} pieces off the plinth, ${broken} welds broken`);
+// ---------------------------------------------------------------------------
+// Soldiers: standing loose on the castle, not welded. One knocked down from
+// where it stood, or over, scores.
+// ---------------------------------------------------------------------------
+
+const SOLDIER = [0.045, 0.1, 0.04];
+const soldierShape = new three.BoxGeometry(...SOLDIER);
+const headShape = new three.SphereGeometry(0.018, 10, 8);
+const helmetShape = new three.ConeGeometry(0.021, 0.026, 8);
+// Each soldier's body, its head, the height it stood at, and whether it is down.
+let soldiers = [];
+
+function placeSoldiers(feet) {
+	for (const soldier of soldiers) {
+		three.physics.remove(soldier.mesh);
+		scene.remove(soldier.mesh);
 	}
+	soldiers = feet.map(([x, y, z], k) => {
+		const mesh = new three.Mesh(soldierShape, matte);
+		mesh.position.set(x * CELL, PLINTH_TOP + y * CELL + SOLDIER[1] / 2 + 0.001, CASTLE_Z + z * CELL);
+		mesh.color = k % 2 === 0 ? [0.72, 0.12, 0.1] : [0.15, 0.22, 0.6];
+		scene.add(mesh);
+		const head = new three.Mesh(headShape, matte);
+		head.position.set(0, SOLDIER[1] / 2 + 0.016, 0);
+		head.color = [0.9, 0.72, 0.58];
+		head.collides = false;
+		mesh.add(head);
+		const helmet = new three.Mesh(helmetShape, matte);
+		helmet.position.set(0, SOLDIER[1] / 2 + 0.034, 0);
+		helmet.color = [0.55, 0.56, 0.6];
+		helmet.collides = false;
+		mesh.add(helmet);
+		three.physics.add(mesh, { shape: 'box', mass: 0.15, friction: 0.7, restitution: 0.05, angularDamping: 1 });
+		return { mesh, head, stood: mesh.position.y, down: false };
+	});
+}
+
+// Fallen from where it stood, or lying down: its head no longer above it.
+function knockedDown(soldier) {
+	const body = soldier.mesh.position.y;
+	return body < soldier.stood - 0.12 || soldier.head.getWorldPosition().y - body < SOLDIER[1] * 0.25;
+}
+
+// ---------------------------------------------------------------------------
+// The scoreboard: seven-segment digits of glowing boxes on a board beside the
+// castle. The interface layer is drawn per eye, so the score lives in the world.
+// ---------------------------------------------------------------------------
+
+// Which of a digit's seven segments are lit, a to g as bits 0 to 6.
+const SEGMENTS = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
+const unlitSegment = new three.MeshLambertMaterial({});
+const glow = (hex) => new three.MeshLambertMaterial({ emissive: hex, emissiveIntensity: 1.5 });
+const segmentShapes = new Map();
+function segmentShape(size) {
+	const key = size.join();
+	if (!segmentShapes.has(key)) segmentShapes.set(key, new three.BoxGeometry(...size));
+	return segmentShapes.get(key);
+}
+
+class Digit {
+	// `height` in metres, on `parent`'s front face; 0.6 of it wide.
+	constructor(parent, x, y, height, lit) {
+		const w = height * 0.6;
+		const t = height * 0.13;
+		const across = segmentShape([w - t * 1.2, t, 0.006]);
+		const up = segmentShape([t, height / 2 - t * 0.8, 0.006]);
+		const places = [
+			[0, height / 2 - t / 2, across], [w / 2 - t / 2, height / 4, up], [w / 2 - t / 2, -height / 4, up],
+			[0, -height / 2 + t / 2, across], [-w / 2 + t / 2, -height / 4, up], [-w / 2 + t / 2, height / 4, up],
+			[0, 0, across],
+		];
+		this.segments = places.map(([sx, sy, shape]) => {
+			const segment = new three.Mesh(shape, unlitSegment);
+			segment.position.set(x + sx, y + sy, 0.013);
+			segment.color = [0.09, 0.08, 0.07];
+			segment.collides = false;
+			parent.add(segment);
+			return segment;
+		});
+		this.lit = lit;
+		this.value = undefined;
+	}
+
+	// A digit 0 to 9, or null for none lit.
+	show(n) {
+		if (n === this.value) return;
+		this.value = n;
+		const bits = n === null ? 0 : SEGMENTS[n];
+		this.segments.forEach((segment, k) => { segment.material = bits & (1 << k) ? this.lit : unlitSegment; });
+	}
+}
+
+// A number in a row of digits, right-aligned with no leading zeros; null
+// blanks it.
+class Readout {
+	constructor(parent, count, x, y, height, spacing, lit) {
+		this.digits = [];
+		for (let i = 0; i < count; i++) this.digits.push(new Digit(parent, x + (i - (count - 1) / 2) * spacing, y, height, lit));
+	}
+
+	show(value) {
+		const count = this.digits.length;
+		const text = value === null ? '' : String(Math.min(Math.max(Math.round(value), 0), 10 ** count - 1));
+		this.digits.forEach((digit, i) => {
+			const c = text.length - count + i;
+			digit.show(c >= 0 ? +text[c] : null);
+		});
+	}
+}
+
+// Left of the castle and turned to face the line.
+const BOARD_AT = [-1.25, 1.5, -2.3];
+const BOARD = [0.6, 0.34, 0.02];
+const boardYaw = Math.atan2(-BOARD_AT[0], -BOARD_AT[2]);
+const board = box(BOARD, BOARD_AT, woodMaterial, [0.32, 0.23, 0.17], {}, boardYaw);
+const pole = box([0.04, BOARD_AT[1] - BOARD[1] / 2, 0.04], [BOARD_AT[0], (BOARD_AT[1] - BOARD[1] / 2) / 2, BOARD_AT[2]], woodMaterial, [0.4, 0.3, 0.2], {}, boardYaw);
+const scoreReadout = new Readout(board, 5, 0, 0.06, 0.13, 0.095, glow(0xffa030));
+const levelDigit = new Digit(board, -0.24, -0.095, 0.075, glow(0x8fd16a));
+const bestReadout = new Readout(board, 5, -0.02, -0.095, 0.075, 0.052, glow(0x5ab4ff));
+const stonesDigit = new Digit(board, 0.235, -0.095, 0.075, glow(0xf0e6d0));
+const stoneIcon = new three.Mesh(new three.SphereGeometry(0.018, 10, 8), pebbleMaterial);
+stoneIcon.position.set(0.17, -0.095, 0.025);
+stoneIcon.collides = false;
+board.add(stoneIcon);
+
+// ---------------------------------------------------------------------------
+// The round: eight stones, a score, and the best kept per castle.
+// ---------------------------------------------------------------------------
+
+// Points for a kilogram of castle brought a metre down, and for a soldier.
+// Height rather than "off the plinth": a wall knocked flat on the plinth is
+// most of the way to knocked off it, and should score like it.
+const POINTS = { perKgMetre: 100, soldier: 250 };
+// Once the last stone is out and has stopped, the round ends when the score
+// has not risen for SETTLE_SCORE seconds, or LONGEST_WAIT after the last throw.
+// A piece counts from a centimetre down, so a castle settling scores nothing.
+const SETTLE_SCORE = 1.5;
+const LONGEST_WAIT = 8;
+const STILL = 0.3;
+const SLACK = 0.01;
+
+let best = {};
+try {
+	best = three.save.read('best') ?? {};
+} catch (e) {
+	console.warn(`siege: no best scores: ${e.message}`);
+}
+
+const round = { state: 'play', score: 0, soldiersDown: 0, dropped: 0, left: STONES, moving: false, risenAt: 0, risenFrom: 0, doneAt: 0, newBest: false };
+// Pieces off the plinth, for reading over MCP.
+let down = 0;
+let nextScore = 0;
+
+// Stones still to throw: in the basket or in a hand.
+function stonesLeft() {
+	let n = hands.filter((hand) => hand.stone !== null).length;
+	for (const stone of stones) if (stone.visible && inBasket(triple(stone.position), 0.02)) n++;
+	return n;
+}
+
+function speedOf(object) {
+	const v = three.physics.velocity(object);
+	return v === null ? 0 : Math.hypot(v[0], v[1], v[2]);
+}
+
+function scoreRound() {
+	let dropped = 0;
+	let off = 0;
+	for (const block of blocks) {
+		const home = homes.get(block);
+		// Off the edge of the world counts as on the ground.
+		dropped += home.mass * Math.max(0, home.y - Math.max(block.position.y, 0) - SLACK);
+		if (block.position.y < PLINTH_TOP) off++;
+	}
+	// A stone on the ground can no longer change the score.
+	round.moving = stones.some((stone) => stone.visible && stone.position.y > STONE_RADIUS + 0.05
+		&& !inBasket(triple(stone.position), 0.02) && speedOf(stone) > STILL);
+	for (const soldier of soldiers) {
+		if (soldier.down || !knockedDown(soldier)) continue;
+		soldier.down = true;
+		round.soldiersDown++;
+		lastThrow?.thrower?.xr.vibrate(0.9, 0.12);
+		console.log(`siege: a soldier is down, ${round.soldiersDown} of ${soldiers.length}`);
+	}
+	round.dropped = dropped;
+	const score = Math.round(dropped * POINTS.perKgMetre + round.soldiersDown * POINTS.soldier);
+	// Rubble creeps for a while; a rise that small is not the castle falling.
+	if (score > round.risenFrom + Math.max(25, round.risenFrom * 0.02)) {
+		round.risenAt = three.clock.time;
+		round.risenFrom = score;
+	}
+	round.score = score;
+	down = off;
+}
+
+function finishRound(now) {
+	round.state = 'done';
+	round.doneAt = now;
+	const name = LEVELS[level].name;
+	round.newBest = round.score > (best[name] ?? 0);
+	if (round.newBest) {
+		best[name] = round.score;
+		try {
+			three.save.write('best', best);
+		} catch (e) {
+			console.warn(`siege: the best score was not saved: ${e.message}`);
+		}
+	}
+	for (const hand of hands) hand.xr.vibrate(round.newBest ? 1 : 0.5, round.newBest ? 0.4 : 0.15);
+	console.log(`siege: ${name} is over, ${round.score} points${round.newBest ? ', a new best' : ''}, ${round.soldiersDown} of ${soldiers.length} soldiers down`);
+}
+
+// Once a frame: the score every tenth of a second, the end of the round once
+// every stone is out and everything has stopped, and the board.
+function tickRound(now) {
+	if (round.state === 'play') {
+		if (now >= nextScore) {
+			nextScore = now + 0.1;
+			scoreRound();
+		}
+		round.left = stonesLeft();
+		const settled = !round.moving && now - round.risenAt >= SETTLE_SCORE;
+		if (round.left === 0 && (settled || now - lastLaunch >= LONGEST_WAIT)) {
+			scoreRound();
+			finishRound(now);
+		}
+	}
+	// The final score blinks for three seconds, then stays.
+	const blinking = round.state === 'done' && now - round.doneAt < 3 && Math.floor((now - round.doneAt) / 0.3) % 2 === 1;
+	scoreReadout.show(blinking ? null : round.score);
+	bestReadout.show(best[LEVELS[level].name] ?? 0);
+	levelDigit.show(level + 1);
+	stonesDigit.show(round.left);
+}
+
+// Anything that rolled or slid off the edge of the ground falls for ever,
+// awake; its body goes.
+function sweepFallen() {
+	for (const object of [...blocks, ...stones, ...soldiers.map((soldier) => soldier.mesh)]) {
+		if (object.position.y > -2 || !object.visible) continue;
+		three.physics.remove(object);
+		object.visible = false;
+	}
+}
+
+function startRound() {
+	Object.assign(round, { state: 'play', score: 0, soldiersDown: 0, dropped: 0, left: STONES, moving: false, risenAt: 0, risenFrom: 0, doneAt: 0, newBest: false });
+	down = 0;
+	nextScore = 0;
+	placeSoldiers(LEVELS[level].soldiers);
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +1206,7 @@ function reset() {
 	fillBasket();
 	const sections = buildCastle();
 	broken = 0;
-	down = 0;
+	startRound();
 	console.log(`siege: ${LEVELS[level].name}, ${blocks.length} pieces in ${sections.length} sections, ${welds.length} welds`);
 }
 
@@ -935,7 +1221,7 @@ function build(name) {
 // and call `reset()`. `throwAt` sends a stone from the line at a point, for
 // trying a rating without anybody throwing.
 globalThis.siege = {
-	tuning, throws, ratings, impact, reset, build,
+	tuning, throws, ratings, impact, round, best, reset, build,
 	throwAt(target, speed = 7) {
 		const stone = stones[aimed++ % STONES];
 		const from = [0, 1.4, -0.4];
@@ -956,6 +1242,7 @@ globalThis.siege = {
 	get down() { return down; },
 	get blocks() { return blocks; },
 	get welds() { return welds; },
+	get soldiers() { return soldiers; },
 };
 
 let aimed = 0;
@@ -1009,5 +1296,6 @@ three.setAnimationLoop((ms) => {
 		reset();
 	}
 	strike();
-	countDown(now);
+	sweepFallen();
+	tickRound(three.clock.time);
 });

@@ -179,6 +179,38 @@ desktop with `--xr-emulate`.
    - Pieces are toy weight, 0.3 kg per stone cell, and the stone is 0.6 kg.
 3. **The catapult.**
 4. **Game loop.** Score, stones left, reset on B, level select, the scoreboard.
+   In progress, in `siege.js`:
+   - Eight stones a round. It ends once the basket is empty, no thrown stone is
+     moving above the ground and the score has not risen for 1.5 s (8 s after
+     the last throw at most). The final score blinks, both hands buzz, and the
+     best per castle is kept with `three.save`.
+   - Soldiers (4-5 a castle) stand loose on battlements and tower tops; one
+     knocked down from where it stood, or over, is 250 points.
+   - **Decided: the score is height, not "off the plinth".** 100 points per
+     kilogram of castle brought a metre down, counted from the settled castle
+     with a centimetre of slack. Most hits leave the pieces on the plinth, and
+     a wall knocked flat there should score.
+   - The scoreboard stands left of the castle, facing the line: score, best,
+     which castle, stones left, in seven-segment digits of glowing boxes.
+
+   **Found:** a pyramid roof (a hull) resting on a box fought its welds with
+   130-500 N of contact while standing still, enough to bring the watchtower and
+   the belfry down by themselves. Welds to a roof no longer collide, and a roof
+   and what it rests on are rated four times higher. A bell on a point joint spun
+   up and kept the belfry awake, so it is welded too.
+
+   **Found on the headset:** knocked-down wood kept jumping until it walked off
+   the plinth. Thin stakes and rails jitter at two substeps; castle pieces and
+   soldiers now have angular damping 1, and the palisade's rubble sleeps. That
+   exposed an engine bug: `linearDamping` / `angularDamping` were handed to the
+   solver as the share of velocity kept per second, so a damping of 2 doubled a
+   spin every second (the spinning bell). Now converted, tested and documented.
+   Stones that miss roll off the 20 m ground and fall for ever, awake; anything
+   two metres below the ground loses its body.
+
+   **Open:** the belfry's tower rocks on its base for 20 s or more after a hit,
+   about 2.4 ms of solver on the Mac while it does. Welding its foot to the
+   plinth made it worse.
 5. **Post and polish.** Grade, bloom, slow motion, dust. Measure the cost: any script
    pass makes the headset copy both eyes into one image first.
 6. **Passthrough mode,** and a check that the grade does not tint the real room.
