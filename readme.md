@@ -104,10 +104,11 @@ what it shows and which keys it answers to.
 | [`vfx.js`](examples/vfx.js) | Effect materials that sample their own textures |
 | [`storage_images.js`](examples/storage_images.js) | Compute shaders writing images, and a post chain |
 | [`editor.js`](examples/editor.js) | A kit editor with an asset browser, for a folder of `.glb` files |
-| [`vr_controllers.js`](examples/vr_controllers.js) | Grab, throw and walk with both hands in VR |
+| [`vr_castle.js`](examples/vr_castle.js) | Knock a toy castle off a table in VR: both hands, lamps, physics |
 
 All but the editor build everything they draw in code, so they run on a clean checkout. The editor
-wants a kit: `./build/three --assets your-kit --script examples/editor.js`.
+wants a kit: `./build/three --assets your-kit --script examples/editor.js`. A whole VR game built on
+the engine lives in its own repo: [Tabletop Siege](https://github.com/tonis2/tabletop-siege).
 
 ### Running
 
@@ -137,8 +138,8 @@ The agent reads the API from [`docs/`](docs/); `run_script`'s description tells 
 
 ```sh
 ./setup.sh android                                           # once: the OpenXR loader
-packaging/android/build-apk.sh examples/vr_controllers.js --run
-packaging/android/quest.sh push examples/vr_controllers.js   # reloads in place, no rebuild
+packaging/android/build-apk.sh examples/vr_castle.js --run
+packaging/android/quest.sh push examples/vr_castle.js        # reloads in place, no rebuild
 packaging/android/quest.sh mcp                               # the agent tools, on the headset
 packaging/android/quest.sh logs
 ```

@@ -5,7 +5,7 @@
 #     packaging/android/build-apk.sh [game] [--install] [--run]
 #
 # `game` is a .js file (packed as script.js) or a directory holding a main.js.
-# It defaults to examples/vr_hello.js. --install puts the APK on the headset
+# It defaults to examples/vr_castle.js. --install puts the APK on the headset
 # adb is connected to; --run also launches it.
 #
 # A game pushed to the headset beats the packed one, so a script can be changed
@@ -22,7 +22,7 @@ HERE="$ROOT/packaging/android"
 PACKAGE="dev.threec3.quest"
 API=32
 
-game="$ROOT/examples/vr_hello.js"
+game="$ROOT/examples/vr_castle.js"
 install=0
 run=0
 for arg in "$@"; do
