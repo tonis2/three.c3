@@ -1311,6 +1311,7 @@ generator's one short cycle. `int(low, high)` is inclusive at both ends, as Thre
 
 ```js
 three.load(path)
+await three.loadAsync(path)   // the same Asset, read and parsed on a worker thread
 ```
 
 A parsed `.glb` or `.gltf`. Three doors onto it: `instantiate()` for the file's own node hierarchy,

@@ -34,6 +34,7 @@ import std::core::test;
 import std::io::file;
 import std::math;
 import std::collections::list;
+import std::thread;
 
 const uint W = 120;
 const uint H = 90;
@@ -1083,6 +1084,79 @@ fn void the_pre_pass_matches_the_serial_transcode() @test
 			test::@check(as_linear.levels[level] == bytes,
 				"level %d differs between sRGB and linear; one transcode cannot serve both", level);
 		}
+	};
+}
+
+<*
+ `three.loadAsync`'s worker runs the pre-pass too, and gets the serial bytes.
+
+ The pre-pass's own pool is spawned from the worker here rather than from the
+ main thread, so its "the calling thread has a temp arena" case is the worker's
+ arena, and its allocator is the one the worker was handed.
+*>
+fn void the_pre_pass_runs_on_the_load_worker() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::TextureFormat bc7 = { three::TextureFamily.BC7, three::ColorSpace.SRGB };
+		if (!renderer.gpu.supports(bc7)) return;   // no BC7 here; the pre-pass declines
+
+		char[][4] blobs;
+		for (uint i = 0; i < 4; i++) blobs[i] = pre_pass_blob(i);
+		defer for (uint i = 0; i < 4; i++) free(blobs[i]);
+
+		String path = "build/ktx_pre_pass_async.glb";
+		write_basisu_glb_multi(path, blobs[..], true);
+		defer (void)file::delete(path);
+
+		three::Assets* assets = &renderer.pass.assets;
+		three::AssetLoad* load = assets.start_load(&renderer.gpu, path);
+		three::AssetId id = assets.finish_load(&renderer.gpu, load)!!;
+		three::Asset* asset = assets.slot(id);
+
+		test::@check(asset.images.blocks.len() == 4,
+			"the worker's pre-pass queued %d images, not the file's 4", asset.images.blocks.len());
+		foreach (&pre : asset.images.blocks)
+		{
+			three::BlockImage want = three::transcode_ktx2_blocks(blobs[pre.image], bc7)!!;
+			defer want.free();
+			test::@check(pre.blocks.levels.len == want.levels.len, "image %d has the serial level count", pre.image);
+			foreach (level, bytes : want.levels)
+			{
+				test::@check(pre.blocks.levels[level] == bytes,
+					"image %d level %d differs from the serial transcode", pre.image, level);
+			}
+		}
+	};
+}
+
+<*
+ A load dropped while its worker is still reading stops, and frees what it read.
+
+ Dropped straight after the start, so the worker is usually mid-file when it is
+ asked to stop; and a second drop after it has finished, so the other branch —
+ a whole asset to free — runs too. Both are leak-checked by the runner.
+*>
+fn void a_dropped_load_frees_what_it_read() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		char[][4] blobs;
+		for (uint i = 0; i < 4; i++) blobs[i] = pre_pass_blob(i);
+		defer for (uint i = 0; i < 4; i++) free(blobs[i]);
+
+		String path = "build/ktx_pre_pass_dropped.glb";
+		write_basisu_glb_multi(path, blobs[..], true);
+		defer (void)file::delete(path);
+
+		three::Assets* assets = &renderer.pass.assets;
+		assets.start_load(&renderer.gpu, path).drop();
+
+		three::AssetLoad* finished = assets.start_load(&renderer.gpu, path);
+		while (!finished.ready()) thread::sleep_ms(1);
+		finished.drop();
+
+		test::@check(!assets.find_loaded(path).is_set(), "nothing a dropped load read was filed");
 	};
 }
 

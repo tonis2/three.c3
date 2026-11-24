@@ -23,6 +23,7 @@ import std::core::test;
 import std::math;
 import std::io::file;
 import std::io::path;
+import std::thread;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -7393,6 +7394,257 @@ fn void an_unloaded_asset_rejects_what_was_queued() @test
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		test::@check(result.value.contains("unloaded"),
 			"the await failed with a sentence naming the cause: %s", result.value);
+	};
+}
+
+// ============================================================================
+// Loading on a worker — three.loadAsync
+// ============================================================================
+
+<*
+ Ticks until `condition` reads true in the script, sleeping a little between
+ ticks so a worker thread has time to finish. False if it never did.
+*>
+fn bool tick_until(three::JsRuntime* run, String condition, uint ticks = 2000)
+{
+	for (uint i = 0; i < ticks; i++)
+	{
+		run.tick((double)i * 16.0);
+		three::RunResult asked = run.run(string::tformat("return !!(%s);", condition), drain_frame: false);
+		defer asked.free();
+		if (asked.value == "true") return true;
+		thread::sleep_ms(1);
+	}
+	return false;
+}
+
+<*
+ Awaiting a load gets an Asset that works like `three.load`'s: the same handle,
+ and meshes that draw.
+*>
+fn void loading_asynchronously_gives_a_usable_asset() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const kit = await three.loadAsync("test/fixtures/shared_material.glb");
+			const same = three.load("test/fixtures/shared_material.glb");
+			const scene = new three.Scene();
+			scene.add(kit.instantiate());
+			three.render(scene);
+			return {
+				meshes: kit.meshes.length, path: kit.path,
+				same: same._h === kit._h, drawn: three.stats().drawCalls > 0,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"meshes":4`), "the file's four meshes: %s", result.value);
+		test::@check(result.value.contains(`"same":true`),
+			"three.load of the same path answers with the same asset: %s", result.value);
+		test::@check(result.value.contains(`"drawn":true`), "and it draws: %s", result.value);
+	};
+}
+
+<*
+ A load nobody awaits resolves on a frame, not inside the script that started
+ it — the loop keeps running while the worker reads.
+*>
+fn void an_unawaited_load_resolves_on_a_frame() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.landed = null;
+			three.setAnimationLoop(() => {});
+			three.loadAsync("test/fixtures/hierarchy.glb").then((a) => { globalThis.landed = a.meshes.length; });
+			return globalThis.landed === null;
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+		test::@check(started.value == "true", "nothing resolved before the script returned: %s", started.value);
+		test::@check(run.loads.len() == 1, "and the load is in flight: %d", run.loads.len());
+
+		test::@check(tick_until(run, "globalThis.landed !== null"), "a frame resolved it");
+		three::RunResult landed = run.run("return globalThis.landed;", drain_frame: false);
+		defer landed.free();
+		test::@check((landed.value.to_int() ?? 0) > 0, "with the file's meshes: %s", landed.value);
+		test::@check(run.loads.len() == 0, "and nothing is left in flight: %d", run.loads.len());
+	};
+}
+
+<*
+ A missing file and a file that is not a glTF reject with the sentence
+ `three.load` throws for them, word for word.
+*>
+fn void a_bad_path_rejects_with_the_load_sentence() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const both = async (path) => {
+				let threw = "", rejected = "";
+				try { three.load(path); } catch (e) { threw = e.message; }
+				try { await three.loadAsync(path); } catch (e) { rejected = e.message; }
+				return threw.length > 0 && threw === rejected ? "same" : threw + " | " + rejected;
+			};
+			return [await both("test/fixtures/missing.glb"), await both("test/fixtures/not_an_image.png")];
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `["same","same"]`, "the rejection is the throw: %s", result.value);
+	};
+}
+
+<*
+ Two files loading at once both arrive, and a path asked for twice while it is
+ loading is read once and answers both promises with the same asset.
+*>
+fn void two_loads_at_once_both_resolve() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.got = null;
+			three.setAnimationLoop(() => {});
+			Promise.all([
+				three.loadAsync("test/fixtures/textured.glb"),
+				three.loadAsync("test/fixtures/hierarchy.glb"),
+				three.loadAsync("test/fixtures/textured.glb"),
+			]).then(([a, b, c]) => {
+				globalThis.got = { shared: a._h === c._h, different: a._h !== b._h, b: b.meshes.length };
+			});
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+		test::@check(run.loads.len() == 3, "three promises are waiting: %d", run.loads.len());
+		test::@check(run.loads[0].job == run.loads[2].job && run.loads[0].job != run.loads[1].job,
+			"on two loads, one of them shared");
+
+		test::@check(tick_until(run, "globalThis.got !== null"), "both loads resolved");
+		three::RunResult got = run.run("return globalThis.got;", drain_frame: false);
+		defer got.free();
+		test::@check(got.value.contains(`"shared":true`), "the shared path is one asset: %s", got.value);
+		test::@check(got.value.contains(`"different":true`), "the other file is its own: %s", got.value);
+	};
+}
+
+<*
+ A blocking `three.load` of a path that is still loading on a worker files it
+ first, and the worker's copy is dropped: the promise answers with that asset
+ and the table holds the path once.
+*>
+fn void a_blocking_load_during_an_async_one_is_the_same_asset() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.same = null;
+			three.setAnimationLoop(() => {});
+			const pending = three.loadAsync("test/fixtures/morph.glb");
+			const now = three.load("test/fixtures/morph.glb");
+			pending.then((a) => { globalThis.same = a._h === now._h; });
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+
+		test::@check(tick_until(run, "globalThis.same !== null"), "the async load resolved");
+		three::RunResult same = run.run("return globalThis.same;", drain_frame: false);
+		defer same.free();
+		test::@check(same.value == "true", "with the asset the blocking load filed: %s", same.value);
+		uint copies = 0;
+		foreach (&asset : run.pass.assets.assets)
+		{
+			if (asset.alive && asset.path == "test/fixtures/morph.glb") copies++;
+		}
+		test::@check(copies == 1, "the path is in the table once, not %d times", copies);
+	};
+}
+
+<*
+ Unloading and disposing during a load do not touch it: the asset is not in the
+ table until it resolves, so there is nothing to free under the worker.
+*>
+fn void an_unload_during_a_load_leaves_it_alone() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.result = null;
+			const old = new three.Scene();
+			three.loadAsync("test/fixtures/hierarchy.glb").then(
+				(a) => { globalThis.result = a.instantiate().children.length; },
+				(e) => { globalThis.result = "rejected: " + e.message; });
+			new three.Scene();
+			three.disposeInactive();
+			three.unloadUnused();
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+
+		test::@check(tick_until(run, "globalThis.result !== null"), "the load still settled");
+		three::RunResult result = run.run("return globalThis.result;", drain_frame: false);
+		defer result.free();
+		test::@check((result.value.to_int() ?? 0) > 0, "with an asset that instantiates: %s", result.value);
+	};
+}
+
+<*
+ `three.reset()` during a load rejects it, and what the worker read is dropped
+ rather than filed. A load of the same path afterwards starts over and works.
+*>
+fn void a_reset_during_a_load_drops_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			globalThis.why = null;
+			three.loadAsync("test/fixtures/legs.glb").then(
+				() => { globalThis.why = "resolved"; },
+				(e) => { globalThis.why = e.message; });
+			three.reset();
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+
+		test::@check(tick_until(run, "globalThis.why !== null"), "the promise settled");
+		for (uint i = 0; i < 2000 && run.loads.len() > 0; i++)
+		{
+			run.tick((double)i * 16.0);
+			thread::sleep_ms(1);
+		}
+		test::@check(run.loads.len() == 0, "the dropped load leaves once its worker is done: %d left", run.loads.len());
+		three::RunResult why = run.run("return globalThis.why;", drain_frame: false);
+		defer why.free();
+		test::@check(why.value.contains("three.reset() dropped the load"), "it was rejected by the reset: %s", why.value);
+		test::@check(!run.pass.assets.find_loaded("test/fixtures/legs.glb").is_set(),
+			"and nothing it read was filed");
+
+		three::RunResult again = run.run(`
+			const legs = await three.loadAsync("test/fixtures/legs.glb");
+			return legs.meshes.length > 0;
+		`);
+		defer again.free();
+		test::@check(again.ok && again.value == "true", "a fresh load works: %s %s", again.value, again.error);
+	};
+}
+
+<*
+ The script ending with a load in flight waits for the worker and frees what it
+ read — `JsRuntime.close` cannot leave a thread writing into a context that is
+ gone.
+*>
+fn void closing_during_a_load_waits_for_it() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		three::RunResult started = run.run(`
+			three.loadAsync("test/fixtures/bodies.glb");
+			three.loadAsync("test/fixtures/skinned.glb");
+		`);
+		defer started.free();
+		test::@check(started.ok, "the script succeeded: %s", started.error);
+		test::@check(run.loads.len() == 2, "both loads are in flight as the runtime closes: %d", run.loads.len());
 	};
 }
 

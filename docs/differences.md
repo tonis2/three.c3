@@ -2,7 +2,8 @@
 
 ## load-is-synchronous
 
-`three.load(path)` is synchronous. `await` works but is not needed.
+`three.load(path)` is synchronous. `await` works but is not needed. `three.loadAsync(path)` is the
+asynchronous one: it reads the file on a worker thread so a running loop keeps drawing.
 
 ## measure-everything
 

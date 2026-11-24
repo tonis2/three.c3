@@ -34,6 +34,8 @@ import std::io::path;
 fn void? JsRuntime.bind_asset_verbs(&self, js::Value host)
 {
 	self.js.@bind(host, "load", &js_load, self)!;
+	self.js.@bind(host, "loadAsync", &js_load_async, self)!;
+	self.js.@bind(host, "dropLoads", &js_drop_loads, self)!;
 	self.js.@bind(host, "texture", &js_texture, self)!;
 	self.js.@bind(host, "dataTexture", &js_data_texture, self)!;
 	self.js.@bind(host, "textureDispose", &js_texture_dispose, self)!;
@@ -101,9 +103,30 @@ fn AssetId? js_load(JsRuntime* self, String path)
 	need_device(self, "three.load")!;
 	if (path.len == 0) return self.js.fail("three.load(path) wants a path to a .glb or .gltf")~;
 
-	// Relative to the assets directory in a `--assets` boot, and to the working
-	// directory otherwise. Resolved before the load so a path reaching out of
-	// the game is refused by name rather than opening whatever it found.
+	String opening = load_path(self, path)!;
+	AssetId? asset = self.pass.assets.load(&self.renderer.gpu, opening);
+	if (catch err = asset)
+	{
+		// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
+		// each a different thing to do about it, and flattening them into
+		// "could not load" would cost the agent the one word that says which.
+		return self.js.fail("could not load %s: %s", self.blame(path, opening), err)~;
+	}
+	return asset;
+}
+
+<*
+ The path `three.load` and `three.loadAsync` open, or the throw that refuses it.
+
+ Relative to the assets directory in a `--assets` boot, and to the working
+ directory otherwise. Resolved before the load so a path reaching out of the
+ game is refused by name rather than opening whatever it found.
+
+ @return `In tmem.`
+ @return? js::THREW
+*>
+fn String? load_path(JsRuntime* self, String path) @local
+{
 	String? opening = self.resolve_asset(path, tmem);
 	if (catch err = opening)
 	{
@@ -115,17 +138,59 @@ fn AssetId? js_load(JsRuntime* self, String path)
 		}
 		return self.js.fail("cannot load '%s': %s", path, err)~;
 	}
-
-	AssetId? asset = self.pass.assets.load(&self.renderer.gpu, opening);
-	if (catch err = asset)
-	{
-		// The fault name verbatim: ASSET_HAS_NO_MESHES and the io faults are
-		// each a different thing to do about it, and flattening them into
-		// "could not load" would cost the agent the one word that says which.
-		return self.js.fail("could not load %s: %s", self.blame(path, opening), err)~;
-	}
-	return asset;
+	return opening;
 }
+
+<*
+ `loadAsync(path, onDone, onFail)` — `load`, with the file read on a worker.
+
+ Refuses what `js_load` refuses, with the same sentences, and the prelude's
+ promise turns the throw into its rejection. A path already loaded answers with
+ its handle at once. Anything else answers null and settles later, through
+ `JsRuntime.step_load`, on the first frame after the worker is done.
+
+ A path already loading shares that load: one read, and both promises settle
+ together with the same asset.
+
+ @return? js::THREW
+*>
+fn js::Value? js_load_async(JsRuntime* self, String path, js::Value resolve, js::Value reject)
+{
+	need_device(self, "three.loadAsync")!;
+	if (path.len == 0) return self.js.fail("three.loadAsync(path) wants a path to a .glb or .gltf")~;
+	if (!resolve.is_function() || !reject.is_function())
+	{
+		return self.js.fail("loadAsync wants the two settlement functions of a promise")~;
+	}
+
+	String opening = load_path(self, path)!;
+	AssetId loaded = self.pass.assets.find_loaded(opening);
+	if (loaded.is_set()) return self.asset_handle(loaded);
+
+	AssetLoad* job = null;
+	foreach (&entry : self.loads)
+	{
+		if (entry.job.path != opening) continue;
+		job = entry.job;
+		break;
+	}
+	if (job == null) job = self.pass.assets.start_load(&self.renderer.gpu, opening);
+
+	self.loads.push({
+		.job = job,
+		.path = path.copy(mem),
+		.resolve = self.js.hold(resolve),
+		.reject = self.js.hold(reject),
+		.waiting = true,
+	});
+	return js::NULL;
+}
+
+<*
+ `dropLoads()` — `three.reset()`'s half of `loadAsync`: every load still in
+ flight rejects, and what its worker reads is dropped.
+*>
+fn void js_drop_loads(JsRuntime* self) => self.reject_loads("three.reset()");
 
 <*
  Whether these bytes are text at all.

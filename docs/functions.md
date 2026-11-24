@@ -15,6 +15,40 @@ Loading the same path twice returns the same asset — unless it was unloaded in
 a fresh one and makes the old handle throw. Use `asset.instantiate()` for the file's own hierarchy
 and `asset.mesh(name)` for one piece of it.
 
+It blocks until the file is read and parsed. A game that loads while it draws wants
+`three.loadAsync`.
+
+## three.loadAsync(path)
+
+`three.load` with the file read, the glTF parse and the texture transcode on a worker thread. It
+answers with a Promise for the same Asset, which resolves on the first frame after the worker is
+done, so a running animation loop keeps its frame time while a big `.glb` loads.
+
+```js
+const region = await three.loadAsync('regions/forest_3_4.glb');
+scene.add(await region.instantiateAsync());
+```
+
+The GPU uploads are not part of it: a mesh still reaches the device when something first draws it,
+and `instantiateAsync` / `nodeAsync` are what spread those over frames. Filing the finished asset
+happens on the frame it resolves on, and a file with `KHR_implicit_shapes` or `convexHull` colliders
+uploads their proxies there, about a millisecond each.
+
+- A path that is already loaded resolves at once with it.
+- A path that is still loading shares the load in flight: the file is read once, and both promises
+  resolve together with the same asset.
+- Several different files load at once, each on a thread of its own.
+- A missing or broken file rejects with the sentence `three.load` throws for it, and so does a path
+  that climbs out of the assets directory.
+- The asset is not in the table until it resolves, so `three.unloadUnused()` and disposing a scene
+  cannot free it under the worker.
+- `three.reset()` rejects every load still in flight, and what their workers read is dropped. The
+  JavaScript context closing — the process exiting, or `three.reload()` — waits for the workers and
+  drops what they read. A script that only returns leaves its loads running, and they resolve on the
+  frames after it.
+
+In a one-shot script there is no frame to protect, so awaiting it costs what `three.load` costs.
+
 ## three.merge(root)
 
 `MeshRef.split()` in reverse: every Mesh in a subtree, concatenated into one asset with each one's
@@ -175,6 +209,9 @@ What a script calls at its top when it is going to be run more than once — und
 
 It does not free the scene being rendered. `new three.Scene()` then `three.disposeInactive()` is that
 half.
+
+A `three.loadAsync` still in flight belongs to the run being reset: its promise rejects, and what its
+worker reads is dropped rather than filed.
 
 ## three.unloadUnused()
 

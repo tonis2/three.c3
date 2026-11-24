@@ -1454,7 +1454,7 @@ fn AssetId Assets.claim_slot(&self, Asset asset)
  navigation, file stream, terrain grid, merged copy and path. Leaves the fields
  dangling; the caller zeroes or discards the slot.
 *>
-fn void free_asset_memory(Gpu* gpu, Asset* asset) @local
+fn void free_asset_memory(Gpu* gpu, Asset* asset)
 {
 	foreach (&mesh : asset.meshes) mesh.free_buffers(gpu);
 	asset.meshes.free();
@@ -2160,16 +2160,13 @@ fn int transcode_shard(void* arg) @local
 
  Only images a `texture` names are transcoded. An image nothing points at is
  dead weight in the file and would be dead weight here.
-*>
-fn void Assets.pretranscode_basis_images(&self, Gpu* gpu, Asset* asset)
-{
-	if (gpu == null) return;
 
-	// The device decides, exactly as `claim_blocks_if_possible` lets it: without
-	// BC7 every one of these images takes the RGBA8 path and a transcode here
-	// would be work nothing collects.
+ @param bc7 : `may_pretranscode's answer. The device decides, and is asked on the main thread so this can run on a worker.`
+*>
+fn void pretranscode_basis_images(Asset* asset, bool bc7) @local
+{
+	if (!bc7) return;
 	TextureFormat target = { TextureFamily.BC7, ColorSpace.SRGB };
-	if (!gpu.supports(target)) return;
 
 	sz image_count = (sz)asset.stream.gltf.images.len();
 	if (image_count == 0 || asset.stream.gltf.textures.len() == 0) return;
@@ -2343,15 +2340,6 @@ fn bool take_pretranscoded(AssetImages* images, int image_index, BlockImage* out
 	return false;
 }
 
-<*
- Load a `.glb` or `.gltf`, upload everything it needs to draw, and close the
- file.
-
- Loading the same path twice returns the first load. That is the coarse half of
- "linked, not duplicated" — the fine half is the content-hash texture dedup
- below, which catches two *different* files sharing an image.
-
-*>
 fn void record_navigation(Asset* asset, gltf::GltfStream* stream) @local
 {
 	foreach (source : stream.gltf.navigation_profiles)
@@ -2417,11 +2405,34 @@ fn void record_navigation(Asset* asset, gltf::GltfStream* stream) @local
 	}
 }
 
-<* @param path : `A .glb or a .gltf; gltf.c3l reads both.` *>
+<*
+ Load a `.glb` or `.gltf`: parse it, describe every mesh, and file it in the
+ table. Nothing is uploaded; a mesh goes to the device when something draws it.
+
+ Loading the same path twice returns the first load. That is the coarse half of
+ "linked, not duplicated" — the fine half is the content-hash texture dedup
+ below, which catches two *different* files sharing an image.
+
+ Two halves, so `three.loadAsync` can run the first on a worker thread:
+ `read_asset` touches nothing shared, and `adopt` is what has to stay here.
+
+ @param path : `A .glb or a .gltf; gltf.c3l reads both.`
+*>
 fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 {
 	if (!self.started) self.init();
 
+	AssetId loaded = self.find_loaded(path);
+	if (loaded.is_set()) return loaded;
+
+	return self.adopt(gpu, read_asset(path, may_pretranscode(gpu))!);
+}
+
+<*
+ The live asset loaded from this path, or `NO_ASSET`.
+*>
+fn AssetId Assets.find_loaded(&self, String path)
+{
 	foreach (i, &existing : self.assets)
 	{
 		// Dead slots keep their path until they are overwritten, so the liveness
@@ -2431,7 +2442,75 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 			return { .index = (uint)i, .generation = existing.generation };
 		}
 	}
+	return NO_ASSET;
+}
 
+<*
+ File an asset `read_asset` made, and answer with its handle.
+
+ The physics proxies are built here rather than in `read_asset` because they
+ upload, and the device is the main thread's.
+
+ @param asset : `From read_asset. Ownership passes to the table.`
+*>
+fn AssetId Assets.adopt(&self, Gpu* gpu, Asset asset)
+{
+	// After the nodes, which it writes `AssetNode.body` into, and after the mesh
+	// loop, because an implicit shape's proxy is pushed onto the end of
+	// `asset.meshes` and would otherwise shift the ranges the nodes just took.
+	self.record_physics(gpu, &asset, &asset.stream);
+	return self.claim_slot(asset);
+}
+
+<*
+ Whether the pre-pass may transcode Basis images to BC7 on this device.
+
+ Asked on the main thread and handed to `read_asset` as a bool, so a worker
+ never reaches for the device.
+*>
+fn bool may_pretranscode(Gpu* gpu)
+{
+	if (gpu == null) return false;
+	// Without BC7 every one of these images takes the RGBA8 path, exactly as
+	// `claim_blocks_if_possible` decides, and a transcode would be work nothing
+	// collects.
+	return gpu.supports({ TextureFamily.BC7, ColorSpace.SRGB });
+}
+
+<*
+ Every page of the file's mapped buffers read once, so the bytes are in memory
+ before anything uploads from them.
+
+ A `.glb`'s binary chunk is mapped rather than read, and a mapping is read
+ lazily: without this the file read happens as page faults inside each mesh
+ upload, on the main thread `three.loadAsync` moved the load off.
+*>
+fn void read_ahead(gltf::GltfStream* stream) @local
+{
+	foreach (&slot : stream.buffer_slots)
+	{
+		if (slot.state != gltf::LoadState.MMAP || slot.ptr == null) continue;
+		// 4 KiB is the smallest page there is, so this touches every one.
+		for (sz at = 0; at < slot.len; at += 4096) @volatile_load(slot.ptr[at]);
+	}
+}
+
+// Whether the main thread has asked a load to stop. See `AssetLoad.drop`.
+fn bool stop_asked(int* cancelled) @local @inline => cancelled != null && @atomic_load(*cancelled) != 0;
+
+<*
+ Open a file, parse it and describe it, ready for `Assets.adopt` to file.
+
+ Touches nothing on `Assets` and nothing on the device, which is what lets
+ `three.loadAsync` run it on a worker thread — `scene/asset_load.c3`.
+
+ @param bc7 : `may_pretranscode's answer for the device the asset is for.`
+ @param ahead : `Read the mapped buffers in here too — see read_ahead.`
+ @param cancelled : `Polled between steps; non-zero stops the load with ASSET_LOAD_CANCELLED. Null for a load that cannot be stopped.`
+ @return? ASSET_HAS_NO_MESHES, ASSET_LOAD_CANCELLED, gltf::open!
+*>
+fn Asset? read_asset(String path, bool bc7, bool ahead = false, int* cancelled = null)
+{
 	// Opened before anything is allocated, because a `defer catch` covers the
 	// statements below it and not the one that registers it. A path copied
 	// ahead of this line leaks on every path that does not open — which is the
@@ -2466,11 +2545,19 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	asset.images.blocks.init(mem, 4);
 	asset.nav_profiles.init(mem, 1);
 
+	if (stop_asked(cancelled)) return ASSET_LOAD_CANCELLED~;
+	if (ahead) read_ahead(&asset.stream);
+	if (stop_asked(cancelled)) return ASSET_LOAD_CANCELLED~;
+
 	// Every `KHR_texture_basisu` image at once, before a material asks for one.
 	// After the mesh check because a file with nothing to draw has nothing to
 	// draw with either, and before the primitive walk because the walk is where
 	// the first upload could otherwise reach the transcoder one image at a time.
-	self.pretranscode_basis_images(gpu, &asset);
+	pretranscode_basis_images(&asset, bc7);
+
+	// The last place a stop is honoured: past here the meshes own names, which
+	// the cleanup above does not free, and the rest is quick anyway.
+	if (stop_asked(cancelled)) return ASSET_LOAD_CANCELLED~;
 
 	bool first_bounds = true;
 
@@ -2518,13 +2605,8 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
 	record_lights(&asset, &asset.stream);
 	record_navigation(&asset, &asset.stream);
-	// After the nodes, which it writes `AssetNode.body` into, and after the mesh
-	// loop, because an implicit shape's proxy is pushed onto the end of
-	// `asset.meshes` and would otherwise shift the ranges the nodes just took.
-	self.record_physics(gpu, &asset, &asset.stream);
 	record_clips(&asset);
-
-	return self.claim_slot(asset);
+	return asset;
 }
 
 <*

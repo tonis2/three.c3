@@ -53,6 +53,7 @@ module three;
 
 import std::io;
 import std::time;
+import std::thread;
 import std::collections::list;
 import std::collections::map;
 import fastjs::js;
@@ -498,6 +499,15 @@ struct JsRuntime
 	*>
 	List{PendingUpload} uploads;
 	<*
+	 Files a script is loading with `three.loadAsync` — `js/bind_asset.c3`.
+
+	 One entry per promise, holding the load it waits on and its two callbacks.
+	 Two promises for one path share one load. An entry `three.reset()` took the
+	 callbacks from stays until its worker is done, and what it read is dropped.
+	 Settled a load at a time by `step_load`.
+	*>
+	List{PendingLoad} loads;
+	<*
 	 The resolve functions of every `three.nextFrame()` promise still waiting.
 
 	 Settled by the next `tick`, just before it drains the jobs, so the code after
@@ -598,6 +608,22 @@ struct PendingUpload
 }
 
 <*
+ One `three.loadAsync` promise, and the load on a worker thread it waits for.
+*>
+struct PendingLoad
+{
+	// Shared by every entry for the same path, and freed when it settles.
+	AssetLoad* job;
+	// As the script wrote it, for the rejection's sentence. Owned.
+	String path;
+	js::Root resolve;
+	js::Root reject;
+	// False once `three.reset()` has rejected the promise and given back the
+	// callbacks. The worker is still running, and nobody is waiting for it.
+	bool waiting;
+}
+
+<*
  Starts the engine and installs the API.
 
  @param pass : `The scene, assets and camera the bindings drive. Must outlive the runtime.`
@@ -640,6 +666,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	// The asynchronous upload queue — `js/bind_asset.c3`. Empty for every run
 	// that never asks for one, which is most of them.
 	self.uploads.init(mem, 8);
+	self.loads.init(mem, 4);
 	self.frame_waiters.init(mem, 4);
 	// One entry per resident image, grown on demand — `hold_texture`.
 	self.texture_handles.init(mem, 8);
@@ -695,6 +722,8 @@ fn void JsRuntime.close(&self)
 	self.clear_click_handler();
 	self.clear_physics_handlers();
 	self.clear_uploads();
+	// Waits for every worker still reading, so none outlives the context.
+	self.clear_loads();
 	self.clear_frame_waiters();
 	// The interface's callbacks, and then the interface itself: the layer belongs
 	// to the Renderer and outlives this context, so a reload must not leave it
@@ -941,6 +970,177 @@ fn void JsRuntime.clear_uploads(&self)
 }
 
 <*
+ Settles one `three.loadAsync` whose worker has finished, if there is one.
+
+ Never waits: a worker still reading is left for the next call. One load per
+ call, because filing one builds its physics proxies, and a frame should not
+ pay for four regions that happened to finish together.
+
+ @return `True when a load was settled.`
+*>
+fn bool JsRuntime.step_load(&self)
+{
+	foreach (&entry : self.loads)
+	{
+		if (!entry.job.ready()) continue;
+		self.settle_load(entry.job);
+		return true;
+	}
+	return false;
+}
+
+<*
+ Files what one worker read and settles every promise waiting on it.
+
+ The entries come off the list before any callback runs: a resolve can start
+ another load, and the freed job's address can come back for it.
+*>
+fn void JsRuntime.settle_load(&self, AssetLoad* job)
+{
+	@pool()
+	{
+		List{PendingLoad} settling;
+		settling.tinit();
+		for (sz i = 0; i < self.loads.len();)
+		{
+			if (self.loads[i].job != job)
+			{
+				i++;
+				continue;
+			}
+			settling.push(self.loads[i]);
+			self.loads.remove_at(i);
+		}
+		defer foreach (&entry : settling) entry.path.free(mem);
+
+		bool wanted = false;
+		foreach (&entry : settling) wanted = wanted || entry.waiting;
+		if (!wanted)
+		{
+			job.drop();
+			return;
+		}
+
+		String opening = job.path.copy(tmem);
+		AssetId? loaded = self.pass.assets.finish_load(&self.renderer.gpu, job);
+		fault failure = @catch(loaded);
+		AssetId id = loaded ?? NO_ASSET;
+
+		foreach (&entry : settling)
+		{
+			if (!entry.waiting) continue;
+			defer self.js.drop(&entry.resolve);
+			defer self.js.drop(&entry.reject);
+			js::Value[1] arguments = { self.asset_handle(id) ?? js::UNDEFINED };
+			js::Root settle = entry.resolve;
+			if (failure)
+			{
+				// `js_load`'s sentence, so the rejection reads as its throw would.
+				String why = string::tformat("could not load %s: %s", self.blame(entry.path, opening), failure);
+				arguments[0] = self.js.string(why) ?? js::UNDEFINED;
+				settle = entry.reject;
+			}
+			if (catch self.js.call(self.js.held(settle), js::UNDEFINED, &arguments)) self.js.take_exception();
+		}
+	};
+}
+
+<*
+ Blocks until a load somebody is waiting for has finished, then settles it.
+
+ For a one-shot script awaiting `three.loadAsync`: there is no frame to keep, so
+ waiting here costs what `three.load` would have. The script's budget still
+ applies, and a load it runs out on is left for the frames.
+
+ @return `True when a load was settled.`
+*>
+fn bool JsRuntime.wait_for_load(&self)
+{
+	bool waiting = false;
+	foreach (&entry : self.loads) waiting = waiting || entry.waiting;
+	if (!waiting) return false;
+
+	while (!self.step_load())
+	{
+		if (self.budget_ns > 0 && (long)self.started.to_now() >= self.budget_ns)
+		{
+			self.timed_out = true;
+			return false;
+		}
+		thread::sleep_ms(1);
+	}
+	return true;
+}
+
+<*
+ Rejects every `three.loadAsync` still in flight, for `three.reset()`.
+
+ The workers keep going: stopping one means waiting for it, and a reset should
+ not. Each entry stays until its worker is done and `step_load` drops what it
+ read — unless a later `loadAsync` of the same path is waiting on it too, which
+ then gets it.
+*>
+fn void JsRuntime.reject_loads(&self, String why)
+{
+	@pool()
+	{
+		// Taken off the entries before any is called: a callback can start a
+		// load, and the push can move the list.
+		List{js::Root} rejects;
+		List{String} paths;
+		rejects.tinit();
+		paths.tinit();
+		foreach (&entry : self.loads)
+		{
+			if (!entry.waiting) continue;
+			entry.waiting = false;
+			self.js.drop(&entry.resolve);
+			rejects.push(entry.reject);
+			paths.push(entry.path.copy(tmem));
+			entry.reject = js::NO_ROOT;
+		}
+
+		foreach (i, &reject : rejects)
+		{
+			defer self.js.drop(reject);
+			js::Value[1] arguments = {
+				self.js.string(string::tformat("%s dropped the load of \"%s\" before it finished", why, paths[i]))
+					?? js::UNDEFINED,
+			};
+			if (catch self.js.call(self.js.held(*reject), js::UNDEFINED, &arguments)) self.js.take_exception();
+		}
+	};
+}
+
+<*
+ Gives back every load's callbacks without calling either, and waits for every
+ worker — the context is going, and a worker must not outlive it.
+*>
+fn void JsRuntime.clear_loads(&self)
+{
+	while (self.loads.len() > 0)
+	{
+		AssetLoad* job = self.loads[0].job;
+		for (sz i = 0; i < self.loads.len();)
+		{
+			PendingLoad* each = &self.loads[i];
+			if (each.job != job)
+			{
+				i++;
+				continue;
+			}
+			// Both are NO_ROOT already on an entry a reset rejected.
+			self.js.drop(&each.resolve);
+			self.js.drop(&each.reject);
+			each.path.free(mem);
+			self.loads.remove_at(i);
+		}
+		job.drop();
+	}
+	self.loads.free();
+}
+
+<*
  Runs the microtask queue until the script's promise settles, then reads its
  value or its rejection straight off the promise.
 *>
@@ -963,13 +1163,14 @@ fn void JsRuntime.await_settled(&self, js::Root promise)
 		{
 			self.step_job();
 		} // Nothing runnable and the script has not finished: it can only be waiting
-		// on a queued upload, so hand it one. **Only while it is still waiting** —
-		// a script that started an upload and returned without awaiting it leaves
-		// the queue for the frames to drain, which is the entire point of there
-		// being a queue. Draining it here regardless would make
-		// `instantiateAsync` in a `main.js` cost exactly what the synchronous
-		// path costs, on the one code path where it matters most.
-		else if (js::promise_state(self.js.held(promise)) != PENDING || !self.step_upload())
+		// on a queued upload or a file loading, so hand it one — an upload first,
+		// because a load may mean waiting for a worker. **Only while it is still
+		// waiting** — a script that started an upload and returned without
+		// awaiting it leaves the queue for the frames to drain, which is the
+		// entire point of there being a queue. Draining it here regardless would
+		// make `instantiateAsync` in a `main.js` cost exactly what the
+		// synchronous path costs, on the one code path where it matters most.
+		else if (js::promise_state(self.js.held(promise)) != PENDING || (!self.step_upload() && !self.wait_for_load()))
 		{
 			break;
 		}

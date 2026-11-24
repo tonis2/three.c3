@@ -228,6 +228,9 @@ fn bool JsRuntime.is_animating(&self)
 	// A promise waiting on a frame, or work a handler queued: both are JavaScript
 	// that has to run on the next tick, so both are a reason to have one.
 	if (self.frame_waiters.len() > 0 || (self.ready && self.js.jobs_waiting())) return true;
+	// A file loading on a worker settles on a tick, and a window asleep in the
+	// kernel would hold its promise until the mouse moved.
+	if (self.loads.len() > 0) return true;
 	return self.frame_loop.active || self.fixed_loop.active || self.late_loop.active || self.key_handler_count > 0 || self.click_handler.active;
 }
 
@@ -862,6 +865,10 @@ fn void JsRuntime.drain_frame_jobs(&self)
 	// for asynchronously therefore arrives a mesh a frame, which is the whole
 	// difference between it and `scene.add`.
 	self.step_upload();
+	// And one file a worker has finished reading, for the same reason: its
+	// promise resolves into this frame's jobs. One that is still reading is
+	// left alone, so the frame never waits for a worker.
+	self.step_load();
 
 	uint drained = 0;
 	while (self.js.jobs_waiting() && drained < JS_FRAME_MAX_JOBS)

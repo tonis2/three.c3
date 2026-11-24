@@ -2320,14 +2320,46 @@ export const three = {
 	WireframeHelper,
 
 	// Synchronous, despite reading like Three.js's async loader: the file is
-	// read and uploaded on this thread and there is nothing to yield to.
-	// `await three.load(...)` still works — awaiting a plain value is a
-	// no-op — so the Three.js-shaped line an agent writes is correct here.
+	// read and parsed on this thread before it returns. `await three.load(...)`
+	// still works — awaiting a plain value is a no-op — so the Three.js-shaped
+	// line an agent writes is correct here. A game that loads while it draws
+	// wants loadAsync, below.
 	load(path) {
 		if (typeof path !== 'string' || path.length === 0) {
 			throw new TypeError('three.load(path) wants a path to a .glb or .gltf');
 		}
 		return new Asset(H.load(path));
+	},
+
+	// three.load with the file read, the glTF parse and the texture transcode
+	// on a worker thread. The promise resolves with the same Asset on the first
+	// frame after the worker is done, so a running loop keeps its frame time
+	// while a big .glb loads.
+	//
+	//     const region = await three.loadAsync('regions/forest_3_4.glb');
+	//     scene.add(await region.instantiateAsync());
+	//
+	// The uploads are not part of it: a mesh still goes to the device when
+	// something first draws it, and instantiateAsync / nodeAsync are what spread
+	// those over frames.
+	//
+	// A path already loaded resolves at once with it. A path still loading
+	// shares the load in flight — one read, and both promises resolve together.
+	// A missing or broken file rejects with the sentence three.load throws. The
+	// asset is not in the table until it resolves, so three.unloadUnused()
+	// cannot free it under the worker, and three.reset() rejects every load
+	// still in flight and drops what it reads.
+	//
+	// In a one-shot script there is no frame to protect, so awaiting it costs
+	// what three.load costs.
+	loadAsync(path) {
+		return new Promise((ok, no) => {
+			if (typeof path !== 'string' || path.length === 0) {
+				throw new TypeError('three.loadAsync(path) wants a path to a .glb or .gltf');
+			}
+			const loaded = H.loadAsync(path, (h) => ok(new Asset(h)), (why) => no(new Error(why)));
+			if (loaded !== null) ok(new Asset(loaded));
+		});
 	},
 
 	// Decode a PNG, JPEG or KTX2 and upload it. Synchronous, for three.load's
@@ -2746,11 +2778,14 @@ export const three = {
 	// tracked class (even after their scene is already gone), clears the
 	// system registry, and drops the post chain. Does not free the scene being
 	// rendered — `new three.Scene()` then `disposeInactive()` is still that half.
+	// A loadAsync still in flight belongs to the run being reset: it rejects,
+	// and what its worker reads is dropped rather than filed.
 	reset() {
 		unmountAllWidgets();
 		disposeAllEntities();
 		systems.clear();
 		this.setPost(null);
+		H.dropLoads();
 	},
 
 	// Free every asset no live mesh names, and every texture that goes with
