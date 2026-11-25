@@ -193,25 +193,20 @@ struct GpuLayers
  That closes an asymmetry: a normal map is reachable from a script and would
  otherwise be unreachable from a `.glb`.
 
- ## The four maps, and what shades them
+ ## The five maps
 
- normal     `mapped_normal` in a ShaderMaterial, or a LayeredMaterial's
- `normal` — the same path a hand-written one takes.
- emissive   a LayeredMaterial layer's `emissive` and `emissiveFactor`.
- occlusion  nothing built in. A `shade` body multiplies by it in one line.
- metallic-  nothing built in, and that is a decision rather than a gap: the
- roughness  specular term reads one roughness and one metalness per material
- — `material.roughness`, `material.metalness` — and this map is
- per texel. Loaded anyway, because a `shade` body is free to do
- something with it and "we parsed it and threw it away" is worse.
+ Normal, occlusion, metallic-roughness, emissive and height are each one of
+ `MeshLambertMaterial`'s own maps, so the built-in shader draws all five. The
+ height map is the extension's, on a material with no stack: core glTF has no
+ slot for one.
 
  ## The colourspaces are the load-bearing part
 
- `load_material_texture`'s header has the argument. Three of these four are data
- rather than pictures — a direction, a weight, two weights — and go in `LINEAR`;
- emissive is a colour somebody looked at and goes in `SRGB`. The decode memo is
- keyed on `(image, space)`, so a file using one image as both a colour map and a
- data map gets two uploads rather than one wrong one.
+ `load_material_texture`'s header has the argument. Four of these five are data
+ rather than pictures — a direction, a weight, two weights, a distance — and go
+ in `LINEAR`; emissive is a colour somebody looked at and goes in `SRGB`. The
+ decode memo is keyed on `(image, space)`, so a file using one image as both a
+ colour map and a data map gets two uploads rather than one wrong one.
 
  ## Alpha
 
@@ -238,6 +233,12 @@ struct GpuMaterial
 	int occlusion_texture;
 	int emissive_texture;
 	int metallic_roughness_texture;
+	// The relief of a material whose `CUSTOM_materials_layers` carries only its
+	// `base` object: a Principled BSDF with a height map in its Bump node. A stack
+	// keeps its own in `GpuLayers.height_texture`, so this is -1 under one.
+	int height_texture;
+	// Metres, top to bottom: the extension's bump strength times its distance.
+	float height_scale;
 
 	float[3] emissive_factor;
 	float emissive_strength;
@@ -4504,7 +4505,7 @@ fn void GpuMesh.free_layers(&self)
 }
 
 <*
- Give back the four images the glTF material named.
+ Give back the five images the glTF material named.
 
  Beside `release_layers` and called from the same three places, for the same
  reason: a reference taken at load is a reference somebody has to give back, and
@@ -4518,6 +4519,7 @@ fn void GpuMesh.release_material(&self, Assets* assets, Gpu* gpu)
 	assets.release_texture(gpu, self.material.occlusion_texture);
 	assets.release_texture(gpu, self.material.emissive_texture);
 	assets.release_texture(gpu, self.material.metallic_roughness_texture);
+	assets.release_texture(gpu, self.material.height_texture);
 	self.material = { };
 }
 
@@ -4560,6 +4562,7 @@ fn void? Assets.load_material_record(
 		.occlusion_texture = -1,
 		.emissive_texture = -1,
 		.metallic_roughness_texture = -1,
+		.height_texture = -1,
 		.emissive_factor = {
 			material.emissiveFactor[0],
 			material.emissiveFactor[1],
@@ -4592,6 +4595,17 @@ fn void? Assets.load_material_record(
 		ColorSpace.LINEAR
 	)!;
 	out.emissive_texture = self.load_material_texture(gpu, stream, images, material.emissiveTexture)!;
+
+	if (!material.layers_ext.present || material.has_layers()) return;
+	gltf::LayerBump bump = material.layers_ext.bump;
+	out.height_texture = self.load_material_texture(
+		gpu,
+		stream,
+		images,
+		material.layers_ext.heightTexture,
+		ColorSpace.LINEAR
+	)!;
+	out.height_scale = bump.strength * bump.distance;
 }
 
 <*

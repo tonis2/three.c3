@@ -163,14 +163,20 @@ export class MeshRef {
 	//       emissive, emissiveMap, emissiveIntensity,
 	//       aoMap,
 	//       metalness, roughness, metalnessRoughnessMap,
+	//       heightMap, heightScale,
 	//       repeat, offset }
 	//
 	// The base colour and its map are deliberately NOT in here: the mesh already
 	// carries both and a material that names no map draws the mesh's, so
 	// restating them would be a second source for one fact. Everything above is
 	// what the loader used to drop, and each map arrives with its colourspace
-	// already right — normal, occlusion and metallic-roughness are data and load
-	// linear, emissive is a colour and loads sRGB. Getting that wrong is the bug
+	// already right — normal, occlusion, metallic-roughness and height are data
+	// and load linear, emissive is a colour and loads sRGB.
+	//
+	// `heightMap` is the `CUSTOM_materials_layers` extension's base height map on
+	// a material with no stack, which is what Blender's Bump node exports, and
+	// `heightScale` is its depth in metres. Under a stack both are null and 0,
+	// because `layers` carries the stack's own. Getting that wrong is the bug
 	// `mapped_normal`'s header measures, and it is decided by the importer rather
 	// than by you.
 	//
@@ -244,6 +250,8 @@ export class MeshRef {
 			metalness: said.metallic,
 			roughness: said.roughness,
 			metalnessRoughnessMap: layerTexture(said.metallicRoughnessTexture),
+			heightMap: layerTexture(said.heightTexture),
+			heightScale: said.heightScale,
 			repeat: said.uvScale,
 			offset: said.uvOffset,
 		};
@@ -1609,7 +1617,7 @@ export class Asset {
 		// why they are 1 and 0.
 		const surface = d.roughness !== 1 || d.metalness !== 0;
 		const maps = d.normalMap !== null || d.aoMap !== null
-			|| d.metalnessRoughnessMap !== null;
+			|| d.metalnessRoughnessMap !== null || d.heightMap !== null;
 		if (!transparent && alphaTest === 0 && !d.doubleSided && !glow && !surface && !maps && !tiled) {
 			return null;
 		}
@@ -1623,6 +1631,7 @@ export class Asset {
 			d.aoMap ? d.aoMap._index() : -1,
 			d.metalnessRoughnessMap ? d.metalnessRoughnessMap._index() : -1,
 			d.emissiveMap ? d.emissiveMap._index() : -1,
+			d.heightMap ? d.heightMap._index() : -1, d.heightScale,
 			d.emissive.join(','), d.emissiveIntensity,
 			// Two meshes tiled differently are two materials: the transform is a
 			// property of the pipeline's uniforms, not of the images in it, so a
@@ -1652,6 +1661,8 @@ export class Asset {
 			emissiveMap: d.emissiveMap,
 			emissive: d.emissive,
 			emissiveIntensity: d.emissiveIntensity,
+			heightMap: d.heightMap,
+			...(d.heightMap === null ? {} : { heightScale: d.heightScale }),
 		});
 		// After construction rather than in the options, because they are properties
 		// every material has — the two setters are the one place a zero repeat is

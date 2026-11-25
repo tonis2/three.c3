@@ -597,9 +597,13 @@ colour pass cuts at the marched uv and the prepass could only cut at the flat on
 
 #### heightScale
 
-How deep `heightMap`'s relief is, top to bottom, in metres — 0.05 by default. Half of it stands out of
-the surface and half sinks in. It is measured against the world rather than the uv, so `repeat` does
-not change it, and 0 turns the march off without clearing the map.
+How deep `heightMap`'s relief is, top to bottom, in the mesh's own metres — 0.05 by default. Half of
+it stands out of the surface and half sinks in. It is measured against the surface rather than the uv,
+so `repeat` does not change it, and 0 turns the march off without clearing the map.
+
+**It scales with the object, as the geometry does.** A copy scaled to a quarter has a quarter of the
+relief, so a map shrunk onto a table keeps its stones and tiles in proportion instead of tearing them
+across the texture.
 
 #### parallaxSteps
 
@@ -671,6 +675,9 @@ overload nothing calls; so is a helper with the same name and signature as one o
   tint that drifts per copy, a macro noise that does not restart at every piece of a kit, a wave whose
   phase is the tree rather than the leaf. A merged mesh is one copy, so it is per merge and not per
   piece.
+- `scale` — how many world metres one metre of this mesh is: the copy's scale, the cube root of its
+  volume scale under a non-uniform one. The parallax helpers take their depth in the mesh's metres and
+  multiply by it themselves, so a body passes `heightScale`-style numbers straight through.
 
 Each uniform is a field of `s.uniforms` — `s.uniforms.tint` — and a uniform written as an array of
 arrays is a table column, read as `s.uniforms.name[s.variant]`. Being a field, a uniform can be called
@@ -950,7 +957,8 @@ the same weight and the same blend mode the colour does, so a moss layer that mu
 also multiplies its roughness. State only what the layer means — a layer that says `roughness` says
 nothing about `metalness`, and the material's own value carries through.
 
-`height` is parallax: `bump: { strength, distance }` scales it, `distance` in metres, and the uv moves
+`height` is parallax: `bump: { strength, distance }` scales it, `distance` in the mesh's metres (a
+scaled copy scales its relief with it, as `heightScale` does), and the uv moves
 under everything sampled after it. A height on the LayeredMaterial itself moves the whole stack — base
 colour, base normal, the mask and every layer; a height on a layer moves that layer's own maps and
 nothing else. 0.5 in the map is the plane the mesh already has. By default it is one step rather than a
@@ -1172,13 +1180,20 @@ holding a reference, so read it once and keep what it gave you.
 #### material
 
 `{ alphaMode, alphaCutoff, doubleSided, normalMap, emissive, emissiveMap, emissiveIntensity, aoMap,
-metalness, roughness, metalnessRoughnessMap, repeat, offset }`, or null for a primitive that names no
-material. This is what the loader used to drop.
+metalness, roughness, metalnessRoughnessMap, heightMap, heightScale, repeat, offset }`, or null for a
+primitive that names no material. This is what the loader used to drop.
 
-Each map arrives with its colourspace already right — normal, occlusion and metallic-roughness are
-data and load linear, emissive is a colour and loads sRGB — which is decided by the importer rather
+Each map arrives with its colourspace already right — normal, occlusion, metallic-roughness and height
+are data and load linear, emissive is a colour and loads sRGB — which is decided by the importer rather
 than by you, and is the difference between a normal map that works and one that leans every surface
 the same way.
+
+`heightMap` and `heightScale` are the relief core glTF has no slot for: the `CUSTOM_materials_layers`
+extension's `base` height map and its bump, on a material with no layer stack. That is what Blender's
+Bump node exports with a height map in its Height socket, and `heightScale` is the node's Distance
+times its Strength, in metres. `instantiate({ materials: true })` puts both on the
+`MeshLambertMaterial` it builds, so the surface is parallax-mapped. Under a stack they are null and 0,
+and `layers` carries the stack's own.
 
 It is a description and not a material: what to build from it is yours, and
 `asset.instantiate({ materials: true })` is the shorter door.

@@ -691,6 +691,7 @@ fn String relief_scene(float tilt)
 		const plane = new three.Mesh(new three.PlaneGeometry(2, 2), globalThis.MAT);
 		plane.rotation.x = %f;
 		scene.add(plane);
+		globalThis.PLANE = plane;
 		three.camera.frameAll();
 		return 'built';`,
 		tilt
@@ -804,6 +805,41 @@ fn void a_height_map_moves_the_surface_at_an_angle() @test
 		defer back.free();
 		usz left = frame_difference(&flat, &back);
 		test::@check(left == 0, "and clearing it left %d pixels changed", left);
+	};
+}
+
+<*
+ A relief scales with the copy it is on, as the copy's geometry does: the same
+ plane shrunk to a quarter and framed the same draws the same picture. In world
+ metres the small one's relief would be four times as deep for its size, which
+ is what a map set on a table at 1:29 looked like.
+*>
+fn void a_relief_scales_with_its_copy() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult built = run.run(relief_scene(-1.1f));
+		defer built.free();
+		test::@check(built.ok, "the scene was built: %s", built.error);
+
+		three::RunResult set = run.run(
+			`globalThis.MAT.heightScale = 0.3; globalThis.MAT.heightMap = globalThis.HEIGHT; return 'set';`
+		);
+		defer set.free();
+		test::@check(set.ok, "the map was assigned: %s", set.error);
+		image::Image full = renderer.capture()!!;
+		defer full.free();
+
+		three::RunResult shrunk = run.run(
+			`globalThis.PLANE.scale.set(0.25, 0.25, 0.25); three.camera.frameAll(); return 'shrunk';`
+		);
+		defer shrunk.free();
+		test::@check(shrunk.ok, "the plane was shrunk: %s", shrunk.error);
+		image::Image small = renderer.capture()!!;
+		defer small.free();
+
+		usz changed = frame_difference(&full, &small);
+		test::@check(changed < (usz)(W * H / 500), "the shrunk copy's relief changed %d pixels", changed);
 	};
 }
 

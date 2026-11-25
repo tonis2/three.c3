@@ -244,7 +244,8 @@ function surfaces(layer) {
 // **`distance` is in metres**, which is what it means in the file and in the node
 // it came out of. `parallax_uv` solves the uv gradient per pixel, so it stays
 // metres whatever the surface is tiled at rather than becoming a number that has
-// to be retuned per mesh. `strength` is the 0-to-1 amount beside it, and the two
+// to be retuned per mesh. They are the mesh's metres: the helpers multiply by
+// `s.scale`, so a scaled copy's relief scales with it. `strength` is the 0-to-1 amount beside it, and the two
 // multiply into the single depth the generated source carries — nothing needs
 // them apart except the exporter, which is handed both.
 //

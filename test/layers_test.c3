@@ -685,6 +685,49 @@ fn void a_painted_mask_is_not_a_tint() @test
 }
 
 <*
+ A plain material's height map crosses onto the built-in one.
+
+ Blender's Bump node with a height map in it, on a Principled BSDF and no stack,
+ exports as the extension's `base` object alone. `layers` stays null for it, so
+ the height map rides on `ref.material`, linear, with the node's Strength times
+ its Distance as the depth, and `{ materials: true }` builds the parallax-mapped
+ `MeshLambertMaterial` from it. A stack's material leaves both empty: the stack
+ carries its own.
+*>
+fn void a_plain_materials_height_map_crosses_onto_the_built_in_one() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the relief crosses", `
+			const round = (v) => Math.round(v * 1000) / 1000;
+			const asset = three.load("test/fixtures/relief_plain.glb");
+			const ref = asset.mesh("wall");
+			const d = ref.material;
+			const built = asset.instantiate("level", { materials: true });
+			let worn = null;
+			built.traverse((o) => { if (o.geometry && o.name === "wall") worn = o.material; });
+			const stacked = three.load("test/fixtures/layered.glb").mesh("terrain").material;
+			return ({
+				layers: ref.layers,
+				height: [d.heightMap !== null, d.heightMap?.colorSpace === three.LinearSRGBColorSpace, round(d.heightScale)],
+				worn: [worn.toJSON().type, worn.heightMap !== null, round(worn.heightScale)],
+				stacked: [stacked.heightMap, stacked.heightScale],
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains(`"layers":null`), "a base with no layers is not a stack: %s", answer);
+		test::@check(answer.contains(`"height":[true,true,0.04]`), "the map crosses linear, 0.5 x 0.08 deep: %s", answer);
+		test::@check(
+			answer.contains(`"worn":["MeshLambertMaterial",true,0.04]`),
+			"and the material instantiate builds is parallax-mapped: %s",
+			answer
+		);
+		test::@check(answer.contains(`"stacked":[null,0]`), "a stack's material leaves its relief to the stack: %s", answer);
+	};
+}
+
+<*
  An instantiated tree wears the stacks the file carried.
 
  `{ materials: true }` built a `MeshLambertMaterial` out of `ref.material` and

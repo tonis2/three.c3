@@ -1620,6 +1620,8 @@ struct MeshMaterialRecord
 	js::Value occlusion_texture;
 	js::Value metallic_roughness_texture;
 	js::Value emissive_texture;
+	js::Value height_texture;
+	float height_scale;
 	float[<2>] uv_scale;
 	float[<2>] uv_offset;
 }
@@ -1654,6 +1656,8 @@ fn js::Value? js_mesh_material(JsRuntime* self, AssetId id, uint index)
 		.occlusion_texture = layer_texture(self, material.occlusion_texture)!,
 		.metallic_roughness_texture = layer_texture(self, material.metallic_roughness_texture)!,
 		.emissive_texture = layer_texture(self, material.emissive_texture)!,
+		.height_texture = layer_texture(self, material.height_texture)!,
+		.height_scale = material.height_scale,
 		.uv_scale = { material.uv_scale[0], material.uv_scale[1] },
 		.uv_offset = { material.uv_offset[0], material.uv_offset[1] },
 	};

@@ -262,6 +262,10 @@ struct Surface
 	// matrix in the vertex stage, so it is the copy's origin under any scale,
 	// rotation or translation.
 	float3 origin;
+	// How many world metres one metre of this mesh is: the copy's scale. The
+	// parallax helpers take their depth in the mesh's metres and multiply by
+	// this, so a relief shrinks with the copy it is on, as its geometry does.
+	float scale;
 	float4 color;          // this copy's colour, raw
 	float4 vertex_color;   // the mesh's COLOR_0, white where the file had none
 
@@ -622,12 +626,15 @@ fn float3 mapped_normal(Surface s, float3 texel)
 // handful of instructions and shifts a texture convincingly, and is not the
 // version that occludes or self-shadows.
 //
-// `depth` is in metres, and the screen-space steps of the world position and of
-// the uv are the same two steps measured two ways, so dividing one by the other
-// leaves how far a unit of u and a unit of v reach across this surface. A
-// `bump.distance` of 0.1 therefore means a tenth of a metre of relief whatever
-// the mesh is tiled at. `height` is the map's red channel, and `parallax_step`
-// reads 0.5 as the plane the mesh already has.
+// `depth` is in the mesh's own metres, and the screen-space steps of the world
+// position and of the uv are the same two steps measured two ways, so dividing
+// one by the other leaves how far a unit of u and a unit of v reach across this
+// surface. A `bump.distance` of 0.1 therefore means a tenth of a metre of relief
+// whatever the mesh is tiled at, and `s.scale` of that on a scaled copy - a map
+// shrunk onto a table keeps its relief in proportion. The shift returned is per
+// mesh metre, which is what `parallax_step` multiplies by the same depth.
+// `height` is the map's red channel, and `parallax_step` reads 0.5 as the plane
+// the mesh already has.
 //
 // It fades out where nobody can see it: once the deepest relief on the surface
 // would move the texel less than half a pixel, the whole effect is a sub-pixel
@@ -654,10 +661,10 @@ fn float2 parallax_shift(Surface s, float2 duv_dx, float2 duv_dy, float depth)
 	// Half the depth is as far as a texel can travel - the map runs either side
 	// of the plane the mesh has - and this is that distance against the world
 	// size of one pixel.
-	float fade = saturate(0.5 * depth * length(along) / pixel - 0.5);
+	float fade = saturate(0.5 * depth * s.scale * length(along) / pixel - 0.5);
 	if (fade <= 0.0) return float2(0.0, 0.0);
 
-	return fade * float2(dot(along, du) / dot(du, du), dot(along, dv) / dot(dv, dv));
+	return fade * s.scale * float2(dot(along, du) / dot(du, du), dot(along, dv) / dot(dv, dv));
 }
 
 // The frame every parallax helper works in: the normal, the direction to the
@@ -712,8 +719,8 @@ fn float3 parallax_tangent(float3 direction, float3 n, float3 du, float3 dv)
 // height map, then one secant step between the last two samples places the
 // hit. Relief in front of relief hides it, which a single step cannot do.
 //
-// The same conventions as `parallax_uv`: `depth` in metres, the map's red
-// channel, 0.5 the plane the mesh has. `duv_dx` and `duv_dy` are the gradients
+// The same conventions as `parallax_uv`: `depth` in the mesh's metres, the map's
+// red channel, 0.5 the plane the mesh has. `duv_dx` and `duv_dy` are the gradients
 // of the *unshifted* uv - every sample in the loop reads with them, so the mip
 // does not jump where the march does.
 //
@@ -734,6 +741,7 @@ fn float2 parallax_occlusion_uv(
 	out float hit)
 {
 	hit = 0.5;
+	depth *= s.scale;
 	float3 n;
 	float3 view;
 	float3 du;
@@ -814,6 +822,7 @@ fn float parallax_self_shadow(
 	float hit,
 	float3 toward)
 {
+	depth *= s.scale;
 	float3 n;
 	float3 view;
 	float3 du;
@@ -931,7 +940,8 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	}
 
 	s.position = input.world;
-	s.origin = input.origin;
+	s.origin = input.origin.xyz;
+	s.scale = input.origin.w;
 	s.color = input.color;
 	s.mesh_uv = input.uv;
 	s.uv = input.uv * draw.uv_transform.xy + draw.uv_transform.zw;
