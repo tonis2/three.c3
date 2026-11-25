@@ -2502,12 +2502,20 @@ fn uint MeshPass.unused_features(&self)
 fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 {
 	self.lit_pipelines.clear();
-	self.skip_features = self.feature_variants_disabled ? 0 : self.unused_features();
-	if (self.skip_features == 0) return;
+	if (self.feature_variants_disabled)
+	{
+		self.skip_features = 0;
+		return;
+	}
+	self.skip_features = self.unused_features();
 	foreach (&material : self.materials)
 	{
 		if (!material.alive || material.pipeline == null) continue;
-		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, self.skip_features)!;
+		// The frame's features, and the alpha test where this material has none:
+		// a material that can never discard draws through a pipeline without the
+		// instruction, so it keeps early depth - see `SKIP_ALPHA_TEST`.
+		uint skip = self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST);
+		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip)!;
 		if (lit != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit });
 	}
 }

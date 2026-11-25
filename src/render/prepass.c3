@@ -21,7 +21,9 @@ import vk;
 *>
 struct DepthPrepass
 {
-	// `three.depthPrepass`. On by default; a script turns it off to compare.
+	// `three.depthPrepass`. On by default at a desk and off on the headset, whose
+	// tiler rejects overdraw itself (`android/entry.c3` has the measurements); a
+	// script turns it either way to compare.
 	bool enabled;
 	// Both pipelines this frame's buckets may need are built and the pass has
 	// something to draw with. Recomputed by `MeshPass.prepare`.

@@ -476,10 +476,12 @@ struct Draw @local
 	// `quicksort` takes a captureless function pointer, so the sort has no way to
 	// reach a table saying which materials are transparent.
 	uint order;
-	// Signed distance from the near plane to the world-bounds centre, for the
-	// back-to-front sort. Zero for an opaque draw, which never pays for it: the
-	// blended pipelines write no depth, so ordering is what stands in for the depth
-	// buffer, and only the draws that lost the depth buffer need it.
+	// Signed distance from the near plane to the world-bounds centre. A
+	// transparent draw sorts by it farthest first, across buckets, because the
+	// blended pipelines write no depth and ordering is what stands in for the depth
+	// buffer. An opaque one sorts by it nearest first, inside its bucket only, so
+	// the early depth test has something in front to reject against. Zero in a
+	// frame that computed no world boxes - no culling and nothing transparent.
 	float depth;
 	// Whether the camera can see this copy, as opposed to whether the light can. A
 	// draw is in the list if *either* is true; this says which range of its bucket
@@ -2828,8 +2830,9 @@ fn void Scene.build_draw_list(
 			}
 			// Signed distance to the near plane: positive in front of the camera and
 			// larger the further away, so "farthest first" is a descending sort with
-			// no camera position anywhere in it.
-			if (sorted) depth = near.normal.dot(box.center()) + near.distance;
+			// no camera position anywhere in it. Opaque draws read it too, nearest
+			// first inside a bucket - see the comparator.
+			if (near != null) depth = near.normal.dot(box.center()) + near.distance;
 		}
 
 		self.draws.push(
@@ -2913,6 +2916,18 @@ fn void Scene.build_draw_list(
 		uint cell_a = draw_cell(a.visible, a.is_static);
 		uint cell_b = draw_cell(b.visible, b.is_static);
 		if (cell_a != cell_b) return cell_a < cell_b ? -1 : 1;
+		// After the cell, so it only orders copies inside one bucket's range and
+		// never splits a bucket: nearest first. On a tiler with no depth prepass the
+		// early depth test is what throws hidden fragments away, and it can only
+		// throw away what is behind something already drawn. Four walls drawn back
+		// to front shaded all four - 10 ms in `examples/vr_bench.js` - and front to
+		// back only the first, 3.5 ms. The transparent band already ran farthest
+		// first above, so this never reverses it.
+		if (a.order != TRANSPARENT_ORDER)
+		{
+			if (a.depth < b.depth) return -1;
+			if (a.depth > b.depth) return 1;
+		}
 		return 0;
 	});
 

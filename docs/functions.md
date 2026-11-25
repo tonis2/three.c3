@@ -3653,7 +3653,15 @@ a fade to white is this, a change of curve is not.
 ## three.depthPrepass
 
 Draw the opaque and cut-out geometry depth-only before the scene pass, so each pixel is shaded once instead of
-once per layer of overdraw. `true` by default.
+once per layer of overdraw. `true` by default at a desk, and `false` on a Quest.
+
+On a Quest the GPU sorts out overdraw itself. It bins the frame into tiles and keeps a coarse depth of the
+whole frame (LRZ) before shading any of it, so hidden fragments are thrown away early without a prepass. There
+the prepass mostly doubles the vertex work, which is the headset's dearest: on `examples/vr_bench.js`, a
+400k-triangle scene took 8.5 ms without it and 15 ms with it, and four overlapping layers of wall cost less
+without it too. That holds for materials with no alpha test. A material with an `alphaTest`, or a `fragment:`
+body that discards, has to decide whether each fragment exists before its depth can be written, so it loses the
+early rejection and its overdraw is shaded; turn the prepass on if a scene is full of those.
 
 It costs a depth-only pass over the same geometry and pays wherever the fragment shader is expensive and things
 stand in front of each other — foliage, a crowd, a corridor. A flat scene with no overdraw pays the extra pass

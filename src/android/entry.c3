@@ -105,6 +105,13 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// Both eyes in one multiview pass where the device can.
 	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1)!;
 	engine.renderer.gpu.report();
+	// No depth prepass on the headset. Adreno bins the frame and builds a coarse
+	// depth of all of it (LRZ) before shading, which throws away hidden fragments
+	// without one, so the prepass here mostly doubled the vertex work - the
+	// binning pass ran every vertex twice per eye. `examples/vr_bench.js`: a
+	// 400k-triangle scene 15 ms with it and 8.5 ms without; four overlapping
+	// walls cheaper without it too. A script can still turn it on.
+	engine.renderer.pass.prepass.enabled = false;
 	// For profiling: whether the per-pass GPU timestamps and the statistics query
 	// cost anything shows in Meta's own app GPU time (the VrApi line) with them gone.
 	if (ndk::property("debug.three.timestamps").trim() == "0")

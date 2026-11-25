@@ -1156,3 +1156,37 @@ fn void a_lighting_variant_draws_what_the_full_shader_draws() @test
 	test::@check(max_rgb_difference(&full, &variant) <= 1,
 		"the variant matches the full shader (largest channel error %d)", max_rgb_difference(&full, &variant));
 }
+
+// The feature bits the pipeline a material draws with this frame left out.
+fn uint drawn_skip(three::Renderer* renderer, three::MeshPipeline* base)
+{
+	three::MeshPipeline* drawn = renderer.pass.draw_pipeline(base);
+	three::CachedPipeline* entry = renderer.pass.pipelines.entry_for(drawn);
+	return entry == null ? 0 : entry.state.skip_features;
+}
+
+// The alpha test is the material's own: compiled out of the pipeline of one whose
+// `alpha_test` is zero, which can never discard, and kept for one that can. A
+// shader that merely contains a discard loses early depth on a tiler.
+fn void only_a_material_with_an_alpha_test_keeps_its_discard() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	image::Image first = renderer.capture()!!;
+	first.free();
+
+	three::Material* material = renderer.pass.material(0);
+	float was = material.alpha_test;
+	defer material.alpha_test = was;
+
+	material.alpha_test = 0;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, material.pipeline) & three::SKIP_ALPHA_TEST) != 0,
+		"a material with no alpha test still draws through a pipeline that holds the discard");
+
+	material.alpha_test = 0.5f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, material.pipeline) & three::SKIP_ALPHA_TEST) == 0,
+		"a material with an alpha test lost its discard");
+}

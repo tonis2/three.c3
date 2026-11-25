@@ -897,6 +897,45 @@ fn void stats_stays_camera_free_with_transparency() @test
 }
 
 <*
+ Opaque copies inside one bucket draw nearest first, so the early depth test has
+ the near one to reject the far one against. Added far first, so slot order -
+ what a sort without depth keeps - is the wrong answer.
+*>
+fn void opaque_copies_draw_nearest_first() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		renderer.pass.load_triangle(&renderer.gpu)!!;
+		three::Scene* scene = renderer.pass.scene;
+		scene.cull = true;
+
+		three::NodeId far = scene.add_mesh(TRIANGLE, 0);
+		scene.set_position(far, { 0, 0, -2 });
+		three::NodeId near = scene.add_mesh(TRIANGLE, 0);
+		scene.set_position(near, { 0, 0, 2 });
+
+		three::Camera camera = three::default_camera();
+		camera.target = { 0, 0, 0 };
+		camera.distance = 10;
+		camera.yaw = 0;
+		camera.pitch = 0;
+		scene.update(&renderer.pass.assets, camera.view_projection((float)W / (float)H));
+
+		// The pass's own triangle at the origin makes three copies of the one mesh.
+		test::@check(scene.buckets.len() == 1 && scene.instances.len() == 3,
+			"three copies of one mesh are one bucket of three, got %d buckets and %d copies", scene.buckets.len(), scene.instances.len());
+		Vec3 eye = camera.eye();
+		float last = -1;
+		foreach (i, copy : scene.instances)
+		{
+			float distance = (Vec3){ copy.model.m[12], copy.model.m[13], copy.model.m[14] }.distance(eye);
+			test::@check(distance >= last, "copy %d is %f from the eye, nearer than the one before it at %f", i, distance, last);
+			last = distance;
+		}
+	};
+}
+
+<*
  Transparent buckets are sorted farthest first, sit above every opaque bucket and
  below the lines, and the instance array they index is still a clean tiling.
 

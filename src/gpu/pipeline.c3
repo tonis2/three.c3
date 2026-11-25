@@ -976,11 +976,20 @@ const uint SKIP_ENVIRONMENT        = 32;
 const uint SKIP_LIGHTMAPS          = 64;
 const uint SKIP_OCCLUSION          = 128;
 const uint SKIP_SUN_SHADOW         = 256;
+// Every bit a *frame* decides. The one below is a material's.
 const uint SKIP_ALL_FEATURES       = 511;
+// The alpha test, for a material whose `alpha_test` is zero and so can never
+// discard. Compiled out rather than left untaken because a fragment shader that
+// *contains* a discard loses early depth on a tiler: Adreno cannot write a
+// fragment's depth before the shader has decided whether the fragment exists,
+// so every draw through it tests depth late and writes no low-resolution depth
+// (LRZ), and every layer of overdraw is shaded. That is what the depth prepass
+// was standing in for.
+const uint SKIP_ALPHA_TEST         = 512;
 // The shaders' `LIGHTS_*` and `SURFACE_*` constants are `@spec(100)` onwards, in
 // the order of the bits above.
 const uint FEATURE_SPEC_ID = 100;
-const uint SHADER_FEATURES = 9;
+const uint SHADER_FEATURES = 10;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces
@@ -2364,7 +2373,7 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
  cache did not hand out comes back unchanged.
 
  @param [&in] base : "A pipeline `acquire` handed out"
- @require skip_features <= SKIP_ALL_FEATURES : "Unknown feature bits"
+ @require skip_features <= (SKIP_ALL_FEATURES | SKIP_ALPHA_TEST) : "Unknown feature bits"
 
  @return "`base` itself when it already leaves out exactly those features"
 *>

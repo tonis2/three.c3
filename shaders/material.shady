@@ -982,7 +982,9 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		// colour, would cut a different shape.
 		Map base_color_map = map_at(SLOT_BASE_COLOR);
 		float4 base = map_texel(base_color_map, s.uv, uv_dx, uv_dy, scattered);
-		if (base.a * draw.base_color.a < draw.surface.w) discard;
+		// Compiled out for a material with no alpha test: a discard the shader
+		// merely contains costs early depth on every draw - `SKIP_ALPHA_TEST`.
+		if (SURFACE_ALPHA_TEST && base.a * draw.base_color.a < draw.surface.w) discard;
 		s.albedo *= base.rgb;
 
 		if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)

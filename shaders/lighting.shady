@@ -39,6 +39,9 @@ const bool SURFACE_ENVIRONMENT      @spec(105) = true;
 const bool SURFACE_LIGHTMAPS        @spec(106) = true;
 const bool SURFACE_OCCLUSION        @spec(107) = true;
 const bool SURFACE_SUN_SHADOW       @spec(108) = true;
+// Per material, not per frame: off for one whose alpha test is zero, so its
+// pipeline holds no discard at all and keeps early depth (`SKIP_ALPHA_TEST`).
+const bool SURFACE_ALPHA_TEST       @spec(109) = true;
 
 // `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
 // direct diffuse in its tile. `shade_lights` skips the diffuse half for those

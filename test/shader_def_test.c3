@@ -509,8 +509,8 @@ fn void the_ported_mesh_is_lit() @test
 		"the device-wide texture array is the module's one resource");
 	test::@check(source.contains("Map base_color_map = map_at(SLOT_BASE_COLOR);"),
 		"the base colour map is reached by its row through `Map`");
-	test::@check(source.contains("if (base.a * draw.base_color.a < draw.surface.w) discard;"),
-		"and the alpha test is before the body, on the map's alpha times the material's");
+	test::@check(source.contains("if (SURFACE_ALPHA_TEST && base.a * draw.base_color.a < draw.surface.w) discard;"),
+		"and the alpha test is before the body, on the map's alpha times the material's, behind the constant that compiles it out");
 	test::@check(source.contains("if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)")
 		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);"),
 		"a normal map bends the shading normal through the shared frame, not the geometric one");
