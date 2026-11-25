@@ -14,8 +14,13 @@ While working on the engine, test without the leak checker:
     c3c build three                                # the engine, contracts checked
     c3c build --safe=no -O3                        # the fast one: no contracts, optimised
 
+
+Before running c3c tests with leak detection, ask the user.
+
+When you see stale comments or code, fix it right away.
+
+Read /c3 skill, before making larger code changes.
+
 There is no -D DEBUG. Validation layers and debug logging are `./build/three --debug` at run time,
 and the suite asks for the layer itself, so every build has both.
 
-Tabletop Siege, the VR game, lives in its own repo beside this one (`../tabletop-siege`). Game work
-goes there; engine fixes it turns up go here.
