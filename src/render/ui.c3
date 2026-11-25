@@ -76,7 +76,7 @@ import vk;
  stopped matching after a `set` renamed a node is a HUD that quietly freezes, and
  finding out why costs an afternoon.
 *>
-faultdef UI_NO_SUCH_KEY, UI_NO_TREE, UI_BAD_PARENT, UI_NO_DEVICE;
+excuse UI_NO_SUCH_KEY, UI_NO_TREE, UI_BAD_PARENT, UI_NO_DEVICE;
 
 <*
  The font the interface draws with, in the binary rather than on disk.

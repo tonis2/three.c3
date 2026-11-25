@@ -18,7 +18,7 @@ module three;
 import shady;
 
 
-faultdef MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY, MATERIAL_TOO_MANY_TEXTURES;
+excuse MATERIAL_NAME_INVALID, MATERIAL_TOO_MANY_UNIFORMS, MATERIAL_BODY_EMPTY, MATERIAL_TOO_MANY_TEXTURES;
 
 <*
  One sampler the agent asked for, as the JS side named it.
@@ -57,8 +57,14 @@ struct MaterialUniform
 {
 	String name; // borrowed from the caller
 	uint components; // 1..4 floats
-	uint rows; // 1 for a plain uniform, N for a column of an N-row table
+	uint rows; // 0 or 1 for a plain uniform, N for a column of an N-row table
 }
+
+<*
+ How many rows the uniform takes. A declared count of zero means "not a table",
+ which is one row; the budget, the clamp and the generated declaration all ask here.
+*>
+fn uint MaterialUniform.row_count(self) => max(self.rows, 1u);
 
 <*
  Bytes of push block available to material uniforms, after the mesh contract.
@@ -142,7 +148,7 @@ fn uint material_table_bytes(MaterialUniform[] uniforms)
 	uint total = 0;
 	foreach (uniform : uniforms)
 	{
-		uint rows = uniform_rows_of(uniform);
+		uint rows = uniform.row_count();
 		if (rows > 1) total += uniform.components * rows * 4;
 	}
 	return total;
@@ -161,7 +167,7 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
 	uint total = 8;
 	foreach (uniform : uniforms)
 	{
-		if (uniform_rows_of(uniform) == 1) total += uniform.components * 4;
+		if (uniform.row_count() == 1) total += uniform.components * 4;
 	}
 	return total;
 }
@@ -192,7 +198,7 @@ fn uint material_pushed_bytes(MaterialUniform[] uniforms)
  declared one. Now a bucket pushes the reserved images and its record carries the
  rest as integers.
 *>
-const uint MATERIAL_TEXTURE_LIMIT = DRAW_TEXTURE_INDICES - MATERIAL_BINDING_FIRST;
+const uint MATERIAL_TEXTURE_LIMIT = DRAW_TEXTURE_INDICES - MaterialBinding.FIRST_DECLARED;
 
 <*
  What the agent's own lines are called in a diagnostic.
@@ -206,7 +212,7 @@ const usz MATERIAL_DIAGNOSTIC_MAX @local = 512;
 
 // The message the last refusal carried. See `material_diagnostic`.
 char[MATERIAL_DIAGNOSTIC_MAX] material_message @local;
-usz material_message_len @local;
+sz material_message_len @local;
 
 <*
  What the last `validate_material` refused, in words.
@@ -240,7 +246,7 @@ fn void material_note(String message) @local
 fn uint material_uniform_bytes(MaterialUniform[] uniforms)
 {
 	uint total = 0;
-	foreach (uniform : uniforms) total += uniform.components * uniform_rows_of(uniform) * 4;
+	foreach (uniform : uniforms) total += uniform.components * uniform.row_count() * 4;
 	return total;
 }
 
@@ -257,7 +263,7 @@ fn uint material_rows(MaterialUniform[] uniforms)
 	uint rows = 1;
 	foreach (uniform : uniforms)
 	{
-		uint declared = uniform_rows_of(uniform);
+		uint declared = uniform.row_count();
 		if (declared > rows) rows = declared;
 	}
 	return rows;
@@ -334,10 +340,10 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			// One table, not a bag of arrays — see `MaterialUniform`. Checked
 			// against the first column that has more than one row rather than
 			// against the maximum, so the message can name both of them.
-			uint rows = uniform_rows_of(uniform);
+			uint rows = uniform.row_count();
 			foreach (other : uniforms)
 			{
-				uint other_rows = uniform_rows_of(other);
+				uint other_rows = other.row_count();
 				if (other_rows == 1 || rows == 1 || other_rows == rows) continue;
 				material_note(
 					string::tformat(

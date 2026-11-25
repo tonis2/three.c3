@@ -34,7 +34,7 @@ Sampler2D scene @set(0) @binding(1);
 Sampler2D depth_buffer @set(0) @binding(2);
 Sampler2D tap_image @set(0) @binding(3);
 
-// The destination. Binding 8 is `POST_OUTPUT_BINDING`: past the four reserved
+// The destination. Binding 8 is `PostBinding.OUTPUT`: past the four reserved
 // samplers and the four the script may declare, so neither kind of pass has to
 // renumber anything for the other.
 image2d<rgba16f> output @set(0) @binding(8);

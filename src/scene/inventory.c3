@@ -28,7 +28,7 @@ import std::math::matrix;
 import gltf;
 import collision;
 
-faultdef ASSETS_ROOT_IS_NOT_A_DIRECTORY;
+excuse ASSETS_ROOT_IS_NOT_A_DIRECTORY;
 
 <*
  One mesh, as the file describes it.

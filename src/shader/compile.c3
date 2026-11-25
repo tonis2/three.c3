@@ -9,7 +9,7 @@ module three;
 
 import std::collections::list;
 
-faultdef SHADER_COMPILE_FAILED;
+excuse SHADER_COMPILE_FAILED;
 
 // The SPIR-V magic number, little-endian. Checked against what the compiler just
 // returned, where it catches a compiler that reported success and produced

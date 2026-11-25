@@ -25,7 +25,7 @@ import std::io;
 import std::io::file;
 import shady;
 
-faultdef SHADER_NOT_FOUND;
+excuse SHADER_NOT_FOUND;
 
 <*
  Where a source file is looked for: `shaders/` and `build/shaders/`.

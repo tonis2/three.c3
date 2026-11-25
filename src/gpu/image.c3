@@ -9,7 +9,7 @@ module three;
 
 import vk;
 
-faultdef IMAGE_OVER_BUDGET;
+excuse IMAGE_OVER_BUDGET;
 
 <*
  An image, its memory and its view.

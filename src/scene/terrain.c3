@@ -52,7 +52,7 @@ import collision;
 const uint MAX_TERRAIN_SEGMENTS = 512;
 const uint MIN_TERRAIN_SEGMENTS = 1;
 
-faultdef TERRAIN_SIZE_INVALID, TERRAIN_HEIGHTS_WRONG_LENGTH;
+excuse TERRAIN_SIZE_INVALID, TERRAIN_HEIGHTS_WRONG_LENGTH;
 
 <*
  A grid of heights, and everything derived from it.

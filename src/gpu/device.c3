@@ -58,7 +58,7 @@ import std::io;
 import std::collections::list;
 import vk;
 
-faultdef
+excuse
 	NO_BUFFER_DEVICE_ADDRESS, NO_DYNAMIC_RENDERING, NO_PUSH_DESCRIPTOR, NO_SHADER_DRAW_PARAMETERS, NO_SUITABLE_GPU,
 	PORTABILITY_DRIVER_ONLY;
 

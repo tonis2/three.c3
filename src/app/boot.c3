@@ -41,7 +41,7 @@ const String VERSION = "0.1.0";
 // Raised by `boot_script` rather than by the command line: a path that cannot be
 // read is a fact about the file, and an application that never parsed a flag
 // still has to be told. `main.c3` catches it to print its own sentence.
-faultdef SCRIPT_NOT_READABLE;
+excuse SCRIPT_NOT_READABLE;
 
 <*
  What the title bar says until a game says otherwise.

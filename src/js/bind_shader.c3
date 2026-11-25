@@ -689,8 +689,9 @@ fn void? js_set_map(JsRuntime* self, uint index, int texture)
  built-in material's three maps past its base colour.
 
  One verb for the three, keyed by a slot number, because they differ only in
- which binding they land in — `MATERIAL_SLOT_*` in `scene/material.c3` is what
- the prelude names and `NORMAL_MAP_BINDING` is where those become bindings.
+ which row they land in. The prelude sends the row itself, from
+ `MaterialBinding.NORMAL_MAP` up, and `built_in_map_from` checks it here, where it
+ enters from the script.
 
  The three refusals are told apart in the message, because they are three
  different mistakes: a dead texture is one the material may not use, a built-in
@@ -702,7 +703,7 @@ fn void? js_set_map(JsRuntime* self, uint index, int texture)
 fn void? js_set_material_slot(JsRuntime* self, uint index, int slot, int texture)
 {
 	Gpu* gpu = self.renderer == null ? null : &self.renderer.gpu;
-	if (catch err = self.pass.set_material_slot(gpu, index, slot, texture))
+	if (catch err = self.pass.set_material_slot(gpu, index, built_in_map_from(slot), texture))
 	{
 		switch (err)
 		{

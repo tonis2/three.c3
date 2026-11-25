@@ -441,7 +441,7 @@ function readLayer(raw, at) {
 		animated: raw.animated === true,
 		// Filled in by the emitter, which is the only thing that decides what a
 		// binding is called. Nothing above this file spells a sampler name, for
-		// the reason `MATERIAL_BINDING_FIRST` spells out about binding numbers.
+		// the reason `MaterialBinding.FIRST_DECLARED` spells out about binding numbers.
 		samplers: {},
 	};
 }

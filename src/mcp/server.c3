@@ -39,7 +39,7 @@ import image;
 import image::png;
 import mcp;
 
-faultdef TOOL_NEEDS_SOURCE, TOOL_NEEDS_DEVICE, TOOL_NO_RUNTIME, TOOL_WRITE_FAILED;
+excuse TOOL_NEEDS_SOURCE, TOOL_NEEDS_DEVICE, TOOL_NO_RUNTIME, TOOL_WRITE_FAILED;
 
 <*
  What the tool handlers are given. Must outlive the server.

@@ -32,7 +32,7 @@ import std::io::path;
 import std::os::env;
 import libc;
 
-faultdef NO_USER_DIR;
+excuse NO_USER_DIR;
 
 // One name under every root, so `three.c3/` is the whole footprint and a person
 // who wants it gone has one directory to delete per root.

@@ -169,7 +169,7 @@ struct PostStage (FullscreenPass)
 	// extent - what every pass that writes the frame wants.
 	uint[2] threads;
 	// The chain's images this pass declared, in declaration order, which is also
-	// binding order from `POST_IMAGE_FIRST`. Counted references - see `PostImage`.
+	// binding order from `PostBinding.IMAGE_FIRST`. Counted references - see `PostImage`.
 	PostImage*[POST_IMAGE_LIMIT] images;
 	uint image_count;
 }
@@ -647,8 +647,8 @@ fn PostStage*? PostPass.build_stage(
 			if (binding.set != 0 || binding.type != DESCRIPTOR_TYPE_STORAGE_IMAGE) continue;
 			storage_images++;
 			if (!binding.writes) continue;
-			if (binding.binding == POST_OUTPUT_BINDING) writes_output = true;
-			if (binding.binding >= POST_IMAGE_FIRST) writes_images = true;
+			if (binding.binding == PostBinding.OUTPUT) writes_output = true;
+			if (binding.binding >= PostBinding.IMAGE_FIRST) writes_images = true;
 		}
 		if (!writes_output && !writes_images)
 		{
@@ -928,7 +928,7 @@ fn void? PostPass.set_texture(&self, Gpu* gpu, Assets* assets, String name, int 
 	if (target == null || assets == null) return MATERIAL_UNKNOWN~;
 	if (texture != NO_TEXTURE && !assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 
-	uint binding = sampler_binding_of(&target.pipeline, name, POST_BINDING_FIRST);
+	uint binding = sampler_binding_of(&target.pipeline, name);
 	if (binding == 0) return MATERIAL_SAMPLER_UNKNOWN~;
 
 	int held = target.textures.at(binding);
@@ -951,7 +951,7 @@ fn int PostPass.texture(&self, String name, uint stage = 0)
 {
 	PostStage* target = self.stage(stage);
 	if (target == null) return NO_TEXTURE;
-	return target.textures.at(sampler_binding_of(&target.pipeline, name, POST_BINDING_FIRST));
+	return target.textures.at(sampler_binding_of(&target.pipeline, name));
 }
 
 <*
@@ -978,7 +978,7 @@ fn void PostStage.release_textures(&self, Gpu* gpu, Assets* assets)
 {
 	if (assets == null) return;
 
-	for (uint binding = POST_BINDING_FIRST; binding < POST_BINDINGS_END; binding++)
+	for (uint binding = PostBinding.FIRST_DECLARED; binding < POST_BINDINGS_END; binding++)
 	{
 		int held = self.textures.at(binding);
 		if (held == NO_TEXTURE) continue;
@@ -1087,7 +1087,7 @@ fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
 	// bindings included. The compiler may drop a sampler nothing reads, and a body
 	// that never touches `p.scene` gives it every reason to drop `scene`; a write
 	// to a binding the layout does not declare is a validation error. Everything
-	// from `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
+	// from `PostBinding.FIRST_DECLARED` up is resolved by name; see `render/bind.c3`.
 	SampledBindings samplers;
 	self.add_chain_samplers(&samplers, io);
 	self.add_images(&samplers, io.layer);
@@ -1161,9 +1161,9 @@ fn void? PostStage.record_compute(&self, vk::CommandBuffer cmd, PassIo io)
 
 	SampledBindings bindings;
 	self.add_chain_samplers(&bindings, io);
-	if (io.dst_view != null && pipeline_declares_binding(&self.pipeline, POST_OUTPUT_BINDING, DESCRIPTOR_TYPE_STORAGE_IMAGE))
+	if (io.dst_view != null && pipeline_declares_binding(&self.pipeline, PostBinding.OUTPUT, DESCRIPTOR_TYPE_STORAGE_IMAGE))
 	{
-		bindings.add_storage(POST_OUTPUT_BINDING, io.dst_view);
+		bindings.add_storage(PostBinding.OUTPUT, io.dst_view);
 	}
 	self.add_images(&bindings, io.layer);
 	bindings.push(cmd, &self.pipeline);
@@ -1197,23 +1197,23 @@ fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst) @dynami
  included. The compiler may drop a sampler nothing reads, and a body that never
  touches `p.scene` gives it every reason to drop `scene`; a write to a binding the
  layout does not declare is a validation error. Everything from
- `POST_BINDING_FIRST` up is resolved by name; see `render/bind.c3`.
+ `PostBinding.FIRST_DECLARED` up is resolved by name; see `render/bind.c3`.
 *>
 fn void PostStage.add_chain_samplers(&self, SampledBindings* samplers, PassIo io)
 {
-	samplers.add_if(&self.pipeline, 0, sampled_with(io.sampler, io.prev));
-	samplers.add_if(&self.pipeline, 1, sampled_with(io.sampler, io.scene));
+	samplers.add_if(&self.pipeline, PostBinding.PREV, sampled_with(io.sampler, io.prev));
+	samplers.add_if(&self.pipeline, PostBinding.SCENE, sampled_with(io.sampler, io.scene));
 	// The depth buffer, in `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than
 	// `SHADER_READ_ONLY_OPTIMAL` — a different layout and a different sampler from
 	// the two above, which is why it does not go through `sampled_with`.
-	samplers.add_if(&self.pipeline, 2,
+	samplers.add_if(&self.pipeline, PostBinding.DEPTH,
 		{ .sampler = io.depth_sampler, .imageView = io.depth, .imageLayout = IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL });
 	// The third source. `io.tap` is the view of whatever pass this one names, and
 	// the chain has already transitioned it — a tapped stage's output goes to
 	// SHADER_READ_ONLY_OPTIMAL after it runs like every other stage's, and it is
 	// an image nothing overwrites in between.
-	samplers.add_if(&self.pipeline, POST_TAP_BINDING, sampled_with(io.sampler, io.tap));
-	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets, POST_BINDING_FIRST);
+	samplers.add_if(&self.pipeline, PostBinding.TAP, sampled_with(io.sampler, io.tap));
+	if (io.assets != null) samplers.collect(&self.pipeline, &self.textures, io.assets);
 }
 
 <*
@@ -1227,7 +1227,7 @@ fn void PostStage.add_images(&self, SampledBindings* bindings, uint layer)
 {
 	for (uint i = 0; i < self.image_count; i++)
 	{
-		uint binding = POST_IMAGE_FIRST + i;
+		uint binding = PostBinding.IMAGE_FIRST + i;
 		if (!pipeline_declares_binding(&self.pipeline, binding, DESCRIPTOR_TYPE_STORAGE_IMAGE)) continue;
 		if (!self.images[i].image.exists()) continue;
 		bindings.add_storage(binding, self.images[i].image.layer_view(layer));

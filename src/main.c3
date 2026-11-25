@@ -60,7 +60,7 @@ import vk;
 
 const int DEFAULT_MCP_PORT = 8808;
 
-faultdef BAD_ARGUMENT, MISSING_VALUE;
+excuse BAD_ARGUMENT, MISSING_VALUE;
 
 fn Options? parse_args(String[] args)
 {

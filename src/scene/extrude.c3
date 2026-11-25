@@ -106,7 +106,7 @@ module three;
 import std::math;
 import std::math::vector;
 
-faultdef EXTRUDE_SHAPE_IS_DEGENERATE, TOO_MANY_EXTRUDE_POINTS;
+excuse EXTRUDE_SHAPE_IS_DEGENERATE, TOO_MANY_EXTRUDE_POINTS;
 
 <*
  Beyond this many points a triangulation is a stall rather than a shape.

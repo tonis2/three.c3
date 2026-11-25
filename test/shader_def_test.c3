@@ -1332,7 +1332,7 @@ fn void a_scripted_post_compiles_through_the_switch() @test
 	test::@check(mod.ok, "a scripted post compiles: %s", mod.diagnostic);
 
 	three::ShaderBinding* tint = mod.layout.binding_of("tint_map");
-	test::@check(tint != null && tint.set == 0 && tint.binding == three::POST_BINDING_FIRST,
+	test::@check(tint != null && tint.set == 0 && tint.binding == PostBinding.FIRST_DECLARED,
 		"its texture is a binding beside the four reserved ones");
 	test::@check(mod.layout.field_of("gain") != null, "and its uniform is a push field");
 }

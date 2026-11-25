@@ -36,12 +36,12 @@ import vk;
 
 // One past the last *slot* a material can name and one past the last binding a
 // post pass can declare. A material's slots are not descriptors any more — they
-// are rows of `DrawRecord.texture_index`, numbered from `MATERIAL_BINDING_FIRST`
+// are rows of `DrawRecord.texture_index`, numbered from `MaterialBinding.FIRST_DECLARED`
 // so nothing above `shader/assemble.c3` had to move — but they share
 // `TextureSlots` with a post pass's real bindings, so the wider of the two is
 // what that array has to hold.
-const uint MATERIAL_BINDINGS_END = MATERIAL_BINDING_FIRST + MATERIAL_TEXTURE_LIMIT;
-const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
+const uint MATERIAL_BINDINGS_END = MaterialBinding.FIRST_DECLARED + MATERIAL_TEXTURE_LIMIT;
+const uint POST_BINDINGS_END     = PostBinding.FIRST_DECLARED + POST_TEXTURE_LIMIT;
 
 <*
  The most sampler bindings one draw can carry: whichever kind of shader wants
@@ -55,8 +55,8 @@ const uint POST_BINDINGS_END     = POST_BINDING_FIRST + POST_TEXTURE_LIMIT;
  binding itself.
 *>
 const uint MAX_USER_BINDINGS = MATERIAL_BINDINGS_END > POST_BINDINGS_END ? MATERIAL_BINDINGS_END : POST_BINDINGS_END;
-const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > SHADOW_ATLAS_STATIC_COMPARE_BINDING + 1
-    ? MAX_USER_BINDINGS : SHADOW_ATLAS_STATIC_COMPARE_BINDING + 1;
+const uint MAX_SAMPLED_BINDINGS = MAX_USER_BINDINGS > FrameBinding.SHADOW_ATLAS_STATIC_COMPARE + 1
+    ? MAX_USER_BINDINGS : FrameBinding.SHADOW_ATLAS_STATIC_COMPARE + 1;
 
 // `TextureSlots` and the draw record's index row are indexed by the same number,
 // so the row has to be at least as wide as the slots.
@@ -132,31 +132,24 @@ fn void SampledBindings.add_typed(&self, uint binding, vk::DescriptorImageInfo i
 }
 
 <*
- Fills every binding the shader declared past the ones its template reserves,
- from a material's own table.
+ Fills every sampler a post shader declared from `PostBinding.FIRST_DECLARED` up,
+ from the pass's own table. The reserved bindings below it are the caller's to add.
 
- The reserved bindings are the caller's to add and are not touched here, because
- the two callers mean different things by them: a material's binding 0 is
- `material.map` or the mesh's own image, and a post pass's 0 and 1 are the pass
- before it and image A. Everything above them is the agent's and resolves the
- same way for both — hence `first` being a parameter rather than a constant.
-
- Driven by the reflected bindings, not by the textures the material holds: a
- sampler the script never supplied gets white rather than being skipped, since
- skipping it is undefined behaviour rather than a missing picture.
+ Driven by the reflected bindings, not by the textures the pass holds: a sampler
+ the script never supplied gets white rather than being skipped, since skipping it
+ is undefined behaviour rather than a missing picture.
 
  @param pipeline : `Whose reflected layout says which bindings exist.`
  @param slots : `Where the indices come from. Null binds white to every declared sampler.`
- @param first : `The first binding that is the agent's — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST. Everything below it belongs to the template and the caller has already added it.`
 *>
-fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slots, Assets* assets, uint first)
+fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slots, Assets* assets)
 {
 	foreach (binding : pipeline.shader.bindings)
 	{
 		// Set 1 is the device-wide texture array, which is bound whole and is not
 		// pushed per draw.
 		if (binding.set != 0) continue;
-		if (binding.binding < first) continue;
+		if (binding.binding < PostBinding.FIRST_DECLARED) continue;
 		if (binding.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
 		bool supplied = false;
 		for (uint i = 0; i < self.count; i++)
@@ -171,13 +164,11 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
 }
 
 <*
- Which binding a sampler name means, resolved through the *reflected* layout.
+ Which binding a post shader's sampler name means, resolved through the *reflected* layout.
 
- **A post pass's question now.** A material's images stopped being descriptors
- when they moved into the device-wide texture array, so
- `Material.binding_of_texture` reads its slots out of the declaration list
- instead; this is what is left, and a post pass's samplers are still bindings of
- its own set.
+ A material's images are slots of the device-wide texture array, which
+ `Material.binding_of_texture` reads out of the declaration list; a post pass's
+ samplers are still bindings of its own set, and this is where they are found.
 
  The name is looked up in the module's own reflection rather than in anything
  this side remembers, so a shader and the thing holding its textures cannot
@@ -185,29 +176,26 @@ fn void SampledBindings.collect(&self, MeshPipeline* pipeline, TextureSlots* slo
  spells a binding number: a script writes `grade_lut`, and this is where that
  becomes a `4`.
 
- Zero means no, and can, because zero is never a legal answer: binding 0 is the
- template's own `base_color_map` or `prev`, reached through `material.map` and
- through the chain respectively and deliberately not by name. A name reflecting
- below `first` is refused like a name reflecting at nothing at all, which keeps
- a post shader from reaching `scene` at binding 1 by declaring a texture called
- something else.
+ Zero means no, and can, because binding 0 is `prev`, reached through the chain
+ and never by name. A name reflecting below `PostBinding.FIRST_DECLARED` is refused
+ like a name reflecting at nothing at all, which keeps a post shader from reaching
+ `scene` by declaring a texture called something else.
 
  A name the body declared and never sampled may be absent here — the compiler
  may drop a parameter nothing reads — and that is indistinguishable from a typo,
  so the two setters answer with a sentence naming both possibilities.
 
- @param first : `The first binding that is the agent's — MATERIAL_BINDING_FIRST or POST_BINDING_FIRST.`
  @return `The binding index, or 0 for a name this shader has no sampler for.`
 *>
-fn uint sampler_binding_of(MeshPipeline* pipeline, String name, uint first)
+fn uint sampler_binding_of(MeshPipeline* pipeline, String name)
 {
 	if (pipeline == null) return 0;
 	ShaderBinding* found = pipeline.shader.binding_of(name);
 	if (found == null) return 0;
 	if (found.set != 0) return 0;
-	if (found.binding < first) return 0;
+	if (found.binding < PostBinding.FIRST_DECLARED) return 0;
 	if (found.binding >= MAX_SAMPLED_BINDINGS) return 0;
-	// A sampler, and nothing else that happens to sit above `first`: a compute
+	// A sampler, and nothing else that happens to sit above `FIRST_DECLARED`: a compute
 	// post pass's `output` and its own images are bindings of the same set, and
 	// `post.textures.output = tex` must be refused rather than land a sampled
 	// texture in a storage-image slot.

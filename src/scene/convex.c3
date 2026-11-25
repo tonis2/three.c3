@@ -80,7 +80,7 @@ import std::math;
 import std::math::vector;
 import collision;
 
-faultdef CONVEX_HULL_IS_DEGENERATE, TOO_MANY_CONVEX_POINTS;
+excuse CONVEX_HULL_IS_DEGENERATE, TOO_MANY_CONVEX_POINTS;
 
 <*
  Beyond this many points a hull is a stall rather than a shape.

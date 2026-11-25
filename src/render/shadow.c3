@@ -13,7 +13,7 @@ import std::math::vector;
 import vk;
 import collision;
 
-faultdef SHADOW_FORMAT_UNSUPPORTED;
+excuse SHADOW_FORMAT_UNSUPPORTED;
 
 <*
  How wide the map is by default, in texels per side.

@@ -46,7 +46,7 @@ import std::math::vector;
 import std::collections::list;
 import collision;
 
-faultdef PRIMITIVE_HAS_NO_TRIANGLES, NO_SUCH_PRIMITIVE, NOTHING_BUILT_UNDER_THAT_KEY;
+excuse PRIMITIVE_HAS_NO_TRIANGLES, NO_SUCH_PRIMITIVE, NOTHING_BUILT_UNDER_THAT_KEY;
 
 <*
  What a shape is called, on both sides of the binding.

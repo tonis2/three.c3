@@ -40,7 +40,7 @@ module three;
 import std::collections::list;
 import vk;
 
-faultdef
+excuse
 	MATERIAL_UNKNOWN,
 	MATERIAL_TEXTURE_UNKNOWN, // A name that is not one of this material's samplers. Separate from
 	// `MATERIAL_TEXTURE_UNKNOWN`, which is about the *image*: one says the picture
@@ -153,21 +153,20 @@ fn PipelineState state_for_blend(BlendMode blend)
 }
 
 <*
- Which of the built-in material's maps a script is naming.
+ The built-in map a script's number names.
 
- A number rather than a name, because the name would be the shader's — see
- `NORMAL_MAP_BINDING`, which is where these become binding indices and where the
- argument for not spelling `normal_map` in a script lives.
+ The prelude sends the row itself (`SLOT_*` in prelude/material.js), not a name,
+ because the name would be the shader's. `the_prelude_sends_the_built_in_map_rows`
+ holds the two sides together.
 
- Five constants rather than five verbs, unlike `map`: they differ only in which
- binding they write, they take and give back references identically, and one door
- means one place where the retain and the release cannot get out of step.
+ @return? MATERIAL_SAMPLER_UNKNOWN
 *>
-const int MATERIAL_SLOT_NORMAL               = 0;
-const int MATERIAL_SLOT_METALNESS_ROUGHNESS  = 1;
-const int MATERIAL_SLOT_OCCLUSION            = 2;
-const int MATERIAL_SLOT_EMISSIVE             = 3;
-const int MATERIAL_SLOT_HEIGHT               = 4;
+fn MaterialBinding? built_in_map_from(int row)
+{
+	MaterialBinding map = (MaterialBinding)row;    // a negative row wraps far past HEIGHT_MAP
+	if (!map.is_built_in_map()) return MATERIAL_SAMPLER_UNKNOWN~;
+	return map;
+}
 
 // `material.heightScale` and `material.parallaxSteps` on a material nobody set
 // them on: five centimetres of relief, and a march of at most sixteen steps.
@@ -175,27 +174,6 @@ const float DEFAULT_HEIGHT_SCALE = 0.05f;
 const uint DEFAULT_PARALLAX_STEPS = 16;
 // Past this a march stops buying detail and starts buying frame time.
 const uint MAX_PARALLAX_STEPS = 64;
-
-<*
- The binding one of those slots means.
-
- Zero for a slot that is not one of the three, which is never a legal binding —
- the same "zero means no" `sampler_binding_of` answers with, for the same reason:
- binding 0 is the template's own base colour map and is reached through
- `material.map` rather than through here.
-*>
-fn uint binding_for_material_slot(int slot)
-{
-	switch (slot)
-	{
-		case MATERIAL_SLOT_NORMAL: return NORMAL_MAP_BINDING;
-		case MATERIAL_SLOT_METALNESS_ROUGHNESS: return METALNESS_ROUGHNESS_MAP_BINDING;
-		case MATERIAL_SLOT_OCCLUSION: return OCCLUSION_MAP_BINDING;
-		case MATERIAL_SLOT_EMISSIVE: return EMISSIVE_MAP_BINDING;
-		case MATERIAL_SLOT_HEIGHT: return HEIGHT_MAP_BINDING;
-		default: return 0;
-	}
-}
 
 <*
  The material every debug line draws with.
@@ -832,7 +810,7 @@ fn void TextureSlots.set(&self, uint binding, int texture)
  **Asked of the declaration list rather than of the reflected layout**, which is
  where this moved when a material's images stopped being descriptor bindings.
  `append_shady_textures` fills one `Textures` field per declared texture with
- `map_at(K)`, in declaration order from `MATERIAL_BINDING_FIRST` — and a table
+ `map_at(K)`, in declaration order from `MaterialBinding.FIRST_DECLARED` — and a table
  row leaves nothing in the module for reflection to find, so the list the def was
  handed is the only record of what K was. It is the same list, kept for the bake, and the same
  order the assembler read it in, so the two cannot disagree.
@@ -854,7 +832,7 @@ fn uint Material.binding_of_texture(&self, String name)
 	foreach (i, texture : self.declared_textures)
 	{
 		if (texture.name != name) continue;
-		return MATERIAL_BINDING_FIRST + (uint)i;
+		return MaterialBinding.FIRST_DECLARED + (uint)i;
 	}
 	return 0;
 }

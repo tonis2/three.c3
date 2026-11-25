@@ -186,7 +186,7 @@ fn void a_scripted_post_reaches_the_post_def() @test
 	test::@check(field != null && field.offset == three::POST_PUSH_START && field.size == 4,
 		"gain lands at POST_PUSH_START");
 	three::ShaderBinding* declared = mod.layout.binding_of("tint_map");
-	test::@check(declared != null && declared.set == 0 && declared.binding == three::POST_BINDING_FIRST,
+	test::@check(declared != null && declared.set == 0 && declared.binding == PostBinding.FIRST_DECLARED,
 		"and the declared texture is the next post binding");
 }
 

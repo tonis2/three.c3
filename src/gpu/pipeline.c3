@@ -56,7 +56,7 @@ import std::math::matrix;
 import std::collections::list;
 import vk;
 
-faultdef
+excuse
 	NO_SCALAR_BLOCK_LAYOUT,
 	PUSH_BLOCK_TOO_LARGE,
 	PUSH_BLOCK_MISMATCH,

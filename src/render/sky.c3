@@ -6,7 +6,7 @@
  - **The background.** Three vertices at the far plane, sampled by the direction
  through each pixel — `shaders/sky.shady` has how, and why it is
  equirectangular rather than a cubemap.
- - **The environment.** The same image bound at `ENVIRONMENT_BINDING` in every
+ - **The environment.** The same image bound at `FrameBinding.ENVIRONMENT` in every
  shader that shades a surface, reflected by `environment_light`. This is the
  half the plan is actually about: a metal reflects and does not scatter, so
  with nothing around it to reflect, `material.metalness` renders dark and the

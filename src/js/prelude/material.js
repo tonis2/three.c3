@@ -41,10 +41,10 @@ const BLENDING_IS_BAKED =
 // its own, use whatever the mesh brought".
 export const NoTexture = -1;
 
-// Which of the built-in material's maps a slot number means —
-// `MATERIAL_SLOT_*` in scene/material.c3, which is where they become sampler
-// bindings. Not exported: a script names a property, never a slot.
-const SLOT_NORMAL = 0;
+// The row each of the built-in material's maps lands in: `MaterialBinding.NORMAL_MAP`
+// to `HEIGHT_MAP` in shader/bindings.c3, which `the_prelude_sends_the_built_in_map_rows`
+// holds these to. Not exported: a script names a property, never a slot.
+const SLOT_NORMAL = 5;
 // How many rows `material.uvVariants` takes — `UV_VARIANTS` in
 // `gpu/pipeline.c3`, where the number is argued for. Repeated rather than asked
 // for because the host has no verb that answers it and a wrong number here is a
@@ -52,10 +52,10 @@ const SLOT_NORMAL = 0;
 // refuses the ninth row on its own.
 const UV_VARIANTS = 8;
 
-const SLOT_METALNESS_ROUGHNESS = 1;
-const SLOT_OCCLUSION = 2;
-const SLOT_EMISSIVE = 3;
-const SLOT_HEIGHT = 4;
+const SLOT_METALNESS_ROUGHNESS = 6;
+const SLOT_OCCLUSION = 7;
+const SLOT_EMISSIVE = 8;
+const SLOT_HEIGHT = 9;
 
 // What `material.roughnessMap` and `material.metalnessMap` answer. Three.js
 // keeps the two apart and glTF packs them into one image, and this renderer

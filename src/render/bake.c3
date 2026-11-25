@@ -77,13 +77,10 @@ import vk;
 // There is no device, so there is nothing to run the body on. The one way a bake
 // can be refused before a single material is looked at — `scene.export` itself
 // needs no GPU, and this is the part of it that does.
-faultdef BAKE_NEEDS_A_DEVICE;
+excuse BAKE_NEEDS_A_DEVICE;
 
 // The frame images a bake has none of, each bound to the white 1x1.
-const uint[*] BAKE_WHITE_BINDINGS = {
-	SHADOW_BINDING, POINT_SHADOW_BINDING, SHADOW_ATLAS_BINDING, LTC_LUT_BINDING,
-	LIGHTMAP_BINDING, ENVIRONMENT_BINDING,
-};
+const FrameBinding[*] BAKE_WHITE_BINDINGS = { SHADOW, POINT_SHADOW, SHADOW_ATLAS, LTC_LUT, LIGHTMAP, ENVIRONMENT };
 
 <*
  What `scene.export(path, { bake: true })` bakes at, in texels a side. Square,
@@ -324,10 +321,10 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		vk::DescriptorImageInfo white = self.pass.assets.texture_at(NO_TEXTURE).descriptor();
 		foreach (binding : BAKE_WHITE_BINDINGS) samplers.add_if(pipeline, binding, white);
 		// Sampled as an array of layers, so its white is one too.
-		samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING, self.pass.assets.white_layers_descriptor());
+		samplers.add_if(pipeline, FrameBinding.AMBIENT_OCCLUSION, self.pass.assets.white_layers_descriptor());
 		vk::DescriptorImageInfo unlit = self.pass.shadow_manager.atlas.compare_descriptor(false, false);
-		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, unlit);
-		samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, unlit);
+		samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_COMPARE, unlit);
+		samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_STATIC_COMPARE, unlit);
 		samplers.push(cmd, pipeline);
 
 		MeshPush push = {

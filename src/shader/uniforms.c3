@@ -153,7 +153,7 @@ fn void append_shady_images(DString* out, ShaderImage[] images, uint first)
  its rows. Every width is a multiple of four under scalar layout, so a field
  starts where the one before it ended.
 *>
-fn uint uniform_size(MaterialUniform uniform) => uniform.components * 4 * uniform_rows_of(uniform);
+fn uint uniform_size(MaterialUniform uniform) => uniform.components * 4 * uniform.row_count();
 
 <*
  The fields of the `Uniforms` struct `append_shady_uniforms` emits, at their

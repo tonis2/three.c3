@@ -23,9 +23,9 @@ import shady;
 import std::collections::list;
 
 
-faultdef POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
-faultdef POST_TAP_UNKNOWN;
-faultdef POST_COMPUTE_BODY, POST_IMAGE_INVALID, POST_TOO_MANY_IMAGES, POST_PASS_WRITES_NOTHING, POST_TAP_SIDE_PASS,
+excuse POST_NAME_INVALID, POST_TOO_MANY_UNIFORMS, POST_BODY_EMPTY, POST_TOO_MANY_TEXTURES;
+excuse POST_TAP_UNKNOWN;
+excuse POST_COMPUTE_BODY, POST_IMAGE_INVALID, POST_TOO_MANY_IMAGES, POST_PASS_WRITES_NOTHING, POST_TAP_SIDE_PASS,
 	POST_IMAGE_CONFLICT;
 
 <*
@@ -98,7 +98,7 @@ const String POST_BODY_NAME = "post";
 const usz POST_DIAGNOSTIC_MAX @local = 512;
 
 char[POST_DIAGNOSTIC_MAX] post_message @local;
-usz post_message_len @local;
+sz post_message_len @local;
 
 <*
  What the last `validate_post` refused, in words.
@@ -241,13 +241,13 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 			// module has no row bound to clamp against. Refused with the reason
 			// rather than silently flattened, because a caller asking for four
 			// rows believes it can index them.
-			if (uniform_rows_of(uniform) > 1)
+			if (uniform.row_count() > 1)
 			{
 				post_note(
 					string::tformat(
 						"post: uniform '%s' asked for %d rows; a post pass draws one triangle over the whole frame, so there are no instances to select a row with",
 						uniform.name,
-						uniform_rows_of(uniform)
+						uniform.row_count()
 					)
 				);
 				return POST_NAME_INVALID~;

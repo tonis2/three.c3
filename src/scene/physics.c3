@@ -8,7 +8,7 @@ import std::math::quaternion;
 import std::time;
 import collision;
 
-faultdef
+excuse
 	// The node draws nothing, so there is no size to take a collider from.
 	NODE_HAS_NO_MESH, // A hull was asked for on a mesh whose positions never reached the host.
 	MESH_HAS_NO_HULL, // The solver works in world space; a nested node's local transform is not.

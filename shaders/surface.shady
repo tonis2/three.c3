@@ -24,7 +24,7 @@ Sampler2D three_textures[] @set(1) @binding(0);
 // The row of `DrawRecord.texture_index` the base colour map sits at. The row is
 // what a material's own maps are named by - the number each used to be bound at
 // - and the rest of the rows are a script's declared textures, numbered from
-// `MATERIAL_BINDING_FIRST`.
+// `MaterialBinding.FIRST_DECLARED`.
 const uint SLOT_BASE_COLOR = 0;
 
 // The built-in draw path's other four maps, by the row each sits at - the

@@ -63,7 +63,7 @@ import std::collections::map;
 import fastjs::js;
 import c3w;
 
-faultdef JS_ENGINE_FAILED, JS_PRELUDE_FAILED;
+excuse JS_ENGINE_FAILED, JS_PRELUDE_FAILED;
 
 // Enough for a scene script and its strings; small enough that a runaway
 // allocation is an exception the agent is told about rather than the process

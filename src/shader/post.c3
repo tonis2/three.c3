@@ -66,9 +66,9 @@ macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialT
 		// they are ordinary resources the body reads by name.
 		.texture_form = TextureForm.SAMPLERS,
 		.textures = textures,
-		.texture_first = POST_BINDING_FIRST,
+		.texture_first = PostBinding.FIRST_DECLARED,
 		.images = images,
-		.image_first = POST_IMAGE_FIRST,
+		.image_first = PostBinding.IMAGE_FIRST,
 		.sources = sources,
 		.fills = fills,
 	};
@@ -101,9 +101,9 @@ macro ShaderDef post_compute_def(String body, MaterialUniform[] uniforms = {}, M
 		.uniforms = uniforms,
 		.texture_form = TextureForm.SAMPLERS,
 		.textures = textures,
-		.texture_first = POST_BINDING_FIRST,
+		.texture_first = PostBinding.FIRST_DECLARED,
 		.images = images,
-		.image_first = POST_IMAGE_FIRST,
+		.image_first = PostBinding.IMAGE_FIRST,
 		.sources = sources,
 		.fills = fills,
 	};

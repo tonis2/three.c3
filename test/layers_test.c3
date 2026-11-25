@@ -1084,7 +1084,7 @@ fn void a_stack_over_the_budget_sheds_its_relief_rather_than_refusing() @test
 <*
  The core material's other three maps have somewhere to go.
 
- A generated body has no built-in map slots — `NORMAL_MAP_BINDING` and the three
+ A generated body has no built-in map slots — `MaterialBinding.NORMAL_MAP` and the three
  beside it belong to the built-in look — so an imported stack used to drop the file's
  occlusion, emissive and metallic-roughness maps on the floor and say nothing. Each
  is a sampler of the stack's own budget now, and each lands in the term it belongs

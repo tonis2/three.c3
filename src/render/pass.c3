@@ -1830,25 +1830,25 @@ fn void MeshPass.push_frame_images(&self, vk::CommandBuffer cmd, MeshPipeline* p
 	// anything, and `shadow_factor` comes out lit. So shadows on and shadows off
 	// are the same pipeline and the same descriptor layout, differing by which
 	// image is in one slot.
-	samplers.add_if(pipeline, SHADOW_BINDING, shadow);
+	samplers.add_if(pipeline, FrameBinding.SHADOW, shadow);
 	// The sky when the scene has one and the white 1x1 when it does not. What
 	// stops that white from putting a mirror finish on everything is
 	// `FrameBlock.environment.x`, which is zero in a frame with no environment —
 	// so shading with a sky and shading without one are one pipeline and one layout.
 	int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
-	samplers.add_if(pipeline, ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
-	samplers.add_if(pipeline, POINT_SHADOW_BINDING, white);
-	samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING,
+	samplers.add_if(pipeline, FrameBinding.ENVIRONMENT, self.assets.texture_at(sky).descriptor());
+	samplers.add_if(pipeline, FrameBinding.POINT_SHADOW, white);
+	samplers.add_if(pipeline, FrameBinding.AMBIENT_OCCLUSION,
 		self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : self.assets.white_layers_descriptor());
-	samplers.add_if(pipeline, SHADOW_ATLAS_BINDING, shadow);
-	samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING,
+	samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS, shadow);
+	samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_COMPARE,
 		atlas.compare_descriptor(self.shadow_manager.sample_static, shadowed));
-	samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, atlas.compare_descriptor(true, shadowed));
-	samplers.add_if(pipeline, LTC_LUT_BINDING, self.ltc.live ? self.ltc.descriptor() : white);
+	samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_STATIC_COMPARE, atlas.compare_descriptor(true, shadowed));
+	samplers.add_if(pipeline, FrameBinding.LTC_LUT, self.ltc.live ? self.ltc.descriptor() : white);
 	// The shared white image until a bake has run, and unread then: a copy
 	// with no tile carries a zero size, which the vertex stage turns into the
 	// flag that stops the fragment stage sampling at all.
-	samplers.add_if(pipeline, LIGHTMAP_BINDING, self.lightmap.live ? self.lightmap.descriptor() : white);
+	samplers.add_if(pipeline, FrameBinding.LIGHTMAP, self.lightmap.live ? self.lightmap.descriptor() : white);
 	samplers.push(cmd, pipeline);
 }
 
@@ -3874,7 +3874,7 @@ fn void? MeshPass.set_material_map(&self, Gpu* gpu, uint index, int texture)
  material drawn by the *built-in shader* is refused here on its own account.
  `material.shady` declares `normal_map`, `metalness_roughness_map` and
  `occlusion_map`, so those names would otherwise resolve through this door — and
- that is exactly the thing `NORMAL_MAP_BINDING` argues against, because it would
+ that is exactly the thing `MaterialBinding.NORMAL_MAP` argues against, because it would
  make the shader's own spelling part of the script-facing API and leave two ways
  to write one slot. `set_material_slot` is the one way.
 
@@ -3910,7 +3910,7 @@ fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name,
 
  `set_material_map` for the bindings `material.shady` reserves above zero, and the
  differences are two. The slot is a number rather than a name, because the name
- would be the shader's — `NORMAL_MAP_BINDING` has the argument. And the material
+ would be the shader's — `MaterialBinding.NORMAL_MAP` has the argument. And the material
  has to be one the *built-in* shader draws: a `ShaderMaterial` numbers its own
  samplers at exactly these bindings, so writing a normal map into one would put
  an image in whatever the body called its first texture and shade with it.
@@ -3921,22 +3921,21 @@ fn void? MeshPass.set_material_texture(&self, Gpu* gpu, uint index, String name,
 
  The retain/release dance is `set_material_map`'s exactly.
 
- @param slot : `MATERIAL_SLOT_NORMAL, MATERIAL_SLOT_METALNESS_ROUGHNESS or MATERIAL_SLOT_OCCLUSION.`
+ @param map : `Which of the built-in maps to set.`
+ @require map.is_built_in_map() : "Not one of the built-in maps"
  @param texture : `An index into Assets.textures, or NO_TEXTURE to put white back and clear the flag.`
  @return ? MATERIAL_UNKNOWN : `No such material, or one of the two built-in ones, which are shared.`
  @return ? MATERIAL_TEXTURE_UNKNOWN : `No such texture: a disposed handle, or one from another context.`
- @return ? MATERIAL_SAMPLER_UNKNOWN : `Not one of the three slots, or a material whose shader is not the built-in one.`
+ @return ? MATERIAL_SAMPLER_UNKNOWN : `A material whose shader is not the built-in one.`
 *>
-fn void? MeshPass.set_material_slot(&self, Gpu* gpu, uint index, int slot, int texture)
+fn void? MeshPass.set_material_slot(&self, Gpu* gpu, uint index, MaterialBinding map, int texture)
 {
 	Material* material = self.editable(index)!;
 	if (!self.shades_built_in(material)) return MATERIAL_SAMPLER_UNKNOWN~;
 
-	uint binding = binding_for_material_slot(slot);
-	if (binding == 0) return MATERIAL_SAMPLER_UNKNOWN~;
 	if (texture != NO_TEXTURE && !self.assets.texture_alive(texture)) return MATERIAL_TEXTURE_UNKNOWN~;
 
-	int held = material.textures.at(binding);
+	int held = material.textures.at(map);
 	if (held == texture) return;
 
 	// Retain before release, for `set_material_map`'s reason: the two indices can
@@ -3945,22 +3944,24 @@ fn void? MeshPass.set_material_slot(&self, Gpu* gpu, uint index, int slot, int t
 	if (texture != NO_TEXTURE) self.assets.retain_texture(texture);
 	self.assets.release_texture(gpu, held);
 
-	material.textures.set(binding, texture);
+	material.textures.set(map, texture);
 }
 
 <*
- Which texture is in one of those three slots.
+ Which texture is in one of the built-in maps.
 
- `NO_TEXTURE` for a material that does not exist, a slot that is not one of the
- three, and a material whose shader is not the built-in one alike — `material_texture`'s
+ `NO_TEXTURE` for a material that does not exist and a material whose shader is
+ not the built-in one alike — `material_texture`'s
  rule, which is that a getter answers what a material that was never given
  anything would answer and the setter is where a mistake is reported.
+
+ @require map.is_built_in_map() : "Not one of the built-in maps"
 *>
-fn int MeshPass.material_slot(&self, uint index, int slot)
+fn int MeshPass.material_slot(&self, uint index, MaterialBinding map)
 {
 	Material* material = self.material(index);
 	if (material == null || !self.shades_built_in(material)) return NO_TEXTURE;
-	return material.textures.at(binding_for_material_slot(slot));
+	return material.textures.at(map);
 }
 
 <*
@@ -4004,14 +4005,14 @@ fn uint MeshPass.map_flags(&self, Material* material)
 	if (!self.shades_built_in(material)) return stochastic;
 
 	uint flags = stochastic;
-	if (material.textures.at(NORMAL_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_NORMAL_MAP;
-	if (material.textures.at(METALNESS_ROUGHNESS_MAP_BINDING) != NO_TEXTURE)
+	if (material.textures.at(MaterialBinding.NORMAL_MAP) != NO_TEXTURE) flags |= FLAG_HAS_NORMAL_MAP;
+	if (material.textures.at(MaterialBinding.METALNESS_ROUGHNESS_MAP) != NO_TEXTURE)
 	{
 		flags |= FLAG_HAS_METALNESS_ROUGHNESS_MAP;
 	}
-	if (material.textures.at(OCCLUSION_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_OCCLUSION_MAP;
-	if (material.textures.at(EMISSIVE_MAP_BINDING) != NO_TEXTURE) flags |= FLAG_HAS_EMISSIVE_MAP;
-	if (material.textures.at(HEIGHT_MAP_BINDING) != NO_TEXTURE && material.height_scale() > 0.0f)
+	if (material.textures.at(MaterialBinding.OCCLUSION_MAP) != NO_TEXTURE) flags |= FLAG_HAS_OCCLUSION_MAP;
+	if (material.textures.at(MaterialBinding.EMISSIVE_MAP) != NO_TEXTURE) flags |= FLAG_HAS_EMISSIVE_MAP;
+	if (material.textures.at(MaterialBinding.HEIGHT_MAP) != NO_TEXTURE && material.height_scale() > 0.0f)
 	{
 		flags |= FLAG_HAS_HEIGHT_MAP;
 	}
@@ -4124,7 +4125,7 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	// swapped out from under the material and the slots are the record of what is
 	// actually held: a reference is released by whoever took it, not by whoever
 	// still declares a name for it.
-	for (uint binding = MATERIAL_BINDING_FIRST; binding < MATERIAL_BINDINGS_END; binding++)
+	for (MaterialBinding binding = FIRST_DECLARED; binding < MATERIAL_BINDINGS_END; binding++)
 	{
 		int held = material.textures.at(binding);
 		if (held == NO_TEXTURE) continue;
@@ -4206,7 +4207,7 @@ fn void MeshPass.free(&self, Gpu* gpu)
 		// whatever it is holding — but a teardown that gave back one of a material's
 		// five references and not the other four would read as a bug in whichever of
 		// the two is looked at second.
-		for (uint b = MATERIAL_BINDING_FIRST; b < MATERIAL_BINDINGS_END; b++)
+		for (MaterialBinding b = FIRST_DECLARED; b < MATERIAL_BINDINGS_END; b++)
 		{
 			self.assets.release_texture(gpu, material.textures.at(b));
 		}

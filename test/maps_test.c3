@@ -174,7 +174,7 @@ fn void a_normal_map_bends_the_light() @test
 		test::@check(flat > 150, "a plane lit down its own normal is bright, got %d", flat);
 
 		int tilted = tilt_map(renderer, 0.31f);
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_NORMAL, tilted)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, NORMAL_MAP, tilted)!!;
 
 		uint bent = centre(renderer);
 		test::@check(
@@ -185,7 +185,7 @@ fn void a_normal_map_bends_the_light() @test
 		);
 
 		renderer.pass.set_material_slot(
-			&renderer.gpu, material, three::MATERIAL_SLOT_NORMAL, three::NO_TEXTURE
+			&renderer.gpu, material, NORMAL_MAP, three::NO_TEXTURE
 		)!!;
 		uint cleared = centre(renderer);
 		test::@check(
@@ -217,7 +217,7 @@ fn void a_flat_normal_map_is_the_identity() @test
 		uint bare = centre(renderer);
 
 		int identity = tilt_map(renderer, 1.0f);
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_NORMAL, identity)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, NORMAL_MAP, identity)!!;
 
 		uint mapped = centre(renderer);
 		test::@check(
@@ -266,7 +266,7 @@ fn void the_metallic_roughness_map_is_packed_gltfs_way() @test
 			&renderer.gpu, rough_not_metal, three::ColorSpace.LINEAR
 		)!!;
 		renderer.pass.set_material_slot(
-			&renderer.gpu, material, three::MATERIAL_SLOT_METALNESS_ROUGHNESS, soft
+			&renderer.gpu, material, METALNESS_ROUGHNESS_MAP, soft
 		)!!;
 		uint dielectric = centre(renderer);
 
@@ -286,7 +286,7 @@ fn void the_metallic_roughness_map_is_packed_gltfs_way() @test
 			&renderer.gpu, smooth_metal, three::ColorSpace.LINEAR
 		)!!;
 		renderer.pass.set_material_slot(
-			&renderer.gpu, material, three::MATERIAL_SLOT_METALNESS_ROUGHNESS, hard
+			&renderer.gpu, material, METALNESS_ROUGHNESS_MAP, hard
 		)!!;
 		uint swapped = centre(renderer);
 
@@ -329,7 +329,7 @@ fn void occlusion_darkens_the_ambient_floor_and_not_a_light() @test
 		image::Image shut = solid(0, 0, 0);
 		defer shut.free();
 		int dark = renderer.pass.assets.claim_texture(&renderer.gpu, shut, three::ColorSpace.LINEAR)!!;
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, dark)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, OCCLUSION_MAP, dark)!!;
 
 		uint occluded = centre(renderer);
 		test::@check(
@@ -348,7 +348,7 @@ fn void occlusion_darkens_the_ambient_floor_and_not_a_light() @test
 		uint floor_occluded = centre(renderer);
 
 		renderer.pass.set_material_slot(
-			&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, three::NO_TEXTURE
+			&renderer.gpu, material, OCCLUSION_MAP, three::NO_TEXTURE
 		)!!;
 		uint floor_open = centre(renderer);
 
@@ -400,7 +400,7 @@ fn void the_world_light_is_occluded_like_the_ambient_floor() @test
 		image::Image shut = solid(0, 0, 0);
 		defer shut.free();
 		int dark = renderer.pass.assets.claim_texture(&renderer.gpu, shut, three::ColorSpace.LINEAR)!!;
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, dark)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, OCCLUSION_MAP, dark)!!;
 
 		uint closed = centre(renderer);
 		test::@check(
@@ -413,7 +413,7 @@ fn void the_world_light_is_occluded_like_the_ambient_floor() @test
 		image::Image half = solid(128, 128, 128);
 		defer half.free();
 		int dim = renderer.pass.assets.claim_texture(&renderer.gpu, half, three::ColorSpace.LINEAR)!!;
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_OCCLUSION, dim)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, OCCLUSION_MAP, dim)!!;
 
 		// The albedo is `PRIMITIVE_COLOR` and the map is 128 of 255, both linear
 		// by the time the shader has them, so the answer is stated rather than
@@ -453,7 +453,7 @@ fn void a_material_holds_a_reference_to_every_map_it_names() @test
 		int normal    = tilt_map(renderer, 0.5f);
 		test::@check(assets.texture_refs(normal) == 1, "a fresh upload holds one reference");
 
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_NORMAL, normal)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, NORMAL_MAP, normal)!!;
 		test::@check(
 			assets.texture_refs(normal) == 2,
 			"a material naming it holds a second, got %d",
@@ -463,7 +463,7 @@ fn void a_material_holds_a_reference_to_every_map_it_names() @test
 		// Pointed somewhere else: the old image loses the material's reference in
 		// the same call that gives the new one its own.
 		int other = tilt_map(renderer, 0.25f);
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_NORMAL, other)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, NORMAL_MAP, other)!!;
 		test::@check(
 			assets.texture_refs(normal) == 1,
 			"and re-pointing the slot gives it back, got %d",
@@ -510,7 +510,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 
 		int normal = tilt_map(renderer, 0.5f);
 		if (catch err = renderer.pass.set_material_slot(
-			&renderer.gpu, compiled, three::MATERIAL_SLOT_NORMAL, normal
+			&renderer.gpu, compiled, NORMAL_MAP, normal
 		))
 		{
 			test::@check(
@@ -525,7 +525,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 		}
 
 		test::@check(
-			renderer.pass.material_slot(compiled, three::MATERIAL_SLOT_NORMAL) == three::NO_TEXTURE,
+			renderer.pass.material_slot(compiled, NORMAL_MAP) == three::NO_TEXTURE,
 			"and the getter says the same thing"
 		);
 	};
@@ -536,7 +536,7 @@ fn void a_shader_materials_samplers_are_its_own() @test
 
  `material.shady` declares `normal_map`, so `material.textures.normal_map = tex`
  would otherwise resolve through the *name* — which is the thing
- `NORMAL_MAP_BINDING` argues against, because it makes the shader's spelling part
+ `MaterialBinding.NORMAL_MAP` argues against, because it makes the shader's spelling part
  of the API and leaves one slot with two ways to write it. The refusal is what
  keeps `set_material_slot` the only one.
 *>
@@ -561,7 +561,7 @@ fn void the_built_in_shaders_own_names_are_not_a_door() @test
 		}
 
 		test::@check(
-			renderer.pass.material_slot(material, three::MATERIAL_SLOT_NORMAL) == three::NO_TEXTURE,
+			renderer.pass.material_slot(material, NORMAL_MAP) == three::NO_TEXTURE,
 			"and nothing landed in the slot"
 		);
 		test::@check(
@@ -826,7 +826,7 @@ fn void a_marched_cut_out_is_not_prepassed() @test
 		if (!plain) return; // No prepass or no cut-out prepass here: nothing to keep out.
 
 		int height = tilt_map(renderer, 1.0f);
-		renderer.pass.set_material_slot(&renderer.gpu, material, three::MATERIAL_SLOT_HEIGHT, height)!!;
+		renderer.pass.set_material_slot(&renderer.gpu, material, HEIGHT_MAP, height)!!;
 		test::@check(
 			!renderer.pass.prepassed(&renderer.pass.materials[material]),
 			"a cut-out with a height map is drawn without the prepass"
@@ -838,4 +838,36 @@ fn void a_marched_cut_out_is_not_prepassed() @test
 			"and an opaque one keeps it: the march moves no depth"
 		);
 	};
+}
+
+struct PreludeRow
+{
+	String name;
+	MaterialBinding row;
+}
+
+<*
+ The prelude sends each built-in map's row as a bare number (`SLOT_*` in
+ prelude/material.js), and nothing else checks that the two sides agree: moving a
+ row in `MaterialBinding` without this would write a script's normal map into the
+ wrong row, with no error anywhere.
+*>
+fn void the_prelude_sends_the_built_in_map_rows() @test
+{
+	String prelude = (String)three::PRELUDE_MATERIAL[..];
+	PreludeRow[*] rows = {
+		{ "SLOT_NORMAL", NORMAL_MAP },
+		{ "SLOT_METALNESS_ROUGHNESS", METALNESS_ROUGHNESS_MAP },
+		{ "SLOT_OCCLUSION", OCCLUSION_MAP },
+		{ "SLOT_EMISSIVE", EMISSIVE_MAP },
+		{ "SLOT_HEIGHT", HEIGHT_MAP },
+	};
+	foreach (r : rows)
+	{
+		@pool()
+		{
+			String line = string::tformat("const %s = %d;", r.name, r.row);
+			test::@check(prelude.contains(line), "prelude/material.js should say `%s`", line);
+		};
+	}
 }

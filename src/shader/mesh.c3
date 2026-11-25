@@ -115,7 +115,7 @@ macro ShaderDef mesh_def(
 		.uniforms = uniforms,
 		.texture_form = TextureForm.MAPS,
 		.textures = textures,
-		.texture_first = MATERIAL_BINDING_FIRST,
+		.texture_first = MaterialBinding.FIRST_DECLARED,
 		.sources = sources,
 		.fills = fills,
 	};

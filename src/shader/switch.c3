@@ -80,7 +80,7 @@ enum ShaderPass : char
 	COUNT,
 }
 
-faultdef SHADY_PASS_UNWIRED;
+excuse SHADY_PASS_UNWIRED;
 
 <*
  Compiles one pass.

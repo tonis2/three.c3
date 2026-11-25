@@ -11,7 +11,7 @@ import std::math;
 import mcp;
 import cui;
 
-faultdef TOOL_NO_UI, TOOL_BAD_TARGET, TOOL_BAD_ACTION;
+excuse TOOL_NO_UI, TOOL_BAD_TARGET, TOOL_BAD_ACTION;
 
 const String UI_TREE_SCHEMA = `{"type":"object","properties":{`
 	`"under":{"type":"string","description":"An element id to list from; omit for the whole interface."},`

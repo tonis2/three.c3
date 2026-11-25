@@ -275,8 +275,8 @@ fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 	test::@check(shadow != null, "and the shared shadow atlas is present");
 	if (shadow == null) return;
 	test::@check(
-		shadow.set == 0 && shadow.binding == three::SHADOW_ATLAS_BINDING,
-		"at 0,%d — got %d,%d", three::SHADOW_ATLAS_BINDING, shadow.set, shadow.binding
+		shadow.set == 0 && shadow.binding == FrameBinding.SHADOW_ATLAS,
+		"at 0,%d — got %d,%d", FrameBinding.SHADOW_ATLAS, shadow.set, shadow.binding
 	);
 
 	three::ShaderBinding* compare = mod.layout.binding_of("shadow_atlas_compare");
@@ -284,9 +284,9 @@ fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 	if (compare == null) return;
 	test::@check(
 		compare.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-			&& compare.set == 0 && compare.binding == three::SHADOW_ATLAS_COMPARE_BINDING,
+			&& compare.set == 0 && compare.binding == FrameBinding.SHADOW_ATLAS_COMPARE,
 		"a combined image sampler at 0,%d — got %d,%d",
-		three::SHADOW_ATLAS_COMPARE_BINDING, compare.set, compare.binding
+		FrameBinding.SHADOW_ATLAS_COMPARE, compare.set, compare.binding
 	);
 
 	three::ShaderBinding* ltc = mod.layout.binding_of("ltc_lut");
@@ -294,9 +294,9 @@ fn void the_material_declares_the_same_descriptors_the_mesh_pass_does() @test
 	if (ltc == null) return;
 	test::@check(
 		ltc.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-			&& ltc.set == 0 && ltc.binding == three::LTC_LUT_BINDING,
+			&& ltc.set == 0 && ltc.binding == FrameBinding.LTC_LUT,
 		"a combined image sampler at 0,%d — got %d,%d",
-		three::LTC_LUT_BINDING, ltc.set, ltc.binding
+		FrameBinding.LTC_LUT, ltc.set, ltc.binding
 	);
 }
 
@@ -984,8 +984,8 @@ fn void a_declared_texture_is_a_slot_the_body_can_sample() @test
 	// The frame's own images are untouched by any of this.
 	three::ShaderBinding* shadow = mod.layout.binding_of("shadow_atlas");
 	test::@check(
-		shadow != null && shadow.binding == three::SHADOW_ATLAS_BINDING,
-		"and the shared shadow atlas is still binding %d", three::SHADOW_ATLAS_BINDING
+		shadow != null && shadow.binding == FrameBinding.SHADOW_ATLAS,
+		"and the shared shadow atlas is still binding %d", FrameBinding.SHADOW_ATLAS
 	);
 }
 

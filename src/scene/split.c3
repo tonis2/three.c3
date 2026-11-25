@@ -59,7 +59,7 @@ module three;
 import std::collections::list;
 import std::math;
 
-faultdef MESH_CANNOT_BE_SPLIT, MESH_HAS_LAYERS, TOO_MANY_SPLIT_PIECES;
+excuse MESH_CANNOT_BE_SPLIT, MESH_HAS_LAYERS, TOO_MANY_SPLIT_PIECES;
 
 <*
  One piece: which asset it landed in and which mesh of it.

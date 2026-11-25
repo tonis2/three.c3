@@ -23,7 +23,7 @@ module three;
 import vk;
 import shady;
 
-faultdef STORAGE_FORMAT_UNKNOWN, STORAGE_FORMAT_UNSUPPORTED;
+excuse STORAGE_FORMAT_UNKNOWN, STORAGE_FORMAT_UNSUPPORTED;
 
 <*
  How one component of a texel is stored, which is what a readback has to know

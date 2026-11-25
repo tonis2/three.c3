@@ -362,7 +362,7 @@ fn FrameKeys read_events(c3w::EventMap events, c3w::Event[] log = { })
 // Names
 // ============================================================================
 
-faultdef NO_SUCH_KEY;
+excuse NO_SUCH_KEY;
 
 <*
  One row of the table: a name, and the one or two keys it means.

@@ -852,7 +852,7 @@ fn void the_post_pass_is_silent_under_validation() @test
  The thing that would break silently: the chain binds the pass before this one at
  0 and image A at 1 (`PostStage.record`), so a generated declaration that landed
  on either would push a frame into the agent's sampler and leave the body reading
- its own lookup table as though it were the picture. `POST_BINDING_FIRST` is why
+ its own lookup table as though it were the picture. `PostBinding.FIRST_DECLARED` is why
  it cannot, and this asserts both ends of that rather than the constant.
 
  **Four reserved bindings and not one**, which is the half that would break
@@ -899,14 +899,14 @@ fn void a_post_texture_is_a_binding_beside_the_scene() @test
 	test::@check(depth != null && depth.binding == 2, "the depth buffer is binding 2");
 
 	three::ShaderBinding* tapped = mod.layout.binding_of("tap_image");
-	test::@check(tapped != null && tapped.binding == three::POST_TAP_BINDING,
-		"the third source is binding %d", three::POST_TAP_BINDING);
+	test::@check(tapped != null && tapped.binding == PostBinding.TAP,
+		"the third source is binding %d", PostBinding.TAP);
 
 	three::ShaderBinding* lut = mod.layout.binding_of("grade_lut");
 	test::@check(lut != null, "the first declared texture is there by name");
 	if (lut == null) return;
-	test::@check(lut.binding == three::POST_BINDING_FIRST,
-		"at %d, got %d", three::POST_BINDING_FIRST, lut.binding);
+	test::@check(lut.binding == PostBinding.FIRST_DECLARED,
+		"at %d, got %d", PostBinding.FIRST_DECLARED, lut.binding);
 	test::@check(lut.type == DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 		"as a combined image sampler, got %d", (uint)lut.type);
 
@@ -1946,7 +1946,7 @@ fn void main(PostThread t) @compute @threads(8, 8, 1)
 
 <*
  A compute body compiles against its template: one compute entry, the workgroup
- it declared, and `output` at `POST_OUTPUT_BINDING` - written, `rgba16f`, a
+ it declared, and `output` at `PostBinding.OUTPUT` - written, `rgba16f`, a
  storage image - with the four reserved samplers where a fragment pass has them.
 *>
 fn void the_post_compute_def_declares_output_at_its_binding() @test
@@ -1962,8 +1962,8 @@ fn void the_post_compute_def_declares_output_at_its_binding() @test
 
 	three::ShaderBinding* output = mod.layout.binding_of("output");
 	test::@check(output != null, "output is reflected");
-	test::@check(output.binding == three::POST_OUTPUT_BINDING, "at binding %d, got %d",
-		three::POST_OUTPUT_BINDING, output.binding);
+	test::@check(output.binding == PostBinding.OUTPUT, "at binding %d, got %d",
+		PostBinding.OUTPUT, output.binding);
 	test::@check(output.type == DESCRIPTOR_TYPE_STORAGE_IMAGE && output.writes && !output.reads,
 		"as a storage image that is written and not read");
 	test::@check(output.storage_format == (uint)shady::ImageFormat.RGBA16F, "in rgba16f, the chain's format");

@@ -59,7 +59,7 @@ import image::png;
 import image::jpeg;
 import collision;
 
-faultdef
+excuse
 	ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE, TEXTURE_UNREADABLE, TEXTURE_FORMAT_UNKNOWN, TEXTURE_BIT_DEPTH;
 
 <*

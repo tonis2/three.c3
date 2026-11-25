@@ -242,7 +242,7 @@ import image;
 import image::png;
 import collision;
 
-faultdef EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
+excuse EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
 
 <*
  What an export encodes its *generated* pictures as.
@@ -3092,13 +3092,13 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	if (material_of != null && self.pass.shades_built_in(material_of))
 	{
 		surface.normal = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(NORMAL_MAP_BINDING))
+			self.device_texture_for(material_of.textures.at(MaterialBinding.NORMAL_MAP))
 		);
 		surface.occlusion = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(OCCLUSION_MAP_BINDING))
+			self.device_texture_for(material_of.textures.at(MaterialBinding.OCCLUSION_MAP))
 		);
 		surface.emissive = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(EMISSIVE_MAP_BINDING))
+			self.device_texture_for(material_of.textures.at(MaterialBinding.EMISSIVE_MAP))
 		);
 	}
 

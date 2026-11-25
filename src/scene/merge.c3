@@ -88,7 +88,7 @@ import std::math;
 import std::math::vector;
 import std::math::matrix;
 
-faultdef NOTHING_TO_MERGE, MESH_CANNOT_BE_MERGED, TOO_MANY_MERGE_MESHES;
+excuse NOTHING_TO_MERGE, MESH_CANNOT_BE_MERGED, TOO_MANY_MERGE_MESHES;
 
 <*
  Beyond this many meshes a merge is a mistake rather than a kit: a subtree this

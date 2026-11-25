@@ -86,7 +86,7 @@ import std::io::file;
 import collision;
 import vk;
 
-faultdef LIGHTMAP_NO_DEVICE, LIGHTMAP_NO_PIPELINE, LIGHTMAP_NO_ATLAS,
+excuse LIGHTMAP_NO_DEVICE, LIGHTMAP_NO_PIPELINE, LIGHTMAP_NO_ATLAS,
 	LIGHTMAP_BAD_FILE, LIGHTMAP_STALE;
 
 // RGBA16F, which is `POST_CHAIN_FORMAT` and therefore a format this project
@@ -1058,7 +1058,7 @@ fn uint MeshPass.lightmap_receivers(&self, uint[] slots, float[] wanted, float d
 			continue;
 		}
 		if (material != null && material.pipeline != null
-			&& !pipeline_declares_binding(material.pipeline, LIGHTMAP_BINDING))
+			&& !pipeline_declares_binding(material.pipeline, FrameBinding.LIGHTMAP))
 		{
 			if (skipped != null) (*skipped)++;
 			continue;
@@ -1297,16 +1297,16 @@ fn void MeshPass.push_lightmap_samplers(&self, vk::CommandBuffer cmd, MeshPipeli
 	foreach (declared : pipeline.shader.bindings)
 	{
 		if (declared.set != 0 || declared.type != DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-		if (declared.binding == SHADOW_ATLAS_COMPARE_BINDING
-			|| declared.binding == SHADOW_ATLAS_STATIC_COMPARE_BINDING) continue;
+		if (declared.binding == FrameBinding.SHADOW_ATLAS_COMPARE
+			|| declared.binding == FrameBinding.SHADOW_ATLAS_STATIC_COMPARE) continue;
 		// The occlusion map is sampled as an array of layers, so its white is one too.
-		samplers.add(declared.binding, declared.binding == AMBIENT_OCCLUSION_BINDING
+		samplers.add(declared.binding, declared.binding == FrameBinding.AMBIENT_OCCLUSION
 			? self.assets.white_layers_descriptor() : self.assets.texture_at(NO_TEXTURE).descriptor());
 	}
 	ShadowAtlas* atlas = &self.shadow_manager.atlas;
 	vk::DescriptorImageInfo statics = atlas.compare_descriptor(true, atlas.static_initialized);
-	samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING, statics);
-	samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, statics);
+	samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_COMPARE, statics);
+	samplers.add_if(pipeline, FrameBinding.SHADOW_ATLAS_STATIC_COMPARE, statics);
 	samplers.push(cmd, pipeline);
 }
 

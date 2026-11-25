@@ -29,7 +29,7 @@ module three;
 
 import vk;
 
-faultdef SURFACE_CANNOT_BLIT, NO_PRESENTABLE_SURFACE;
+excuse SURFACE_CANNOT_BLIT, NO_PRESENTABLE_SURFACE;
 
 <*
  Does this format carry the sRGB transfer function, so the hardware encodes on

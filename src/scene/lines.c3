@@ -40,7 +40,7 @@ import std::math::vector;
 import std::collections::list;
 import std::sort;
 
-faultdef NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT, NO_SUCH_LINE_SHAPE;
+excuse NO_SUCH_LINE_MESH, LINE_MESH_NOT_RESIDENT, NO_SUCH_LINE_SHAPE;
 
 <*
  The shapes that come as lines.
