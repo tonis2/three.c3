@@ -15,6 +15,7 @@
  --frames <n>          run n frames, then stop. Implies --headless
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
+ --quest [scale]       draw like a Quest 3 eye at a desk — see gpu/headset.c3
  --debug               validation layers, @debug_log, and the window's own chords
  --cache-dir <dir>     where compiled shaders are kept — see paths.c3
 
@@ -121,6 +122,21 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
+			case "--quest":
+				opts.quest = XR_RENDER_SCALE;
+				if (i + 1 < args.len)
+				{
+					if (try scale = args[i + 1].to_float())
+					{
+						if (scale < 0.4f || scale > 1.5f)
+						{
+							io::printfn("--quest takes an eye scale from 0.4 to 1.5, as debug.three.xr_scale does: %s", args[i + 1]);
+							return BAD_ARGUMENT~;
+						}
+						opts.quest = scale;
+						i++;
+					}
+				}
 			case "--mcp-stdio":
 				// The same optional port, for the same reason — and a port already
 				// named by an earlier `--mcp` is kept, so the two flags compose in
@@ -197,6 +213,8 @@ fn void usage()
 	io::printn("  --frames <n>          run n frames and stop — implies --headless");
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
+	io::printn("  --quest [scale]       draw like a Quest 3 eye: its pixels per degree, 4x MSAA,");
+	io::printn("                        its passes; scale as debug.three.xr_scale (1.0)");
 	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
 	io::printn("  -h, --help            this");

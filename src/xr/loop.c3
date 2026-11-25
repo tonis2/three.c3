@@ -20,11 +20,8 @@ import xr;
 import vk;
 import three::ndk;
 
-// Of the runtime's recommended eye size, 1680x1760 on Quest 3.
-const float XR_RENDER_SCALE = 0.7f;
-
 <*
- The eye size to render at: XR_RENDER_SCALE, unless `adb shell setprop
+ The eye size to render at: XR_RENDER_SCALE (`gpu/headset.c3`), unless `adb shell setprop
  debug.three.xr_scale 0.9` asks for another between 0.4 and 1.5. Read once, when
  the app starts, because the swapchain is made at that size; restart the app to
  try the next one. It is how a game finds what its scene can afford on the
@@ -49,11 +46,8 @@ fn float xr_render_scale()
 	return scale;
 }
 
-// Samples per pixel for the eyes: 4x MSAA, kept on the tile and resolved there.
-const uint XR_MSAA = 4;
-
 <*
- The eyes' samples per pixel: XR_MSAA, unless `adb shell setprop debug.three.msaa`
+ The eyes' samples per pixel: XR_MSAA (`gpu/headset.c3`), unless `adb shell setprop debug.three.msaa`
  asks for 1 (none), 2 or 4. Read once, when the app starts.
 *>
 fn uint xr_msaa()
@@ -316,6 +310,9 @@ fn void? Renderer.update_foveation(&self, xr::View[2] views)
 	map.fill(&self.gpu, self.target.view_extent, level, centers)!;
 	io::printfn("xr: foveation %s, lens centres %.2f %.2f and %.2f %.2f", level.name,
 		centers[0], centers[1], centers[2], centers[3]);
+	xr::Fovf fov = views[0].fov;
+	io::printfn("xr: left eye fov %.4f %.4f %.4f %.4f rad (left, right, up, down)",
+		fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down);
 }
 
 <*

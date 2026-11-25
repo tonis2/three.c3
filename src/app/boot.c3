@@ -127,6 +127,9 @@ struct Options
 	String cache_dir;
 	bool cache_dir_set;
 	bool help;
+	// `--quest [scale]`: draw like a Quest 3 eye at this share of its recommended
+	// size (`Renderer.draw_like_quest`). 0 draws at the window's own resolution.
+	float quest;
 }
 
 
@@ -337,9 +340,15 @@ fn void? run(Options opts)
 	Engine* engine = mem::new(Engine);
 	defer mem::free(engine);
 	defer engine.close();
-	engine.open(opts.width, opts.height, opts.headless)!;
+	engine.open(opts.width, opts.height, opts.headless, samples: opts.quest > 0.0f ? XR_MSAA : 1)!;
 
 	Renderer* renderer = &engine.renderer;
+	if (opts.quest > 0.0f)
+	{
+		renderer.draw_like_quest(opts.quest);
+		io::printfn("quest: drawing like a Quest 3 eye at %.2f: %.0f pixels per unit of view tangent, %dx MSAA",
+			opts.quest, renderer.headset_density, (uint)renderer.target.samples);
+	}
 	c3w::Window* window = engine.viewer();
 	bool windowed = engine.windowed;
 

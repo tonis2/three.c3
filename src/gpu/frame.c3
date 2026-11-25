@@ -287,6 +287,11 @@ struct Renderer
 	*>
 	float render_scale;
 
+	// Pixels per unit of view tangent the target follows instead of the window's
+	// own size: a Quest 3 eye's, under `--quest` (`draw_like_quest`). Zero is off.
+	// The window's aspect is kept; `render_scale` is not read while it is on.
+	float headset_density;
+
 	// What every render begins with. Reachable from a script as
 	// `scene.background`.
 	float[4] clear;
@@ -992,8 +997,17 @@ fn void Renderer.follow_window(&self)
 	// nothing to make a target out of, whereas 0 scaled would round up to a 1x1.
 	if (wide == 0 || high == 0) return;
 
-	wide = scale_side(wide, self.render_scale);
-	high = scale_side(high, self.render_scale);
+	if (self.headset_density > 0.0f)
+	{
+		uint rows = headset_rows(self.headset_density, self.pass.camera.fov);
+		wide = max(1u, (uint)((double)wide * rows / high + 0.5));
+		high = rows;
+	}
+	else
+	{
+		wide = scale_side(wide, self.render_scale);
+		high = scale_side(high, self.render_scale);
+	}
 
 	if (catch err = self.resize_target(wide, high))
 	{
