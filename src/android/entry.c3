@@ -219,7 +219,8 @@ fn GameDir? game_in(String root)
 <*
  Copies assets/game/** out of the APK, which is a zip and not a directory the
  engine can read. `game/manifest.txt` lists the files, a stamp first; the copy
- is skipped when the stamp matches the last one written.
+ is skipped when the stamp matches the last one written, and otherwise starts
+ from an empty folder.
 
  @return? io::FILE_NOT_FOUND
 *>
@@ -240,6 +241,10 @@ fn void? unpack_game(void* assets, String dest) => @pool()
 		}
 	}
 
+	// A different APK: what the last one unpacked goes first. Left in place, a
+	// game folder's main.js would win over the new APK's script.js, and the old
+	// game would boot instead of the new one.
+	if (file::is_dir(dest)) path::rmtree(path::tnew(dest)!)!;
 	path::mkdir(dest, recursive: true)!;
 	usz count;
 	foreach (line : lines[1..])
