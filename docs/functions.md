@@ -4155,8 +4155,8 @@ existed the renderer distinguished none of them.
   `three.light.shadow.distance` fitted somewhere other than where you are looking; dark purple is no shadow pass
   this frame.
 - `'features'` draws which features the shader drawing each surface kept. A frame decides them: with no
-  area light, spot, local shadow, second directional, baked light, environment map, light map, occlusion or sun
-  shadow, the renderer draws with a shader that leaves that code out, which a mobile GPU runs much faster. They
+  area light, spot, local shadow, second directional, baked light, environment map, light map, occlusion, sun
+  shadow or light besides the sun, the renderer draws with a shader that leaves that code out, which a mobile GPU runs much faster. They
   are stripes along world x, two metres wide and in that order: grey where kept, black where left out.
 
 The sky is not a surface and has no shadow, so a debug view colours only what the geometry covers.

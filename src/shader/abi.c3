@@ -192,6 +192,7 @@ fn void append_shader_abi(DString* out)
 	append_shady_struct(out, MorphDelta, "@address", WIRE_HOME);
 	append_shady_struct(out, Light, "@address", WIRE_HOME);
 	append_shady_struct(out, ShadowGpuView, "@address", WIRE_HOME);
+	append_shady_struct(out, FrameSun, "", WIRE_HOME);
 	append_shady_struct(out, Instance, "@address", WIRE_HOME);
 	append_shady_struct(out, DrawRecord, "@address", WIRE_HOME);
 	append_shady_struct(out, FrameBlock, "@address", WIRE_HOME);

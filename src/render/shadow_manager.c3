@@ -832,6 +832,7 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				if (uploaded != null && !(manager.plan == SHADOW_PLAN_COMBINED && view.live_valid))
 				{
 					uploaded[packed].params[3] = 0;
+					manager.packed[packed].params[3] = 0; // what `FrameBlock.sun` copies
 				}
 				else if (uploaded != null && manager.plan == SHADOW_PLAN_COMBINED
 					&& view.static_valid && view.live_valid)

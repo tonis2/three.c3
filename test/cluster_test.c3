@@ -61,6 +61,17 @@ fn uint max_rgb_difference(image::Image* a, image::Image* b)
 	return largest;
 }
 
+fn uint max_rgb(image::Image* a)
+{
+	uint largest = 0;
+	sz bpp = a.bytes_per_pixel();
+	for (sz p = 0; p < a.pixels.len; p += bpp)
+	{
+		for (sz c = 0; c < 3; c++) largest = max(largest, (uint)(char)a.pixels[p + c]);
+	}
+	return largest;
+}
+
 fn sz differing_rgb(image::Image* a, image::Image* b)
 {
 	sz changed = 0;
@@ -1112,16 +1123,22 @@ fn void the_frame_names_the_features_it_does_not_use() @test
 	three::MeshPass* pass = mem::new(three::MeshPass);
 	defer free(pass);
 
-	// The sun and one point light: nothing but the point path is in use.
-	pass.lighting.count = 2;
+	// The sun alone needs no light loop at all.
+	pass.lighting.count = 1;
 	pass.lighting.lights[0].meta = { 1, three::SHADOW_VIEW_NONE, 0, 0 };
-	pass.lighting.lights[1].meta = { 2, three::SHADOW_VIEW_NONE, 1, 0 };
 	test::@check(pass.unused_features() == three::SKIP_ALL_FEATURES,
+		"the sun alone still used %x", ~pass.unused_features() & three::SKIP_ALL_FEATURES);
+
+	// The sun and one point light: nothing but the loop's point path is in use.
+	pass.lighting.count = 2;
+	pass.lighting.lights[1].meta = { 2, three::SHADOW_VIEW_NONE, 1, 0 };
+	uint point = three::SKIP_ALL_FEATURES & ~three::SKIP_LIGHT_LOOP;
+	test::@check(pass.unused_features() == point,
 		"a sun and a point light still used %x", ~pass.unused_features() & three::SKIP_ALL_FEATURES);
 
 	// The sun's own shadow view counts as its shadow, not as a local one.
 	pass.lighting.lights[0].meta[1] = 0;
-	test::@check(pass.unused_features() == (three::SKIP_ALL_FEATURES & ~three::SKIP_SUN_SHADOW),
+	test::@check(pass.unused_features() == (point & ~three::SKIP_SUN_SHADOW),
 		"the sun's shadow left %x unused", pass.unused_features());
 
 	pass.lighting.count = 6;
@@ -1151,8 +1168,31 @@ fn void a_lighting_variant_draws_what_the_full_shader_draws() @test
 	renderer.pass.feature_variants_disabled = false;
 	image::Image variant = renderer.capture()!!;
 	defer variant.free();
-	test::@check(renderer.pass.skip_features == three::SKIP_ALL_FEATURES, "the frame kept %x", renderer.pass.skip_features);
+	test::@check(renderer.pass.skip_features == (three::SKIP_ALL_FEATURES & ~three::SKIP_LIGHT_LOOP),
+		"the frame kept %x", renderer.pass.skip_features);
 	test::@check(renderer.pass.lit_pipelines.len() > 0, "nothing drew with a variant");
+	test::@check(max_rgb_difference(&full, &variant) <= 1,
+		"the variant matches the full shader (largest channel error %d)", max_rgb_difference(&full, &variant));
+}
+
+// The sun alone draws with no light loop, and the picture is the full shader's.
+fn void the_sun_alone_draws_without_the_light_loop() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer renderer.pass.feature_variants_disabled = false;
+	scene(renderer);
+	renderer.pass.lighting.lights[0].direction = { 0.3, 0.5, 1, 0 };
+	renderer.pass.lighting.lights[0].color = { 1, 0.9, 0.8, 1 };
+	renderer.pass.feature_variants_disabled = true;
+	image::Image full = renderer.capture()!!;
+	defer full.free();
+	renderer.pass.feature_variants_disabled = false;
+	image::Image variant = renderer.capture()!!;
+	defer variant.free();
+	test::@check(max_rgb(&variant) > 64, "the sun lit nothing (brightest channel %d)", max_rgb(&variant));
+	test::@check(renderer.pass.lighting.count == 1, "the scene has %d lights", renderer.pass.lighting.count);
+	test::@check((renderer.pass.skip_features & three::SKIP_LIGHT_LOOP) != 0, "the frame kept the loop");
 	test::@check(max_rgb_difference(&full, &variant) <= 1,
 		"the variant matches the full shader (largest channel error %d)", max_rgb_difference(&full, &variant));
 }

@@ -269,6 +269,30 @@ struct Light
 }
 
 <*
+ Light zero and the shadow view it casts through, copied out of `lights` and
+ `shadow_views` into `FrameBlock`. Every lit fragment reads both, and there each
+ is one load from the push block rather than the end of a chain of pointers,
+ which cost the Quest table 0.3 ms a frame.
+
+ The fields themselves rather than a `Light` and a `ShadowGpuView`: those are
+ address blocks, and a block can't hold another by value.
+*>
+struct FrameSun
+{
+	float[4] direction; // as `Light`
+	float[4] color;
+	uint[4] meta;
+	// As `ShadowGpuView`, and all zero for a sun that casts no shadow: `params.w`
+	// zero reads as fully lit.
+	Matrix4f view_projection;
+	float[4] atlas;
+	float[4] params;
+	float[4] plane_x;
+	float[4] plane_y;
+	float[4] plane_z;
+}
+
+<*
  What every draw in a frame shares. One per frame in flight, written before
  recording and read through `MeshPush.frame`.
 *>
@@ -399,6 +423,7 @@ struct FrameBlock
 	// `lights` for them: x is one more than how many of yzw hold one. 0, which a
 	// frame block that never filled it reads, scans every light instead.
 	uint[4] directional_lights;
+	FrameSun sun;
 }
 
 <*
@@ -720,7 +745,7 @@ $assert ShadowPush::size == 96 : "the shadow push block moved off its pinned siz
 // boundary after `relief` ends at 404 and the four bytes between are padding —
 // not a field and not part of the wire format, which is why the new field is last.
 $assert DrawRecord::size == 416 : "DrawRecord moved off its pinned size";
-$assert FrameBlock::size == 432 : "FrameBlock moved off its pinned size";
+$assert FrameBlock::size == 624 : "FrameBlock moved off its pinned size";
 $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex moved off its pinned size";
@@ -816,6 +841,7 @@ const PushFieldLayout[*] FRAME_BLOCK_FIELDS = {
 	{ "cluster_screen", 384, 16 },
 	{ "view_rect", 400, 16 },
 	{ "directional_lights", 416, 16 },
+	{ "sun", 432, 192 },
 };
 
 <*
@@ -976,8 +1002,9 @@ const uint SKIP_ENVIRONMENT        = 32;
 const uint SKIP_LIGHTMAPS          = 64;
 const uint SKIP_OCCLUSION          = 128;
 const uint SKIP_SUN_SHADOW         = 256;
-// Every bit a *frame* decides. The one below is a material's.
-const uint SKIP_ALL_FEATURES       = 511;
+// Every bit a *frame* decides. The alpha test is a material's and the receiver
+// plane a setting.
+const uint SKIP_ALL_FEATURES       = 511 | SKIP_LIGHT_LOOP;
 // The alpha test, for a material whose `alpha_test` is zero and so can never
 // discard. Compiled out rather than left untaken because a fragment shader that
 // *contains* a discard loses early depth on a tiler: Adreno cannot write a
@@ -992,10 +1019,14 @@ const uint SKIP_ALPHA_TEST         = 512;
 // clean under coarse texels. On a Quest the four taps and the plane cost 2.2 ms of
 // a 7.7 ms frame on the game's table, for no difference anyone could see.
 const uint SKIP_RECEIVER_PLANE     = 1024;
+// The loop over every light besides the sun, and the cluster lookup that feeds
+// it: a log, divisions and a dependent read per fragment even where no light
+// reaches. A frame lit by the sun alone paid 0.9 ms of a 5.3 ms Quest frame for it.
+const uint SKIP_LIGHT_LOOP         = 2048;
 // The shaders' `LIGHTS_*`, `SURFACE_*` and `SHADOW_*` constants are `@spec(100)`
 // onwards, in the order of the bits above.
 const uint FEATURE_SPEC_ID = 100;
-const uint SHADER_FEATURES = 11;
+const uint SHADER_FEATURES = 12;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces

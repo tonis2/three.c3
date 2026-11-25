@@ -1371,6 +1371,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 		.cluster_indices = null,
 		.cluster_grid = { 0, 0, 0, 0 },
 		.cluster_screen = { 0, 0, 0, 0 },
+		.sun = self.frame_sun(),
 	};
 	map.frame = gpu.create_dynamic(FrameBlock::size)!;
 	map.frame.upload(&frame, FrameBlock::size);

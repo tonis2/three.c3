@@ -1357,7 +1357,6 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.directional_lights = self.directional_lights(),
 	};
 	self.live_address = live_address;
-	self.frame_address = self.write_frame_blocks(gpu, slot, &frame)!;
 	// Already written, unless the growth inside the callback faulted — in which
 	// case the copies went into `Scene.instances` and this is the retry that both
 	// uploads them and produces the fault the callback could not return.
@@ -1396,6 +1395,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	self.plan_shadow(gpu);
 	self.finalize_lightmap();
 	self.plan_prepass(gpu, target);
+
+	// After `plan_shadow`, which can turn the sun's view off for this frame.
+	frame.sun = self.frame_sun();
+	self.frame_address = self.write_frame_blocks(gpu, slot, &frame)!;
 
 	// Last, so the two plans above are in it.
 	self.fold_frame_key(slot, &frame);
@@ -2484,6 +2487,7 @@ fn uint MeshPass.unused_features(&self)
 		Light* light = &self.lighting.lights[i];
 		if ((light.meta[3] & LIGHT_BAKED) != 0) used |= SKIP_BAKED_LIGHTS;
 		if (i == 0) continue;
+		used |= SKIP_LIGHT_LOOP;
 		switch (light.meta[2])
 		{
 			case 0: used |= SKIP_EXTRA_DIRECTIONALS;
@@ -2551,6 +2555,25 @@ fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
 	self.light_buffers[slot].upload(&self.lighting.lights[0], needed * Light::size);
 	self.frame_key = hash_bytes(self.frame_key, &self.lighting.lights[0], (usz)(needed * Light::size));
 	return self.light_buffers[slot].address;
+}
+
+<*
+ Light zero and its shadow view, as `FrameBlock.sun` carries them. After
+ `write_shadow_views`, which packs the view.
+*>
+fn FrameSun MeshPass.frame_sun(&self)
+{
+	Light* light = &self.lighting.lights[0];
+	FrameSun sun = { .direction = light.direction, .color = light.color, .meta = light.meta };
+	if (light.meta[1] >= self.shadow_manager.packed_count) return sun;
+	ShadowGpuView* view = &self.shadow_manager.packed[light.meta[1]];
+	sun.view_projection = view.view_projection;
+	sun.atlas = view.atlas;
+	sun.params = view.params;
+	sun.plane_x = view.plane_x;
+	sun.plane_y = view.plane_y;
+	sun.plane_z = view.plane_z;
+	return sun;
 }
 
 fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot)

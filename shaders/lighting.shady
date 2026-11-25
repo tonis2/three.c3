@@ -45,6 +45,8 @@ const bool SURFACE_ALPHA_TEST       @spec(109) = true;
 // A setting: off reads a shadow with one hardware-filtered tap instead of four
 // against the receiver's plane (`SKIP_RECEIVER_PLANE`, the headset's choice).
 const bool SHADOW_RECEIVER_PLANE    @spec(110) = true;
+// Off when the sun is the only light: no cluster lookup and no light loop.
+const bool LIGHTS_LOOP              @spec(111) = true;
 
 // `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
 // direct diffuse in its tile. `shade_lights` skips the diffuse half for those
@@ -132,13 +134,11 @@ fn float shadow_compare(bool cached, float2 uv, float reference)
 	return shadow_atlas_compare.SampleCmpLevelZero(uv, reference);
 }
 
-// How much of one light's shadow reaches this point: 1 fully lit, 0 fully
+// How much of one view's shadow reaches this point: 1 fully lit, 0 fully
 // shadowed. Four texel centres, each compared at the receiver plane's own depth
 // there and blended by where the fragment sits between them.
-fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, bool cached)
+fn float shadow_view_lookup(ShadowGpuView view, float3 position, float3 normal, bool cached)
 {
-	if (index == 0xffffffffu) return 1.0;
-	ShadowGpuView view = push.frame[0].shadow_views[index];
 	if (view.params.w <= 0.0) return 1.0;
 
 	// The projection's four columns, read rather than multiplied: a column is
@@ -196,9 +196,9 @@ fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 no
 	// `plane_*.xyz` and the inverse-transposed w row in their w, which is the
 	// rank-one update of the projection's 3x3.
 	float inv_w = 1.0 / clip.w;
-	float4 plane_x = push.frame[0].shadow_views[index].plane_x;
-	float4 plane_y = push.frame[0].shadow_views[index].plane_y;
-	float4 plane_z = push.frame[0].shadow_views[index].plane_z;
+	float4 plane_x = view.plane_x;
+	float4 plane_y = view.plane_y;
+	float4 plane_z = view.plane_z;
 	float3 plane_w = float3(plane_x.w, plane_y.w, plane_z.w);
 	float3 plane_n = float3(dot(plane_x.xyz, normal), dot(plane_y.xyz, normal), dot(plane_z.xyz, normal));
 	float3 plane_ndc = plane_n * (1.0 - dot(ndc, plane_w)) + plane_w * dot(ndc, plane_n);
@@ -234,17 +234,48 @@ fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 no
 	return lerp(1.0, lit, view.params.w);
 }
 
+// The same for the view a light names by index, 0xffffffff for none.
+fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 normal, bool cached)
+{
+	if (index == 0xffffffffu) return 1.0;
+	return shadow_view_lookup(push.frame[0].shadow_views[index], position, normal, cached);
+}
+
 fn float shadow_view_factor_filtered(uint index, float3 position, float3 normal)
 {
 	return shadow_view_factor_filtered_from(index, position, normal, false);
 }
 
-// One light's shadow, from the view it names. `Light.meta.y` is that view's
-// index, or 0xffffffff for a light with no view at all.
+// Light zero and its shadow view, rebuilt from the frame block's copy.
+fn Light frame_sun(FrameBlock* frame)
+{
+	Light sun;
+	sun.direction = frame[0].sun.direction;
+	sun.color = frame[0].sun.color;
+	sun.area_right = float4(0.0);
+	sun.area_up = float4(0.0);
+	sun.meta = frame[0].sun.meta;
+	return sun;
+}
+
+fn ShadowGpuView frame_sun_shadow()
+{
+	ShadowGpuView view;
+	view.view_projection = push.frame[0].sun.view_projection;
+	view.atlas = push.frame[0].sun.atlas;
+	view.params = push.frame[0].sun.params;
+	view.dynamic_rect = float4(0.0);
+	view.plane_x = push.frame[0].sun.plane_x;
+	view.plane_y = push.frame[0].sun.plane_y;
+	view.plane_z = push.frame[0].sun.plane_z;
+	return view;
+}
+
+// The sun's shadow.
 fn float shadow_factor(float3 position, float3 normal)
 {
 	if (!SURFACE_SUN_SHADOW) return 1.0;
-	return shadow_view_factor_filtered(push.frame[0].lights[0].meta.y, position, normal);
+	return shadow_view_lookup(frame_sun_shadow(), position, normal, false);
 }
 
 // The same for a point, spot or area emitter: one view per light, and a point
@@ -749,7 +780,7 @@ fn LightTerms shade_lights(
 	terms.specular = float3(0.0);
 
 	uint count = (uint)frame[0].lighting.y;
-	Light sun = frame[0].lights[0];
+	Light sun = frame_sun(frame);
 	if (sun.meta.z == LIGHT_DIRECTIONAL)
 	{
 		float reach;
@@ -761,6 +792,7 @@ fn LightTerms shade_lights(
 		if (!(LIGHTS_BAKED && skip_baked_diffuse && light_is_baked(sun))) terms.diffuse += energy * nl;
 		terms.specular += energy * punctual_specular(normal, view, toward, nl, f0, f90, a2, k, nv);
 	}
+	if (!LIGHTS_LOOP) return terms;
 
 	uint listed = frame[0].directional_lights.x;
 	uint extra = listed == 0u || !LIGHTS_EXTRA_DIRECTIONAL ? 0u : listed - 1u;

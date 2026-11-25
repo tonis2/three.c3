@@ -614,6 +614,7 @@ fn void record_wire_structs(List{C3Struct}* out)
 {
 	@record_struct(out, three::Light, "Light");
 	@record_struct(out, three::ShadowGpuView, "ShadowGpuView");
+	@record_struct(out, three::FrameSun, "FrameSun");
 	@record_struct(out, three::Instance, "Instance");
 	@record_struct(out, three::DrawRecord, "Draw");
 	@record_struct(out, three::SkinnedVertex, "SkinnedVertex");
