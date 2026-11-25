@@ -80,7 +80,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// the engine opens with. Without it the run is the headless probe.
 	XrHost* host = mem::new(XrHost);
 	defer mem::free(host);
-	bool xr_up = @ok(host.open(app, XR_RENDER_SCALE));
+	bool xr_up = @ok(host.open(app, xr_render_scale()));
 	if (!xr_up)
 	{
 		io::eprintn("three: OpenXR is not available; running the headless probe");
@@ -105,6 +105,13 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// Both eyes in one multiview pass where the device can.
 	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1)!;
 	engine.renderer.gpu.report();
+	// For profiling: whether the per-pass GPU timestamps and the statistics query
+	// cost anything shows in Meta's own app GPU time (the VrApi line) with them gone.
+	if (ndk::property("debug.three.timestamps").trim() == "0")
+	{
+		engine.renderer.timer.free(&engine.renderer.gpu);
+		io::printn("xr: debug.three.timestamps is 0, so no GPU timing this run");
+	}
 	// Runs before `engine.close`: the session holds the engine's device.
 	defer host.close();
 	if (xr_up) host.start(&engine.renderer.gpu)!;

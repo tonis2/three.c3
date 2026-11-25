@@ -149,6 +149,12 @@ struct PreparedSceneView
 
 struct MeshPass
 {
+	// What the last colour recording drew: draw calls, copies and triangles, all
+	// views together. Counted where the draws are recorded, so nothing walks the
+	// buckets again to report them; the headset's frame report averages these.
+	uint drawn_calls;
+	uint drawn_instances;
+	ulong drawn_triangles;
 	// Compiled on demand and kept by content hash. `pipeline` is borrowed from it
 	// — the cache owns every pipeline it hands out and frees them all.
 	PipelineCache pipelines;
@@ -1734,6 +1740,9 @@ fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
 *>
 fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 {
+	self.drawn_calls = 0;
+	self.drawn_instances = 0;
+	self.drawn_triangles = 0;
 	// Every view in one go: the pipelines carry the target's view mask, and each
 	// view's shaders read its own frame block, which follows the main one.
 	if (self.multiview)
@@ -1895,6 +1904,9 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		// have an index buffer and no vertex input state at all.
 		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
 		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.visible, 0, 0, 0);
+		self.drawn_calls++;
+		self.drawn_instances += bucket.visible;
+		self.drawn_triangles += (ulong)mesh.index_count / 3 * bucket.visible;
 	}
 }
 

@@ -22,6 +22,32 @@ import three::ndk;
 const float XR_RENDER_SCALE = 0.7f;
 
 <*
+ The eye size to render at: XR_RENDER_SCALE, unless `adb shell setprop
+ debug.three.xr_scale 0.9` asks for another between 0.4 and 1.5. Read once, when
+ the app starts, because the swapchain is made at that size; restart the app to
+ try the next one. It is how a game finds what its scene can afford on the
+ headset without rebuilding the engine for each try.
+*>
+fn float xr_render_scale()
+{
+	String asked = ndk::property("debug.three.xr_scale");
+	if (asked.len == 0) return XR_RENDER_SCALE;
+	float? scale = asked.trim().to_float();
+	if (catch scale)
+	{
+		io::eprintfn("xr: debug.three.xr_scale is %s, not a number; rendering at %.2f", asked, XR_RENDER_SCALE);
+		return XR_RENDER_SCALE;
+	}
+	if (scale < 0.4f || scale > 1.5f)
+	{
+		io::eprintfn("xr: debug.three.xr_scale %.2f is outside 0.4 to 1.5; rendering at %.2f", scale, XR_RENDER_SCALE);
+		return XR_RENDER_SCALE;
+	}
+	io::printfn("xr: debug.three.xr_scale asks for %.2f of the recommended eye size", scale);
+	return scale;
+}
+
+<*
  Draws one frame into `dst`, an image of the XR swapchain, and leaves it in the
  layout the runtime expects to be given back. The tonemap writes it directly;
  a frame with an interface over it goes through the target and a blit.
@@ -90,6 +116,15 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 	long busy_ns;
 	long waited_ns;
 	FrameTiming gpu_sum;
+	// How the cpu number splits, for the second report line: the script's spans,
+	// the engine's own work, and the runtime's pacing wait, which "cpu" leaves out.
+	long script_ns;
+	long solver_ns;
+	long engine_ns;
+	long paced_ns;
+	ulong drawn_calls;
+	ulong drawn_instances;
+	ulong drawn_triangles;
 
 	while (app.destroy_requested == 0 && !host.exit_wanted)
 	{
@@ -108,9 +143,11 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 
 		xr::FrameWaitInfo wait_info = { .type = xr::TYPE_FRAME_WAIT_INFO };
 		xr::FrameState frame = { .type = xr::TYPE_FRAME_STATE };
+		Clock pacing = clock::now();
 		xr::check(xr::cmd.wait_frame(host.session, &wait_info, &frame), "xrWaitFrame")!;
 		xr::FrameBeginInfo begin_info = { .type = xr::TYPE_FRAME_BEGIN_INFO };
 		xr::check(xr::cmd.begin_frame(host.session, &begin_info), "xrBeginFrame")!;
+		paced_ns += (long)pacing.to_now();
 
 		Clock busy = clock::now();
 		if (first_time == 0) first_time = frame.predicted_display_time;
@@ -153,6 +190,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			drawn = true;
 		}
 		runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
+		script_ns += runtime.frame_spend.script_ns();
+		solver_ns += runtime.frame_spend.solver_ns;
+		engine_ns += runtime.frame_spend.host_ns;
 
 		end_frame(host, &frame, &views, drawn)!;
 		print_frame_output(runtime, &said);
@@ -170,6 +210,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			gpu_sum.scene += gpu.scene;
 			gpu_sum.post += gpu.post;
 			gpu_sum.present += gpu.present;
+			drawn_calls += renderer.pass.drawn_calls;
+			drawn_instances += renderer.pass.drawn_instances;
+			drawn_triangles += renderer.pass.drawn_triangles;
 		}
 		busy_ns += (long)busy.to_now() - wait_ns;
 		waited_ns += wait_ns;
@@ -183,11 +226,23 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 				gpu_sum.total / n, gpu_sum.prepare / n, gpu_sum.shadow / n, gpu_sum.occlusion / n,
 				gpu_sum.prepass / n, gpu_sum.scene / n, gpu_sum.post / n, gpu_sum.present / n,
 				hand_word(&runtime.hands, Hand.LEFT), hand_word(&runtime.hands, Hand.RIGHT));
+			// The engine part also holds xrWaitSwapchainImage and the submit; the
+			// pacing wait is xrWaitFrame and xrBeginFrame, outside "cpu" above.
+			io::printfn("xr: cpu split: js %.2f ms (solver %.2f), engine %.2f ms, paced %.2f ms; drawn %.0f calls, %.0f copies, %.0fk triangles",
+				(double)script_ns / 1e6 / n, (double)solver_ns / 1e6 / n, (double)engine_ns / 1e6 / n, (double)paced_ns / 1e6 / n,
+				(double)drawn_calls / n, (double)drawn_instances / n, (double)drawn_triangles / 1e3 / n);
 			report_since = clock::now();
 			frames_drawn = 0;
 			busy_ns = 0;
 			waited_ns = 0;
 			gpu_sum = {};
+			script_ns = 0;
+			solver_ns = 0;
+			engine_ns = 0;
+			paced_ns = 0;
+			drawn_calls = 0;
+			drawn_instances = 0;
+			drawn_triangles = 0;
 		}
 	}
 }
