@@ -48,6 +48,29 @@ fn float xr_render_scale()
 }
 
 <*
+ How the compositor filters the eye images as it scales them to the display:
+ Meta Quest Super Resolution, an upscale and sharpen that costs the compositor
+ about 0.15 ms, because the eyes are always drawn below the display's size.
+ `adb shell setprop debug.three.xr_filter` asks for `none` (bilinear), `sharpen`
+ (normal sharpening) or `auto` (Super Resolution where the runtime thinks it
+ helps) instead. Read once, when the app starts.
+*>
+fn CompositionLayerSettingsFlagsFB xr_layer_filter()
+{
+	String asked = ndk::property("debug.three.xr_filter").trim();
+	switch (asked)
+	{
+		case "":
+		case "super": return QUALITY_SHARPENING;
+		case "none": return {};
+		case "sharpen": return NORMAL_SHARPENING;
+		case "auto": return QUALITY_SHARPENING | AUTO_LAYER_FILTER;
+	}
+	io::eprintfn("xr: debug.three.xr_filter is %s, not none, sharpen, super or auto; Super Resolution", asked);
+	return QUALITY_SHARPENING;
+}
+
+<*
  Draws one frame into `dst`, an image of the XR swapchain, and leaves it in the
  layout the runtime expects to be given back. The tonemap writes it directly;
  a frame with an interface over it goes through the target and a blit.
@@ -371,8 +394,13 @@ fn void? end_frame(XrHost* host, xr::FrameState* frame, xr::View[2]* views, bool
 			},
 		};
 	}
+	xr::CompositionLayerSettingsFB filter = {
+		.type = xr::TYPE_COMPOSITION_LAYER_SETTINGS_FB,
+		.layer_flags = host.layer_filter,
+	};
 	xr::CompositionLayerProjection layer = {
 		.type = xr::TYPE_COMPOSITION_LAYER_PROJECTION,
+		.next = host.layer_filter ? &filter : null,
 		.space = host.space,
 		.view_count = 2,
 		.views = &eyes[0],

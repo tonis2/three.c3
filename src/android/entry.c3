@@ -80,7 +80,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// the engine opens with. Without it the run is the headless probe.
 	XrHost* host = mem::new(XrHost);
 	defer mem::free(host);
-	bool xr_up = @ok(host.open(app, xr_render_scale()));
+	bool xr_up = @ok(host.open(app, xr_render_scale(), xr_layer_filter()));
 	if (!xr_up)
 	{
 		io::eprintn("three: OpenXR is not available; running the headless probe");

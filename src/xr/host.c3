@@ -51,6 +51,8 @@ struct XrHost
 	xr::PassthroughFB passthrough;
 	xr::PassthroughLayerFB passthrough_layer;
 	bool passthrough_running;
+	// How the compositor filters the eye layer; none is bilinear.
+	CompositionLayerSettingsFlagsFB layer_filter;
 	XrInput input;
 }
 
@@ -60,10 +62,11 @@ struct XrHost
 
  @param [&inout] app : "The glue's app, for the JavaVM and the activity"
  @param render_scale : "Fraction of the runtime's recommended eye size"
+ @param layer_filter : "How the compositor filters the eyes; none is bilinear"
  @require render_scale > 0 : "Scale must be positive"
  @return? xr::COMMAND_MISSING, xr::CALL_FAILED
 *>
-fn void? XrHost.open(&self, ndk::App* app, float render_scale)
+fn void? XrHost.open(&self, ndk::App* app, float render_scale, CompositionLayerSettingsFlagsFB layer_filter = {})
 {
 	xr::load_global()!;
 	if (xr::cmd.initialize_loader != null)
@@ -81,11 +84,24 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale)
 	bool refresh_rate = xr::has_extension(xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) ?? false;
 	bool performance = xr::has_extension(xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME) ?? false;
 	bool passthrough = xr::has_extension(xr::FB_PASSTHROUGH_EXTENSION_NAME) ?? false;
-	ZString[5] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null, null };
+	bool filter = layer_filter && (xr::has_extension(xr::FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME) ?? false);
+	bool auto_filter = filter && (layer_filter & AUTO_LAYER_FILTER) && (xr::has_extension(xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME) ?? false);
+	ZString[7] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null, null, null, null };
 	uint enabled = 2;
 	if (refresh_rate) extensions[enabled++] = xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
 	if (performance) extensions[enabled++] = xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
 	if (passthrough) extensions[enabled++] = xr::FB_PASSTHROUGH_EXTENSION_NAME;
+	if (filter) extensions[enabled++] = xr::FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
+	if (auto_filter) extensions[enabled++] = xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME;
+	if (filter)
+	{
+		self.layer_filter = auto_filter ? layer_filter : layer_filter & ~AUTO_LAYER_FILTER;
+		io::printfn("xr: eye layer filter 0x%x", (xr::Flags64)self.layer_filter);
+	}
+	else if (layer_filter)
+	{
+		io::eprintn("xr: the runtime has no XR_FB_composition_layer_settings; no eye layer filter");
+	}
 	xr::InstanceCreateInfoAndroidKHR android_info = {
 		.type = xr::TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
 		.application_vm = app.activity.vm,

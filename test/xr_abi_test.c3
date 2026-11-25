@@ -121,6 +121,8 @@ fn void passthrough_layout() @test
 	test::eq(xr::PassthroughLayerCreateInfoFB::size, 40);
 	test::eq(xr::CompositionLayerPassthroughFB::size, 40);
 	test::eq(xr::EventDataPassthroughStateChangedFB::size, 24);
+	test::eq(xr::CompositionLayerSettingsFB::size, 24);
+	test::eq((usz)$reflect(xr::CompositionLayerSettingsFB.layer_flags).offset, (usz)16);
 	test::eq((usz)$reflect(xr::PassthroughLayerCreateInfoFB.flags).offset, (usz)24);
 	test::eq((usz)$reflect(xr::PassthroughLayerCreateInfoFB.purpose).offset, (usz)32);
 	test::eq((usz)$reflect(xr::CompositionLayerPassthroughFB.space).offset, (usz)24);
@@ -158,6 +160,7 @@ fn void constants() @test
 	test::eq(xr::TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB, 1000118003);
 	test::eq(xr::TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB, 1000118006);
 	test::eq(xr::TYPE_EVENT_DATA_PASSTHROUGH_STATE_CHANGED_FB, 1000118030);
+	test::eq(xr::TYPE_COMPOSITION_LAYER_SETTINGS_FB, 1000204000);
 	test::eq(xr::ACTION_TYPE_VIBRATION_OUTPUT, 100);
 	test::eq(xr::COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, (xr::Flags64)2);
 	test::eq(xr::MIN_HAPTIC_DURATION, (xr::Duration)-1);
