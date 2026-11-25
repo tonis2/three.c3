@@ -112,6 +112,11 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// 400k-triangle scene 15 ms with it and 8.5 ms without; four overlapping
 	// walls cheaper without it too. A script can still turn it on.
 	engine.renderer.pass.prepass.enabled = false;
+	// Shadows with one hardware-filtered tap: the four taps against the receiver's
+	// plane were 3.2 ms of a 7.7 ms frame on the game's table, and one tap 1.0 ms,
+	// with the same 2x2 filter and no difference anyone could see at the headset's
+	// shadow distances (`SKIP_RECEIVER_PLANE`).
+	engine.renderer.pass.one_tap_shadows = true;
 	// For profiling: whether the per-pass GPU timestamps and the statistics query
 	// cost anything shows in Meta's own app GPU time (the VrApi line) with them gone.
 	if (ndk::property("debug.three.timestamps").trim() == "0")

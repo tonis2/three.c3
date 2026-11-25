@@ -42,6 +42,9 @@ const bool SURFACE_SUN_SHADOW       @spec(108) = true;
 // Per material, not per frame: off for one whose alpha test is zero, so its
 // pipeline holds no discard at all and keeps early depth (`SKIP_ALPHA_TEST`).
 const bool SURFACE_ALPHA_TEST       @spec(109) = true;
+// A setting: off reads a shadow with one hardware-filtered tap instead of four
+// against the receiver's plane (`SKIP_RECEIVER_PLANE`, the headset's choice).
+const bool SHADOW_RECEIVER_PLANE    @spec(110) = true;
 
 // `Light.meta.w` bit 18: a receiver with a lightmap already has this light's
 // direct diffuse in its tile. `shade_lights` skips the diffuse half for those
@@ -178,6 +181,16 @@ fn float shadow_view_factor_filtered_from(uint index, float3 position, float3 no
 	// view's depth.
 	float2 lo = view.atlas.zw + texel * 0.5;
 	float2 hi = view.atlas.zw + view.atlas.xy - texel * 0.5;
+
+	// One tap: the compare sampler filters linearly, so this is the same 2x2
+	// bilinear filter as the four taps below, with one depth for all four texels
+	// rather than each texel's own depth on the receiver's plane. Clamped half a
+	// texel in like them, so the footprint stays in this view's tile.
+	if (!SHADOW_RECEIVER_PLANE)
+	{
+		float lit = shadow_compare(cached, clamp(local * view.atlas.xy + view.atlas.zw, lo, hi), ndc.z - view.params.y);
+		return lerp(1.0, lit, view.params.w);
+	}
 
 	// The receiver plane's depth slope in ndc: the cofactor rows in
 	// `plane_*.xyz` and the inverse-transposed w row in their w, which is the

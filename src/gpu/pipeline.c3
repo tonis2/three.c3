@@ -986,10 +986,16 @@ const uint SKIP_ALL_FEATURES       = 511;
 // (LRZ), and every layer of overdraw is shaded. That is what the depth prepass
 // was standing in for.
 const uint SKIP_ALPHA_TEST         = 512;
-// The shaders' `LIGHTS_*` and `SURFACE_*` constants are `@spec(100)` onwards, in
-// the order of the bits above.
+// A setting, not an unused feature: shadows read with one hardware-filtered tap
+// instead of four taps against the receiver's plane (`MeshPass.one_tap_shadows`).
+// The same 2x2 filter, without the per-tap depth that keeps a sloped receiver
+// clean under coarse texels. On a Quest the four taps and the plane cost 2.2 ms of
+// a 7.7 ms frame on the game's table, for no difference anyone could see.
+const uint SKIP_RECEIVER_PLANE     = 1024;
+// The shaders' `LIGHTS_*`, `SURFACE_*` and `SHADOW_*` constants are `@spec(100)`
+// onwards, in the order of the bits above.
 const uint FEATURE_SPEC_ID = 100;
-const uint SHADER_FEATURES = 10;
+const uint SHADER_FEATURES = 11;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces
@@ -2373,7 +2379,7 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
  cache did not hand out comes back unchanged.
 
  @param [&in] base : "A pipeline `acquire` handed out"
- @require skip_features <= (SKIP_ALL_FEATURES | SKIP_ALPHA_TEST) : "Unknown feature bits"
+ @require skip_features <= (SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE) : "Unknown feature bits"
 
  @return "`base` itself when it already leaves out exactly those features"
 *>

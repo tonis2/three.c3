@@ -3102,6 +3102,12 @@ The way to make that pass cheap is `object.static = true` on whatever will not m
 the map once and are kept, and each frame after draws only the movers. It costs no draw call in the colour pass.
 See the static-casters topic.
 
+On a Quest the expensive half is not the pass but the reading. At a desk every shaded pixel reads four texels,
+each compared at the depth the receiver's own plane has there, which keeps a slope clean when the texels are
+coarse. The headset reads one tap of the same 2x2 filter at one depth: on the game's table that was 3.2 ms of a
+7.7 ms frame against 1.0 ms, with no difference to see at a table's shadow distance. A slope that shows stripes
+there wants a smaller `distance` or a little `bias`.
+
 # Materials
 
 ## material.repeat / material.offset

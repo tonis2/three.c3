@@ -198,6 +198,9 @@ struct MeshPass
 	// pipeline each material draws with for them - see `resolve_lit_pipelines`.
 	uint skip_features;
 	List{LitPipeline} lit_pipelines;
+	// Shadows read with one hardware-filtered tap and no receiver plane,
+	// `SKIP_RECEIVER_PLANE`. The headset's setting (`android/entry.c3`).
+	bool one_tap_shadows;
 	// For tests: every draw keeps every light feature, as before there were variants.
 	bool feature_variants_disabled;
 	Assets assets;
@@ -2507,7 +2510,7 @@ fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 		self.skip_features = 0;
 		return;
 	}
-	self.skip_features = self.unused_features();
+	self.skip_features = self.unused_features() | (self.one_tap_shadows ? SKIP_RECEIVER_PLANE : 0);
 	foreach (&material : self.materials)
 	{
 		if (!material.alive || material.pipeline == null) continue;

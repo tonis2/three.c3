@@ -384,6 +384,55 @@ fn void a_caster_darkens_the_ground_under_it() @test
 }
 
 <*
+ One tap shadows the same ground as the four.
+
+ The headset's filter (`MeshPass.one_tap_shadows`) is the same 2x2 bilinear
+ compare with one depth for all four texels, so under the box it has to be the
+ shadow the four taps draw, within a few levels, and the ground away from the
+ box has to stay untouched. The frame has to have drawn through the variant
+ without the plane, or the two pictures would agree by not being two.
+*>
+fn void one_tap_shadows_the_same_ground() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		defer renderer.pass.one_tap_shadows = false;
+		three::RunResult built = run.run(SCENE);
+		defer built.free();
+		test::@check(built.ok, "the scene built: %s", built.error);
+		image::Image lit = renderer.capture()!!;
+		defer lit.free();
+
+		three::RunResult on = run.run(`three.light.shadow = true`);
+		defer on.free();
+		image::Image four = renderer.capture()!!;
+		defer four.free();
+		test::@check((renderer.pass.skip_features & three::SKIP_RECEIVER_PLANE) == 0, "four taps by default");
+
+		renderer.pass.one_tap_shadows = true;
+		image::Image one = renderer.capture()!!;
+		defer one.free();
+		test::@check((renderer.pass.skip_features & three::SKIP_RECEIVER_PLANE) != 0, "the frame dropped the plane");
+		test::@check(renderer.pass.lit_pipelines.len() > 0, "and drew through a variant");
+
+		// The two pixels `a_caster_darkens_the_ground_under_it` reads.
+		uint under_x = W / 2;
+		uint under_y = (uint)(H * 0.62f);
+		uint clear_x = W / 2;
+		uint clear_y = (uint)(H * 0.92f);
+		uint under_four = luma_at(&four, under_x, under_y);
+		uint under_one = luma_at(&one, under_x, under_y);
+		test::@check(under_one + 30 < luma_at(&lit, under_x, under_y),
+			"the ground under the box went from %d to %d", luma_at(&lit, under_x, under_y), under_one);
+		test::@check(math::abs((int)under_one - (int)under_four) <= 6,
+			"as dark as with four taps: %d against %d", under_one, under_four);
+		test::@check(luma_at(&one, clear_x, clear_y) == luma_at(&lit, clear_x, clear_y),
+			"and the ground away from it did not move: %d to %d",
+			luma_at(&lit, clear_x, clear_y), luma_at(&one, clear_x, clear_y));
+	};
+}
+
+<*
  Turning the pass off puts the frame back exactly as it was.
 
  **The claim that shadows cost nothing when they are off**, asserted as byte
