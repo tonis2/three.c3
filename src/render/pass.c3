@@ -1769,6 +1769,87 @@ fn void MeshPass.record(&self, vk::CommandBuffer cmd)
 }
 
 <*
+ The dynamic state one recording last sent, so a draw that changes none of it
+ sends nothing.
+
+ Worth keeping because of how a tiler runs a rendering: the commands are replayed
+ once per bin, and a Quest eye pair is 18 bins, so a repeated set costs 18 times
+ over rather than once. The bench (`examples/vr_bench.js`) measured about 25 µs
+ of GPU per draw before this and the frame images were pushed per draw too.
+
+ Starts unknown, so the first draw of a recording always sets everything: a
+ recording cannot know what the one before it left.
+*>
+struct DrawState
+{
+	vk::CullModeFlags cull;
+	vk::CompareOp compare;
+	bool depth_write;
+	bool cull_known;
+	bool depth_known;
+}
+
+fn void DrawState.cull_mode(&self, vk::CommandBuffer cmd, vk::CullModeFlags cull)
+{
+	if (self.cull_known && self.cull == cull) return;
+	vk::cmdSetCullMode(cmd, cull);
+	self.cull = cull;
+	self.cull_known = true;
+}
+
+fn void DrawState.depth(&self, vk::CommandBuffer cmd, bool write, vk::CompareOp compare)
+{
+	if (self.depth_known && self.depth_write == write && self.compare == compare) return;
+	vk::cmdSetDepthWriteEnable(cmd, write ? vk::TRUE : vk::FALSE);
+	vk::cmdSetDepthCompareOp(cmd, compare);
+	self.depth_write = write;
+	self.compare = compare;
+	self.depth_known = true;
+}
+
+<*
+ Pushes the images the *frame* owns, for whichever of them this pipeline's
+ shader kept: shadow maps, the sky, AO, the LTC table and the lightmap. They are
+ the same for every draw in the frame, so the colour pass pushes them once per
+ pipeline bind. A material's own maps are not here: they are slots of the
+ device-wide texture array, written into each bucket's record by
+ `texture_indices_of` and reached in the shader through `map_at`.
+*>
+fn void MeshPass.push_frame_images(&self, vk::CommandBuffer cmd, MeshPipeline* pipeline)
+{
+	SampledBindings samplers;
+	vk::DescriptorImageInfo white = self.assets.texture_at(NO_TEXTURE).descriptor();
+	bool shadowed = self.shadows.live || self.point_shadows.live;
+	ShadowAtlas* atlas = &self.shadow_manager.atlas;
+	vk::DescriptorImageInfo shadow = shadowed ? atlas.descriptor(self.shadow_manager.sample_static) : white;
+	// The white 1x1 when there is no shadow pass, which is not a fallback but
+	// the correct value: a depth of 1 is the far plane, nothing is in front of
+	// anything, and `shadow_factor` comes out lit. So shadows on and shadows off
+	// are the same pipeline and the same descriptor layout, differing by which
+	// image is in one slot.
+	samplers.add_if(pipeline, SHADOW_BINDING, shadow);
+	// The sky when the scene has one and the white 1x1 when it does not. What
+	// stops that white from putting a mirror finish on everything is
+	// `FrameBlock.environment.x`, which is zero in a frame with no environment —
+	// so shading with a sky and shading without one are one pipeline and one layout.
+	int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
+	samplers.add_if(pipeline, ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
+	samplers.add_if(pipeline, POINT_SHADOW_BINDING, white);
+	samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING,
+		self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : self.assets.white_layers_descriptor());
+	samplers.add_if(pipeline, SHADOW_ATLAS_BINDING, shadow);
+	samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING,
+		atlas.compare_descriptor(self.shadow_manager.sample_static, shadowed));
+	samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, atlas.compare_descriptor(true, shadowed));
+	samplers.add_if(pipeline, LTC_LUT_BINDING, self.ltc.live ? self.ltc.descriptor() : white);
+	// The shared white image until a bake has run, and unread then: a copy
+	// with no tile carries a zero size, which the vertex stage turns into the
+	// flag that stops the fragment stage sampling at all.
+	samplers.add_if(pipeline, LIGHTMAP_BINDING, self.lightmap.live ? self.lightmap.descriptor() : white);
+	samplers.push(cmd, pipeline);
+}
+
+<*
  @param skies : "The view-projection of each view the draws reach: one, or every eye of a multiview pass"
 *>
 fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
@@ -1803,6 +1884,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 	// precisely so this stays one bind per material rather than one per bucket —
 	// `bound` is what turns that ordering into skipped calls.
 	vk::Pipeline bound = (vk::Pipeline)null;
+	DrawState state;
 
 	foreach (i, bucket : self.scene.buckets)
 	{
@@ -1834,60 +1916,24 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 			// binding survives only while the layouts stay compatible up to its own
 			// number. A no-op on a device without the table.
 			self.assets.bind_texture_table(cmd, pipeline.layout);
+			// Once per pipeline, not once per draw: these are the frame's own
+			// images, the same for every draw the pipeline makes, and a push set
+			// stays bound until the next one. A material's maps are not among them;
+			// they are slots of the texture table, named by each bucket's record.
+			self.push_frame_images(cmd, pipeline);
 			bound = pipeline.handle;
 		}
 
 		// Dynamic, so `material.side` costs a command rather than a pipeline — see
-		// `PipelineState`. Set per bucket rather than tracked like `bound`, because
-		// the draw list is material-major already: consecutive buckets usually share
-		// a material and the driver folds a repeated set, whereas a `last_cull`
-		// variable would be a second thing to keep in step with the pipeline bind
-		// for no measured gain.
-		vk::cmdSetCullMode(cmd, material.cull);
+		// `PipelineState`. Sent only when it changes: the draw list is
+		// material-major, so most buckets repeat the last bucket's values.
+		state.cull_mode(cmd, material.cull);
 
 		// The depth prepass already wrote this bucket's depth, so the fragment
 		// shader runs on the one layer that survived it and writes nothing back.
 		// Everything else keeps the state its pipeline was built with.
 		bool prepassed = use_prepass && self.prepassed(material);
-		vk::cmdSetDepthWriteEnable(cmd, (!prepassed && pipeline.state.depth_write) ? vk::TRUE : vk::FALSE);
-		vk::cmdSetDepthCompareOp(cmd, prepassed ? COMPARE_OP_EQUAL : COMPARE_OP_LESS_OR_EQUAL);
-
-		// Pushed, not bound, and only the images the *frame* owns. A material's own
-		// maps — its base colour and everything a body declared — are slots of the
-		// device-wide texture array, written into this bucket's record by
-		// `texture_indices_of` and reached in the shader through `map_at`. What is
-		// left here is the seven the def reserves, which are the same images
-		// for every draw in the frame.
-		SampledBindings samplers;
-		vk::DescriptorImageInfo white = self.assets.texture_at(NO_TEXTURE).descriptor();
-		bool shadowed = self.shadows.live || self.point_shadows.live;
-		ShadowAtlas* atlas = &self.shadow_manager.atlas;
-		vk::DescriptorImageInfo shadow = shadowed ? atlas.descriptor(self.shadow_manager.sample_static) : white;
-		// The white 1x1 when there is no shadow pass, which is not a fallback but
-		// the correct value: a depth of 1 is the far plane, nothing is in front of
-		// anything, and `shadow_factor` comes out lit. So shadows on and shadows off
-		// are the same pipeline and the same descriptor layout, differing by which
-		// image is in one slot.
-		samplers.add_if(pipeline, SHADOW_BINDING, shadow);
-		// The sky when the scene has one and the white 1x1 when it does not. What
-		// stops that white from putting a mirror finish on everything is
-		// `FrameBlock.environment.x`, which is zero in a frame with no environment —
-		// so shading with a sky and shading without one are one pipeline and one layout.
-		int sky = self.scene != null ? self.scene.look.sky.environment : NO_TEXTURE;
-		samplers.add_if(pipeline, ENVIRONMENT_BINDING, self.assets.texture_at(sky).descriptor());
-		samplers.add_if(pipeline, POINT_SHADOW_BINDING, white);
-		samplers.add_if(pipeline, AMBIENT_OCCLUSION_BINDING,
-			self.ambient_occlusion.live ? self.ambient_occlusion.descriptor() : self.assets.white_layers_descriptor());
-		samplers.add_if(pipeline, SHADOW_ATLAS_BINDING, shadow);
-		samplers.add_if(pipeline, SHADOW_ATLAS_COMPARE_BINDING,
-			atlas.compare_descriptor(self.shadow_manager.sample_static, shadowed));
-		samplers.add_if(pipeline, SHADOW_ATLAS_STATIC_COMPARE_BINDING, atlas.compare_descriptor(true, shadowed));
-		samplers.add_if(pipeline, LTC_LUT_BINDING, self.ltc.live ? self.ltc.descriptor() : white);
-		// The shared white image until a bake has run, and unread then: a copy
-		// with no tile carries a zero size, which the vertex stage turns into the
-		// flag that stops the fragment stage sampling at all.
-		samplers.add_if(pipeline, LIGHTMAP_BINDING, self.lightmap.live ? self.lightmap.descriptor() : white);
-		samplers.push(cmd, pipeline);
+		state.depth(cmd, !prepassed && pipeline.state.depth_write, prepassed ? COMPARE_OP_EQUAL : COMPARE_OP_LESS_OR_EQUAL);
 
 		// Offset on the CPU rather than passed as a base index: the shader reads
 		// instance zero of its own slice, and `push.draw[0]` is always this
@@ -2050,6 +2096,7 @@ fn uint MeshPass.record_prepass_draws(&self, vk::CommandBuffer cmd, Matrix4f vie
 	bool view_cameras = false)
 {
 	uint recorded = 0;
+	DrawState state;
 	foreach (i, bucket : self.scene.buckets)
 	{
 		uint at = i < self.draw_indices.len() ? self.draw_indices[i] : NOT_DRAWN;
@@ -2072,7 +2119,7 @@ fn uint MeshPass.record_prepass_draws(&self, vk::CommandBuffer cmd, Matrix4f vie
 			self.assets.bind_texture_table(cmd, pipeline.layout);
 			*bound = pipeline.handle;
 		}
-		vk::cmdSetCullMode(cmd, material.cull);
+		state.cull_mode(cmd, material.cull);
 
 		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, view_projection,
 			view_cameras: view_cameras);
