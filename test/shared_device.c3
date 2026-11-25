@@ -94,9 +94,10 @@ int loaded = -1;
 
  @param with_pass : `False for a suite that only wants a device — the pass is left zeroed rather than built.`
  @param views : "Views the target draws in one multiview pass; the next borrow puts it back to one"
+ @param samples : "The scene's samples per pixel, for MSAA; the next borrow puts it back to one"
 *>
 fn three::Renderer* borrow(uint width = 200, uint height = 150, bool validate = false, bool with_pass = true,
-	uint views = 1)
+	uint views = 1, uint samples = 1)
 {
 	usz index = validate ? 1 : 0;
 	Slot* slot = &slots[index];
@@ -108,7 +109,8 @@ fn three::Renderer* borrow(uint width = 200, uint height = 150, bool validate = 
 		defer mem = tracked;
 
 		slot.instance = three::create_instance(validate, headless: true)!!;
-		slot.renderer.init(slot.instance, (vk::SurfaceKHR)null, width, height, validate: validate, views: views)!!;
+		slot.renderer.init(slot.instance, (vk::SurfaceKHR)null, width, height, validate: validate, views: views,
+			samples: samples)!!;
 
 		// Build a pass, upload through it, and throw both away — so the device's
 		// 64MB memory pages exist before the runner is watching. `find_or_create_page`
@@ -132,7 +134,7 @@ fn three::Renderer* borrow(uint width = 200, uint height = 150, bool validate = 
 		HeapAlloc tracked = mem;
 		mem = real_heap;
 		defer mem = tracked;
-		slot.renderer.resize_target(width, height, views)!!;
+		slot.renderer.resize_target(width, height, views, samples)!!;
 	}
 
 	slot.renderer.post.init();

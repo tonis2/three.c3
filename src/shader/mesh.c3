@@ -92,6 +92,9 @@ macro ShaderDef mesh_def(
 			? "const bool MATERIAL_DISPLACED = true;\n"
 			: "const bool MATERIAL_DISPLACED = false;\n" },
 
+		// The tone a display variant writes with, which `material.shady` applies last.
+		{ .name = "tonemap", .file = ShaderFile.TONEMAP_SHADY },
+		{ .name = "scene_tone", .file = ShaderFile.SCENE_TONE_SHADY },
 		{ .name = "three.material", .file = ShaderFile.MATERIAL_SHADY },
 		{ .name = "mesh", .file = ShaderFile.MESH_SHADY },
 	};

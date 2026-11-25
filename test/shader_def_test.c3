@@ -567,7 +567,8 @@ fn void the_ported_mesh_is_lit() @test
 		"and a debug view answers instead of the body, before the body runs");
 	test::@check(source.contains("float alpha = draw.base_color.a * input.color.a;")
 		&& source.contains("alpha *= input.vertex_color.a;")
-		&& source.contains("return float4(shade(s), (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);"),
+		&& source.contains("float3 color = scene_tone(shade(s), push.frame[0].camera.w);")
+		&& source.contains("return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);"),
 		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's, and 1 unless blended");
 	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
 		"and the body that was spliced in is the one that runs");

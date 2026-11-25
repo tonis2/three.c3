@@ -76,6 +76,9 @@ echo "==> game: ${game#"$ROOT/"}"
 if [[ -d "$game" ]]; then
 	[[ -f "$game/main.js" ]] || { echo "build-apk: $game has no main.js" >&2; exit 1; }
 	cp -r "$game/." "$out/apk/assets/game/"
+	# aapt2 leaves dot files and folders out of the assets, so they go before the
+	# list is made: a listed file the APK lacks stops the unpack on the headset.
+	find "$out/apk/assets/game" -mindepth 1 -name '.*' -prune -exec rm -rf {} +
 else
 	cp "$game" "$out/apk/assets/game/script.js"
 fi

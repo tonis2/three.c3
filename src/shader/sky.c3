@@ -17,6 +17,9 @@ import shady;
 macro ShaderDef sky_def()
 {
 	ShaderSource[] sources = {
+		// The tone a display variant writes the sky with.
+		{ .name = "tonemap", .file = ShaderFile.TONEMAP_SHADY },
+		{ .name = "scene_tone", .file = ShaderFile.SCENE_TONE_SHADY },
 		{ .name = "sky", .file = ShaderFile.SKY_SHADY },
 	};
 

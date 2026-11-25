@@ -82,7 +82,8 @@ struct SkyPush
 {
 	// across, down, ahead for view 0, then for view 1. xyz only.
 	float[<4>][6] rays;
-	// x intensity, y rotation in radians about world Y, zw unused.
+	// x intensity, y rotation in radians about world Y, z the exposure a display
+	// variant's tone applies, w unused.
 	float[4] params;
 }
 
@@ -189,14 +190,15 @@ fn float[4] MeshPass.environment_params(&self)
 *>
 fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f[] view_projections)
 {
-	if (self.sky_pipeline == null || self.scene == null || self.see_through) return;
+	if (self.sky_drawn == null || self.scene == null || self.see_through) return;
 
 	SkyLook sky = self.scene.look.sky;
 	if (sky.background == NO_TEXTURE || sky.background_intensity <= 0) return;
 	if (!self.assets.texture_alive(sky.background)) return;
 
-	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, self.sky_pipeline.handle);
-	self.assets.bind_texture_table(cmd, self.sky_pipeline.layout);
+	MeshPipeline* pipeline = self.sky_drawn;
+	vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+	self.assets.bind_texture_table(cmd, pipeline.layout);
 	// None, for the reason `SKY_STATE` gives. Set here rather than left to the
 	// bucket loop below it: the first bucket sets its own material's mode, so
 	// this cannot be inherited in either direction.
@@ -208,12 +210,12 @@ fn void MeshPass.record_sky(&self, vk::CommandBuffer cmd, Matrix4f[] view_projec
 
 	SampledBindings samplers;
 	samplers.add(0, self.assets.texture_at(sky.background).descriptor());
-	samplers.push(cmd, self.sky_pipeline);
+	samplers.push(cmd, pipeline);
 
 	// One view, or each eye of a multiview pass.
-	SkyPush push = { .params = { sky.background_intensity, sky.rotation, 0, 0 } };
+	SkyPush push = { .params = { sky.background_intensity, sky.rotation, self.tone_exposure, 0 } };
 	foreach (i, view_projection : view_projections) push.rays[i * 3 : 3] = sky_rays(view_projection)[..];
-	vk::cmdPushConstants(cmd, self.sky_pipeline.layout, self.sky_pipeline.shader.stages, 0, SkyPush::size, &push);
+	vk::cmdPushConstants(cmd, pipeline.layout, pipeline.shader.stages, 0, SkyPush::size, &push);
 
 	// No index buffer and no vertex input: `SV_VertexID` is all the vertex stage
 	// reads, which is the same arrangement the post chain draws under.

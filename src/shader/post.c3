@@ -48,6 +48,8 @@ macro ShaderDef post_def(String body, MaterialUniform[] uniforms = {}, MaterialT
 		// A body that never says `.depth` leaves the depth buffer unsampled, so
 		// the scene need not write it back.
 		{ .name = "post.depth", .source = body.contains(".depth") ? POST_DEPTH_READ : POST_DEPTH_FAR },
+		// The engine's tone curves, which its own tonemap body calls.
+		{ .name = "tonemap", .file = ShaderFile.TONEMAP_SHADY },
 		{ .name = "post", .file = ShaderFile.POST_SHADY },
 	};
 

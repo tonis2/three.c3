@@ -1111,5 +1111,8 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	float3 view;
 	if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
 
-	return float4(shade(s), (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);
+	// Toned as it is written when this pipeline writes a headset's eye image
+	// itself; linear light for the post chain otherwise.
+	float3 color = scene_tone(shade(s), push.frame[0].camera.w);
+	return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);
 }

@@ -2,8 +2,8 @@
  The one place a device-local 2D image is created.
 
  Every owner of an image — render targets, the post chain, the shadow atlas,
- textures, the lightmap — wants the same thing: optimal tiling, one sample, one
- layer, memory bound, and nothing left behind when a step fails.
+ textures, the lightmap — wants the same thing: optimal tiling, memory bound,
+ and nothing left behind when a step fails.
 *>
 module three;
 
@@ -36,31 +36,52 @@ const vk::ImageUsageFlags CHAIN_IMAGE_USAGE = IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
  The image is destroyed again when its memory cannot be found, so a failure
  leaves nothing to clean up.
 
+ A transient attachment goes in lazily allocated memory where the device has
+ it: a tiler keeps such an image in tile memory and never backs it.
+
  @param max_bytes : `IMAGE_OVER_BUDGET when the image needs more than this`
 *>
 fn vk::Memory? Gpu.create_device_image(&self, vk::Format format, uint width, uint height,
-	vk::ImageUsageFlags usage, uint levels = 1, usz max_bytes = usz::max, uint layers = 1)
+	vk::ImageUsageFlags usage, uint levels = 1, usz max_bytes = usz::max, uint layers = 1,
+	vk::SampleCountFlagBits samples = SAMPLE_COUNT_1_BIT)
 {
 	vk::Image image = vk::imageCreateInfo().setImageType(IMAGE_TYPE_2D).setFormat(format)
 		.setExtent({ .width = width, .height = height, .depth = 1 })
 		.setMipLevels(levels)
 		.setArrayLayers(layers)
-		.setSamples(SAMPLE_COUNT_1_BIT)
+		.setSamples(samples)
 		.setTiling(IMAGE_TILING_OPTIMAL)
 		.setUsage(usage)
 		.setInitialLayout(IMAGE_LAYOUT_UNDEFINED)
 		.build(self.handle)!;
 	defer catch vk::destroyImage(self.handle, image, null);
 
+	vk::MemoryRequirements requirements = image.getMemoryRequirements(self.handle);
 	if (max_bytes != usz::max)
 	{
-		vk::MemoryRequirements requirements = image.getMemoryRequirements(self.handle);
 		usz required = (usz)requirements.size;
 		usz alignment = (usz)requirements.alignment;
 		if (alignment > 0) required = (required + alignment - 1) / alignment * alignment;
 		if (required > max_bytes) return IMAGE_OVER_BUDGET~;
 	}
-	return vk::create_image_buffer(image, &self.allocator, MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	vk::MemoryPropertyFlags memory = MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	vk::MemoryPropertyFlags lazy = MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
+	if ((usage & IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) && self.has_memory(lazy, requirements.memoryTypeBits)) memory = lazy;
+	return vk::create_image_buffer(image, &self.allocator, memory);
+}
+
+<*
+ Whether one of the memory types `type_bits` allows has every flag in `properties`.
+*>
+fn bool Gpu.has_memory(&self, vk::MemoryPropertyFlags properties, uint type_bits)
+{
+	vk::PhysicalDeviceMemoryProperties types;
+	vk::getPhysicalDeviceMemoryProperties(self.pdevice, &types);
+	for (uint i = 0; i < types.memoryTypeCount; i++)
+	{
+		if ((type_bits & (1u << i)) && (types.memoryTypes[i].propertyFlags & properties) == properties) return true;
+	}
+	return false;
 }
 
 <*
@@ -110,9 +131,11 @@ struct LayeredImage
  @require layers >= 1 && layers <= MAX_VIEWS : "One layer per view"
 *>
 fn LayeredImage? Gpu.create_layered_image(&self, vk::Format format, vk::Extent2D extent, uint layers,
-	vk::ImageUsageFlags usage, vk::ImageAspectFlags aspect = IMAGE_ASPECT_COLOR_BIT, bool array = false)
+	vk::ImageUsageFlags usage, vk::ImageAspectFlags aspect = IMAGE_ASPECT_COLOR_BIT, bool array = false,
+	vk::SampleCountFlagBits samples = SAMPLE_COUNT_1_BIT)
 {
-	vk::Memory memory = self.create_device_image(format, extent.width, extent.height, usage, layers: layers)!;
+	vk::Memory memory = self.create_device_image(format, extent.width, extent.height, usage, layers: layers,
+		samples: samples)!;
 	LayeredImage made = { .whole = { .image = memory.image, .memory = memory }, .count = layers };
 	defer catch made.destroy(self);
 	made.whole.view = self.create_layer_view(memory.image, format, aspect, 0, layers, array)!;

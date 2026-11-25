@@ -5,8 +5,10 @@
  The right eye is an extra `SceneView` beside the main camera, so geometry,
  lights and shadows are prepared once for both. Each eye gets its own light
  clusters and AO. On a multiview target every draw reaches both eyes, each
- into its own layer, and the tonemap puts them side by side in the swapchain
- image; otherwise each eye is drawn over its half of the target in turn.
+ into its own layer, and each layer goes to the swapchain's layer for that eye:
+ written by the scene itself with MSAA, otherwise toned and copied there.
+ Without multiview each eye is drawn over its half of the target in turn, and
+ the tonemap puts them side by side in the swapchain image.
 *>
 module three @feat(ANDROID);
 
@@ -47,6 +49,27 @@ fn float xr_render_scale()
 	return scale;
 }
 
+// Samples per pixel for the eyes: 4x MSAA, kept on the tile and resolved there.
+const uint XR_MSAA = 4;
+
+<*
+ The eyes' samples per pixel: XR_MSAA, unless `adb shell setprop debug.three.msaa`
+ asks for 1 (none), 2 or 4. Read once, when the app starts.
+*>
+fn uint xr_msaa()
+{
+	String asked = ndk::property("debug.three.msaa").trim();
+	switch (asked)
+	{
+		case "": return XR_MSAA;
+		case "1": return 1;
+		case "2": return 2;
+		case "4": return 4;
+	}
+	io::eprintfn("xr: debug.three.msaa is %s, not 1, 2 or 4; %dx MSAA", asked, XR_MSAA);
+	return XR_MSAA;
+}
+
 <*
  How the compositor filters the eye images as it scales them to the display:
  Meta Quest Super Resolution, an upscale and sharpen that costs the compositor
@@ -68,47 +91,6 @@ fn CompositionLayerSettingsFlagsFB xr_layer_filter()
 	}
 	io::eprintfn("xr: debug.three.xr_filter is %s, not none, sharpen, super or auto; Super Resolution", asked);
 	return QUALITY_SHARPENING;
-}
-
-<*
- Draws one frame into `dst`, an image of the XR swapchain, and leaves it in the
- layout the runtime expects to be given back. The tonemap writes it directly;
- a frame with an interface over it goes through the target and a blit.
-*>
-fn void? Renderer.render_xr(&self, vk::Image dst, vk::ImageView dst_view, vk::Extent2D dst_extent,
-	long* wait_ns = null)
-{
-	if (wait_ns != null) *wait_ns = 0;
-	uint slot       = self.frames.slot;
-	vk::Fence fence = self.frames.fences[slot];
-	@timed(wait_ns) { fence.wait(self.gpu.handle)!; };
-	fence.reset(self.gpu.handle)!;
-	self.gpu.begin_frame();
-
-	vk::CommandBuffer cmd = self.frames.buffers[slot];
-	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
-	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
-
-	self.timer.begin(&self.gpu, cmd, slot)!;
-	bool direct = self.record_scene(cmd, output: dst_view != null ? dst : (vk::Image)null, output_view: dst_view,
-		see_through: self.xr_display.passthrough_active)!;
-	if (!direct) record_blit(cmd, self.target.color, self.target.extent, dst, dst_extent, {
-		...IMAGE_BARRIER,
-		.image = dst,
-		.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-		.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
-		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-		.dstAccessMask = (vk::AccessFlags2)0,
-		.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-	});
-	self.timer.end(cmd, slot);
-
-	vk::endCommandBuffer(cmd)!;
-	// Not waited on: the runtime orders its reads after this submit on the same
-	// queue, and the slot's fence guards its buffers when the slot comes round.
-	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
-	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 <*
@@ -370,7 +352,9 @@ fn void? draw_to_swapchain(XrHost* host, Renderer* renderer, long* wait_ns) @loc
 		(void)xr::check(xr::cmd.release_swapchain_image(host.swapchain, &release), "xrReleaseSwapchainImage");
 	}
 	vk::ImageView view = index < host.views.len() ? host.views[index] : (vk::ImageView)null;
-	renderer.render_xr(host.images[index], view, { host.eye_width * 2, host.eye_height }, wait_ns)!;
+	bool eyes = host.layers > 1;
+	renderer.render_into(host.images[index], view, { eyes ? host.eye_width : host.eye_width * 2, host.eye_height },
+		eyes, renderer.xr_display.passthrough_active, wait_ns)!;
 }
 
 <*
@@ -388,9 +372,10 @@ fn void? end_frame(XrHost* host, xr::FrameState* frame, xr::View[2]* views, bool
 			.sub_image = {
 				.swapchain = host.swapchain,
 				.image_rect = {
-					.offset = { (int)(i * host.eye_width), 0 },
+					.offset = { host.layers > 1 ? 0 : (int)(i * host.eye_width), 0 },
 					.extent = { (int)host.eye_width, (int)host.eye_height },
 				},
+				.image_array_index = host.layers > 1 ? (uint)i : 0,
 			},
 		};
 	}

@@ -92,6 +92,9 @@ struct GpuLimits
 	// 2026-11): a pipeline cached for one view hands its vertex shader to a
 	// two-view one, and the second eye draws nothing.
 	bool multiview_cache_broken;
+	// The sample counts a rendering with both a colour and a depth attachment may
+	// use: what MSAA can ask for.
+	vk::SampleCountFlags msaa_counts;
 	// `gl_BaseInstance` in a shader with no vertex input — how the UI's one
 	// instanced draw tells six vertices which drawing they belong to. A
 	// `VkPhysicalDeviceVulkan11Features` member, and `v11` is handed to
@@ -777,6 +780,7 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.fragment_density_texel_max = density_properties.maxFragmentDensityTexelSize,
 		.multiview = v11.multiview == vk::TRUE && v11_properties.maxMultiviewViewCount >= MAX_VIEWS,
 		.multiview_cache_broken = v12_properties.driverID == DRIVER_ID_MESA_KOSMICKRISP,
+		.msaa_counts = properties.limits.framebufferColorSampleCounts & properties.limits.framebufferDepthSampleCounts,
 		.timestamp_period = properties.limits
 			.timestampPeriod, // `hostQueryReset` is read off the same `v12` handed to `deviceCreateInfo`
 			// below unchanged, so it is enabled exactly when it is supported: a claim

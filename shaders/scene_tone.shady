@@ -1,0 +1,15 @@
+// How a scene fragment writes its colour: linear light for the post chain, or a
+// headset's eye image with the tone curve applied as it is written. After
+// `tonemap.shady`, whose curves it calls.
+
+// As `SceneTone`: 0 linear light; 1 the display's own colour, which the
+// attachment clamps; 2 and 3 the same through AgX or Blender's AgX.
+const uint SCENE_TONE @spec(120) = 0u;
+
+// A scene fragment's colour as `SCENE_TONE` says to write it.
+fn float3 scene_tone(float3 c, float exposure)
+{
+	if (SCENE_TONE == 2u) return tone_agx(c * exposure);
+	if (SCENE_TONE == 3u) return tone_agx_blender(c * exposure);
+	return c;
+}

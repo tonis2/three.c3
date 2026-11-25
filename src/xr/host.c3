@@ -1,6 +1,7 @@
 <*
  The OpenXR side of a Quest run: instance, session, the space the head is
- tracked in, and the one swapchain both eyes are drawn into side by side.
+ tracked in, and the one swapchain both eyes are drawn into: a layer each for a
+ multiview target, side by side otherwise.
 
  Order matters and is OpenXR's, not ours: the instance and system come first,
  because they say which Vulkan device and extensions the runtime needs; then the
@@ -27,13 +28,15 @@ struct XrHost
 	CInt space_type;
 	xr::Swapchain swapchain;
 	List {vk::Image} images;
-	// One per image, for drawing into it directly.
+	// One per image, of every layer, for drawing into it directly.
 	List {vk::ImageView} views;
 	vk::Device device;
 	long format;
-	// One eye; the swapchain is twice as wide.
+	// One eye.
 	uint eye_width;
 	uint eye_height;
+	// One per eye, or 1 with the eyes side by side in an image twice as wide.
+	uint layers;
 	CInt state;
 	bool running;
 	bool exit_wanted;
@@ -251,9 +254,11 @@ fn vk::PhysicalDevice pick_xr_device(void* context, vk::Instance instance)
  swapchain.
 
  @param [&in] gpu : "The device the engine opened to vulkan_request"
+ @param layers : "The target's views: a swapchain layer per eye, or 1 for the eyes side by side"
+ @require layers >= 1 && layers <= MAX_VIEWS : "One layer per view"
  @return? xr::CALL_FAILED
 *>
-fn void? XrHost.start(&self, Gpu* gpu)
+fn void? XrHost.start(&self, Gpu* gpu, uint layers = 1)
 {
 	xr::GraphicsBindingVulkanKHR binding = {
 		.type = xr::TYPE_GRAPHICS_BINDING_VULKAN_KHR,
@@ -282,16 +287,18 @@ fn void? XrHost.start(&self, Gpu* gpu)
 		: self.space_type == xr::REFERENCE_SPACE_TYPE_LOCAL_FLOOR ? "local-floor" : "local");
 
 	self.format = self.pick_format()!;
+	self.layers = layers;
 	xr::SwapchainCreateInfo swap_info = {
 		.type = xr::TYPE_SWAPCHAIN_CREATE_INFO,
-		// Drawn into by the tonemap, or copied into when something is drawn over the frame.
+		// Drawn into by the scene or the tonemap, or copied into when something is
+		// drawn over the frame.
 		.usage_flags = xr::SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | xr::SWAPCHAIN_USAGE_TRANSFER_DST_BIT,
 		.format = self.format,
 		.sample_count = 1,
-		.width = self.eye_width * 2,
+		.width = layers > 1 ? self.eye_width : self.eye_width * 2,
 		.height = self.eye_height,
 		.face_count = 1,
-		.array_size = 1,
+		.array_size = layers,
 		.mip_count = 1,
 	};
 	xr::check(xr::cmd.create_swapchain(self.session, &swap_info, &self.swapchain), "xrCreateSwapchain")!;
@@ -305,17 +312,20 @@ fn void? XrHost.start(&self, Gpu* gpu)
 	self.images.init(mem);
 	self.views.init(mem);
 	self.device = gpu.handle;
-	// Views only in the target's own format, the one the tonemap is built for.
+	// Views only in the target's own format, the one the scene and the tonemap
+	// are built for.
 	bool drawable = (vk::Format)self.format == TARGET_COLOR_FORMAT;
 	foreach (image : found)
 	{
 		self.images.push((vk::Image)image.image);
 		if (!drawable) continue;
-		vk::ImageView? view = gpu.create_view_2d((vk::Image)image.image, (vk::Format)self.format);
+		vk::ImageView? view = gpu.create_layer_view((vk::Image)image.image, (vk::Format)self.format,
+			IMAGE_ASPECT_COLOR_BIT, 0, layers);
 		if (catch view) return xr::CALL_FAILED~;
 		self.views.push(view);
 	}
-	io::printfn("xr: swapchain %dx%d, format %d, %d images", self.eye_width * 2, self.eye_height, self.format, count);
+	io::printfn("xr: swapchain %dx%d, %d layers, format %d, %d images", swap_info.width, self.eye_height, layers,
+		self.format, count);
 }
 
 <*

@@ -111,7 +111,7 @@ struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
 struct_field PushData.padding offset=24 size=8
 struct_field PushData.projection offset=32 size=64
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -133,6 +133,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -218,7 +219,7 @@ struct PushData size=24 stride=24
 struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -240,6 +241,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -311,7 +313,7 @@ struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
 struct_field PushData.padding offset=24 size=8
 struct_field PushData.projection offset=32 size=64
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -333,6 +335,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -405,7 +408,7 @@ struct PushData size=24 stride=24
 struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -427,6 +430,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -501,7 +505,7 @@ struct PushData size=24 stride=24
 struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -523,6 +527,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -601,7 +606,7 @@ struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
 struct_field PushData.tint offset=24 size=12
 struct_field PushData.swatches offset=36 size=64
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -623,6 +628,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -698,7 +704,7 @@ struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
 struct_field PushData.tint offset=24 size=12
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -720,6 +726,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -799,7 +806,7 @@ struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
 struct_field PushData.material_table offset=24 size=8
 struct_field PushData.tint offset=32 size=12
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -821,6 +828,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -896,7 +904,7 @@ struct PushData size=24 stride=24
 struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -918,6 +926,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16
@@ -989,7 +998,7 @@ struct PushData size=24 stride=24
 struct_field PushData.frame offset=0 size=8
 struct_field PushData.instances offset=8 size=8
 struct_field PushData.draw offset=16 size=8
-struct FrameBlock size=432 stride=432
+struct FrameBlock size=624 stride=624
 struct_field FrameBlock.view_projection offset=0 size=64
 struct_field FrameBlock.lighting offset=64 size=16
 struct_field FrameBlock.live_poses offset=80 size=8
@@ -1011,6 +1020,7 @@ struct_field FrameBlock.cluster_grid offset=368 size=16
 struct_field FrameBlock.cluster_screen offset=384 size=16
 struct_field FrameBlock.view_rect offset=400 size=16
 struct_field FrameBlock.directional_lights offset=416 size=16
+struct_field FrameBlock.sun offset=432 size=192
 struct Light size=80 stride=80
 struct_field Light.direction offset=0 size=16
 struct_field Light.color offset=16 size=16

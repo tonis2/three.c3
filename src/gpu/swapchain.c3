@@ -328,9 +328,12 @@ fn void Viewer.record_blit_from(
  Scales `src`, in `TRANSFER_SRC_OPTIMAL`, over the whole of `dst`, which comes
  from `UNDEFINED` because every pixel of it is written. `after` moves `dst` on
  to wherever it goes next.
+
+ @param layers : "Layers of dst: src is cut across into that many equal parts, one for each"
+ @require layers >= 1 && layers <= MAX_VIEWS : "One layer per view"
 *>
 fn void record_blit(vk::CommandBuffer cmd, vk::Image src, vk::Extent2D src_extent,
-	vk::Image dst, vk::Extent2D dst_extent, vk::ImageMemoryBarrier2 after)
+	vk::Image dst, vk::Extent2D dst_extent, vk::ImageMemoryBarrier2 after, uint layers = 1)
 {
 	vk::ImageMemoryBarrier2 before = {
 		...IMAGE_BARRIER,
@@ -344,15 +347,19 @@ fn void record_blit(vk::CommandBuffer cmd, vk::Image src, vk::Extent2D src_exten
 	};
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ before }));
 
-	vk::ImageSubresourceLayers layers = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 };
-	vk::ImageBlit region = {
-		.srcSubresource = layers,
-		.srcOffsets = { { 0, 0, 0 }, { (int)src_extent.width, (int)src_extent.height, 1 } },
-		.dstSubresource = layers,
-		.dstOffsets = { { 0, 0, 0 }, { (int)dst_extent.width, (int)dst_extent.height, 1 } },
-	};
+	vk::ImageBlit[MAX_VIEWS] regions;
+	int part = (int)(src_extent.width / layers);
+	for (uint i = 0; i < layers; i++)
+	{
+		regions[i] = {
+			.srcSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
+			.srcOffsets = { { (int)i * part, 0, 0 }, { (int)(i + 1) * part, (int)src_extent.height, 1 } },
+			.dstSubresource = { .aspectMask = IMAGE_ASPECT_COLOR_BIT, .baseArrayLayer = i, .layerCount = 1 },
+			.dstOffsets = { { 0, 0, 0 }, { (int)dst_extent.width, (int)dst_extent.height, 1 } },
+		};
+	}
 	vk::cmdBlitImage(cmd, src, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1, &region, FILTER_LINEAR);
+		layers, &regions[0], FILTER_LINEAR);
 
 	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ after }));
 }

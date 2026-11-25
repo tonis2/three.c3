@@ -1,9 +1,9 @@
 <*
  The offscreen colour+depth attachment, and its readback.
 
- Everything draws here; nothing ever draws into a swapchain image. The swapchain
- blits this (`gpu/swapchain.c3`) and the screenshot copies it — both are
- consumers. Three things follow:
+ Everything draws here, but a headset's eye images, which the scene can write
+ itself (`SceneTone`). The window's swapchain blits this (`gpu/swapchain.c3`)
+ and the screenshot copies it — both are consumers. Three things follow:
 
  - The extent is a parameter, not the window's. A resize rebuilds the swapchain
  and moves the blit's destination rect; it does not touch the target, the depth
@@ -90,6 +90,29 @@ struct Target
 	vk::Extent2D view_extent;
 	// Each layer of the depth image alone, for a pass that samples one eye.
 	vk::ImageView[MAX_VIEWS] depth_layers;
+
+	// Samples per pixel the scene draws with. Above one the scene draws into
+	// `msaa_color` and `msaa_depth`, which never leave the tile on a tiler, and
+	// resolves into the scene image and `depth` as the rendering ends.
+	vk::SampleCountFlagBits samples;
+	// In `POST_CHAIN_FORMAT`, the scene image's, a layer per view. Absent at one sample.
+	LayeredImage msaa_color;
+	LayeredImage msaa_depth;
+	// In `TARGET_COLOR_FORMAT`, for a multiview scene that writes a headset's
+	// eye images itself (`SceneTone`). Absent at one sample or one view.
+	LayeredImage msaa_display;
+}
+
+<*
+ The most samples up to `wanted` that the device draws colour and depth with.
+*>
+fn vk::SampleCountFlagBits msaa_samples(Gpu* gpu, uint wanted)
+{
+	for (uint count = 8; count > 1; count /= 2)
+	{
+		if (count <= wanted && ((uint)gpu.limits.msaa_counts & count)) return (vk::SampleCountFlagBits)count;
+	}
+	return SAMPLE_COUNT_1_BIT;
 }
 
 <*
@@ -103,10 +126,12 @@ fn vk::ImageView Target.depth_layer(&self, uint view) => self.views > 1 ? self.d
 <*
  @param width : `Independent of any window. Nothing here consults a surface.`
  @param views : "Views drawn side by side in one multiview pass; more than one only where the device has multiview"
+ @param samples : "Samples per pixel for the scene, MSAA above one; the device's most below it when it has fewer"
  @require width > 0 && height > 0
  @require views >= 1 && views <= MAX_VIEWS && width >= views : "Between one view and MAX_VIEWS"
+ @require samples >= 1 : "At least one sample"
 *>
-fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1)
+fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1, uint samples = 1)
 {
 	self.extent = { .width = width, .height = height };
 	self.views = views > 1 && gpu.limits.multiview ? views : 1;
@@ -135,6 +160,32 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1)
 	LayeredImage depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
 		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT,
 		IMAGE_ASPECT_DEPTH_BIT)!;
+	defer catch depth.destroy(gpu);
+
+	self.samples = msaa_samples(gpu, samples);
+	LayeredImage msaa_color;
+	LayeredImage msaa_depth;
+	LayeredImage msaa_display;
+	defer catch msaa_color.destroy(gpu);
+	defer catch msaa_depth.destroy(gpu);
+	defer catch msaa_display.destroy(gpu);
+	if (self.samples != SAMPLE_COUNT_1_BIT)
+	{
+		vk::ImageUsageFlags transient = IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+		msaa_color = gpu.create_layered_image(POST_CHAIN_FORMAT, self.view_extent, self.views, transient,
+			samples: self.samples)!;
+		msaa_depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
+			IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, IMAGE_ASPECT_DEPTH_BIT,
+			samples: self.samples)!;
+		if (self.views > 1)
+		{
+			msaa_display = gpu.create_layered_image(TARGET_COLOR_FORMAT, self.view_extent, self.views, transient,
+				samples: self.samples)!;
+		}
+	}
+	self.msaa_color = msaa_color;
+	self.msaa_depth = msaa_depth;
+	self.msaa_display = msaa_display;
 
 	self.color = color.image;
 	self.color_view = color.view;
@@ -159,6 +210,9 @@ fn void Target.free(&self, Gpu* gpu)
 	foreach (view : self.depth_layers) if (view != null) view.free(gpu.handle);
 	self.color_memory.free();
 	self.depth_memory.free();
+	self.msaa_color.destroy(gpu);
+	self.msaa_depth.destroy(gpu);
+	self.msaa_display.destroy(gpu);
 	self.foveation.free(gpu);
 	*self = { };
 }
@@ -377,10 +431,10 @@ fn void compute_to_stage_barrier(vk::CommandBuffer cmd, vk::PipelineStageFlags2 
 <*
  The depth attachment, finished being written and about to be sampled.
 
- `shader_read_barrier`'s shape over the depth aspect. Both differences are
- forced: the source stage is the fragment tests rather than colour output,
- because that is what wrote it, and the destination layout is
- `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather than `SHADER_READ_ONLY_OPTIMAL`.
+ `shader_read_barrier`'s shape over the depth aspect. The source is the
+ fragment tests, which wrote it, and colour output too, where an MSAA resolve
+ writes it. The destination layout is `DEPTH_STENCIL_READ_ONLY_OPTIMAL` rather
+ than `SHADER_READ_ONLY_OPTIMAL`.
 
  Issued once per frame by `PostPass.record_chain`, beside the one for image A.
  There is no barrier back: `depth_discard_barrier` opens the next frame's geometry
@@ -394,8 +448,9 @@ fn vk::ImageMemoryBarrier2 depth_read_barrier(vk::Image image)
 	return {
 		...IMAGE_BARRIER,
 		.image = image,
-		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT
+			| PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.dstStageMask = CHAIN_READERS,
 		.dstAccessMask = ACCESS_2_SHADER_SAMPLED_READ_BIT,
 		.oldLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -494,6 +549,8 @@ fn void begin_depth_rendering(vk::CommandBuffer cmd, vk::ImageView view, vk::Ext
 
  `depth_discard_barrier` opens from `UNDEFINED`, which is right here for the same
  reason it is right there: the attachment is cleared on load.
+
+ @require self.samples == SAMPLE_COUNT_1_BIT : "An MSAA prepass draws inside the scene rendering"
 *>
 fn void Target.begin_depth(&self, vk::CommandBuffer cmd)
 {
@@ -514,6 +571,24 @@ fn vk::ImageMemoryBarrier2 depth_discard_barrier(vk::Image image)
 		.srcStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 		.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		.subresourceRange = DEPTH_LEVEL,
+	};
+}
+
+<*
+ Opens a single-sample depth buffer that an MSAA rendering resolves into, from
+ `UNDEFINED`. A resolve writes in the colour output stage, depth included.
+*>
+fn vk::ImageMemoryBarrier2 depth_resolve_barrier(vk::Image image)
+{
+	return {
+		...IMAGE_BARRIER,
+		.image = image,
+		.srcStageMask = PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstAccessMask = ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.oldLayout = IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		.subresourceRange = DEPTH_LEVEL,
@@ -554,7 +629,7 @@ fn void Target.begin_render(
 	float[4] clear = { 0, 0, 0, 1 },
 	bool keep_depth = false,
 	bool store_depth = true
-) => self.begin_render_to(cmd, self.color, self.color_view, clear, keep_depth, store_depth);
+) => self.begin_render_to(cmd, self.color, self.color_view, clear, keep_depth, store_depth, self.color_format);
 
 <*
  The same, into a colour image that is not necessarily the target's.
@@ -568,8 +643,16 @@ fn void Target.begin_render(
  The viewport height is negative, which flips Y so glTF's coordinate system lands
  the right way up in Vulkan's. Every projection matrix in this project assumes it.
 
+ With MSAA the scene draws into the target's multisampled images and resolves
+ into `view` and the depth buffer as the rendering ends; the samples themselves
+ are never stored.
+
  @param image : `The colour image being written. Its layout is not read - the barrier discards whatever was there.`
  @param view : `A view of image, and the attachment's format follows the image's, not the target's.`
+ @param format : "The image's format, which MSAA samples are drawn in"
+ @require self.samples == SAMPLE_COUNT_1_BIT || !keep_depth : "MSAA depth is not kept between renderings"
+ @require self.samples == SAMPLE_COUNT_1_BIT || format == POST_CHAIN_FORMAT || (format == TARGET_COLOR_FORMAT && self.msaa_display.exists())
+	: "MSAA samples come in the scene's float format, or the display's on a multiview target"
 *>
 fn void Target.begin_render_to(
 	&self,
@@ -578,16 +661,28 @@ fn void Target.begin_render_to(
 	vk::ImageView view,
 	float[4] clear = { 0, 0, 0, 1 },
 	bool keep_depth = false,
-	bool store_depth = true
+	bool store_depth = true,
+	vk::Format format = POST_CHAIN_FORMAT
 )
 {
 	// The one colour in the renderer that never meets a shader, so the one that
 	// cannot be decoded where the others are. `gpu/color.c3` says why the curve
 	// is the piecewise one.
 	float[4] clear_linear               = srgb_to_linear_rgb(clear);
-	vk::ImageMemoryBarrier2[2] barriers = { color_attachment_barrier(image),
-		keep_depth ? depth_keep_barrier(self.depth) : depth_discard_barrier(self.depth) };
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[..]));
+	bool msaa                           = self.samples != SAMPLE_COUNT_1_BIT;
+	LayeredImage* samples               = format == TARGET_COLOR_FORMAT ? &self.msaa_display : &self.msaa_color;
+	vk::ImageMemoryBarrier2[4] barriers;
+	barriers[0] = color_attachment_barrier(image);
+	barriers[1] = keep_depth ? depth_keep_barrier(self.depth) : depth_discard_barrier(self.depth);
+	if (msaa)
+	{
+		// The depth buffer is opened even when nothing resolves into it, because
+		// the post chain closes it from the attachment layout either way.
+		barriers[1] = depth_resolve_barrier(self.depth);
+		barriers[2] = color_attachment_barrier(samples.whole.image);
+		barriers[3] = depth_discard_barrier(self.msaa_depth.whole.image);
+	}
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[:msaa ? 4 : 2]));
 
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
@@ -602,6 +697,25 @@ fn void Target.begin_render_to(
 		// that is a whole depth image of memory traffic saved.
 		.setStoreOp(store_depth ? ATTACHMENT_STORE_OP_STORE : ATTACHMENT_STORE_OP_DONT_CARE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
+
+	if (msaa)
+	{
+		color_attachment = color_attachment.setImageView(samples.whole.view)
+			.setStoreOp(ATTACHMENT_STORE_OP_DONT_CARE)
+			.setResolveMode(RESOLVE_MODE_AVERAGE_BIT)
+			.setResolveImageView(view)
+			.setResolveImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		depth_attachment = depth_attachment.setImageView(self.msaa_depth.whole.view)
+			.setStoreOp(ATTACHMENT_STORE_OP_DONT_CARE);
+		// The first sample's depth, which is a surface that is there; an average
+		// across a silhouette would not be.
+		if (store_depth)
+		{
+			depth_attachment = depth_attachment.setResolveMode(RESOLVE_MODE_SAMPLE_ZERO_BIT)
+				.setResolveImageView(self.depth_view)
+				.setResolveImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+		}
+	}
 
 	vk::RenderingFragmentDensityMapAttachmentInfoEXT density;
 	vk::RenderingInfo rendering = vk::renderingInfo().setRenderArea({ .extent = self.view_extent }).setLayerCount(1)
@@ -621,6 +735,7 @@ fn void Target.begin_render_to(
  colour is the final transfer source and depth is still an attachment.
 
  @require self.views == 1 : "The scene cache is for one view"
+ @require self.samples == SAMPLE_COUNT_1_BIT : "The scene cache keeps no samples"
 *>
 fn void Target.begin_cached_render_to(
 	&self,
@@ -674,6 +789,7 @@ fn void Target.begin_cached_render_to(
 <*
  Rebuilds depth only inside a cached scene's dirty region.
  @require self.views == 1 : "The scene cache is for one view"
+ @require self.samples == SAMPLE_COUNT_1_BIT : "The scene cache keeps no samples"
 *>
 fn void Target.begin_cached_depth(&self, vk::CommandBuffer cmd, vk::Rect2D dirty, bool sampled)
 {

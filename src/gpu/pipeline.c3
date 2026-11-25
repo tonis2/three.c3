@@ -340,12 +340,13 @@ struct FrameBlock
 	*>
 	float[4] debug;
 	<*
-	 Where the camera is, in world space, with w unused.
+	 Where the camera is, in world space, and in w the exposure a display
+	 variant's tone curve applies (`SceneTone`).
 
-	 Read by the specular term and by nothing else — a highlight is the one thing
-	 in a shading body that depends on which way the surface is being looked at,
-	 and inverting `view_projection` per fragment to recover it would be work for a
-	 value the CPU already has.
+	 The position is read by the specular term and by nothing else — a highlight
+	 is the one thing in a shading body that depends on which way the surface is
+	 being looked at, and inverting `view_projection` per fragment to recover it
+	 would be work for a value the CPU already has.
 	*>
 	float[4] camera;
 	<*
@@ -988,7 +989,44 @@ struct PipelineState
 	// which is what each pipeline but a frame's variant is built with - see
 	// `PipelineCache.variant`.
 	uint skip_features;
+	// Linear light for the post chain, or a headset's eye image written directly.
+	SceneTone tone;
 }
+
+<*
+ What a scene pipeline writes. `LINEAR` is the float scene image the post chain
+ tones; the others write `TARGET_COLOR_FORMAT`, a headset's eye image, with the
+ tone curve applied as each fragment is written, so no full-screen pass runs.
+ The ordinal is `SCENE_TONE` in `shaders/scene_tone.shady`.
+
+ A blended fragment is toned before it blends, so a translucent surface mixes
+ display colours rather than light. Over passthrough that is what the tonemap
+ did anyway: the scene there is one layer over nothing.
+*>
+enum SceneTone : char
+{
+	LINEAR,
+	// The identity tone: the attachment clamps and encodes.
+	DISPLAY,
+	DISPLAY_AGX,
+	DISPLAY_AGX_BLENDER,
+}
+
+<*
+ The display tone that does what `mode` does in the post chain.
+*>
+fn SceneTone display_tone(ToneMap mode)
+{
+	switch (mode)
+	{
+		case NONE: return DISPLAY;
+		case AGX: return DISPLAY_AGX;
+		case AGX_BLENDER: return DISPLAY_AGX_BLENDER;
+	}
+}
+
+// `SCENE_TONE`'s id, clear of the feature constants from `FEATURE_SPEC_ID` up.
+const uint SCENE_TONE_SPEC_ID = 120;
 
 // What a frame may leave out of the mesh shader. A mobile GPU pays in registers
 // for every branch a shader has, taken or not, so a scene without any area
@@ -1157,7 +1195,8 @@ fn bool PipelineState.equals(self, PipelineState other)
 				// compile, about a millisecond for the extra `VkPipeline`.
 		&& self.blend == other.blend
 		&& self.color == other.color
-		&& self.skip_features == other.skip_features;
+		&& self.skip_features == other.skip_features
+		&& self.tone == other.tone;
 }
 
 struct MeshPipeline
@@ -1393,7 +1432,7 @@ fn void? MeshPipeline.build_layouts(
  booleans and two enums in a row at the call site.
 
  Everything *not* here is the same for every pipeline in the project and lives in
- `build_graphics`: an empty vertex input state, `defaultMultisampleState`, one
+ `build_graphics`: an empty vertex input state, no sample shading, one
  viewport and one scissor, and `POLYGON_MODE_FILL` with counter-clockwise front
  faces.
 *>
@@ -1426,6 +1465,9 @@ struct GraphicsPipelineDesc
 	// Drawn inside a rendering with a fragment density map - the scene and the
 	// depth prepass on a foveated target.
 	bool density_map;
+	// The rendering's samples per pixel: the target's for what draws in the
+	// scene, one for every pass with images of its own.
+	vk::SampleCountFlagBits samples;
 }
 
 <*
@@ -1439,6 +1481,7 @@ const GraphicsPipelineDesc GRAPHICS_PIPELINE = {
 	.dynamic_cull = false,
 	.depth_test = false,
 	.depth_write = false,
+	.samples = SAMPLE_COUNT_1_BIT,
 };
 
 <*
@@ -1481,7 +1524,8 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.setFrontFace(FRONT_FACE_COUNTER_CLOCKWISE)
 		.setPolygonMode(POLYGON_MODE_FILL);
 
-	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState();
+	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState()
+		.setRasterizationSamples(desc.samples);
 
 	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
 		.setDepthTestEnable(desc.depth_test ? vk::TRUE : vk::FALSE)
@@ -1601,24 +1645,28 @@ fn MeshPipeline? MeshPipeline.init(
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[2] stages = draw_stages(module_handle);
-	// Each feature constant on unless its bit is set. A module without them - any
-	// but the mesh shader - ignores the entries.
-	uint[SHADER_FEATURES] kept;
-	vk::SpecializationMapEntry[SHADER_FEATURES] entries;
-	foreach (i, &entry : entries)
+	// Each feature constant on unless its bit is set, then the tone. A module
+	// without them ignores the entries.
+	uint[SHADER_FEATURES + 1] kept;
+	vk::SpecializationMapEntry[SHADER_FEATURES + 1] entries;
+	foreach (i, &entry : entries[:SHADER_FEATURES])
 	{
 		kept[i] = (state.skip_features & (1u << i)) == 0 ? 1 : 0;
 		*entry = { .constantID = FEATURE_SPEC_ID + (uint)i, .offset = (uint)(i * uint::size), .size = uint::size };
 	}
+	kept[SHADER_FEATURES] = (uint)state.tone.ordinal;
+	entries[SHADER_FEATURES] = { .constantID = SCENE_TONE_SPEC_ID, .offset = (uint)(SHADER_FEATURES * uint::size),
+		.size = uint::size };
 	vk::SpecializationInfo lights = {
-		.mapEntryCount = SHADER_FEATURES,
+		.mapEntryCount = entries.len,
 		.pMapEntries = &entries[0],
 		.dataSize = kept.len * uint::size,
 		.pData = &kept[0],
 	};
-	if (state.skip_features != 0) stages[1].pSpecializationInfo = &lights;
+	if (state.skip_features != 0 || state.tone != LINEAR) stages[1].pSpecializationInfo = &lights;
 
 	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
+	if (state.tone != LINEAR) color = TARGET_COLOR_FORMAT;
 	// Every view of the target in one draw, which is how the scene is drawn into
 	// a multiview target.
 	vk::PipelineRenderingCreateInfo rendering = vk::pipelineRenderingCreateInfo()
@@ -1667,6 +1715,7 @@ fn MeshPipeline? MeshPipeline.init(
 		{
 			...GRAPHICS_PIPELINE,
 			.density_map = target.foveation.exists(),
+			.samples = target.samples,
 			.stages = stages[..],
 			.rendering = &rendering,
 			.color_blend = &color_blend,
@@ -1870,12 +1919,13 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
  @param mod : `A module from compile_shader containing the entry points the entries parameter names. Its layout is copied, not moved.`
  @param entries : `The stages the module must contain and the names it is linked under: the SHADOW_ENTRIES list alone for the depth-only path, the cut-out's pair when it carries a fragment stage. The two spellings of the cut-out vertex entry are the lists above.`
  @param depth_format : `The atlas format, chosen for both depth attachment and sampling.`
+ @param samples : "The scene's, for a prepass drawn inside its rendering; one for a map of its own"
  @return ? SHADER_MISSING_ENTRY_POINT : `The module is missing one of the entries it was held to.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.shady and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
 	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false, bool density_map = false,
-	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED)
+	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED, vk::SampleCountFlagBits samples = SAMPLE_COUNT_1_BIT)
 {
 	// The list is both the contract the module is held to and the names its
 	// stages are created under: one place, so the pipeline cannot check for one
@@ -1938,6 +1988,7 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 			.depth_test = true,
 			.depth_write = true,
 			.density_map = density_map,
+			.samples = samples,
 		}
 	);
 }
@@ -2403,24 +2454,28 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
 
 <*
  `base` built over the same module and state with some shader features
- compiled out, building it the first time it is asked for.
+ compiled out, or writing a headset's eye image, building it the first time it
+ is asked for.
 
  The variant is kept alive by `base`: it holds one borrow while `base` has any,
  and gives it back when `base` is released for the last time. A pipeline this
  cache did not hand out comes back unchanged.
 
  @param [&in] base : "A pipeline `acquire` handed out"
+ @param tone : "What the variant writes"
  @require skip_features <= (SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE) : "Unknown feature bits"
 
- @return "`base` itself when it already leaves out exactly those features"
+ @return "`base` itself when it already leaves out exactly those features and writes that tone"
 *>
-fn MeshPipeline*? PipelineCache.variant(&self, Gpu* gpu, Target* target, MeshPipeline* base, uint skip_features)
+fn MeshPipeline*? PipelineCache.variant(&self, Gpu* gpu, Target* target, MeshPipeline* base, uint skip_features,
+	SceneTone tone = LINEAR)
 {
 	CachedPipeline* entry = self.entry_for(base);
-	if (entry == null || entry.state.skip_features == skip_features) return base;
+	if (entry == null || (entry.state.skip_features == skip_features && entry.state.tone == tone)) return base;
 
 	PipelineState state = entry.state;
 	state.skip_features = skip_features;
+	state.tone = tone;
 	foreach (other : self.entries)
 	{
 		if (other.compiled != entry.compiled || !other.state.equals(state)) continue;

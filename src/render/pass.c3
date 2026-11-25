@@ -198,6 +198,13 @@ struct MeshPass
 	// pipeline each material draws with for them - see `resolve_lit_pipelines`.
 	uint skip_features;
 	List{LitPipeline} lit_pipelines;
+	// What this frame's scene writes: linear light for the post chain, or a
+	// headset's eye image toned as it is written. Set by the renderer before
+	// `prepare`, with the exposure the tone applies.
+	SceneTone scene_tone;
+	float tone_exposure;
+	// The sky's pipeline for this frame's tone.
+	MeshPipeline* sky_drawn;
 	// Shadows read with one hardware-filtered tap and no receiver plane,
 	// `SKIP_RECEIVER_PLANE`. The headset's setting (`android/entry.c3`).
 	bool one_tap_shadows;
@@ -1180,6 +1187,11 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// texels — see `MeshPass.update_lightmap`.
 	self.update_lightmap(gpu);
 
+	// Here rather than with the materials' variants: a scene with nothing in it
+	// still draws its sky.
+	self.sky_drawn = self.sky_pipeline == null ? null
+		: self.pipelines.variant(gpu, target, self.sky_pipeline, 0, self.scene_tone)!;
+
 	self.multiview = target.views > 1;
 	self.resolve_view_rect(target.view_extent);
 	// Each view of a multiview target covers its whole layer.
@@ -1339,7 +1351,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
 		.debug = { (float)self.debug_view, 0, 0, 0 },
-		.camera = { eye.x, eye.y, eye.z, 0 },
+		.camera = { eye.x, eye.y, eye.z, self.tone_exposure },
 		.environment = self.environment_params(),
 		.lights = (Light*)light_address,
 		.point_shadow = { self.point_shadows.created > 0 ? 1.0f / (float)self.point_shadows.created : 0.0f,
@@ -1464,9 +1476,17 @@ fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
 	// A multiview target draws its prepass inside the scene's rendering: carried
 	// from a rendering of its own, Quest 3 loads the depth back wrong along the
 	// edge of each foveation ring, and EQUAL leaves a band of holes there.
-	vk::Format inside = self.multiview ? POST_CHAIN_FORMAT : FORMAT_UNDEFINED;
+	// A one-view MSAA target has none: its samples never leave the scene's
+	// rendering, and only a multiview prepass draws inside it.
+	if (!self.multiview && target.samples != SAMPLE_COUNT_1_BIT)
+	{
+		self.prepass.live = false;
+		return;
+	}
+	vk::Format inside = FORMAT_UNDEFINED;
+	if (self.multiview) inside = self.scene_tone == LINEAR ? POST_CHAIN_FORMAT : TARGET_COLOR_FORMAT;
 	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts(), target.foveation.exists(),
-		target.view_mask(), inside);
+		target.view_mask(), inside, target.samples);
 	if (!self.prepass.live) return;
 
 	bool found = false;
@@ -2509,20 +2529,17 @@ fn uint MeshPass.unused_features(&self)
 fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 {
 	self.lit_pipelines.clear();
-	if (self.feature_variants_disabled)
-	{
-		self.skip_features = 0;
-		return;
-	}
-	self.skip_features = self.unused_features() | (self.one_tap_shadows ? SKIP_RECEIVER_PLANE : 0);
+	bool variants = !self.feature_variants_disabled;
+	self.skip_features = variants ? self.unused_features() | (self.one_tap_shadows ? SKIP_RECEIVER_PLANE : 0) : 0;
+	if (!variants && self.scene_tone == LINEAR) return;
 	foreach (&material : self.materials)
 	{
 		if (!material.alive || material.pipeline == null) continue;
 		// The frame's features, and the alpha test where this material has none:
 		// a material that can never discard draws through a pipeline without the
 		// instruction, so it keeps early depth - see `SKIP_ALPHA_TEST`.
-		uint skip = self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST);
-		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip)!;
+		uint skip = variants ? self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST) : 0;
+		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip, self.scene_tone)!;
 		if (lit != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit });
 	}
 }

@@ -92,7 +92,7 @@ fn float4 sky_fragment(VertexOutput input, uint view)
 	direction = float3(c * direction.x - s * direction.z, direction.y, s * direction.x + c * direction.z);
 
 	float3 color = sky_map.Sample(equirect_uv(direction)).rgb * push.params.x;
-	return float4(color, 1.0);
+	return float4(scene_tone(color, push.params.z), 1.0);
 }
 
 // The two entry points, and the whole of them: a vertex stage that makes its own

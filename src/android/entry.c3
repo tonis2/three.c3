@@ -103,8 +103,9 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	defer mem::free(engine);
 	defer engine.close();
 	// Both eyes in one multiview pass where the device can.
-	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1)!;
+	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1, samples: xr_up ? xr_msaa() : 1)!;
 	engine.renderer.gpu.report();
+	io::printfn("xr: %dx MSAA", (uint)engine.renderer.target.samples);
 	// No depth prepass on the headset. Adreno bins the frame and builds a coarse
 	// depth of all of it (LRZ) before shading, which throws away hidden fragments
 	// without one, so the prepass here mostly doubled the vertex work - the
@@ -117,6 +118,15 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	// with the same 2x2 filter and no difference anyone could see at the headset's
 	// shadow distances (`SKIP_RECEIVER_PLANE`).
 	engine.renderer.pass.one_tap_shadows = true;
+	// The scene writes the eyes itself only with MSAA. Without it the 4-byte
+	// pixels let Adreno pick bins so big that foveation, which it applies per bin,
+	// saves less than the tonemap pass costs: the game at level 4 took 4.70 ms
+	// that way against 4.43 through the pass, where with 4x it is 4.98 against
+	// 6.19. `debug.three.direct_eyes` 0 or 1 picks one, for comparing the two.
+	String direct = ndk::property("debug.three.direct_eyes").trim();
+	engine.renderer.eyes_through_chain = direct.len > 0 ? direct == "0"
+		: (uint)engine.renderer.target.samples == 1;
+	io::printfn("xr: the eyes are written by %s", engine.renderer.eyes_through_chain ? "the tonemap pass" : "the scene");
 	// For profiling: whether the per-pass GPU timestamps and the statistics query
 	// cost anything shows in Meta's own app GPU time (the VrApi line) with them gone.
 	if (ndk::property("debug.three.timestamps").trim() == "0")
@@ -126,7 +136,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	}
 	// Runs before `engine.close`: the session holds the engine's device.
 	defer host.close();
-	if (xr_up) host.start(&engine.renderer.gpu)!;
+	if (xr_up) host.start(&engine.renderer.gpu, engine.renderer.target.views)!;
 	// Before the boot, so a script can ask what the headset can do.
 	engine.renderer.xr_display.passthrough_supported = host.passthrough_supported;
 

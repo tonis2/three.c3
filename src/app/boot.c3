@@ -261,8 +261,9 @@ struct Engine
  succeeded, which is what the `defer`s did before it.
 
  @param views : "Views drawn side by side in one multiview pass, where the device has multiview: 2 for a headset"
+ @param samples : "Samples per pixel for the scene: 1, or 2 or 4 for MSAA"
 *>
-fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint views = 1)
+fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint views = 1, uint samples = 1)
 {
 	// The window is a viewer, never a render target. It is opened first only
 	// because the surface has to come from somewhere; nothing about it reaches the
@@ -289,7 +290,7 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint
 	}
 	self.stage = 3;
 
-	self.renderer.init(self.instance, self.surface, width, height, debugging, views)!;
+	self.renderer.init(self.instance, self.surface, width, height, debugging, views, samples)!;
 	self.stage = 4;
 
 	// The device table on every debug run, where it used to take a flag of its own.

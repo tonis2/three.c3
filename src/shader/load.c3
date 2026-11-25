@@ -71,6 +71,8 @@ const char[*] EMBED_LIGHTING_REFERENCE_SHADY = $embed("../../shaders/lighting_re
 const char[*] EMBED_MATERIAL_SHADY        = $embed("../../shaders/material.shady");
 const char[*] EMBED_NOISE_SHADY           = $embed("../../shaders/noise.shady");
 const char[*] EMBED_SURFACE_SHADY         = $embed("../../shaders/surface.shady");
+const char[*] EMBED_TONEMAP_SHADY         = $embed("../../shaders/tonemap.shady");
+const char[*] EMBED_SCENE_TONE_SHADY      = $embed("../../shaders/scene_tone.shady");
 
 <*
  Every shader source that ships: one member per file, carrying the name it has on
@@ -105,6 +107,8 @@ enum ShaderFile : int (String name, String text)
 	MATERIAL_SHADY       { "material.shady", EMBED_MATERIAL_SHADY },
 	NOISE_SHADY          { "noise.shady", EMBED_NOISE_SHADY },
 	SURFACE_SHADY        { "surface.shady", EMBED_SURFACE_SHADY },
+	TONEMAP_SHADY        { "tonemap.shady", EMBED_TONEMAP_SHADY },
+	SCENE_TONE_SHADY     { "scene_tone.shady", EMBED_SCENE_TONE_SHADY },
 }
 
 <*

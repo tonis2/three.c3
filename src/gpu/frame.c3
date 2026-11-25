@@ -303,6 +303,10 @@ struct Renderer
 	SceneCache scene_cache;
 	// Test and diagnostic escape hatch: force the traditional full redraw.
 	bool scene_cache_disabled;
+	// Eye images always go through the float scene image, the chain and a copy,
+	// never written by the scene itself. The headset sets it without MSAA, where
+	// that is faster (`android/entry.c3`).
+	bool eyes_through_chain;
 
 	<*
 	 Draw every frame, whatever the key says — `three.alwaysRender`.
@@ -381,6 +385,7 @@ fn float XrDisplay.nearest_offered(&self, float hz)
  @param surface : `Null for headless: no viewer, no swapchain, and render + screenshot still work.`
  @param width : `The offscreen target's extent. Not the window's, ever.`
  @param views : "Views drawn side by side in one multiview pass, where the device has multiview"
+ @param samples : "Samples per pixel for the scene: 1, or 2 or 4 for MSAA"
 *>
 fn Renderer? Renderer.init(
 	&self,
@@ -389,14 +394,15 @@ fn Renderer? Renderer.init(
 	uint width,
 	uint height,
 	bool validate = false,
-	uint views = 1
+	uint views = 1,
+	uint samples = 1
 )
 {
 	self.windowed = surface != null;
 	self.clear = DEFAULT_CLEAR;
 
 	self.gpu.init(instance, surface, validate)!;
-	self.target.init(&self.gpu, width, height, views)!;
+	self.target.init(&self.gpu, width, height, views, samples)!;
 	// After the device and before anything that could dispatch: a kernel's
 	// buffers are the script's, so this outlives every frame and owns nothing
 	// the render path frees.
@@ -467,19 +473,22 @@ fn Renderer? Renderer.init(
 
  @param width : `Device pixels. Nothing about the window is consulted.`
  @param views : "Views the target draws in one multiview pass; 0 keeps what it has"
+ @param samples : "Samples per pixel for the scene; 0 keeps what it has"
  @require width > 0 && height > 0
 *>
-fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0)
+fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0, uint samples = 0)
 {
 	if (views == 0) views = self.target.views;
-	if (width == self.target.extent.width && height == self.target.extent.height && views == self.target.views) return;
+	if (samples == 0) samples = (uint)self.target.samples;
+	if (width == self.target.extent.width && height == self.target.extent.height && views == self.target.views
+		&& msaa_samples(&self.gpu, samples) == self.target.samples) return;
 
 	// The new one before the old one goes, so a size the device will not
 	// allocate leaves the renderer exactly as it was rather than with no target
 	// at all. Both are resident for the length of this call, which is the price
 	// of the failure being recoverable.
 	Target next;
-	next.init(&self.gpu, width, height, views)!;
+	next.init(&self.gpu, width, height, views, samples)!;
 
 	self.gpu.handle.waitIdle();
 	self.target.free(&self.gpu);
@@ -600,17 +609,29 @@ fn ulong Renderer.picture_key(&self)
 
  @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn. Only the window path passes true - a screenshot and a headless batch ask for each frame explicitly, and one that answered with the last one would be a lie.`
 
- @param output : "An image the tonemap writes straight into, left as a colour attachment; null for target.color"
+ @param output : "An image the frame goes straight into, left as a colour attachment; null for target.color"
  @param output_view : "A view of output"
  @param see_through : "Drawn over passthrough: no background, and alpha is coverage"
+ @param output_eyes : "output holds a layer per view in TARGET_COLOR_FORMAT, a headset's eye images, rather than the eyes side by side"
+ @require !output_eyes || (output != null && self.target.views > 1) : "Eye images are for a multiview target"
  @return "Whether the frame went to output; false when it went to target.color as usual"
 *>
 fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false,
-	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null, bool see_through = false)
+	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null, bool see_through = false,
+	bool output_eyes = false)
 {
 	// All zero, not the background with alpha 0: premultiplied, any colour here
 	// would be added over the room.
 	float[4] clear = see_through ? (float[4]){ 0, 0, 0, 0 } : self.clear;
+	bool interface_over = !presenting && self.ui.active();
+	// The scene writes the eye images itself, toned as each fragment is written,
+	// when nothing comes between it and them: no script pass and no interface.
+	// That drops the float scene image and the full-screen tonemap. The clear
+	// colour is written as given, where the chain would tone it too.
+	bool display = output_eyes && self.post.stages.len() == 0 && !interface_over && !self.pass.area_reference
+		&& !self.eyes_through_chain;
+	self.pass.scene_tone = display ? display_tone(self.post.tonemap_mode) : LINEAR;
+	self.pass.tone_exposure = self.post.tonemap_exposure;
 	// A shared test/device renderer may predate this frame path, and a resize can
 	// retire A between frames. Make the always-on HDR input and display encoder
 	// present at the recording boundary as well as at normal construction.
@@ -677,7 +698,9 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// just rewrote is not something the scene's own dirty rectangles know.
 	cache_global = @hash_value(cache_global, self.compute.image_epoch);
 	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
-	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial
+	// Not with MSAA: a partial redraw would need last frame's samples, which are never stored.
+	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial && !display
+		&& self.target.samples == SAMPLE_COUNT_1_BIT
 		&& self.pass.prepared_views.len() == 0
 		&& (posted || presenting || !self.ui.active());
 	vk::Rect2D cache_dirty = cache_full;
@@ -733,6 +756,10 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 			posted ? self.post.scene.view : self.target.color_view,
 			cache_dirty, clear, posted, prepassed);
 	}
+	else if (display)
+	{
+		self.target.begin_render_to(cmd, output, output_view, clear, store_depth: false, format: TARGET_COLOR_FORMAT);
+	}
 	else if (posted)
 	{
 		// Kept for a later frame's cache or a post pass that samples it, and
@@ -771,9 +798,10 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// resolve through it — bindings 0 and 1 are the chain's own images, and
 	// everything above them is an image a script named.
 	// Straight into `output` when there is nothing to draw over the frame after
-	// the tonemap: one image and one copy fewer.
-	bool direct = output != null && posted && !(!presenting && self.ui.active());
-	if (posted)
+	// the tonemap: one image and one copy fewer. Eye images take only the scene's
+	// own writes, because the tonemap draws the eyes side by side.
+	bool direct = display || (output != null && !output_eyes && posted && !interface_over);
+	if (posted && !display)
 	{
 		self.post.record_chain(
 			cmd,
@@ -812,6 +840,61 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// previous frame. Closing it again would claim the wrong old layout.
 	if (posted || !cache_reuse) self.target.close(cmd);
 	return false;
+}
+
+<*
+ Draws one frame into `dst`, a headset's swapchain image, and leaves it a
+ colour attachment, the layout the runtime takes it back in. With eye images
+ and nothing drawn over the frame the scene writes them itself; otherwise the
+ frame goes through the target and a blit.
+
+ Submitted and not waited on: the runtime orders its reads after this submit on
+ the same queue, and the slot's fence guards its buffers when the slot comes
+ round.
+
+ @param dst : "The eyes side by side in one layer, or a layer per eye"
+ @param dst_view : "A view of every layer of dst, or null when dst cannot be drawn into"
+ @param dst_extent : "One layer's size"
+ @param eyes : "dst has a layer per view of the target"
+ @param see_through : "Drawn over passthrough: no background, and alpha is coverage"
+ @param [out] wait_ns : "Time spent waiting for the slot's last frame, or null"
+ @require !eyes || self.target.views > 1 : "Eye images are for a multiview target"
+*>
+fn void? Renderer.render_into(&self, vk::Image dst, vk::ImageView dst_view, vk::Extent2D dst_extent, bool eyes = false,
+	bool see_through = false, long* wait_ns = null)
+{
+	if (wait_ns != null) *wait_ns = 0;
+	uint slot       = self.frames.slot;
+	vk::Fence fence = self.frames.fences[slot];
+	@timed(wait_ns) { fence.wait(self.gpu.handle)!; };
+	fence.reset(self.gpu.handle)!;
+	self.gpu.begin_frame();
+
+	vk::CommandBuffer cmd = self.frames.buffers[slot];
+	vk::resetCommandBuffer(cmd, (vk::CommandBufferResetFlags)0)!;
+	vk::beginCommandBuffer(cmd, &&vk::commandBufferBeginInfo())!;
+
+	self.timer.begin(&self.gpu, cmd, slot)!;
+	bool direct = self.record_scene(cmd, output: dst_view != null ? dst : (vk::Image)null, output_view: dst_view,
+		see_through: see_through, output_eyes: eyes && dst_view != null)!;
+	if (!direct)
+	{
+		record_blit(cmd, self.target.color, self.target.extent, dst, dst_extent, {
+			...IMAGE_BARRIER,
+			.image = dst,
+			.srcStageMask = PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+			.srcAccessMask = ACCESS_2_TRANSFER_WRITE_BIT,
+			.dstStageMask = PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+			.dstAccessMask = (vk::AccessFlags2)0,
+			.oldLayout = IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			.newLayout = IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		}, layers: eyes ? self.target.views : 1);
+	}
+	self.timer.end(cmd, slot);
+
+	vk::endCommandBuffer(cmd)!;
+	self.gpu.submit(cmd, fence, (vk::Semaphore)null, (vk::Semaphore)null)!;
+	self.frames.slot = (slot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 <*
