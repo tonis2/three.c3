@@ -65,22 +65,8 @@ struct Options
 {
 	// The game directory: `.js` to run, `.glb` to describe.
 	String assets;
-	// One `.js` file, run the way `run_script` runs one — see `boot_script`.
+	// One `.js` file, evaluated as an ES module before the first frame — see `boot_script`.
 	String script;
-	<*
-	 One `.js` file, evaluated as an ES module — see `boot_module`.
-
-	 **The half `--script` cannot be.** A script is wrapped in an async function so
-	 that top-level `await` and top-level `return` work, and an `import`
-	 declaration in a function body is a syntax error before it is anything else.
-	 So a pipeline with two entry points — a baker that writes a file and a game
-	 that loads it — was one self-contained file plus a module set that could not
-	 share a line with it. This is the second entry point.
-
-	 A module needs a root to resolve its imports against: `--assets` is it when
-	 there is one, and the module's own directory when there is not.
-	*>
-	String entry_module;
 	<*
 	 `--no-boot`: read the assets directory and do not evaluate its `main.js`.
 
@@ -356,7 +342,7 @@ fn void? run(Options opts)
 	c3w::Window* window = engine.viewer();
 	bool windowed = engine.windowed;
 
-	if (opts.script.len == 0 && opts.assets.len == 0 && opts.entry_module.len == 0)
+	if (opts.script.len == 0 && opts.assets.len == 0)
 	{
 		// The placeholder for "nothing was given", and only then. A script or a
 		// game builds its own scene, and since `new three.Scene()` stopped emptying
@@ -371,7 +357,7 @@ fn void? run(Options opts)
 	SceneStats stats = renderer.pass.stats();
 	io::printfn(
 		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
-		opts.script.len > 0 || opts.assets.len > 0 || opts.entry_module.len > 0
+		opts.script.len > 0 || opts.assets.len > 0
 			? "empty scene"
 			: "built-in triangle",
 		stats.draw_calls,
@@ -387,7 +373,7 @@ fn void? run(Options opts)
 	// window. They compose — `--assets ./game --mcp` plays and answers tool calls
 	// at the same time, and `--script` adds one more thing for the same loop to
 	// have run before the first frame.
-	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0 || opts.entry_module.len > 0)
+	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0)
 	{
 		live(
 			renderer,
@@ -399,8 +385,7 @@ fn void? run(Options opts)
 			frames: opts.frames,
 			every: opts.every,
 			camera: opts.camera,
-			boot: !opts.no_boot,
-			entry_module: opts.entry_module
+			boot: !opts.no_boot
 		)!;
 		return;
 	}
@@ -488,7 +473,7 @@ fn void? run(Options opts)
 
  @return ? SCRIPT_NOT_READABLE : `Only from --script: nothing at that path. A game directory that will not boot is reported and not raised.`
 *>
-fn void? boot_world(JsRuntime* runtime, String assets, String script, bool boot = true, String entry_module = "")
+fn void? boot_world(JsRuntime* runtime, String assets, String script, bool boot = true)
 {
 	if (assets.len > 0)
 	{
@@ -506,11 +491,8 @@ fn void? boot_world(JsRuntime* runtime, String assets, String script, bool boot 
 		}
 	}
 
-	// Before `--script` and after `--assets`, which is entry-point order: a module
-	// is a second `main.js` and a script is the probe that runs against what the
-	// two of them built.
-	if (entry_module.len > 0) boot_module(runtime, entry_module)!;
-
+	// After `--assets`, which is entry-point order: the script is the probe that
+	// runs against what `main.js` built.
 	if (script.len > 0) boot_script(runtime, script)!;
 }
 
@@ -545,17 +527,32 @@ fn bool wants_entry_module(String assets, String script)
 }
 
 <*
- Runs one `.js` file the way `run_script` runs one, before the first frame.
+ Runs one `.js` file as an ES module, before the first frame.
 
- A script and not a module, which is the whole difference from `--assets`: the
- source is wrapped in an async function, so top-level `await` and top-level
- `return` both work and `import` does not. That makes `--script examples/vfx.js`
- mean exactly what pasting the same file into `run_script` means. A program in
- several files is what `--assets` is for.
+ **A module, so `import` works.** It used to be wrapped in an async function —
+ the shape `run_script` still takes — and an `import` declaration inside a
+ function body is a syntax error before the engine has looked at anything else.
+ A module keeps what the wrapper was for, top-level `await`, and gives up
+ top-level `return`, which a file on a command line has nobody to return to. It
+ is strict mode, as every module is.
 
- For the same reason there is no assets root: a path the script hands to
- `three.load` is relative to where the process was started, as it is for an
- agent, rather than to wherever the script happens to live.
+ Two questions, answered separately. They used to be one — a second flag,
+ `--module`, made the file's directory the assets root — and the answer to the
+ first then quietly changed the second.
+
+ - **What `import` resolves against: the script's own directory.** A script
+   inside the `--assets` directory is part of the game and imports the way
+   `main.js` does: root-relative, the same module instances, `..` back up to the
+   root allowed. That is the two-stage pipeline, `--assets ./game --no-boot
+   --script ./game/bake.js` baking what `main.js` is waiting for out of the
+   modules it imports. Anywhere else the directory becomes `SCRIPT_SCHEME`, a
+   namespace of its own, so its imports neither reach into the game's root nor
+   get mistaken for files in it.
+ - **What a file path means: what it means without a script.** `three.load`,
+   `readJSON` and `screenshot` resolve against `--assets` when there is one and
+   are used as written when there is not — relative to where the process was
+   started, as they are for an agent. The script's directory is not a root for
+   them, so a tool kept in one project can read and write another's files.
 
  The frame policy is the game's, though. `game_frames` decides what happens when
  a callback runs long, and the choice is between stopping it for good and
@@ -571,18 +568,27 @@ fn bool wants_entry_module(String assets, String script)
 *>
 fn void? boot_script(JsRuntime* runtime, String path)
 {
+	if (!file::is_file(path)) return SCRIPT_NOT_READABLE~;
+
 	// The frame policy, before anything the script does can register a callback.
 	runtime.play_frames();
 
 	@pool()
 	{
-		if (!file::is_file(path)) return SCRIPT_NOT_READABLE~;
-		char[]? source = file::load_temp(path);
-		if (catch source) return SCRIPT_NOT_READABLE~;
+		String file = strip_dot(path);
+		String specifier = inside_root(runtime.modules.root, file);
+		if (specifier.len == 0)
+		{
+			// Its own directory, under the scheme. "/" for a file at the top of the
+			// disk and "." for one in the working directory: a root has to be a
+			// directory, and the empty string means there is none.
+			sz cut = last_separator(file);
+			String dir = cut > 0 ? file[:(usz)cut] : cut == 0 ? "/" : ".";
+			runtime.modules.set_scheme(SCRIPT_SCHEME, dir);
+			specifier = string::tformat("%s%s", SCRIPT_SCHEME, file[(usz)(cut + 1)..]);
+		}
 
-		// Named by the path it was given, so a stack trace says `vfx.js:412` and not
-		// `<script>:412`.
-		RunResult ran = runtime.run((String)source, path);
+		RunResult ran = runtime.run_module(specifier);
 		defer ran.free();
 
 		report_run(ran, path);
@@ -590,74 +596,25 @@ fn void? boot_script(JsRuntime* runtime, String path)
 }
 
 <*
- Runs one `.js` file as an ES module, before the first frame.
+ Where `file` sits inside the assets root, as a specifier that root resolves —
+ or empty when there is no root or the file is not in it.
 
- **The one thing `--script` cannot do.** A script is wrapped in an async function
- — that is what makes top-level `await` and top-level `return` work — and an
- `import` declaration inside a function body is a syntax error before the engine
- has looked at anything else. So `import` worked in `<dir>/main.js` and was a
- `SyntaxError` in the file beside it, and a two-stage pipeline had to be one
- self-contained file plus a module set that could not share a line with it.
-
- A module resolves its imports against a root, so this needs one:
-
- - with `--assets`, that directory, and the file has to be inside it. Which is the
-   arrangement that wanted this: `--assets ./game --no-boot --module ./game/bake.js`
-   bakes what `./game/main.js` is waiting for, out of the same modules it imports;
- - without it, the file's own directory becomes the root, on the same terms
-   `--assets` sets one — so `three.load` inside it is root-relative too. A module
-   with a root of nowhere could not import at all, and a directory is what one is.
-
- A module that throws is printed and carried on with, exactly as a game that fails
- to boot is.
-
- @return ? SCRIPT_NOT_READABLE : `Nothing at that path, it is a directory, or it lies outside the --assets root — a typo on the command line rather than something to debug in a running scene.`
+ Lexical, as the loader's own containment is: `./game/bake.js` is inside `game`,
+ and `/home/me/game/bake.js` is not inside `./game` even when it is the same file.
+ Such a script still runs, under `SCRIPT_SCHEME`; what it does not get is the
+ game's module instances.
 *>
-fn void? boot_module(JsRuntime* runtime, String path)
+fn String inside_root(String root, String file) @local
 {
-	if (!file::is_file(path)) return SCRIPT_NOT_READABLE~;
-
-	@pool()
+	if (root.len == 0) return "";
+	if (root == ".")
 	{
-		String file = strip_dot(path);
-		String root = runtime.modules.root;
-
-		if (root.len == 0)
-		{
-			// The file's own directory, which is the only root a lone module has. "."
-			// when the path names a file in the working directory, because a root has
-			// to be a directory and the empty string already means "there is none".
-			sz cut = last_separator(file);
-			runtime.set_assets_root(cut >= 0 ? file[:(usz)cut] : ".");
-			root = runtime.modules.root;
-		}
-
-		String specifier = file;
-		if (root != ".")
-		{
-			String prefix = string::tformat("%s/", strip_dot(root));
-			if (!file.starts_with(prefix))
-			{
-				io::printfn(
-					"three: --module %s is outside the --assets directory %s — a module resolves its imports against that root, so it has to be inside it",
-					path,
-					root
-				);
-				return SCRIPT_NOT_READABLE~;
-			}
-			specifier = file[prefix.len..];
-		}
-
-		// The frame policy, exactly as `boot_script` sets it: a run started from a
-		// command line is somebody watching a window, and one slow frame is not a
-		// reason to stop the animation for good.
-		runtime.play_frames();
-
-		RunResult ran = runtime.run_module(specifier);
-		defer ran.free();
-
-		report_run(ran, path);
-	};
+		bool climbs = file.starts_with("/") || file.starts_with("../");
+		return climbs ? "" : file;
+	}
+	String base = strip_dot(root);
+	String prefix = base.ends_with("/") ? base : string::tformat("%s/", base);
+	return file.starts_with(prefix) ? file[prefix.len..] : "";
 }
 
 <*
@@ -675,7 +632,7 @@ fn void report_run(RunResult ran, String what)
 	if (!ran.ok) io::printfn("three: %s did not run: %s", what, ran.error);
 }
 
-// A path with its `./` taken off, so that `--assets game` and `--module
+// A path with its `./` taken off, so that `--assets game` and `--script
 // ./game/bake.js` are the same two words either way round.
 fn String strip_dot(String path) @local
 {

@@ -9,10 +9,9 @@
  --width <n>           the window's size in points, or the render size headless
  --height <n>          the same, vertically
  --headless            no window, no surface, no swapchain
- --script <file.js>    boot one script, then keep the window running
+ --script <file.js>    evaluate one file as an ES module, then keep the window running
  --assets <dir>        boot a game: evaluate <dir>/main.js as a module
  --no-boot             with --assets, use the directory as a root and do not run main.js
- --module <file.js>    evaluate one file as an ES module, so `import` works
  --frames <n>          run n frames, then stop. Implies --headless
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
@@ -91,9 +90,6 @@ fn Options? parse_args(String[] args)
 				opts.script = args[++i];
 			case "--no-boot":
 				opts.no_boot = true;
-			case "--module":
-				if (i + 1 >= args.len) return MISSING_VALUE~;
-				opts.entry_module = args[++i];
 			case "--screenshot":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.screenshot = args[++i];
@@ -195,10 +191,9 @@ fn void usage()
 	io::printn("  --width <n>           the window's width, or the render width headless (1280)");
 	io::printn("  --height <n>          the window's height, or the render height headless (720)");
 	io::printn("  --headless            no window, no surface, no swapchain");
-	io::printn("  --script <file.js>    run one script, then keep the window running");
+	io::printn("  --script <file.js>    run one file as an ES module, then keep the window running");
 	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
 	io::printn("  --no-boot             with --assets: the root without the game — main.js is not run");
-	io::printn("  --module <file.js>    evaluate one file as an ES module, so import works in it");
 	io::printn("  --frames <n>          run n frames and stop — implies --headless");
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
@@ -211,7 +206,10 @@ fn void usage()
 	io::printn("");
 	io::printn("  --assets is also the root those paths resolve under, and the only directory");
 	io::printn("  a script may write in. It pairs with --script whether or not the directory");
-	io::printn("  has a main.js of its own to boot.");
+	io::printn("  has a main.js of its own to boot. Without it, paths are used as written.");
+	io::printn("");
+	io::printn("  A --script imports from its own directory; one inside --assets imports the");
+	io::printn("  way main.js does, and shares its modules.");
 	io::printn("");
 	// Said here rather than in the flag list because it is four things, and because
 	// this is where somebody goes when a run is misbehaving. Every build has it —
@@ -279,11 +277,7 @@ fn int main(String[] args) @feat(!ANDROID) // android_main is the entry there
 		// over a path the shell may well have expanded.
 		if (err == SCRIPT_NOT_READABLE)
 		{
-			// Whichever of the two named a file. `--module` reports its own sentence
-			// first when the file is readable and merely outside the root, so this is
-			// the typo case for both.
-			if (opts.script.len > 0) io::printfn("  --script %s: not a file this can read.", opts.script);
-			if (opts.entry_module.len > 0) io::printfn("  --module %s: not a file this can read.", opts.entry_module);
+			io::printfn("  --script %s: not a file this can read.", opts.script);
 			io::printn("  A directory is --assets, and it boots main.js as a module.");
 		}
 		// Two different ways of saying "the only driver here is MoltenVK": the

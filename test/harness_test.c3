@@ -75,25 +75,28 @@ fn void the_camera_override_is_carried_verbatim() @test
  to be rooted at a subdirectory with no `main.js` in it, which works and reads as
  a trick.
 
- `--no-boot` is the root without the game. `--module` is the other half: a file
- evaluated as an ES module, so `import` works in it, which the async wrapper
- `--script` puts around a file makes a syntax error.
+ `--no-boot` is the root without the game, and the baker is an ordinary
+ `--script`: one inside the assets directory imports the way `main.js` does —
+ see `boot_script`. `--module`, the second flag that used to be needed for
+ `import`, is gone, and is refused like any other unknown flag.
 *>
 fn void a_bake_can_run_under_the_game_root_without_booting_it() @test
 {
-	String[*] staged = { "three", "--assets", "./game", "--no-boot", "--module", "./game/bake.js" };
+	String[*] staged = { "three", "--assets", "./game", "--no-boot", "--script", "./game/bake.js" };
 	three::Options opts = three::parse_args(staged[..])!!;
 	test::@check(opts.assets == "./game", "the root is the game's, got '%s'", opts.assets);
 	test::@check(opts.no_boot, "and the game is not booted");
-	test::@check(opts.entry_module == "./game/bake.js", "the module is the baker, got '%s'", opts.entry_module);
-	test::@check(opts.script.len == 0, "which is not the same flag as --script");
+	test::@check(opts.script == "./game/bake.js", "the script is the baker, got '%s'", opts.script);
 
 	// The default, and the one that must not move: a run that says nothing boots
 	// what it always booted.
 	String[*] plain = { "three", "--assets", "./game" };
 	three::Options was = three::parse_args(plain[..])!!;
 	test::@check(!was.no_boot, "--assets alone still boots main.js");
-	test::@check(was.entry_module.len == 0, "and evaluates no module of its own");
+	test::@check(was.script.len == 0, "and runs no script of its own");
+
+	String[*] gone = { "three", "--module", "./game/bake.js" };
+	test::@check(@catch(three::parse_args(gone[..])), "--module is no longer a flag");
 }
 
 <*

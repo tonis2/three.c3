@@ -30,6 +30,10 @@
  input schema says so (`src/mcp/server.c3`), the one place this shape is visible
  from outside.
 
+ A *file* is the other shape. `--script` and `--assets` evaluate theirs as ES
+ modules (`run_module`), because a file is where `import` gets written and a file
+ on a command line has nobody to return a value to — see `boot_script`.
+
  ## The device gets to speak into the error too
 
  A validation error caused by the script is the script's error, even though
@@ -788,8 +792,8 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
  `three` reaches it as a global, which is why there is no import of it and no
  module named for it. See `js/modules.c3`.
 
- @param specifier : `Root-relative, and also what a stack trace calls it and what its own imports resolve against.`
- @require self.modules.root.len > 0 : "a module needs a root to resolve against"
+ @param specifier : `Root-relative or under SCRIPT_SCHEME, and also what a stack trace calls it and what its own imports resolve against.`
+ @require self.modules.root.len > 0 || specifier.starts_with(SCRIPT_SCHEME) : "a module needs a root to resolve against"
 *>
 fn RunResult JsRuntime.run_module(&self, String specifier)
 {

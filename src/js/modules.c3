@@ -29,6 +29,23 @@ module three;
 const String PRELUDE_SCHEME = "three:";
 
 <*
+ The specifier space a `--script` outside the assets directory lives in: its own
+ directory, under a prefix — see `boot_script`.
+
+ The loader's second namespace, which exists for a directory that is somebody's
+ code but not the game's. That is what a script beside the game is, and it is why
+ a namespace and not a second root: a root would make the script's directory the
+ place `three.load` reads from as well, and `import` is the only thing that should
+ change. Its imports resolve against it with the loader's rules — no `..` past
+ it — and a stack trace names it `script:view.js:12`.
+
+ `three.load("script:data.json")` reads beside the script too, because the
+ loader honours a scheme for reads; writing there is refused, as it is for any
+ scheme.
+*>
+const String SCRIPT_SCHEME = "script:";
+
+<*
  Installs the loader, before the prelude evaluates.
 
  The hooks are always in place because the prelude's own imports need them from

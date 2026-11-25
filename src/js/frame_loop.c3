@@ -193,7 +193,7 @@ fn void JsRuntime.complete_host_frame(&self, long elapsed_ns, long wait_ns = 0)
 
  The one switch `JS_GAME_FRAME_SOFT_MS` describes from the other side, and both
  boots that come off a command line throw it: `--assets` through
- `set_assets_root`, `--script` through `main.c3`'s `boot_script`. Everything a
+ `set_assets_root`, `--script` through `app/boot.c3`'s `boot_script`. Everything a
  server runs leaves it alone, which keeps a runaway `run_script` callback from
  wedging the tool surface.
 

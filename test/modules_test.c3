@@ -10,6 +10,8 @@ module three_tests::modules;
 
 import three;
 import fastjs::js;
+import std::io::file;
+import std::io::path;
 
 <*
  Resolve, or say what it faulted with. Both are one line at the call site, which
@@ -232,59 +234,88 @@ fn void no_boot_is_the_root_without_the_game() @test
 }
 
 <*
- `--module` is an entry point that may import, which `--script` cannot be.
+ A `--script` is a module, and imports from its own directory.
 
- A script is wrapped in an async function so top-level `await` and `return` work,
- and an `import` declaration inside a function body is a syntax error before the
- engine has looked at anything else. So `import` worked in `main.js` and was a
- `SyntaxError` in the file beside it.
-
- Twice, because the root is the whole of what a module needs: once inside an
- assets directory that is already set, and once with none — where the file's own
- directory becomes it, since a module with a root of nowhere could not import at
- all.
+ It used to be wrapped in an async function, which made an `import` declaration
+ a syntax error, and a second flag, `--module`, got round that by making the
+ file's directory the assets root — which also moved every path the file read.
+ So both halves are checked: the imports resolve beside the file, and a path is
+ still used as written, because no assets root came with them.
 *>
-fn void a_module_entry_point_imports_the_way_main_js_does() @test
-{
-	three::JsRuntime rooted;
-	rooted.open(null)!!;
-	defer rooted.close();
-	rooted.set_assets_root("test/fixtures/game");
-
-	three::boot_module(&rooted, "test/fixtures/game/main.js")!!;
-	three::RunResult read = rooted.run("return String(globalThis.__game.grid);");
-	defer read.free();
-	test::@check(read.value.contains("9"), "the module and its imports evaluated (%s)", read.value);
-
-	three::JsRuntime alone;
-	alone.open(null)!!;
-	defer alone.close();
-
-	three::boot_module(&alone, "test/fixtures/game/main.js")!!;
-	three::RunResult again = alone.run("return String(globalThis.__game.grid);");
-	defer again.free();
-	test::@check(again.value.contains("9"), "and its own directory is a root (%s)", again.value);
-}
-
-<*
- A `--module` outside the assets root is refused rather than silently rooted
- somewhere else.
-
- The root is what its imports resolve against, so a module outside it would
- resolve them against a directory it is not in — which finds nothing, or finds the
- wrong file, and says neither.
-*>
-fn void a_module_outside_the_root_is_refused() @test
+fn void a_script_imports_from_its_own_directory() @test
 {
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	runtime.set_assets_root("test/fixtures/game/parts");
 
-	test::@check(
-		@catch(three::boot_module(&runtime, "test/fixtures/game/main.js")),
-		"a module outside the assets root was accepted"
-	);
+	three::boot_script(&runtime, "test/fixtures/game/main.js")!!;
+	three::RunResult read = runtime.run("return String(globalThis.__game.grid);");
+	defer read.free();
+	test::@check(read.value.contains("9"), "the script and its imports evaluated (%s)", read.value);
+
+	test::@check(runtime.modules.root.len == 0, "it set no assets root (%s)", runtime.modules.root);
+	three::RunResult loaded = runtime.run("return String(three.readText('test/fixtures/game/parts/size.js') !== null);");
+	defer loaded.free();
+	test::@check(loaded.value.contains("true"), "so a path is read as written (%s)", loaded.value);
+}
+
+// Under `build/`, which is gitignored: a test may not write into the repo.
+const String TEST_SCRIPT_IMPORTS = "build/test-script-imports";
+
+<*
+ A script inside the assets directory is part of the game: it imports the way
+ `main.js` does and gets the same module instances. One outside it imports from
+ beside itself and may not climb into the game.
+
+ The first is the two-stage pipeline, `--assets ./game --no-boot --script
+ ./game/tools/bake.js`: a baker kept in a subdirectory reaches the game's modules
+ with `..`, which under a namespace of its own would be past its root, and a
+ second copy of a module would be a second copy of its state. The second is the
+ other side of the same line — the script's directory is its root for `import`,
+ and the game's is not reachable from it.
+*>
+fn void a_script_inside_the_game_imports_the_way_main_js_does() @test
+{
+	(void)path::rmtree((Path)TEST_SCRIPT_IMPORTS);
+	defer (void)path::rmtree((Path)TEST_SCRIPT_IMPORTS);
+	@pool()
+	{
+		path::mkdir((Path)string::tformat("%s/game/parts", TEST_SCRIPT_IMPORTS), recursive: true)!!;
+		path::mkdir((Path)string::tformat("%s/game/tools", TEST_SCRIPT_IMPORTS), recursive: true)!!;
+		path::mkdir((Path)string::tformat("%s/probe", TEST_SCRIPT_IMPORTS), recursive: true)!!;
+		String[2][*] files = {
+			{ "game/parts/count.js", "export const seen = { n: 0 };" },
+			{ "game/main.js", "import { seen } from './parts/count.js'; seen.n++;" },
+			{ "game/tools/bake.js", "import { seen } from '../parts/count.js'; seen.n++; globalThis.__seen = seen.n;" },
+			{ "probe/helper.js", "export default 'beside';" },
+			{ "probe/probe.js", "import word from './helper.js'; globalThis.__probe = word;" },
+			{ "probe/climb.js", "import { seen } from '../game/parts/count.js'; globalThis.__climbed = seen.n;" },
+		};
+		foreach (f : files) file::save(string::tformat("%s/%s", TEST_SCRIPT_IMPORTS, f[0]), f[1])!!;
+	};
+
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	runtime.set_assets_root("build/test-script-imports/game");
+	three::RunResult booted = runtime.run_module("main.js");
+	defer booted.free();
+	test::@check(booted.ok, "the game boots (%s)", booted.error);
+
+	three::boot_script(&runtime, "./build/test-script-imports/game/tools/bake.js")!!;
+	three::RunResult seen = runtime.run("return String(globalThis.__seen);");
+	defer seen.free();
+	test::@check(seen.value.contains("2"), "the baker climbed to the game's module and shares it (%s)", seen.value);
+
+	three::boot_script(&runtime, "build/test-script-imports/probe/probe.js")!!;
+	three::RunResult probe = runtime.run("return String(globalThis.__probe);");
+	defer probe.free();
+	test::@check(probe.value.contains("beside"), "a script outside the game imports beside itself (%s)", probe.value);
+
+	three::boot_script(&runtime, "build/test-script-imports/probe/climb.js")!!;
+	three::RunResult climbed = runtime.run("return typeof globalThis.__climbed;");
+	defer climbed.free();
+	test::@check(climbed.value.contains("undefined"), "and may not climb into the game (%s)", climbed.value);
 }
 
 <*

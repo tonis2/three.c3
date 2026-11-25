@@ -455,12 +455,11 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
  @param window : `Null when headless: the loop then only serves, and there is nothing to present.`
  @param port : `Zero to run without a listener, which is a game with no agent attached.`
  @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
- @param script : `One .js file, or empty. Run once, as a script, before the first frame — see boot_script.`
+ @param script : `One .js file, or empty. Evaluated once, as an ES module, before the first frame — see boot_script.`
  @param boot : `False for --no-boot: take the assets directory as a root and leave its main.js alone.`
- @param entry_module : `One .js file, or empty. Evaluated as an ES module before the first frame — see boot_module.`
  @param setup : `Called on the fresh runtime before anything is booted, and again after every reload — where an application that links these sources installs verbs of its own. Null for none.`
  @param memory_limit : `The JS heap's ceiling, as JsRuntime.open takes it.`
- @require port > 0 || assets.len > 0 || script.len > 0 || entry_module.len > 0 : "a loop that neither serves nor plays has nothing to do"
+ @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
 fn void? live(
 	Renderer* renderer,
@@ -473,7 +472,6 @@ fn void? live(
 	uint every = 0,
 	String camera = "",
 	bool boot = true,
-	String entry_module = "",
 	JsSetup setup = null,
 	usz memory_limit = JS_MEMORY_LIMIT
 )
@@ -492,7 +490,7 @@ fn void? live(
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
 	// attaches to should be the one `main.js` built.
-	boot_world(&runtime, assets, script, boot, entry_module)!;
+	boot_world(&runtime, assets, script, boot)!;
 
 	// The bounded run, which is how a game is checked without a person watching it
 	// — and the only path in this function that is not an endless loop. The ticks
@@ -656,7 +654,7 @@ fn void? live(
 		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
-			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, entry_module, setup, memory_limit)!;
+			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, setup, memory_limit)!;
 			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
 		}
 

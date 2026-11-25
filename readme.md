@@ -120,6 +120,9 @@ the engine lives in its own repo: [Tabletop Siege](https://github.com/tonis2/tab
 ./build/three --help                         # every flag
 ```
 
+A `--script` file is an ES module like `main.js`, so it can `import` the files beside it. The paths
+it loads and saves are relative to where three was started, or to `--assets` when one is given.
+
 ### Agents
 
 ```sh
