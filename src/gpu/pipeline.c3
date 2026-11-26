@@ -1061,10 +1061,14 @@ const uint SKIP_RECEIVER_PLANE     = 1024;
 // it: a log, divisions and a dependent read per fragment even where no light
 // reaches. A frame lit by the sun alone paid 0.9 ms of a 5.3 ms Quest frame for it.
 const uint SKIP_LIGHT_LOOP         = 2048;
-// The shaders' `LIGHTS_*`, `SURFACE_*` and `SHADOW_*` constants are `@spec(100)`
-// onwards, in the order of the bits above.
+// The vertex pose: morph targets and both skinning paths, for a mesh that has
+// neither. A bucket's, not a frame's, so a material has a variant with it and one
+// without (`LitPipeline`).
+const uint SKIP_POSE               = 4096;
+// The shaders' `LIGHTS_*`, `SURFACE_*`, `SHADOW_*` and `POSE_VERTICES` constants
+// are `@spec(100)` onwards, in the order of the bits above.
 const uint FEATURE_SPEC_ID = 100;
-const uint SHADER_FEATURES = 12;
+const uint SHADER_FEATURES = 13;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces
@@ -1663,7 +1667,11 @@ fn MeshPipeline? MeshPipeline.init(
 		.dataSize = kept.len * uint::size,
 		.pData = &kept[0],
 	};
-	if (state.skip_features != 0 || state.tone != LINEAR) stages[1].pSpecializationInfo = &lights;
+	if (state.skip_features != 0 || state.tone != LINEAR)
+	{
+		stages[0].pSpecializationInfo = &lights;
+		stages[1].pSpecializationInfo = &lights;
+	}
 
 	vk::Format color = state.color != FORMAT_UNDEFINED ? state.color : POST_CHAIN_FORMAT;
 	if (state.tone != LINEAR) color = TARGET_COLOR_FORMAT;
@@ -2463,7 +2471,7 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
 
  @param [&in] base : "A pipeline `acquire` handed out"
  @param tone : "What the variant writes"
- @require skip_features <= (SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE) : "Unknown feature bits"
+ @require (skip_features & ~(SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE | SKIP_POSE)) == 0 : "Unknown feature bits"
 
  @return "`base` itself when it already leaves out exactly those features and writes that tone"
 *>

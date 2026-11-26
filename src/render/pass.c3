@@ -1742,12 +1742,14 @@ fn void MeshPass.build_draw_records(&self, uint slot)
  unchanged. A twin exists only once a frame has asked for one, which is why a
  missing one falls back rather than faulting: the flag can only be read after
  `prepare` built them.
+
+ @param rigid : "The bucket's mesh has no skin and no morph targets, so it draws without the vertex pose"
 *>
-fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline)
+fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline, bool rigid = false)
 {
 	if (!self.area_reference || !self.reference_ready)
 	{
-		foreach (lit : self.lit_pipelines) if (lit.base == pipeline) return lit.lit;
+		foreach (lit : self.lit_pipelines) if (lit.base == pipeline) return rigid ? lit.rigid : lit.lit;
 		return pipeline;
 	}
 	if (pipeline == self.pipeline) return self.reference_pipeline;
@@ -1933,7 +1935,9 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		GpuMesh* mesh      = self.assets.mesh(bucket.asset, bucket.mesh);
 		Material* material = self.material(bucket.material);
 		if (mesh == null || material == null) continue;
-		MeshPipeline* pipeline = self.draw_pipeline(material.pipeline);
+		// Nothing for `pose_vertex` to do: no skin to blend and no target to morph by.
+		bool rigid = !mesh.has_skin && mesh.morph_targets == 0;
+		MeshPipeline* pipeline = self.draw_pipeline(material.pipeline, rigid);
 
 		if (pipeline.handle != bound)
 		{
@@ -2486,6 +2490,9 @@ struct LitPipeline
 {
 	MeshPipeline* base;
 	MeshPipeline* lit;
+	// `lit` without the vertex pose (`SKIP_POSE`), for a mesh with no skin and no
+	// morph targets.
+	MeshPipeline* rigid;
 }
 
 <*
@@ -2540,7 +2547,8 @@ fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 		// instruction, so it keeps early depth - see `SKIP_ALPHA_TEST`.
 		uint skip = variants ? self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST) : 0;
 		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip, self.scene_tone)!;
-		if (lit != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit });
+		MeshPipeline* rigid = variants ? self.pipelines.variant(gpu, target, material.pipeline, skip | SKIP_POSE, self.scene_tone)! : lit;
+		if (lit != material.pipeline || rigid != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit, rigid });
 	}
 }
 

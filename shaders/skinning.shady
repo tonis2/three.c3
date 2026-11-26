@@ -38,6 +38,11 @@ const uint FLAG_HAS_TANGENTS = 4096;
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
 
+// Off in the pipeline a mesh with no skin and no morph targets draws with
+// (`SKIP_POSE`), which then carries none of the morph loop or the joint blend.
+// The registers a vertex is given are set by its longest path, taken or not.
+const bool POSE_VERTICES @spec(112) = true;
+
 // One copy's `Instance`, read a field at a time. A plain struct rather than
 // the wire one: Adreno reads a whole scalar-layout struct as if it were std430,
 // so a copy of `Instance` comes back with its last fields shifted. The draw
@@ -130,6 +135,11 @@ fn void apply_morph(DrawRecord* draw, InstanceData instance, uint vid, inout flo
 // the mesh's own length does not slide across the surface when a character moves.
 fn void pose_vertex(DrawRecord* draw, InstanceData instance, uint vid, uint iid, inout float3 position, inout float3 normal, inout float3 tangent, out float3 local)
 {
+	if (!POSE_VERTICES)
+	{
+		local = position;
+		return;
+	}
 	apply_morph(draw, instance, vid, position, normal);
 	local = position;
 
