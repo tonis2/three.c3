@@ -13,6 +13,7 @@ node_modules
 # Plans are local notes, not part of the repo.
 plan.md
 gameplan.md
+vr_performance.md
 
 # Linker output
 *.ilk
