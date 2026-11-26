@@ -220,6 +220,34 @@ export const query = {
 		const ignored = fillIgnore(options?.ignore, `${where}: ignore`);
 		return hitObject(H.sweep(fx, fy, fz, tx, ty, tz, radius, half, ignoreScratch, ignored));
 	},
+
+	// The first thing an upright capsule centred at a point already overlaps, or
+	// null. `{ radius, height, ignore }` mean what they mean to `sweep`.
+	//
+	//     const solid = three.query.overlap([x, 0.9, z], { radius: 0.3, height: 1.8 });
+	//     if (solid?.object?.extras.water) tile.water = true;
+	//
+	// Exact, not a box test: a surface within the radius, or a collider proxy
+	// (an implicit shape or a convex hull) the capsule is wholly inside. A
+	// mesh collider is a surface and has no inside. A `sweep` from a point to
+	// itself sees the surface and not the inside, which is why this exists.
+	//
+	// The nearest surface is the answer; a solid only when no surface is in
+	// reach. `normal` is the way out and `point` is on that surface, and
+	// `distance` and `fraction` are 0. For every collider at a spot, call it
+	// again with what it found in `ignore`, up to eight.
+	overlap(centre, options = null) {
+		const where = 'three.query.overlap(centre, { radius, height, ignore })';
+		const [x, y, z] = readVector(centre, where);
+		const radius = +(options?.radius ?? 0.5);
+		if (!(Number.isFinite(radius) && radius > 0)) {
+			throw new RangeError(`${where} wants a positive radius, not ${options?.radius}`);
+		}
+		const height = +(options?.height ?? 0);
+		const half = Math.max((height - 2 * radius) * 0.5, 0);
+		const ignored = fillIgnore(options?.ignore, `${where}: ignore`);
+		return hitObject(H.overlap(x, y, z, radius, half, ignoreScratch, ignored));
+	},
 };
 
 // -----------------------------------------------------------------------

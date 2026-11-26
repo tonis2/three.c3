@@ -225,8 +225,9 @@ export class Object3D {
 
 	// **"Find me, but walk past me."** Off, the object is still raycast, picked
 	// and reported by `three.query.sphere`/`box`, but nothing sweeps against
-	// it: not `three.query.sweep`, not `moveAndSlide`, not `three.nav.bake`
-	// and not the sweep `three.nav.path` pulls its route tight with.
+	// it: not `three.query.sweep` or `overlap`, not `moveAndSlide`, not
+	// `three.nav.bake` and not the sweep `three.nav.path` pulls its route tight
+	// with.
 	//
 	// It is what a character wants. Left on, a character is a wall across
 	// every route through where it stands, and its own path from where it

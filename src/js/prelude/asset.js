@@ -667,6 +667,25 @@ export class Asset {
 		return this._nodeNames;
 	}
 
+	// The file's own glTF `extras` — the root object's, which says something
+	// about the file as a whole — as a plain object, `{}` when there are none.
+	// Every JSON value comes through as itself: a bool, a number, an array or a
+	// nested object.
+	//
+	//     const region = three.load('region.glb');
+	//     if (region.extras.version !== 3) throw new Error('re-export the region');
+	//
+	// Parsed on the first read and kept, for `nodes`' reason. A node's own extras
+	// are `object.extras` on the tree `instantiate` builds.
+	get extras() {
+		if (!this._extras) {
+			H.checkAsset(this._h);
+			const text = H.assetExtras(this._h);
+			this._extras = text ? JSON.parse(text) : {};
+		}
+		return this._extras;
+	}
+
 	// The file's `KHR_lights_punctual` lights, each placed in world space.
 	//
 	//     for (const l of asset.lights) console.log(l.name, l.type, l.intensity);
@@ -1009,6 +1028,9 @@ export class Asset {
 		// The name is what the tree is *called*, not which part of the file it is.
 		// `node(name)` is the one that picks — see it for why the two are separate.
 		root.name = name === undefined ? this.path.replace(/^.*[/\\]/, '') : String(name);
+		// The group stands for no glTF node and has nothing to carry, but a
+		// traverse that reads o.extras reaches it too.
+		root.extras = {};
 		this._carry(root, opt);
 		this._build(rows, -1, root, opt);
 		// After the tree, because both write the host's own camera and lights and
@@ -1457,7 +1479,7 @@ export class Asset {
 		for (let i = from < 0 ? 0 : from; i < rows.length; i++) {
 			const {
 				name: label, parent, owner, mesh, position: [px, py, pz], euler: [ex, ey, ez], scale: [sx, sy, sz],
-				quaternion: [qx, qy, qz, qw], gltfNode, color: [r, g, b, a], skin, collides, collisionOnly,
+				quaternion: [qx, qy, qz, qw], gltfNode, color: [r, g, b, a], skin, collides, collisionOnly, extras,
 			} = rows[i];
 			// A skinned mesh is a root of the walk wherever the file hangs it (see
 			// `Assets.flatten_node`), so a subtree takes it along by where it hangs:
@@ -1497,6 +1519,10 @@ export class Asset {
 			// found and `_materialize` sends nothing.
 			node._collides = collides;
 			node._collisionOnly = collisionOnly;
+			// The glTF node's `extras`, parsed here once per object rather than
+			// on each read. Its own object per node, so writing one copy's tags
+			// leaves the other copies' alone.
+			node.extras = extras ? JSON.parse(extras) : {};
 			// Only a copy an instanced node placed has anything but white
 			// here, and only a Mesh has anywhere to put it — a group's row
 			// carries the identity and setting it would define a channel on

@@ -381,6 +381,7 @@ fn int shape_proxy(
 
 	GpuMesh? built = assets.upload_geometry(gpu, shape_label(shape.type), &geometry);
 	if (catch built) return -1;
+	built.solid = true;
 
 	int at = (int)asset.meshes.len();
 	asset.meshes.push(built);
@@ -438,6 +439,7 @@ fn int hull_proxy(
 
 		GpuMesh? built = assets.upload_geometry(gpu, "convex hull collider", &geometry);
 		if (catch built) return -1;
+		built.solid = true;
 
 		at = (int)asset.meshes.len();
 		asset.meshes.push(built);

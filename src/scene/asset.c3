@@ -367,6 +367,11 @@ struct GpuMesh
 	Vec3[] hull_positions;
 	collision::Triangle[] hull_triangles;
 	collision::TriBVH* bvh;
+	// The triangles close a convex solid, wound outwards: a collider proxy, for an
+	// implicit shape or a convex hull. A point behind every face is inside it, which
+	// is how `Scene.overlap_capsule` finds a capsule no surface is near. Every
+	// other mesh is a surface with no inside.
+	bool solid;
 
 	// ---- Lazily uploaded ------------------------------------------------
 	// 
@@ -469,6 +474,10 @@ struct AssetNode
 
 	// Indices into `Asset.nodes`. Owned.
 	List{uint} children;
+
+	// The node's glTF `extras` — Blender's custom properties — as JSON text, or
+	// "" for none. Owned. Every entry `flatten` makes from this node carries it.
+	String extras;
 }
 
 <*
@@ -694,6 +703,10 @@ struct Asset
 	List{AssetBody} bodies;
 	List{AssetJoint} joints;
 	bool has_physics;
+
+	// The file's own glTF `extras` as JSON text, or "" for none — `asset.extras`.
+	// Owned.
+	String extras;
 
 	// How a generated shape was described, for the exporter and for nothing else.
 	// `Primitive.build` regenerates its positions, normals and uvs from these eight
@@ -924,6 +937,10 @@ struct PlacedNode
 	// Borrowed from the asset, valid until the asset is unloaded. Copy it if it
 	// needs to outlive the walk.
 	String name;
+	// The glTF node's `extras` as JSON text, "" for none, borrowed like `name`.
+	// A synthesized entry — a primitive, an instanced copy, a collider proxy —
+	// carries the extras of the node it came from.
+	String extras;
 
 	// Index into the flattened list, or -1 for a root.
 	int parent;
@@ -1465,6 +1482,7 @@ fn void free_asset_memory(Gpu* gpu, Asset* asset)
 	free_stream(asset);
 	if (asset.has_terrain) asset.terrain.heights.free();
 	if (asset.has_merged) asset.merged.free();
+	if (asset.extras.len > 0) asset.extras.free(mem);
 	if (asset.path.len > 0) asset.path.free(mem);
 }
 
@@ -1505,6 +1523,7 @@ fn void Assets.free_slot(&self, Gpu* gpu, uint index)
 	asset.merged = { };
 	asset.has_merged = false;
 	asset.path = "";
+	asset.extras = "";
 	asset.bounds = { };
 	asset.refs = 0;
 	asset.alive = false;
@@ -1711,6 +1730,7 @@ fn void Assets.flatten_node(
 	out.push(
 		{
 			.name = source.name,
+			.extras = source.extras,
 			.parent = skinned ? -1 : parent,
 			.owner = parent,
 			.mesh = draws_itself ? (int)source.first_mesh : -1,
@@ -1728,7 +1748,7 @@ fn void Assets.flatten_node(
 	// world transform, scale included, is what places it, which is exactly how
 	// `Gltf.collider_world_shape` composes one. An instanced node places one per
 	// copy instead; see below.
-	if (proxy >= 0 && !instanced) out.push(collider_proxy(body, proxy, here, { 0, 0, 0 }, NO_ROTATION, { 1, 1, 1 }));
+	if (proxy >= 0 && !instanced) out.push(collider_proxy(body, source, proxy, here, { 0, 0, 0 }, NO_ROTATION, { 1, 1, 1 }));
 
 	if (instanced)
 	{
@@ -1753,7 +1773,7 @@ fn void Assets.flatten_node(
 			}
 			// One proxy per copy, carrying the copy's own transform. The copies are
 			// siblings under the node group, so the proxy is too.
-			if (proxy >= 0) out.push(collider_proxy(body, proxy, here, copy.position, copy.rotation, copy.scale));
+			if (proxy >= 0) out.push(collider_proxy(body, source, proxy, here, copy.position, copy.rotation, copy.scale));
 		}
 	}
 	else if (!draws_itself)
@@ -1783,6 +1803,7 @@ fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int pare
 {
 	return {
 		.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
+		.extras = source.extras,
 		.parent = parent,
 		.owner = parent,
 		.mesh = (int)(source.first_mesh + i),
@@ -1804,10 +1825,11 @@ fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int pare
  seen. Without the flag a node that draws nothing is in no query at all, which
  is why a box collider had no way to exist here before.
 *>
-fn PlacedNode collider_proxy(AssetBody* body, int mesh, int parent, Vec3 position, Quaternionf rotation, Vec3 scale) @local
+fn PlacedNode collider_proxy(AssetBody* body, AssetNode* source, int mesh, int parent, Vec3 position, Quaternionf rotation, Vec3 scale) @local
 {
 	return {
 		.name = body.name,
+		.extras = source.extras,
 		.parent = parent,
 		.owner = parent,
 		.mesh = mesh,
@@ -2605,6 +2627,7 @@ fn Asset? read_asset(String path, TextureFamily family, bool ahead = false, int*
 
 	if (asset.meshes.len() == 0) return ASSET_HAS_NO_MESHES~;
 
+	if (asset.stream.gltf.extras_json.len > 0) asset.extras = asset.stream.gltf.extras_json.copy(mem);
 	record_skins(&asset, &asset.stream);
 	record_nodes(&asset, &asset.stream, mesh_first.array_view(), mesh_count.array_view());
 	record_lights(&asset, &asset.stream);
@@ -2799,6 +2822,7 @@ fn void record_nodes(Asset* asset, gltf::GltfStream* stream, uint[] mesh_first, 
 	{
 		AssetNode node = { .scale = { 1, 1, 1 }, .rotation = NO_ROTATION, .skin = -1, .body = -1 };
 		if (source.name.len > 0) node.name = source.name.copy(mem);
+		if (source.extras_json.len > 0) node.extras = source.extras_json.copy(mem);
 
 		decompose(source.local_matrix(), &node.position, &node.rotation, &node.scale);
 
@@ -3044,6 +3068,7 @@ fn void free_nodes(Asset* asset) @local
 	foreach (&node : asset.nodes)
 	{
 		if (node.name.len > 0) node.name.free(mem);
+		if (node.extras.len > 0) node.extras.free(mem);
 		node.children.free();
 		node.instances.free();
 	}

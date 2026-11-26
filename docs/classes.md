@@ -126,6 +126,7 @@ material is one draw call.
 - `scale`
 - `visible`
 - `name`
+- `extras` — on a mesh `instantiate`/`node` built, the glTF node's `extras` as a plain object, `{}` for none
 - `geometry`
 - `material`
 - `children`
@@ -136,7 +137,7 @@ material is one draw call.
 - `collides` — false takes it out of every spatial query — scenery, not a wall
 - `collisionOnly` — true puts it in every query and in no draw — a shape, not a picture
 - `blocks` — false keeps it in raycasts, picks and `query.sphere`/`box` and out of every sweep,
-  `moveAndSlide`, `nav.bake` and `nav.path` — a character, found by a click and walked past. Free to
+  `query.overlap`, `moveAndSlide`, `nav.bake` and `nav.path` — a character, found by a click and walked past. Free to
   toggle, and not inherited
 - `animations` — empty unless this is the root `asset.node()` returned, for a node that is a mesh
 - `animation` — the playhead, or null — see Group
@@ -1069,6 +1070,7 @@ if (hero.animation.name === 'land' && !hero.animation.playing) hero.play('idle',
 - `scale`
 - `visible`
 - `name`
+- `extras` — on a group `instantiate`/`node` built, the glTF node's `extras` as a plain object, `{}` for none
 - `children`
 - `parent`
 - `static` — this will not move again — see the static-casters topic
@@ -1450,6 +1452,7 @@ what the synchronous path costs. They reject if the asset is unloaded before the
 - `cameras` — the file's cameras, placed in world space. Read on demand
 - `colliders` — the file's `KHR_physics_rigid_bodies` blocks, node by node, in the file's own units. Read on demand
 - `physicsJoints` — the file's joints, each resolved to the two nodes it holds. Read on demand
+- `extras` — the file's own glTF `extras` as a plain object, `{}` for none. Every object a tree is built into carries its node's as `object.extras` — see `## node.extras` in `docs/functions.md`
 
 ### Methods
 

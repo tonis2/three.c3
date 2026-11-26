@@ -296,8 +296,9 @@ There is no `camera.position` to assign, and `yaw`/`pitch`/`distance` throw if a
 ## spatial-queries
 
 Bulk spatial queries go through an index rather than a scan: `three.query.sphere(point, radius)`,
-`three.query.box(box)`, `three.query.raycastAll(origin, direction)` and
-`three.query.sweep(from, to, { radius, height })`. `scene.raycast` goes through the same index.
+`three.query.box(box)`, `three.query.raycastAll(origin, direction)`,
+`three.query.sweep(from, to, { radius, height })` and `three.query.overlap(centre, { radius, height })`.
+`scene.raycast` goes through the same index.
 
 The index refreshes on the first query after anything moved and at no other time, so a frame that asks
 nothing pays nothing. Moving something and then asking about it is fine — a moved node is re-filed
@@ -310,7 +311,13 @@ for a click or a one-off; `three.query.sphere(p, r, buffer)` fills a `three.quer
 and answers with a count, which is right for the loop.
 
 `box` and `sphere` are broad phase — box against box — so a node whose box overlaps and whose triangles
-do not is included. `raycastAll` and `sweep` are exact.
+do not is included. `raycastAll`, `sweep` and `overlap` are exact.
+
+## gltf-extras
+
+A glTF node's `extras` — Blender's custom properties — are `object.extras` on the tree `instantiate` and
+`node` build, where Three.js's `GLTFLoader` puts them in `object.userData`. The file's own are
+`asset.extras`. Both are plain objects, `{}` when there are none.
 
 ## not-collision-geometry
 

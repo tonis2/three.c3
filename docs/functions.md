@@ -849,6 +849,39 @@ This is the same narrow phase `three.moveAndSlide` is built out of, so a wall th
 a character slides along cannot be two different walls. There is no orientation argument: everything
 this is for stands up.
 
+A sweep that starts touching a surface — `from` and `to` the same point included — reports it at
+`fraction` 0 when the motion pushes into it, or always for no motion. It measures distances to triangles,
+so a capsule wholly inside a collider, with no surface within its radius, comes back null. Ask
+`three.query.overlap` whether a point is clear.
+
+## three.query.overlap(centre, options)
+
+The first thing an upright capsule centred at a point already overlaps, or null — the narrow-phase
+answer to "is this spot free", where `three.query.sphere` is the box test.
+
+```js
+const probe = { radius: 0.3, height: 1.8 };
+const hit = three.query.overlap([x, 0.9, z], probe);
+if (hit?.object?.extras.water) tile.water = true;
+```
+
+`{ radius, height, ignore }` mean what they mean to `sweep`, and the hit has the same shape:
+`{ name, object, point, normal, distance, fraction }`, with `distance` and `fraction` 0. It looks at what
+a sweep looks at — the spatial index, minus `blocks = false` objects and the `ignore` subtrees — and it
+is exact for both kinds of collider:
+
+- **A surface within the radius of the capsule's axis**, triangle by triangle, the test `moveAndSlide`
+  pushes out by. That is all a mesh collider is, so a capsule inside a closed mesh with no face in
+  reach is clear of it. Touching counts.
+- **Inside a proxy**, when no surface is in reach. The proxy an implicit shape or a convex hull gets
+  from `instantiate({ physics: true })` is a closed convex solid, so a probe wholly inside a box
+  collider — a tile under a water volume — overlaps it.
+
+The nearest surface is the answer, and a proxy only when no surface is in reach. `normal` is the way
+out — from the surface towards the axis, or out through the proxy's nearest face — and `point` is on
+that surface. For every collider at one spot, call it again with what it found in `ignore`, up to
+eight.
+
 ## three.moveAndSlide(position, motion, options)
 
 The character controller. Sweeps a capsule from `position` by `motion`, slides along whatever it hits,
@@ -3004,6 +3037,43 @@ a `motion` and becomes a *dynamic* body in the solver, which for a level means t
 
 An object hidden in the view layer exports as `KHR_node_visibility` false, so give it no body either —
 otherwise the level has a wall nobody can see.
+
+## asset.extras
+
+The file's own glTF `extras` as a plain object, `{}` when there are none. Every JSON value comes through
+as itself — a string, a number, a bool, null, an array or a nested object.
+
+```js
+const region = three.load('region.glb');
+if (region.extras.version !== 3) throw new Error('re-export the region');
+```
+
+Read out of the JSON chunk on the first ask, and cached: the same object every time. This is the root
+`extras` object of the file. Blender's exporter writes a *scene's* custom properties on the glTF scene
+instead, which this does not read.
+
+## node.extras
+
+A glTF node's `extras` — its custom properties in Blender — on every object `instantiate`, `node` and
+their async forms build, as a plain object, `{}` when the node has none. Every JSON value comes through
+as itself.
+
+```js
+const region = three.load('region.glb');
+const root = region.instantiate('region', { physics: true });
+root.traverse((o) => {
+	if (o.extras.piece) markers.push({ piece: o.extras.piece, kind: o.extras.kind, at: o.position });
+	if (o.collisionOnly && o.extras.walk) walkable.push(o);
+});
+```
+
+Every object a node becomes carries that node's extras: the copies `EXT_mesh_gpu_instancing` places, the
+primitives of a mesh with several, and the collider proxies `{ physics: true }` adds. So the object
+`three.query.overlap` or `scene.raycast` reports names its tags. Each object has its own copy, parsed once
+when the tree is built — writing one copy's tags leaves the others alone. The group `instantiate` wraps
+the file in has `{}`; the file's own extras are `asset.extras`.
+
+Only the trees built from a file have it. It is not exported by `scene.export`.
 
 ## asset.colliders
 

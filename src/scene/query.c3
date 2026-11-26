@@ -1367,42 +1367,54 @@ fn void Scene.gather_triangles(
 
 	self.@each_in_box(assets, box ; NodeId id, collision::Aabb3 world)
 	{
-		if (!self.ignored(id, skip))
+		GpuMesh* mesh = self.swept_mesh(assets, id, skip);
+		if (mesh != null)
 		{
 			Node* node = self.node(id);
-			// `Node.blocks`: a character is found by a pick and walked past by a sweep.
-			if (node != null && node.blocks)
-			{
-				GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
-				if (mesh != null && mesh.bvh != null)
-				{
-					// The world box pulled back into the mesh's own space. An AABB
-					// through an inverse is conservative — the box around the
-					// transformed corners — which is what a tree query wants: too
-					// many triangles is a slower narrow phase and too few is a wall
-					// walked through.
-					Matrix4f inverse_world = invert(node.world);
-					collision::Aabb3 local = box.transform_matrix(inverse_world);
+			// The world box pulled back into the mesh's own space. An AABB
+			// through an inverse is conservative — the box around the
+			// transformed corners — which is what a tree query wants: too
+			// many triangles is a slower narrow phase and too few is a wall
+			// walked through.
+			Matrix4f inverse_world = invert(node.world);
+			collision::Aabb3 local = box.transform_matrix(inverse_world);
 
-					sz before = out.len();
-					mesh.bvh.@foreach_triangle(local; collision::TriangleVerts found) { out.push(found); };
-					for (sz i = before; i < out.len(); i++)
+			sz before = out.len();
+			mesh.bvh.@foreach_triangle(local; collision::TriangleVerts found) { out.push(found); };
+			for (sz i = before; i < out.len(); i++)
+			{
+				collision::TriangleVerts tri = out.get(i);
+				out.set(
+					i,
 					{
-						collision::TriangleVerts tri = out.get(i);
-						out.set(
-							i,
-							{
-								transform_point(node.world, tri[0]),
-								transform_point(node.world, tri[1]),
-								transform_point(node.world, tri[2]),
-							}
-						);
-						owners.push(id);
+						transform_point(node.world, tri[0]),
+						transform_point(node.world, tri[1]),
+						transform_point(node.world, tri[2]),
 					}
-				}
+				);
+				owners.push(id);
 			}
 		}
 	};
+}
+
+<*
+ The mesh a sweep tests a node's triangles from, or null when it tests none:
+ the node is in an ignored subtree, does not block, or draws nothing with a tree.
+
+ `Node.blocks` is the rule that matters: a character is found by a pick and
+ walked past by a sweep.
+
+ @param skip : `Nodes to leave out, subtrees included.`
+ @return `Borrowed from the asset table: valid until the next load.`
+*>
+fn GpuMesh* Scene.swept_mesh(&self, Assets* assets, NodeId id, IgnoreSet skip)
+{
+	if (self.ignored(id, skip)) return null;
+	Node* node = self.node(id);
+	if (node == null || !node.blocks) return null;
+	GpuMesh* mesh = assets.mesh(node.asset, node.mesh);
+	return mesh != null && mesh.bvh != null ? mesh : null;
 }
 
 <*
@@ -1653,4 +1665,163 @@ fn SweepHit Scene.sweep_capsule(
 		// Did not converge — see SWEEP_MAX_STEPS.
 		return miss;
 	};
+}
+
+<*
+ What an upright capsule centred at `centre` already overlaps, if anything.
+
+ A sweep cannot answer this. `sweep_capsule` from a point to itself does report a
+ surface within the radius, but it measures distances to triangles, so a capsule
+ wholly inside a box collider — a tile under a water volume, a probe inside a
+ ground slab — has nothing in reach and comes back clear.
+
+ So there are two ways to overlap, tested in this order:
+
+ - **A surface within the radius of the axis**, by the segment-to-triangle distance
+   `depenetrate_capsule` pushes out by, over the triangles `sweep_capsule` would
+   test: the same ignore set and the same `blocks` rule. Exact for every mesh, and
+   all a mesh collider has — a mesh is a surface with no inside. The nearest
+   triangle is the answer.
+ - **Inside a solid**, when no surface is in reach. A collider proxy (`GpuMesh.solid`)
+   is closed and convex, so the capsule is wholly in it exactly when its centre is
+   behind every face.
+
+ Touching counts: a capsule resting on a floor at exactly its radius overlaps it.
+
+ `fraction` and `distance` are zero, the start of a motion of none. `normal` is the
+ way out — from the surface towards the axis, or out through the solid's nearest
+ face — and `point` is on that surface. The capsule's shape is `sweep_capsule`'s.
+
+ @param skip : `Nodes to ignore, subtrees included. An empty set for none.`
+ @return `The hit, or one with hit false.`
+*>
+fn SweepHit Scene.overlap_capsule(
+	&self,
+	Assets* assets,
+	Vec3 centre,
+	float radius,
+	float half_height,
+	IgnoreSet skip = { }
+)
+{
+	SweepHit miss = { .hit = false, .fraction = 1.0f };
+	if (assets == null) return miss;
+
+	float r              = math::max(radius, 0.0f);
+	float half           = math::max(half_height, 0.0f);
+	Vec3 head            = centre + (Vec3) { 0, half, 0 };
+	Vec3 tail            = centre - (Vec3) { 0, half, 0 };
+	Vec3 reach           = { r, r + half, r };
+	collision::Aabb3 box = { centre - reach, centre + reach };
+
+	@pool()
+	{
+		List{collision::TriangleVerts} triangles;
+		List{NodeId} owners;
+		triangles.tinit(64);
+		owners.tinit(64);
+		self.gather_triangles(assets, box, skip, &triangles, &owners);
+
+		SegmentTriangle best = { .distance = float::max };
+		sz nearest;
+		foreach (i, tri : triangles)
+		{
+			SegmentTriangle pair = segment_triangle_closest(tail, head, tri);
+			if (pair.distance >= best.distance) continue;
+			best    = pair;
+			nearest = i;
+		}
+
+		if (best.distance <= r)
+		{
+			return {
+				.hit = true,
+				.node = owners[nearest],
+				.fraction = 0.0f,
+				.point = best.on_triangle,
+				.normal = way_out(best, triangles[nearest], centre),
+			};
+		}
+	};
+
+	SweepHit inside = miss;
+	self.@each_in_box(assets, box ; NodeId id, collision::Aabb3 world)
+	{
+		// The box test first: a solid's own bounds hold every point inside it.
+		if (!inside.hit && world.contains_point(centre))
+		{
+			GpuMesh* mesh = self.swept_mesh(assets, id, skip);
+			if (mesh != null && mesh.solid)
+			{
+				Vec3 point;
+				Vec3 normal;
+				if (solid_contains(self.node(id).world, mesh, centre, &point, &normal))
+				{
+					inside = { .hit = true, .node = id, .fraction = 0.0f, .point = point, .normal = normal };
+				}
+			}
+		}
+	};
+	return inside;
+}
+
+<*
+ Which way a capsule leaves a triangle it overlaps: from the closest point on the
+ triangle towards the axis.
+
+ When the axis passes through the face there is no such direction, and the face's
+ own normal is turned towards the centre — or up, for a centre on the plane, which
+ is `depenetrate_capsule`'s choice and the common way to be exactly on a face.
+*>
+fn Vec3 way_out(SegmentTriangle pair, collision::TriangleVerts tri, Vec3 centre) @local
+{
+	Vec3 push = pair.on_segment - pair.on_triangle;
+	float length = push.length();
+	if (length > 1e-6f) return push / length;
+
+	Vec3 normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+	float n = normal.length();
+	if (n <= 1e-9f) return { 0, 1, 0 };
+	normal /= n;
+	float side = normal.dot(centre - pair.on_triangle);
+	if (side < 0.0f || (side == 0.0f && normal.y < 0.0f)) normal = -normal;
+	return normal;
+}
+
+<*
+ Whether `point` is inside a solid mesh placed by `world`, and if it is, the
+ nearest point on its surface and the outward normal there.
+
+ Behind every face's plane is inside, for a closed convex mesh wound outwards. The
+ planes are taken in world space, so the nearest face is nearest in metres under
+ any scale; a mirroring transform winds every face the other way, and the
+ determinant's sign turns them back. A mesh that is only nearly convex — a capsule
+ whose caps differ — reads as outside in the crease, never as inside out of it.
+ Slivers with no area, such as a sphere's poles, have no plane and are skipped.
+
+ @param [&out] surface : "The nearest point on the surface"
+ @param [&out] normal : "The outward normal of the face it is on"
+ @return "Whether the point is inside"
+*>
+fn bool solid_contains(Matrix4f world, GpuMesh* mesh, Vec3 point, Vec3* surface, Vec3* normal) @local
+{
+	float sign    = world.determinant() < 0.0f ? -1.0f : 1.0f;
+	float nearest = -float::max;
+	foreach (triangle : mesh.hull_triangles)
+	{
+		collision::TriangleVerts local = triangle.verts(mesh.hull_positions);
+		Vec3 a     = transform_point(world, local[0]);
+		Vec3 face  = (transform_point(world, local[1]) - a).cross(transform_point(world, local[2]) - a) * sign;
+		float area = face.length();
+		if (area < 1e-12f) continue;
+
+		Vec3 outward = face / area;
+		float depth  = outward.dot(point - a);
+		if (depth > 0.0f) return false;
+		if (depth <= nearest) continue;
+		nearest  = depth;
+		*normal  = outward;
+		*surface = point - outward * depth;
+	}
+	return nearest > -float::max;
 }

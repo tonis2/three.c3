@@ -601,6 +601,57 @@ fn void a_clear_sweep_is_not_a_hit() @test
 }
 
 // ============================================================================
+// The overlap
+// ============================================================================
+
+<*
+ An overlap reports a wall the capsule reaches into and not one 5 cm beyond its
+ radius — sideways for a ball against a wall, and along the axis for a standing
+ capsule over a floor, whose half-height is what reaches down.
+
+ The point is on the face and the normal is the way out of it. A sweep from the
+ point to itself gives the same answer for a surface, at fraction 0; what it
+ cannot see is a capsule wholly inside a collider, which
+ `three_tests::extras::an_overlap_finds_the_collider_a_tile_is_inside` checks.
+*>
+fn void an_overlap_finds_a_wall_and_not_one_beyond_its_radius() @test
+{
+	@with_gpu_js(; three::JsRuntime* run)
+	{
+		String value = @value(run, `
+			const scene = new three.Scene();
+			const wall = new three.Mesh(new three.BoxGeometry(4, 4, 1));
+			wall.position.set(0, 0, 3);
+			wall.name = 'wall';
+			scene.add(wall);
+			const floor = new three.Mesh(new three.BoxGeometry(4, 1, 4));
+			floor.position.set(0, -0.5, -6);
+			floor.name = 'floor';
+			scene.add(floor);
+
+			// The wall's near face is z = 2.5 and the floor's top y = 0.
+			const ball = { radius: 0.4 };
+			const into = three.query.overlap([0, 0, 2.5 - 0.39], ball);
+			const clear = three.query.overlap([0, 0, 2.5 - 0.45], ball);
+			const still = three.query.sweep([0, 0, 2.5 - 0.39], [0, 0, 2.5 - 0.39], ball);
+			const stillClear = three.query.sweep([0, 0, 2.5 - 0.45], [0, 0, 2.5 - 0.45], ball);
+
+			const standing = { radius: 0.3, height: 1.8 };
+			const sunk = three.query.overlap([0, 0.89, -6], standing);
+			const above = three.query.overlap([0, 0.95, -6], standing);
+			return [
+				into?.name, +into.point.z.toFixed(3), +into.normal.z.toFixed(3), into.fraction, clear,
+				still?.name, still.fraction, stillClear,
+				sunk?.name, +sunk.normal.y.toFixed(3), above,
+			];
+		`, "the overlap script ran");
+
+		test::@check(value == `["wall",2.5,-1,0,null,"wall",0,null,"floor",1,null]`,
+			"a wall inside the radius and a floor under the capsule overlap, 5 cm off does not; got %s", value);
+	};
+}
+
+// ============================================================================
 // The character controller
 // ============================================================================
 

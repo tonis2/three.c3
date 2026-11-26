@@ -51,6 +51,7 @@ fn void? JsRuntime.bind_asset_verbs(&self, js::Value host)
 	self.js.@bind(host, "wireframe", &js_wireframe, self)!;
 	self.js.@bind(host, "checkAsset", &js_check_asset, self)!;
 	self.js.@bind(host, "assetPath", &js_asset_path, self)!;
+	self.js.@bind(host, "assetExtras", &js_asset_extras, self)!;
 	self.js.@bind(host, "meshNames", &js_mesh_names, self)!;
 	self.js.@bind(host, "meshBounds", &js_mesh_bounds, self)!;
 	self.js.@bind(host, "assetImages", &js_asset_images, self)!;
@@ -1444,6 +1445,9 @@ fn void js_check_asset(JsRuntime* self, AssetId id)
 
 fn String js_asset_path(JsRuntime* self, AssetId id) => self.pass.assets.slot(id).path;
 
+// `assetExtras(asset)` — the file's own glTF `extras` as JSON text, "" for none.
+fn String js_asset_extras(JsRuntime* self, AssetId id) => self.pass.assets.slot(id).extras;
+
 <*
  Every mesh in an asset, by name, in load order.
 
@@ -1987,6 +1991,9 @@ struct AssetNodeRecord
 	// the proxy an implicit shape got.
 	bool collides;
 	bool collision_only;
+	// The glTF node's `extras` as JSON text, "" for none. `_build` parses it into
+	// `object.extras`.
+	String extras;
 }
 
 <*
@@ -2037,6 +2044,7 @@ fn js::Value? js_asset_nodes(JsRuntime* self, AssetId id, bool skeleton, bool ph
 			.skin = entry.skin,
 			.collides = entry.collides,
 			.collision_only = entry.collision_only,
+			.extras = entry.extras,
 		};
 		self.js.push(nodes, self.js.@object_of(record)!);
 	}

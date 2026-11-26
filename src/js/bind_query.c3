@@ -24,6 +24,7 @@ fn void? JsRuntime.bind_query_verbs(&self, js::Value host)
 	self.js.@bind(host, "overlapSphere", &js_overlap_sphere, self)!;
 	self.js.@bind(host, "raycastAll", &js_raycast_all, self)!;
 	self.js.@bind(host, "sweep", &js_sweep, self)!;
+	self.js.@bind(host, "overlap", &js_overlap, self)!;
 	self.js.@bind(host, "moveAndSlide", &js_move_and_slide, self)!;
 	self.js.@bind(host, "moveAndSlideAll", &js_move_and_slide_all, self)!;
 	self.js.@bind(host, "setTransforms", &js_set_transforms, self)!;
@@ -213,6 +214,39 @@ fn js::Value? js_sweep(JsRuntime* self, Vec3 from, Vec3 to, float radius, float 
 		.name = node_name(self, hit.node),
 		.fraction = math::max(hit.fraction, 0.0f),
 		.distance = hit.distance,
+		.point = hit.point,
+		.normal = hit.normal,
+	};
+	return self.js.@object_of(answer);
+}
+
+<*
+ `overlap(x, y, z, radius, halfHeight, ignore, ignored)`: the first thing an
+ upright capsule centred there already overlaps, or null. The arguments and the
+ answer are `sweep`'s, with no motion; see `Scene.overlap_capsule`.
+
+ @return? js::THREW
+*>
+fn js::Value? js_overlap(JsRuntime* self, Vec3 centre, float radius, float half, int[] ignore, int ignored)
+{
+	if (!(radius > 0.0f))
+	{
+		return self.js.fail("three.query.overlap wants a positive radius")~;
+	}
+
+	SweepHit hit = self.pass.scene.overlap_capsule(
+		&self.pass.assets,
+		centre,
+		radius,
+		half,
+		ignore_set(self, ignore, ignored)
+	);
+	if (!hit.hit) return js::NULL;
+	QuerySweepHit answer = {
+		.node = hit.node,
+		.name = node_name(self, hit.node),
+		.fraction = 0.0f,
+		.distance = 0.0f,
 		.point = hit.point,
 		.normal = hit.normal,
 	};
