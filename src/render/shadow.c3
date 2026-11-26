@@ -888,6 +888,11 @@ fn void? ShadowMap.build_cutout_pipeline(&self, Gpu* gpu)
  - It may never be worse than fitting the whole scene. A camera that can see
  everything has a focus box that *is* the scene, and its diagonal is 1.7 times
  the box — so the square is capped at the scene's own light-space extent.
+ - It is centred on what the focus and the scene share, not on the focus. A
+ focus hanging off the scene's edge — a headset's rig standing beside the table
+ it looks at — would otherwise centre the square out past that edge, and with
+ the extent capped at the scene's size the far side of the scene would fall
+ outside the map and lose its shadows.
 
  The depth range still comes from `bounds`, not from `focus`: a caster standing
  between the light and the visible region is outside the focus box and its shadow
@@ -994,6 +999,15 @@ fn void ShadowMap.fit(
 		// half is what a caller that hands over a plain box still gets.
 		extent = (focus.max - focus.min).length();
 	}
+	// Only where the focus and the scene overlap needs texels: see the header's
+	// last point. The square is at least as big as this overlap in both cases
+	// above, so centring on it covers it. A focus that misses the scene altogether
+	// has nothing to say, and the scene is fitted instead.
+	lit.min.x = math::max(lit.min.x, box.min.x);
+	lit.min.y = math::max(lit.min.y, box.min.y);
+	lit.max.x = math::min(lit.max.x, box.max.x);
+	lit.max.y = math::min(lit.max.y, box.max.y);
+	if (lit.min.x > lit.max.x || lit.min.y > lit.max.y) lit = box;
 	// The slack is applied before the cap, so a scene the camera can see all of is
 	// fitted to the scene either way and pays nothing for hysteresis it cannot use.
 	if (stable) extent *= SHADOW_FIT_SLACK;

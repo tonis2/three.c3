@@ -1407,6 +1407,55 @@ fn void the_pass_is_charged_to_its_own_phase() @test
 
 
 <*
+ A focus that hangs off the scene's edge still gets the whole scene's shadows.
+
+ The headset's case: the rig — the camera's target — stands on the floor beside
+ the table the player looks at, so `prepare_shadow_manager` clamps the sphere's
+ centre to the near edge of the scene, and the sphere is far bigger than the
+ table map. The fit used to cap the square at the scene's size but centre it on
+ that edge point, and the far half of the map fell outside it: trees in plain
+ view with no shadow, changing as the map moved.
+
+ So every corner of the scene must land inside the map, for the sphere and for
+ the box shape of the focus, held or not.
+*>
+fn void a_focus_off_the_scenes_edge_still_covers_the_scene() @test
+{
+	float[4] light = { 0.35, 0.80, 0.45, 0 };
+	// A 1:29 map on a table 2 m from the tracking origin.
+	collision::Aabb3 bounds = { .min = { 1.0, 0.7, 1.5 }, .max = { 3.2, 0.95, 3.7 } };
+	Vec3 rig = { 0, 0, 0 };
+	Vec3 centre = math::min(math::max(rig, bounds.min), bounds.max);
+	float radius = 5.7;
+	collision::Aabb3 focus = { .min = centre - (Vec3){ radius, radius, radius }, .max = centre + (Vec3){ radius, radius, radius } };
+
+	foreach (sphere : (bool[]){ true, false })
+	{
+		foreach (stable : (bool[]){ false, true })
+		{
+			three::ShadowMap shadows;
+			shadows.defaults();
+			shadows.size = 1024;
+			shadows.fit(light, bounds, focus, stable: stable, focus_radius: sphere ? radius : 0);
+			for (uint corner = 0; corner < 8; corner++)
+			{
+				Vec3 point = {
+					(corner & 1) != 0 ? bounds.max.x : bounds.min.x,
+					(corner & 2) != 0 ? bounds.max.y : bounds.min.y,
+					(corner & 4) != 0 ? bounds.max.z : bounds.min.z,
+				};
+				float[4] clip = project(shadows.light_view_projection, point);
+				test::@check(
+					clip[0] >= -1.0001f && clip[0] <= 1.0001f && clip[1] >= -1.0001f && clip[1] <= 1.0001f,
+					"sphere %s, stable %s: scene corner %d is at x %f y %f, outside the map",
+					sphere, stable, corner, clip[0], clip[1]
+				);
+			}
+		}
+	}
+}
+
+<*
  A focus box narrows the fit onto it, and the depth range still reaches the
  casters outside it.
 
