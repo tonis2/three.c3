@@ -588,6 +588,161 @@ fn void a_generated_chain_maps_its_base() @test
 }
 
 // ============================================================================
+// ASTC, for a GPU without BC7
+// ============================================================================
+
+// VkFormat ASTC_4x4_UNORM_BLOCK, spelled out for the reason `format` is.
+const uint ASTC_4X4_UNORM = 157;
+
+fn char[] detailed(uint side)
+{
+	char[] rgba = mem::new_array(char, (sz)side * side * 4);
+	for (uint y = 0; y < side; y++)
+	{
+		for (uint x = 0; x < side; x++)
+		{
+			sz at = ((sz)y * side + x) * 4;
+			rgba[at + 0] = (char)(x * 8 + y);
+			rgba[at + 1] = (char)(255 - y * 7);
+			rgba[at + 2] = (char)((x * y) & 0xff);
+			rgba[at + 3] = (char)(x + y < side ? 0xff : 0x40);
+		}
+	}
+	return rgba;
+}
+
+fn char[] uastc_blob(uint side, bool mipmaps)
+{
+	char[] source = detailed(side);
+	defer free(source);
+	char[][1] images = { source };
+	return basis::encode(
+		mem, basis::UASTC_4X4, images[..], side, side, basis::TexType.D2,
+		{ .quality = 90, .effort = 4, .srgb = true, .mipmaps = mipmaps }
+	)!!;
+}
+
+<*
+ UASTC becomes ASTC 4x4 on a device without BC7, every level, as the library's
+ mapper writes it.
+
+ What the blocks decode to is the library's business — `ktx.c3l`'s
+ `test/astc-validate.sh` holds the mapper to Arm's decoder, pixel for pixel —
+ so this checks the route: ASTC asked for, ASTC's mapper ran, at ASTC's sizes.
+*>
+fn void a_uastc_texture_becomes_astc() @test
+{
+	const uint SIDE = 32;
+	char[] blob = uastc_blob(SIDE, true);
+	defer free(blob);
+
+	three::TextureFormat astc = { three::TextureFamily.ASTC4, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, astc)!!;
+	defer made.free();
+	test::@check(made.format.equals(astc), "the blocks are not ASTC 4x4");
+
+	basis::Transcoded[] want = basis::transcode_levels(mem, blob, 0, 0, basis::TF_ASTC_4X4_RGBA, 1)!!;
+	defer
+	{
+		foreach (level : want) free(level.data);
+		free(want.ptr);
+	}
+
+	uint chain = three::mip_levels(SIDE, SIDE);
+	test::@check(made.levels.len == chain, "the file's %d levels became %d", chain, (int)made.levels.len);
+	for (uint level = 0; level < chain; level++)
+	{
+		uint side = three::level_extent(SIDE, level);
+		test::@check(made.levels[level].len == astc.image_size(side, side),
+			"level %d is %d bytes, not an ASTC %dx%d's %d",
+			level, (int)made.levels[level].len, side, side, (int)astc.image_size(side, side));
+		test::@check(made.levels[level] == want[level].data, "level %d is not the mapper's", level);
+	}
+}
+
+<*
+ A UASTC file with no chain gets an ASTC one: its own base mapped, the levels
+ below it encoded to UASTC and mapped, since there is no ASTC encoder.
+*>
+fn void a_chainless_uastc_texture_gets_an_astc_chain() @test
+{
+	const uint SIDE = 16;
+	char[] blob = uastc_blob(SIDE, false);
+	defer free(blob);
+	test::@check(basis::info(blob)!!.levels == 1, "the fixture already has a chain, so this asserts nothing");
+
+	three::TextureFormat astc = { three::TextureFamily.ASTC4, three::ColorSpace.LINEAR };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, astc)!!;
+	defer made.free();
+
+	basis::Transcoded base = basis::transcode(mem, blob, 0, 0, 0, basis::TF_ASTC_4X4_RGBA, 16)!!;
+	defer free(base.data);
+	test::@check(made.levels[0] == base.data, "level 0 is not the file's own blocks, mapped");
+
+	test::@check(made.levels.len == three::mip_levels(SIDE, SIDE),
+		"a one-level file gave %d levels, not the full %d", (int)made.levels.len, three::mip_levels(SIDE, SIDE));
+	for (uint level = 1; level < made.levels.len; level++)
+	{
+		uint side = three::level_extent(SIDE, level);
+		test::@check(made.levels[level].len == astc.image_size(side, side),
+			"generated level %d is %d bytes, not an ASTC %dx%d's %d",
+			level, (int)made.levels[level].len, side, side, (int)astc.image_size(side, side));
+	}
+}
+
+<* ETC1S has no ASTC mapping, so an ASTC device leaves it to the RGBA8 path. *>
+fn void an_etc1s_texture_is_not_made_astc() @test
+{
+	char[] source = quadrants();
+	defer free(source);
+	char[][1] images = { source };
+	char[] blob = basis::encode(
+		mem, basis::ETC1S, images[..], SIZE, SIZE, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = true }
+	)!!;
+	defer free(blob);
+
+	three::TextureFormat astc = { three::TextureFamily.ASTC4, three::ColorSpace.SRGB };
+	test::@check(@catch(three::transcode_ktx2_blocks(blob, astc)) == three::UNSUPPORTED_IMAGE,
+		"an ETC1S file was turned into ASTC");
+	test::@check(!three::is_uastc_ktx2(blob), "ETC1S read as UASTC");
+}
+
+<* A KTX2 already holding ASTC 4x4 lends its blocks, as a BC7 one does. *>
+fn void an_astc_texture_lends_its_blocks() @test
+{
+	const uint SIDE = 32;
+	char[] blob = uastc_blob(SIDE, true);
+	defer free(blob);
+	basis::Transcoded[] levels = basis::transcode_levels(mem, blob, 0, 0, basis::TF_ASTC_4X4_RGBA, 1)!!;
+	defer
+	{
+		foreach (level : levels) free(level.data);
+		free(levels.ptr);
+	}
+
+	container::Texture tex = container::create(mem, {
+		.vk_format = ASTC_4X4_UNORM,
+		.width = SIDE,
+		.height = SIDE,
+		.level_count = (uint)levels.len,
+	})!!;
+	defer tex.free();
+	foreach (l, level : levels) tex.set_image((uint)l, 0, 0, level.data)!!;
+	char[] file = container::write(mem, &tex, { .scheme = container::Scheme.ZSTD })!!;
+	defer free(file);
+
+	three::BlockImage kept = three::decode_ktx2_blocks(file, three::ColorSpace.LINEAR)!!;
+	defer kept.free();
+	test::@check(kept.format.family == three::TextureFamily.ASTC4, "an ASTC file was not read as ASTC");
+	test::@check(kept.levels.len == levels.len, "%d levels became %d", (int)levels.len, (int)kept.levels.len);
+	foreach (l, level : levels)
+	{
+		test::@check(kept.levels[l] == level.data, "level %d is not the file's blocks", l);
+	}
+}
+
+// ============================================================================
 // Getting there
 // ============================================================================
 

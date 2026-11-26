@@ -2096,8 +2096,8 @@ fn int transcode_shard(void* arg) @local
 }
 
 <*
- Every Basis image in the file, transcoded to BC7 at once, before any material
- asks for one.
+ Every Basis image in the file, transcoded to BC7 (or ASTC 4x4) at once, before
+ any material asks for one.
 
  **The load was one image at a time.** `decode_material_texture` reaches
  `transcode_ktx2_blocks` when a mesh is uploaded, so `evil_forest.glb`'s
@@ -2162,12 +2162,12 @@ fn int transcode_shard(void* arg) @local
  Only images a `texture` names are transcoded. An image nothing points at is
  dead weight in the file and would be dead weight here.
 
- @param bc7 : `may_pretranscode's answer. The device decides, and is asked on the main thread so this can run on a worker.`
+ @param family : `basis_family's answer. The device decides, and is asked on the main thread so this can run on a worker.`
 *>
-fn void pretranscode_basis_images(Asset* asset, bool bc7) @local
+fn void pretranscode_basis_images(Asset* asset, TextureFamily family) @local
 {
-	if (!bc7) return;
-	TextureFormat target = { TextureFamily.BC7, ColorSpace.SRGB };
+	if (family == TextureFamily.RGBA8) return;
+	TextureFormat target = { family, ColorSpace.SRGB };
 
 	sz image_count = (sz)asset.stream.gltf.images.len();
 	if (image_count == 0 || asset.stream.gltf.textures.len() == 0) return;
@@ -2189,6 +2189,8 @@ fn void pretranscode_basis_images(Asset* asset, bool bc7) @local
 		char[]? encoded = asset.stream.get_image_data((uint)index);
 		if (catch encoded) continue;
 		if (!is_basis_ktx2(encoded)) continue;
+		// ETC1S has no ASTC mapping, so on such a device it takes the RGBA8 path.
+		if (family == TextureFamily.ASTC4 && !is_uastc_ktx2(encoded)) continue;
 		slots.push({
 			.encoded = encoded,
 			.image = (int)index,
@@ -2301,12 +2303,12 @@ fn void pretranscode_basis_images(Asset* asset, bool bc7) @local
 		int levels = (int)slot.blocks.levels.len;
 		if (slot.generated)
 		{
-			@debug_log("basis: %dx%d, level 0 mapped and %d levels encoded to BC7 in %d ms (no chain in the file)",
-				slot.blocks.width, slot.blocks.height, levels - 1, slot.ms);
+			@debug_log("basis: %dx%d, level 0 mapped and %d levels encoded to %s in %d ms (no chain in the file)",
+				slot.blocks.width, slot.blocks.height, levels - 1, block_family_name(family), slot.ms);
 			continue;
 		}
-		@debug_log("basis: %dx%d, %d levels mapped to BC7 in %d ms",
-			slot.blocks.width, slot.blocks.height, levels, slot.ms);
+		@debug_log("basis: %dx%d, %d levels mapped to %s in %d ms",
+			slot.blocks.width, slot.blocks.height, levels, block_family_name(family), slot.ms);
 	}
 	if (made_chain > 0)
 	{
@@ -2426,7 +2428,7 @@ fn AssetId? Assets.load(&self, Gpu* gpu, String path)
 	AssetId loaded = self.find_loaded(path);
 	if (loaded.is_set()) return loaded;
 
-	return self.adopt(gpu, read_asset(path, may_pretranscode(gpu))!);
+	return self.adopt(gpu, read_asset(path, basis_family(gpu))!);
 }
 
 <*
@@ -2464,18 +2466,19 @@ fn AssetId Assets.adopt(&self, Gpu* gpu, Asset asset)
 }
 
 <*
- Whether the pre-pass may transcode Basis images to BC7 on this device.
+ What a Basis image becomes on this device: BC7 on desktop, ASTC 4x4 on a mobile
+ GPU, which samples no BC format, and RGBA8 on one with neither.
 
- Asked on the main thread and handed to `read_asset` as a bool, so a worker
- never reaches for the device.
+ Asked on the main thread and handed to `read_asset`, so a worker never reaches
+ for the device. `claim_blocks_if_possible` asks it too, so the pre-pass and the
+ claim cannot pick different targets.
 *>
-fn bool may_pretranscode(Gpu* gpu)
+fn TextureFamily basis_family(Gpu* gpu)
 {
-	if (gpu == null) return false;
-	// Without BC7 every one of these images takes the RGBA8 path, exactly as
-	// `claim_blocks_if_possible` decides, and a transcode would be work nothing
-	// collects.
-	return gpu.supports({ TextureFamily.BC7, ColorSpace.SRGB });
+	if (gpu == null) return TextureFamily.RGBA8;
+	if (gpu.supports({ TextureFamily.BC7, ColorSpace.SRGB })) return TextureFamily.BC7;
+	if (gpu.supports({ TextureFamily.ASTC4, ColorSpace.SRGB })) return TextureFamily.ASTC4;
+	return TextureFamily.RGBA8;
 }
 
 <*
@@ -2505,12 +2508,12 @@ fn bool stop_asked(int* cancelled) @local @inline => cancelled != null && @atomi
  Touches nothing on `Assets` and nothing on the device, which is what lets
  `three.loadAsync` run it on a worker thread — `scene/asset_load.c3`.
 
- @param bc7 : `may_pretranscode's answer for the device the asset is for.`
+ @param family : `basis_family's answer for the device the asset is for.`
  @param ahead : `Read the mapped buffers in here too — see read_ahead.`
  @param cancelled : `Polled between steps; non-zero stops the load with ASSET_LOAD_CANCELLED. Null for a load that cannot be stopped.`
  @return? ASSET_HAS_NO_MESHES, ASSET_LOAD_CANCELLED, gltf::open!
 *>
-fn Asset? read_asset(String path, bool bc7, bool ahead = false, int* cancelled = null)
+fn Asset? read_asset(String path, TextureFamily family, bool ahead = false, int* cancelled = null)
 {
 	// Opened before anything is allocated, because a `defer catch` covers the
 	// statements below it and not the one that registers it. A path copied
@@ -2554,7 +2557,7 @@ fn Asset? read_asset(String path, bool bc7, bool ahead = false, int* cancelled =
 	// After the mesh check because a file with nothing to draw has nothing to
 	// draw with either, and before the primitive walk because the walk is where
 	// the first upload could otherwise reach the transcoder one image at a time.
-	pretranscode_basis_images(&asset, bc7);
+	pretranscode_basis_images(&asset, family);
 
 	// The last place a stop is honoured: past here the meshes own names, which
 	// the cleanup above does not free, and the rest is quick anyway.
@@ -5074,14 +5077,16 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 
  ## Two kinds of KTX2, two routes, one answer
 
- A file already holding BCn lends its blocks and nothing is encoded. A Basis one
- — `KHR_texture_basisu`, ETC1S or UASTC — holds a format no device samples, so
- its levels are transcoded to BC7 here: a quarter of the RGBA8 the decoder would
- have produced, with the file's own mip chain rather than a generated one.
+ A file already holding BCn or ASTC lends its blocks and nothing is encoded. A
+ Basis one — `KHR_texture_basisu`, ETC1S or UASTC — holds a format no device
+ samples, so its levels are transcoded here, to BC7 or on a mobile GPU to ASTC
+ 4x4: a quarter of the RGBA8 the decoder would have produced, with the file's
+ own mip chain rather than a generated one.
 
- **The device decides which.** `supports` is asked before the transcode and not
- after, because the fallback is a decode that has not happened yet — hardware
- without BC7 gets the RGBA8 it always got, and pays nothing for the question.
+ **The device decides which.** `basis_family` is asked before the transcode and
+ not after, because the fallback is a decode that has not happened yet —
+ hardware with neither, or an ETC1S file on an ASTC device, gets the RGBA8 it
+ always got, and pays nothing for the question.
 
  @param images : `The file's image cache, when this is a glTF's own image. Null for a path a script named, which has no pre-pass behind it.`
  @param image_index : `Which of the file's images these bytes are, so the pre-pass's answer can be found. -1 for anything else.`
@@ -5108,8 +5113,8 @@ fn int? Assets.claim_blocks_if_possible(
 	BlockImage blocks;
 	if (is_basis_ktx2(encoded))
 	{
-		TextureFormat target = { TextureFamily.BC7, space };
-		if (!gpu.supports(target)) return UNSUPPORTED_IMAGE~;
+		TextureFormat target = { basis_family(gpu), space };
+		if (target.family == TextureFamily.RGBA8) return UNSUPPORTED_IMAGE~;
 		// The load's pre-pass has almost always been here first, and taking its
 		// answer is the whole saving: sixty-one images transcoded across the
 		// cores at load rather than one at a time as the meshes are uploaded.

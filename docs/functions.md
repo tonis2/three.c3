@@ -3343,11 +3343,15 @@ A KTX2 may hold Basis (ETC1S or UASTC, which is what KHR_texture_basisu means) o
 compressed or not, and a `.glb` whose textures are KTX2 loads with them. The format comes from the file's first
 bytes rather than its name.
 
-It reaches the device as blocks wherever it can. A BCn file lends its own, untouched. A Basis one is transcoded
-to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8. No device
-samples ETC1S or UASTC, but both are BC7's own shape, so the transcode rewrites each block as a BC7 block instead
-of decoding and re-encoding: a 1024x1024 image with its eleven levels is tens of milliseconds. Anything else, and
-any device that cannot sample BC7, arrives as RGBA8 with a chain built on the device.
+It reaches the device as blocks wherever it can. A BCn or ASTC file lends its own, untouched. A Basis one is
+transcoded to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8.
+No device samples ETC1S or UASTC, but both are BC7's own shape, so the transcode rewrites each block as a BC7
+block instead of decoding and re-encoding: a 1024x1024 image with its eleven levels is tens of milliseconds.
+
+A mobile GPU — the Quest's among them — samples no BC format, and there a UASTC image becomes ASTC 4x4 instead:
+a UASTC block is an ASTC block in another layout, so that rewrite is lossless and costs the same byte a texel.
+So UASTC is the format for a texture that ships to both. ETC1S has no ASTC mapping. It, anything else, and any
+device that can sample neither arrives as RGBA8 with a chain built on the device.
 
 One image at a time is what a path costs. A `.glb`'s own images are not: `three.load` transcodes every one the
 file names at once, across every core, before any material asks for one, which is what keeps a scene of sixty of
