@@ -30,9 +30,9 @@
  input schema says so (`src/mcp/server.c3`), the one place this shape is visible
  from outside.
 
- A *file* is the other shape. `--script` and `--assets` evaluate theirs as ES
- modules (`run_module`), because a file is where `import` gets written and a file
- on a command line has nobody to return a value to — see `boot_script`.
+ A *file* is the other shape. `--script` evaluates its files as ES modules
+ (`run_module`), because a file is where `import` gets written and a file on a
+ command line has nobody to return a value to — see `boot_world`.
 
  ## The device gets to speak into the error too
 
@@ -382,8 +382,8 @@ struct JsRuntime
 	DString frame_debug;
 	long frame_debug_dropped;
 	DString frame_error;
-	// The game frame policy, set by `--assets` through `set_assets_root`: a game
-	// is warned and counted where an agent is stopped.
+	// The game frame policy, set by a `--script` boot through `play_frames`: a
+	// game is warned and counted where an agent is stopped.
 	bool game_frames;
 
 	// Whether the two "this happened and is not fatal" sentences have been said
@@ -488,10 +488,13 @@ struct JsRuntime
 	HeldFn break_handler;
 
 	// `import`, wired up by `js/modules.c3` over fastjs's loader. An empty
-	// root means no `--assets` boot and no disk imports at all, which is what a
+	// root means no script was run and no disk imports at all, which is what a
 	// plain `--mcp` run wants; the `three:` space works regardless. Addressed by
 	// the engine and must not move while the context is open.
 	js::ModuleLoader modules;
+	// Where relative paths start: the first script's folder, absolute. Empty
+	// when no script was run, and paths are then used as written. Owned.
+	String base;
 
 	<*
 	 Meshes a script asked for and has not been given yet — `js/bind_asset.c3`.
@@ -520,14 +523,6 @@ struct JsRuntime
 	 frame somebody is waiting for.
 	*>
 	List{js::Root} frame_waiters;
-	<*
-	 Whether a `fileBrowser` may leave the assets root. False for a game, whose
-	 scripts are confined to their directory; a host sets it when its scripts
-	 are trusted with the disk anyway, and a browser that could not reach a
-	 model file would only be in the way. Set after `open`, like `window`.
-	*>
-	bool browse_anywhere;
-
 	<*
 	 How many texture references this context has handed to JavaScript, one
 	 count per `Assets.textures` slot — `js/bind_asset.c3`.
@@ -577,7 +572,7 @@ struct JsRuntime
 	 Where `three.save` writes — `js/bind_save.c3`.
 
 	 Empty until something names it: `three.configure({ saveDir })`, or the first
-	 save verb falling back to the assets directory's own name. Held as the
+	 save verb falling back to the first script's folder's name. Held as the
 	 resolved absolute path rather than the slug, because the platform root is
 	 not going to move under a running process and every verb wants the path.
 	*>
@@ -764,6 +759,7 @@ fn void JsRuntime.close(&self)
 	self.texture_handles.free();
 	self.ui_handlers.free();
 	self.modules.free();
+	if (self.base.len > 0) self.base.free(mem);
 	*self = { };
 }
 
@@ -792,36 +788,38 @@ fn RunResult JsRuntime.run(&self, String source, String name = "<script>", bool 
  `three` reaches it as a global, which is why there is no import of it and no
  module named for it. See `js/modules.c3`.
 
- @param specifier : `Root-relative or under SCRIPT_SCHEME, and also what a stack trace calls it and what its own imports resolve against.`
- @require self.modules.root.len > 0 || specifier.starts_with(SCRIPT_SCHEME) : "a module needs a root to resolve against"
+ @param path : `The file: absolute, or relative to the base. Its absolute path is what a stack trace calls it and what its own imports resolve against.`
+ @require self.modules.root.len > 0 : "set_base first: a module needs a root to resolve against"
 *>
-fn RunResult JsRuntime.run_module(&self, String specifier)
+fn RunResult JsRuntime.run_module(&self, String path)
 {
-	String? source = self.modules.read(specifier);
-	if (catch err = source)
-	{
-		self.log.clear();
-		self.value.clear();
-		self.debug.clear();
-		self.error.clear();
-		self.error.appendf("could not read %s: %s", specifier, err)!!;
-		self.rejected = true;
-		self.settled = false;
-		return {
-			.ok = false,
-			.log = self.log.copy_str(mem),
-			.value = self.value.copy_str(mem),
-			.debug = self.debug.copy_str(mem),
-			.error = self.error.copy_str(mem),
-			.warnings = self.advice.copy_str(mem),
-			.frame_error = self.frame_error.copy_str(mem),
-		};
-	}
-	// Copied off the shared buffer before evaluating: the module's own imports are
-	// loaded during the parse and each one overwrites it.
 	@pool()
 	{
-		return self.run_source(source.copy(tmem), specifier, drain_frame: true, as_module: true);
+		String? specifier = self.resolve_asset(path, tmem);
+		String? source = self.modules.read(specifier);
+		if (catch err = source)
+		{
+			self.log.clear();
+			self.value.clear();
+			self.debug.clear();
+			self.error.clear();
+			self.error.appendf("could not read %s: %s", path, err)!!;
+			self.rejected = true;
+			self.settled = false;
+			return {
+				.ok = false,
+				.log = self.log.copy_str(mem),
+				.value = self.value.copy_str(mem),
+				.debug = self.debug.copy_str(mem),
+				.error = self.error.copy_str(mem),
+				.warnings = self.advice.copy_str(mem),
+				.frame_error = self.frame_error.copy_str(mem),
+			};
+		}
+		// Copied off the shared buffer before evaluating: the module's own imports
+		// are loaded during the parse and each one overwrites it. The read worked,
+		// so `specifier` is set and the `??` never picks `path`.
+		return self.run_source(source.copy(tmem), specifier ?? path, drain_frame: true, as_module: true);
 	};
 }
 

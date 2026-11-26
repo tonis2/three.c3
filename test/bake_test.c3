@@ -35,7 +35,7 @@ macro @with_assets(#run; @body)
 	(void)path::rmtree((Path)TEST_BAKE_ASSETS);
 	path::mkdir((Path)TEST_BAKE_ASSETS, recursive: true)!!;
 	defer (void)path::rmtree((Path)TEST_BAKE_ASSETS);
-	#run.set_assets_root(TEST_BAKE_ASSETS);
+	#run.set_base(TEST_BAKE_ASSETS)!!;
 	@body();
 }
 

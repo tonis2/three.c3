@@ -799,62 +799,37 @@ fn void? JsRuntime.apply_ui_tree(&self, js::Value tree)
 }
 
 <*
- Where a `fileBrowser` may look, and how its paths are written back.
+ Where a `fileBrowser` opens, and how its paths are written back.
 
- **A browser rooted anywhere is a script reading the whole disk**, one directory
- listing at a time, so it is confined by exactly the rule every other path a
- script names is confined by — `resolve_asset`'s. The start is resolved through
- that call, so `models` is the assets directory's `models` and `../..` is refused;
- the root that resolution landed in becomes the browser's own, and
- `render/ui.c3` sends any move outside it straight back.
+ Anywhere on disk, as every path a script names is. The start is resolved the
+ way `three.load` resolves a path — `models` is the first script's folder's
+ `models`, an absolute path is itself — and nothing asked opens that folder. A
+ run with no script has no folder, and the browser opens wherever the process
+ started.
 
- A refused start opens at the root rather than raising. A browser is how somebody
- recovers from a bad path — cui's own listing survives being pointed at one — and
- refusing the whole node would take the panel down instead.
+ A start that will not resolve opens at the folder rather than raising. A browser
+ is how somebody recovers from a bad path — cui's own listing survives being
+ pointed at one — and refusing the whole node would take the panel down instead.
 
- Paths come back the way the script would have written them: root-relative, with
- the scheme they opened under, so a path out of `onChoose` is a path `three.load`
- accepts. That is the same promise `three.inventory` makes about the paths it
- hands back, and it is what makes the two verbs compose.
-
- **A process with no assets directory is not confined**, and that
- is deliberate rather than a hole left open: it is the `--mcp` and CLI case,
- where `locate` already uses a path as written because there is no directory to
- be relative to and confining to nothing would refuse every path there is. A run
- that wants the rule is a run that was given a root.
+ Paths come back as the browser lists them, absolute when it opened at an
+ absolute path, so a path out of `onChoose` is a path `three.load` accepts.
 *>
-fn void JsRuntime.confine_browser(&self, UiNodeSpec* spec)
+fn void JsRuntime.place_browser(&self, UiNodeSpec* spec)
 {
 	String asked = spec.text;
-	// A host whose scripts already reach the whole disk — a desktop tool whose
-	// plugins read model files wherever they are — confines nothing here either.
-	String root = self.browse_anywhere ? "" : self.modules.root;
-
-	spec.root = root;
+	spec.root = "";
 	spec.scheme = "";
 
-	if (root.len == 0)
-	{
-		// Empty is cui's "wherever the process started".
-		spec.text = asked;
-		return;
-	}
+	// Empty is cui's "wherever the process started".
+	if (self.base.len == 0) return;
 
-	// Nothing said: the root itself, which is what "open the browser" means when
-	// nowhere in particular was asked for.
 	if (asked.len == 0)
 	{
-		spec.text = root;
+		spec.text = self.base;
 		return;
 	}
 
-	String? where = self.resolve_asset(asked, tmem);
-	if (catch where)
-	{
-		spec.text = root;
-		return;
-	}
-	spec.text = where;
+	spec.text = self.resolve_asset(asked, tmem) ?? self.base;
 }
 
 <*
@@ -971,11 +946,9 @@ fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers
 	};
 	bool graph_view = field_truth(js, value, k.graph_view)!;
 
-	// Where a `fileBrowser` may look, decided here and enforced in
-	// `render/ui.c3`. This file is the one that knows what an assets directory
-	// is, and that is the whole reason the policy is written here rather than
-	// beside the widget it confines.
-	if (spec.kind == UiNodeKind.FILE_BROWSER) self.confine_browser(&spec);
+	// Where a `fileBrowser` opens: this file is the one that knows the first
+	// script's folder.
+	if (spec.kind == UiNodeKind.FILE_BROWSER) self.place_browser(&spec);
 	if (spec.kind == UiNodeKind.TREE) self.read_tree_style(value, &spec)!;
 
 	// Last of the reads, so nothing that can fail runs while they are held

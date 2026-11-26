@@ -268,7 +268,7 @@ function _fromGltf(doc, path) {
 // The spec in a cutscene file. Only the exporter's glTF is one.
 function _readFile(path) {
 	if (typeof path !== 'string' || path === '') {
-		throw new TypeError('three.cutscene.load(path, options) wants a path in the assets directory');
+		throw new TypeError('three.cutscene.load(path, options) wants a path to a file');
 	}
 	if (!GLTF_FILE.test(path)) {
 		throw new TypeError(`three.cutscene.load('${path}'): a cutscene is a .cutscene.glb (or .gltf) written by the Blender exporter`);

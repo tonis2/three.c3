@@ -355,8 +355,8 @@ export class Scene extends Object3D {
 	// unique image, deduplicated across every file they came from by the
 	// same content hash the renderer already deduplicates them with.
 	//
-	// Under `--assets` the path is inside the game directory and cannot
-	// climb out of it — the same rule `three.load` follows.
+	// The path follows the rule `three.load` follows: relative to the first
+	// script's folder.
 	//
 	// Two things are deliberately not in the file:
 	//

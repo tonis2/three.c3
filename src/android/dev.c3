@@ -100,9 +100,9 @@ fn void? HeadsetDev.between_frames(&self, JsRuntime* runtime, Renderer* renderer
 	Clock took = clock::now();
 	// Frames are in flight, and the reload frees what they draw with.
 	renderer.gpu.wait_idle();
-	reload(runtime, &renderer.pass, renderer, null, self.game.root, self.game.script)!;
-	io::printfn("three: reloaded %s in %d ms", self.game.script.len > 0 ? self.game.script : self.game.root,
-		(long)took.to_now() / 1_000_000);
+	String[1] scripts = { self.game.script };
+	reload(runtime, &renderer.pass, renderer, null, scripts[..])!;
+	io::printfn("three: reloaded %s in %d ms", self.game.script, (long)took.to_now() / 1_000_000);
 }
 
 fn void HeadsetDev.close(&self)

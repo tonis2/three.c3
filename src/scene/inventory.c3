@@ -1,7 +1,8 @@
 <*
- What is in a game's directory, without uploading any of it.
+ What is in a game's folder, without uploading any of it.
 
- An `--assets` boot scans for `.glb` and `.gltf` and describes each one — mesh
+ `three.inventory()` scans the first script's folder for `.glb` and `.gltf` and
+ describes each one — mesh
  names, animation names, skin count, triangle count, bounds — for the price of
  the JSON chunk. No buffer is read, no image is decoded, nothing reaches the
  device.
@@ -117,7 +118,7 @@ fn void Inventory.free_entries(&self)
  A file that will not parse is skipped rather than fatal: one corrupt asset in a
  kit of forty should cost that one asset.
 
- @param root : `The assets directory.`
+ @param root : `The folder to scan: the first script's.`
  @return `Owned by the caller; free it with Inventory.free_entries.`
  @return ? ASSETS_ROOT_IS_NOT_A_DIRECTORY : `Nothing there, or not a directory.`
 *>

@@ -674,8 +674,8 @@ struct UiNodeSpec
 	// A `fileBrowser`'s confinement, and the only field on this struct that is a
 	// policy rather than a description. `root` is the absolute directory it opens
 	// under and may not climb out of; `scheme` is the prefix its paths are
-	// written back to JavaScript with. `js/bind_ui.c3` decides both — it is the
-	// file that knows what an assets directory is — and `ui_file_directory`
+	// written back to JavaScript with. `js/bind_ui.c3` decides both — it leaves
+	// them empty for a script's browser — and `ui_file_directory`
 	// enforces them, because cui's `FileBrowser` has no notion of a root and this
 	// binding does not change cui to give it one.
 	//
@@ -2078,8 +2078,7 @@ fn uint? UiLayer.push_node(&self, UiNodeSpec spec, int parent)
 	{
 		// Trailing separators come off first: a listing is written without one
 		// (`FileBrowser.go_to` trims what it is given), so a root that kept its
-		// slash would contain nothing at all — see `ui_file_directory` and
-		// `JsRuntime.set_assets_root`, which trims the other way in.
+		// slash would contain nothing at all — see `ui_file_directory`.
 		String confined = spec.root;
 		while (confined.len > 1 && confined[^1] == '/') confined = confined[..^2];
 		if (confined.len > 0) held.root = held.keep(confined);
@@ -3663,7 +3662,7 @@ fn cui::Element* ui_menu_row(cui::Element* from) @local
  Whether a path is at or under a root.
 
  An empty root is "no confinement" rather than "nothing is inside it", which is
- the reading a host with no assets directory needs — see `UiNodeSpec.root`. The
+ the reading a browser that is not rooted needs — see `UiNodeSpec.root`. The
  separator test is what stops `/home/ada/models-old` counting as inside
  `/home/ada/models`.
 *>
@@ -3731,10 +3730,8 @@ fn void ui_file_report(cui::Ui* ui, UiEventKind kind, String path) @local
  sent straight back to the root and told nobody. The bounce recurses exactly
  once, because the root is inside itself.
 
- A browser is not the only thing this protects. A script cannot `three.load`
- outside the assets directory anyway — `resolve_asset` sees to that — so what
- would leak without this is the *listing*: the names of every file the user
- walked past, handed to a game's panel one directory at a time.
+ The engine's own browsers are not rooted — a script reads the whole disk — so
+ this acts only for a node whose spec carries a root.
 
  Located by the identity of the string rather than by the pointer, because this
  one also fires from `mount`, where there is nothing hovered, captured or focused
@@ -3761,7 +3758,7 @@ fn void ui_file_directory(cui::Ui* ui, String path) @local
 	{
 		// The bounce goes through `go_to`, which fires this handler again from
 		// wherever it lands — so a root that does not contain ITSELF recurses
-		// until the stack is gone. A trailing separator on `--assets` was
+		// until the stack is gone. A root typed with a trailing separator was
 		// exactly that root, and the crash was a stack overflow inside a string
 		// format rather than anything to do with browsing. The root is trimmed
 		// where it is set now; this is the guard that keeps the class of bug to

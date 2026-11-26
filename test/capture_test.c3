@@ -34,10 +34,8 @@ const uint H = 150;
 // Where a check that only wants a file writes it.
 const String SHOTS = "build/test-shots";
 
-// A game directory and a file outside it, for the two sandbox checks.
+// A game directory, for the check of where an image lands.
 const String GAME = "build/test-shot-game";
-const String OUTSIDE = "build/test-shot-outside.png";
-const String OUTSIDE_TEXT = "not a picture, and must stay that way";
 
 // The eight bytes every PNG starts with. Checked rather than assumed: a verb
 // that wrote the raw readback would still produce a file of about the right
@@ -82,23 +80,12 @@ macro @with_shots(; @body)
 	@body();
 }
 
-<*
- A game directory with a file sitting outside it, which is what the sandbox is
- for: `..` out of the root is the obvious way to reach it and must not work.
-*>
+// A fresh game directory, removed afterwards.
 macro @with_game(; @body)
 {
 	(void)path::rmtree((Path)GAME);
-	(void)path::delete((Path)OUTSIDE);
-	defer
-	{
-		(void)path::rmtree((Path)GAME);
-		(void)path::delete((Path)OUTSIDE);
-	}
-
+	defer (void)path::rmtree((Path)GAME);
 	path::mkdir((Path)GAME, recursive: true)!!;
-	file::save(OUTSIDE, (char[])OUTSIDE_TEXT)!!;
-
 	@body();
 }
 
@@ -398,68 +385,32 @@ fn void a_disposed_texture_cannot_be_saved() @test
 }
 
 // ============================================================================
-// The sandbox
+// Where an image lands
 // ============================================================================
 
 <*
- Neither image door can climb out of the game directory, and the file next door
- is untouched afterwards.
-
- The sandbox is `resolve_write`'s — the same call `scene.export` and
- `three.writeText` make — so this is a check that two more doors were not given
- rules of their own. The second half is what makes the first half mean something:
- a refusal that fired after the file was opened would leave the neighbour
- truncated, and the sentence would still read correctly.
+ Both image doors resolve a path as `three.writeText` does: relative to the first
+ script's folder, absolute as it is, and out of the folder with `..`. The check
+ is that two more doors were not given rules of their own.
 *>
-fn void neither_image_door_can_climb_out_of_the_game_directory() @test
+fn void an_image_path_starts_from_the_game_directory() @test
 {
 	@with_game()
 	{
 		@with_gpu_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(GAME);
-
-			String[*] attempts = {
-				`three.screenshot('../test-shot-outside.png');`,
-				`three.screenshot('shots/../../test-shot-outside.png');`,
-				`new three.DataTexture(new Uint8Array(4 * 4), 2, 2).save('../test-shot-outside.png');`,
-			};
-			foreach (attempt : attempts)
-			{
-				String said = @refusal(run, attempt);
-				test::@check(said.contains("climbs out of the assets directory"),
-					"'%s' was refused without saying why: %s", attempt, said);
-			}
-
-			test::@check(file::load_temp(OUTSIDE)!! == OUTSIDE_TEXT,
-				"a refused write reached the file next door");
-		};
-	};
-}
-
-<*
- Inside the game directory both doors work, and a leading `/` is that directory
- rather than the disk's.
-
- The other half of the check above: the refusals mean something only if the
- ordinary path is the one that lands, and it has to land *under the root* rather
- than wherever the process was started.
-*>
-fn void an_image_path_is_rooted_at_the_game_directory() @test
-{
-	@with_game()
-	{
-		@with_gpu_js(; three::JsRuntime* run)
-		{
-			run.set_assets_root(GAME);
+			run.set_base(GAME)!!;
 
 			@ok(run, `three.screenshot('shots/frame.png');`);
-			@ok(run, `new three.DataTexture(new Uint8Array(4 * 4), 2, 2).save('/shots/tex.png');`);
+			@ok(run, string::tformat(`new three.DataTexture(new Uint8Array(4 * 4), 2, 2).save('%s/shots/tex.png');`, run.base));
+			@ok(run, `three.screenshot('../test-shot-beside.png');`);
+			defer (void)file::delete("build/test-shot-beside.png");
 
 			test::@check(is_png(string::tformat("%s/shots/frame.png", GAME)),
 				"the shot did not land under the game directory");
 			test::@check(is_png(string::tformat("%s/shots/tex.png", GAME)),
-				"an absolute path did not mean the game directory");
+				"an absolute path did not land where it points");
+			test::@check(is_png("build/test-shot-beside.png"), "a path out of the folder did not land beside it");
 		};
 	};
 }

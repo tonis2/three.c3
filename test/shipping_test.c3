@@ -110,8 +110,8 @@ macro @with_home(; @body)
 // reason, and never the same directory as TEST_HOME: the whole claim being
 // checked is that the two are different places.
 const String TEST_ASSETS = "build/test-assets";
-// Deliberately outside it, and reachable from inside two ways that must not
-// both work: as `..` out of the root, and through a symlink that sits in it.
+// Deliberately outside it, and reachable from inside two ways: as `..` out of
+// the folder, and through a symlink that sits in it.
 const String TEST_OUTSIDE = "build/test-outside.txt";
 const String OUTSIDE_TEXT = "the file next door";
 // The placement list an editor writes beside the kit it places: a piece name, a
@@ -519,7 +519,7 @@ fn void a_save_cannot_be_written_outside_its_folder() @test
 <*
  With nothing to name a folder after, every verb says which call fixes it.
 
- A `--script` or `--mcp` run has no assets directory, so there is no name to
+ An `--mcp` run with no script has no folder, so there is no name to
  derive and inventing one would put a player's saves somewhere they would never
  find twice. `list` is the exception and answers empty, because it is what a
  load menu calls before anything exists.
@@ -559,9 +559,9 @@ fn void a_run_with_no_folder_says_so_rather_than_guessing() @test
  so.
 
  The path forms are checked here rather than in a test of their own because
- they are the claim that `three.inventory()` and this compose: a leading `/` is
- the assets directory, and the noise comes out — `resolve_asset`'s rules, not a
- second set.
+ they are the claim that `three.inventory()` and this compose: relative to the
+ first script's folder, an absolute path as it is, and the noise comes out —
+ `resolve_asset`'s rules, not a second set.
 *>
 fn void a_level_file_beside_its_kit_reads_back() @test
 {
@@ -569,7 +569,7 @@ fn void a_level_file_beside_its_kit_reads_back() @test
 	{
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
 			test::@check(@answer(run, `return three.readJSON('levels/lumbridge.json').length;`) == "2",
 				"the level did not come back as its two rows");
@@ -582,8 +582,8 @@ fn void a_level_file_beside_its_kit_reads_back() @test
 					== string::tformat("%d", LEVEL_JSON.len),
 				"the text form is not the file's own bytes");
 
-			test::@check(@answer(run, `return three.readJSON('/levels/lumbridge.json')[0][0];`) == `"wall"`,
-				"a leading slash did not mean the assets directory");
+			test::@check(@answer(run, string::tformat(`return three.readJSON('%s/levels/lumbridge.json')[0][0];`, run.base)) == `"wall"`,
+				"the absolute path of the level did not read");
 			test::@check(@answer(run, `return three.readJSON('./levels/../levels/lumbridge.json')[0][0];`) == `"wall"`,
 				"the noise in a path did not come out");
 		};
@@ -605,7 +605,7 @@ fn void a_level_that_was_never_written_reads_as_null() @test
 	{
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
 			test::@check(@answer(run, `return three.readText('levels/varrock.json');`) == "null",
 				"a missing level was not null");
@@ -620,65 +620,43 @@ fn void a_level_that_was_never_written_reads_as_null() @test
 }
 
 <*
- Neither door can climb out of the game, and each is refused by name rather
- than by failing to find anything.
+ Both doors reach past the folder: nothing is fenced in.
 
- The read sandbox is `resolve_asset`'s — the same call `three.load` and
- `three.texture` make — and the write sandbox is `resolve_write`'s — the same
- call `scene.export` makes — so this is a check that neither door was given
- rules of its own: the read sentence is `three.load`'s and the write sentence
- is `scene.export`'s.
-
- The file next door is real and holds known text, so a read's "refused" is
- checked as *the text did not arrive* and not merely as a throw. A write's
- "refused" is checked the same way `three.load`'s escape is — the sentence
- fires before anything opens — since a write that actually reached the file
- next door would corrupt a fixture every other test in this file depends on.
+ `..` climbs out of the first script's folder for a read and a write alike, and
+ an absolute path is the disk's own. The only path refused is one with more `..`
+ than there is path above it, and it is refused by name rather than by failing to
+ find anything.
 *>
-fn void neither_door_can_climb_out_of_the_assets_directory() @test
+fn void both_doors_reach_past_the_folder() @test
 {
 	@with_assets()
 	{
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
-			String[*] reads = {
-				`three.readText('../test-outside.txt');`,
-				`three.readText('../../etc/passwd');`,
-				`three.readJSON('levels/../../test-outside.txt');`,
-				`three.readText('a/../../out.txt');`,
-			};
-			foreach (attempt : reads)
+			test::@check(@answer(run, `return three.readText('../test-outside.txt');`) == string::tformat(`"%s"`, OUTSIDE_TEXT),
+				"a read did not climb out of the folder");
+			String absolute = string::tformat("%s/../test-outside.txt", run.base);
+			test::@check(@answer(run, string::tformat(`return three.readText('%s');`, absolute)) == string::tformat(`"%s"`, OUTSIDE_TEXT),
+				"an absolute path did not read");
+
+			@ok(run, `three.writeText('../test-written-outside.txt', 'mine');`);
+			defer (void)file::delete("build/test-written-outside.txt");
+			test::@check(file::load_temp("build/test-written-outside.txt")!! == "mine", "a write did not climb out of the folder");
+
+			DString climb;
+			climb.tinit();
+			for (usz i = 0; i < 64; i++) climb.append_string("../");
+			climb.append_string("etc/passwd");
+			foreach (verb : (String[]){ "readText", "writeText" })
 			{
-				three::RunResult result = run.run(attempt);
+				three::RunResult result = run.run(string::tformat("three.%s('%s', 'x');", verb, climb.str_view()));
 				defer result.free();
-				test::@check(!result.ok, "'%s' was allowed", attempt);
-				test::@check(result.error.contains("climbs out of the assets directory"),
-					"'%s' was refused without saying why: %s", attempt, result.error);
-				test::@check(!result.value.contains(OUTSIDE_TEXT),
-					"'%s' came back with the file next door", attempt);
+				test::@check(!result.ok, "three.%s past the top of the disk was allowed", verb);
+				test::@check(result.error.contains("more '..' than there is path above it"),
+					"three.%s was refused without saying why: %s", verb, result.error);
 			}
-
-			String[*] writes = {
-				`three.writeText('../test-outside.txt', 'mine now');`,
-				`three.writeText('../../etc/passwd', 'mine now');`,
-				`three.writeJSON('levels/../../test-outside.txt', 'mine now');`,
-				`three.writeText('a/../../out.txt', 'mine now');`,
-			};
-			foreach (attempt : writes)
-			{
-				three::RunResult result = run.run(attempt);
-				defer result.free();
-				test::@check(!result.ok, "'%s' was allowed", attempt);
-				test::@check(result.error.contains("climbs out of the assets directory"),
-					"'%s' was refused without saying why: %s", attempt, result.error);
-			}
-
-			// Refused before anything opened, so the file next door is exactly
-			// what @with_assets wrote and none of the four attempts above landed.
-			test::@check(file::load_temp(TEST_OUTSIDE)!! == OUTSIDE_TEXT,
-				"a write attempt reached the file next door");
 		};
 	};
 }
@@ -688,8 +666,8 @@ fn void neither_door_can_climb_out_of_the_assets_directory() @test
 
  An editor's save-as lands in `levels/` or somewhere under it, and a level
  written on the first run is written into a folder nobody has made. `three.save`
- makes its own folder; this proves the assets door does too, and that what it
- made is inside the sandbox rather than somewhere a relative path could reach.
+ makes its own folder; this proves `three.writeText` does too, wherever the path
+ points.
 *>
 fn void a_first_write_makes_its_own_folder() @test
 {
@@ -697,88 +675,41 @@ fn void a_first_write_makes_its_own_folder() @test
 	{
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
 			@ok(run, `three.writeText('levels/fresh/deeper/first.json', '[1]');`);
 			test::@check(@answer(run, `return three.readText('levels/fresh/deeper/first.json');`) == `"[1]"`,
 				"the file written into a new folder did not read back");
 			test::@check(path::is_dir((Path)string::tformat("%s/levels/fresh/deeper", TEST_ASSETS)),
-				"the folder was not made under the assets directory");
+				"the folder was not made beside the game");
 
-			// Refused before any folder is made: the escape check runs first, so
-			// nothing next door is created either.
-			three::RunResult out = run.run(`three.writeText('../made/outside.txt', 'x');`);
-			defer out.free();
-			test::@check(!out.ok, "a write outside the sandbox made its folder");
-			test::@check(!path::is_dir((Path)"build/made"), "a folder was made outside the assets directory");
+			defer (void)path::rmtree((Path)"build/made");
+			@ok(run, `three.writeText('../made/outside.txt', 'x');`);
+			test::@check(path::is_dir((Path)"build/made"), "a folder outside the game was not made");
 		};
 	};
 }
 
 <*
- An absolute path is a name under the game's own directory, not the disk's.
+ A symlink out of the tree is followed, as any path is.
 
- `resolve_module` roots a leading `/` at the assets directory, which is what
- makes the obvious attack boring rather than dangerous: `/etc/passwd` is
- `<game>/etc/passwd`, there is no such file, and the answer is the same null a
- typo gets. The second half of the check is what makes the first half mean
- something — the same absolute form of a file that *is* in the directory reads,
- so the null above is a rooted path finding nothing rather than absolute paths
- being broken.
+ Paths are normalized lexically and never through `realpath`: two spellings of
+ one file through a link are two paths, as two imports of it are two modules.
+ This check says the link is followed rather than refused.
 *>
-fn void an_absolute_path_is_rooted_at_the_assets_directory() @test
-{
-	@with_assets()
-	{
-		@with_js(; three::JsRuntime* run)
-		{
-			run.set_assets_root(TEST_ASSETS);
-
-			String reached = @answer(run, `return three.readText('/etc/passwd');`);
-			test::@check(reached == "null", "an absolute path read something: %s", reached);
-			test::@check(!reached.contains("root:"), "an absolute path read the machine's own file");
-
-			test::@check(@answer(run, `return three.readJSON('/levels/lumbridge.json')[0][0];`) == `"wall"`,
-				"an absolute path inside the game did not read");
-		};
-	};
-}
-
-<*
- A symlink out of the tree IS followed, and this check exists to say so.
-
- **This is not a refusal and must not be read as one.** `ModuleLoader.locate`
- confines a path lexically and never calls `realpath`, which is written down as
- a decision in fastjs's loader: the root is the game author's own directory, a
- link in it is something they put there, and resolving links would make a
- specifier's meaning depend on the filesystem in a way no error message could
- explain. The boundary it enforces is against a *script* reaching out, which is
- the one that can be written by accident.
-
- So the sandbox this verb reuses is the sandbox `three.load` and
- `three.texture` already have, symlinks included — no wider and no narrower. A
- game directory assembled from links someone else controls is outside what any
- of the three promise. Making this one verb call `realpath` would be a second,
- different sandbox for the same directory, which is the thing worth avoiding
- more than the link is.
-*>
-fn void a_symlink_out_of_the_assets_directory_is_still_followed() @test
+fn void a_symlink_out_of_the_folder_is_followed() @test
 {
 	$if env::WIN32:
-		// No `symlink()` to have made one with. The claim above is about the
-		// resolver, which has no platform in it.
+		// No `symlink()` to have made one with.
 	$else
 		@with_assets()
 		{
 			@with_js(; three::JsRuntime* run)
 			{
-				run.set_assets_root(TEST_ASSETS);
+				run.set_base(TEST_ASSETS)!!;
 
 				String through = @answer(run, `return three.readText('outside.txt');`);
-				test::@check(through.contains(OUTSIDE_TEXT),
-					"a symlink in the assets directory stopped being followed — which is a CHANGE in what "
-						"three.load and three.texture do, not a fix to this verb alone: %s",
-					through);
+				test::@check(through.contains(OUTSIDE_TEXT), "a symlink in the folder was not followed: %s", through);
 			};
 		};
 	$endif
@@ -802,7 +733,7 @@ fn void a_file_that_is_not_text_is_refused() @test
 
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
 			three::RunResult result = run.run(`three.readText('kit.bin');`);
 			defer result.free();
@@ -833,7 +764,7 @@ fn void a_file_too_large_to_be_a_level_is_refused() @test
 
 		@with_js(; three::JsRuntime* run)
 		{
-			run.set_assets_root(TEST_ASSETS);
+			run.set_base(TEST_ASSETS)!!;
 
 			three::RunResult result = run.run(`three.readText('huge.json');`);
 			defer result.free();
@@ -845,22 +776,19 @@ fn void a_file_too_large_to_be_a_level_is_refused() @test
 }
 
 <*
- With no assets directory a path means what the shell means by it.
+ With no script a path means what the shell means by it.
 
- The `--script` and `--mcp` case, and it is `resolve_asset`'s answer rather than
- a decision this verb takes: there is no directory for a path to be relative to,
- and confining one to nothing would refuse every path there is — including the
- `test/fixtures/...` half this suite is built on. It is the same width
- `three.load` and `scene.export` already have in that mode, so a read here is
- not a door that opens onto anything a script could not already reach.
+ The `--mcp` case, and it is `resolve_asset`'s answer rather than a decision
+ this verb takes: there is no folder for a path to be relative to — including
+ the `test/fixtures/...` half this suite is built on.
 *>
-fn void with_no_assets_directory_a_path_is_left_alone() @test
+fn void with_no_script_a_path_is_left_alone() @test
 {
 	@with_assets()
 	{
 		@with_js(; three::JsRuntime* run)
 		{
-			// No set_assets_root: this is the run that never had a directory.
+			// No set_base: this is the run that never had a script.
 			test::@check(@answer(run, `return three.readText('build/test-outside.txt');`)
 					== string::tformat(`"%s"`, OUTSIDE_TEXT),
 				"a path with no root behind it was not taken as written");

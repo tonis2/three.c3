@@ -18,7 +18,7 @@
 // The file itself is read with `three.readJSON` and written with
 // `three.writeJSON`'s own host doors — `H.assetText` / `H.assetWriteText`
 // below, since this module sits under `api.js` in the import graph and
-// cannot import back from it. Same sandbox, same 4 MB limit, same "not there
+// cannot import back from it. Same path rules, same 4 MB limit, same "not there
 // is null" answer.
 
 import { Object3D } from './object3d.js';

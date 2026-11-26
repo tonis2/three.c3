@@ -19,13 +19,14 @@
 // hides the selection and alt+h shows everything — and a hidden row is saved as
 // `visible: false`.
 //
-// Run it against a kit folder (a directory holding one or more .glb files):
+// Run it on a kit folder (a directory holding one or more .glb files). Paths
+// start from the first script's folder, so the kit's own main.js comes first —
+// one line, importing this file from wherever it is:
 //
-//     ./build/three --assets /path/to/kit-folder --script examples/editor.js
+//     echo "import '$PWD/examples/editor.js';" > /path/to/kit-folder/main.js
+//     ./build/three --script /path/to/kit-folder/main.js
 //
-// or copy this file in as that folder's own main.js and boot it directly:
-//
-//     ./build/three --assets /path/to/kit-folder
+// or copy this file in as that folder's main.js.
 //
 // ## Controls
 //
@@ -1395,7 +1396,7 @@ class Editor {
 		}
 	}
 
-	// three.persist.path, or the assets directory's one .glb, or a prompt
+	// three.persist.path, or the kit folder's one .glb, or a prompt
 	// through the kit file browser.
 	boot() {
 		const bootPath = three.persist.path ?? DEFAULT_LEVEL;
@@ -1624,13 +1625,13 @@ class Catalog extends three.Widget {
 	// changes — recomputes the library options and the category counts,
 	// keeping whatever category was active if it still exists.
 	refresh() {
-		// The inventory parses every .glb under the assets directory, so it is read
+		// The inventory parses every .glb under the kit folder, so it is read
 		// once and again only after something wrote a new one (`invalidateKits`).
 		if (!this.kitsRead) {
 			this.kitOptions = three.inventory().filter(e => isKitPath(e.path)).map(e => e.path);
 			this.kitsRead = true;
 		}
-		// With no `--assets` the inventory is empty, and a kit opened by path (Import
+		// The inventory lists the kit folder only, and a kit opened by path (Import
 		// scene, Open) is in no list: add it, or the dropdown names nothing.
 		const open = ed.level && ed.level.kit;
 		if (open && !this.kitOptions.includes(open)) this.kitOptions = [...this.kitOptions, open];

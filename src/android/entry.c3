@@ -74,7 +74,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	env::set_var("HOME", internal);
 
 	GameDir game = find_game(app.activity.asset_manager, internal, external)!;
-	io::printfn("three: game %s, %s", game.root, game.script.len > 0 ? game.script : ENTRY_MODULE);
+	io::printfn("three: game %s", game.script);
 
 	// Before the engine: the runtime decides which Vulkan device and extensions
 	// the engine opens with. Without it the run is the headless probe.
@@ -88,8 +88,8 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	}
 
 	Options opts = {
-		.assets        = game.root,
-		.script        = game.script,
+		.script_list   = { [0] = game.script },
+		.script_count  = 1,
 		// Both eyes, side by side.
 		.width         = xr_up ? host.eye_width * 2 : 1280,
 		.height        = xr_up ? host.eye_height : 720,
@@ -133,7 +133,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	JsRuntime runtime;
 	runtime.open(&engine.renderer.pass, &engine.renderer)!;
 	defer runtime.close();
-	boot_world(&runtime, opts.assets, opts.script)!;
+	boot_world(&runtime, opts.scripts())!;
 
 	if (xr_up)
 	{
@@ -185,7 +185,7 @@ struct GameDir
 {
 	// Owned, both.
 	String root;
-	// Empty when the root has a main.js to boot instead.
+	// What runs: the root's main.js, or its script.js.
 	String script;
 }
 
@@ -221,10 +221,12 @@ fn GameDir? find_game(void* assets, String internal, String external)
 *>
 fn GameDir? game_in(String root)
 {
-	if (file::is_file(string::tformat("%s/%s", root, ENTRY_MODULE))) return { .root = root };
-	String script = string::format(mem, "%s/script.js", root);
-	if (file::is_file(script)) return { .root = root, .script = script };
-	free(script);
+	foreach (name : (String[]){ ENTRY_MODULE, "script.js" })
+	{
+		String script = string::format(mem, "%s/%s", root, name);
+		if (file::is_file(script)) return { .root = root, .script = script };
+		free(script);
+	}
 	return io::FILE_NOT_FOUND~;
 }
 

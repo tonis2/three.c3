@@ -191,11 +191,10 @@ fn void JsRuntime.complete_host_frame(&self, long elapsed_ns, long wait_ns = 0)
 <*
  Says that the frames belong to a program somebody is watching, not to an agent.
 
- The one switch `JS_GAME_FRAME_SOFT_MS` describes from the other side, and both
- boots that come off a command line throw it: `--assets` through
- `set_assets_root`, `--script` through `app/boot.c3`'s `boot_script`. Everything a
- server runs leaves it alone, which keeps a runaway `run_script` callback from
- wedging the tool surface.
+ The one switch `JS_GAME_FRAME_SOFT_MS` describes from the other side, and the
+ boot that comes off a command line throws it: `--script`, through `app/boot.c3`'s
+ `boot_world`. Everything a server runs leaves it alone, which keeps a runaway
+ `run_script` callback from wedging the tool surface.
 
  One-way on purpose. There is no `stop_playing`: the two callers set it before
  anything can register a callback, and a frame policy that changed underneath a
@@ -981,8 +980,8 @@ fn void JsRuntime.drain_frame_debug(&self)
 
  `stop_frame` keeps its reason for the next run to report, and under `--mcp` that
  is exactly right: nobody is reading a terminal, and the next tool call is the
- first moment anyone is listening. A `--script` or `--assets` boot with no
- listener has no next run at all — the callback dies, the window stops moving,
+ first moment anyone is listening. A `--script` boot with no listener has no
+ next run at all — the callback dies, the window stops moving,
  and the reason sits in a buffer until the process exits. That is the case this
  exists for, and why `main.c3` only calls it when nothing is serving: draining it
  with a server up would take the log away from the agent about to ask for it.

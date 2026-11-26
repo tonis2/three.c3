@@ -107,21 +107,25 @@ what it shows and which keys it answers to.
 | [`vr_castle.js`](examples/vr_castle.js) | Knock a toy castle off a table in VR: both hands, lamps, physics |
 
 All but the editor build everything they draw in code, so they run on a clean checkout. The editor
-wants a kit: `./build/three --assets your-kit --script examples/editor.js`. A whole VR game built on
+wants a kit: give the kit folder a one-line `main.js`, `import '<three.c3>/examples/editor.js';`, and
+run `./build/three --script your-kit/main.js`. A whole VR game built on
 the engine lives in its own repo: [Tabletop Siege](https://github.com/tonis2/tabletop-siege).
 
 ### Running
 
 ```sh
 ./build/three --script examples/village.js   # one script, then keep the window up
-./build/three --assets mygame                # boot mygame/main.js as a module
+./build/three --script mygame/main.js        # a game: its folder is where its paths start
+./build/three --script mygame/main.js --script probe.js   # then a probe, against that world
 ./build/three --screenshot shot.png          # render one frame and exit
 ./build/three --debug                        # validation, logging, Shift+R to reload
 ./build/three --help                         # every flag
 ```
 
-A `--script` file is an ES module like `main.js`, so it can `import` the files beside it. The paths
-it loads and saves are relative to where three was started, or to `--assets` when one is given.
+A `--script` file is an ES module. Its imports resolve against the importing file, from anywhere
+on disk, and `import.meta.dirname` is a module's own folder. The paths scripts load and save start
+from the first `--script`'s folder; absolute paths and `..` work, for reading and writing. Give
+`--script` more than once to run several, in order.
 
 ### Agents
 

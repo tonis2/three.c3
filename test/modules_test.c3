@@ -127,50 +127,77 @@ fn void a_path_deeper_than_the_walker_is_refused() @test
 // ============================================================================
 
 <*
- A `.glb` path follows the same rule an `import` does, and for the same reason.
+ A path a script names starts from the first script's folder — `base` — and
+ goes anywhere from there.
 
- `three.inventory()` answers with paths relative to the assets directory and
- `three.load` used to resolve against the working directory, so the two did not
- compose and the first two lines of any real game found that out —
- `could not load level_a.glb: gltf::FILE_NOT_FOUND`. One rule for both is what
- makes a game directory movable.
+ `three.inventory()` answers with paths relative to that folder and `three.load`
+ takes them, so the two compose and a game folder can be moved. An absolute path
+ is used as it is, and `..` climbs out of the folder, for reading and writing
+ alike: nothing is fenced in.
 
- Driven through a `JsRuntime` rather than a free function because the assets
- root is the runtime's, and "no root at all" — the plain `--mcp` case, where a
- path means what the shell means by it — is half of what is under test.
+ Driven through a `JsRuntime` rather than a free function because the base is
+ the runtime's, and "no base at all" — the plain `--mcp` case, where a path means
+ what the shell means by it — is half of what is under test.
 *>
-macro String @asset_path(#root, #path)
+macro String @asset_path(#base, #path)
 {
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	if (#root.len > 0) runtime.set_assets_root(#root);
+	if (#base.len > 0) runtime.set_base(#base)!!;
 
 	String? answer = runtime.resolve_asset(#path, tmem);
 	if (catch err = answer) return string::tformat("<%s>", err);
 	return answer;
 }
 
-fn void an_asset_path_is_relative_to_the_assets_directory() @test
+fn void a_relative_path_starts_from_the_base() @test
 {
-	test::@check(@asset_path("game", "level_a.glb") == "game/level_a.glb",
-		"a bare name (%s)", @asset_path("game", "level_a.glb"));
-	test::@check(@asset_path("game", "kits/rocks.glb") == "game/kits/rocks.glb",
-		"a subdirectory (%s)", @asset_path("game", "kits/rocks.glb"));
-	test::@check(@asset_path("game", "./kits/../level_a.glb") == "game/level_a.glb",
-		"and the noise comes out (%s)", @asset_path("game", "./kits/../level_a.glb"));
-	test::@check(@asset_path("game", "/level_a.glb") == "game/level_a.glb",
-		"a leading slash is the assets root, not the filesystem's (%s)",
-		@asset_path("game", "/level_a.glb"));
+	test::@check(@asset_path("/srv/game", "level_a.glb") == "/srv/game/level_a.glb",
+		"a bare name (%s)", @asset_path("/srv/game", "level_a.glb"));
+	test::@check(@asset_path("/srv/game", "kits/rocks.glb") == "/srv/game/kits/rocks.glb",
+		"a subdirectory (%s)", @asset_path("/srv/game", "kits/rocks.glb"));
+	test::@check(@asset_path("/srv/game", "./kits/../level_a.glb") == "/srv/game/level_a.glb",
+		"and the noise comes out (%s)", @asset_path("/srv/game", "./kits/../level_a.glb"));
 }
 
-fn void an_asset_path_cannot_climb_out_of_the_game() @test
+fn void a_path_goes_anywhere_on_disk() @test
 {
-	test::@check(@asset_path("game", "../secrets.glb") == "<js::MODULE_ESCAPES_ROOT>",
-		"one level up is refused (%s)", @asset_path("game", "../secrets.glb"));
-	test::@check(@asset_path("game", "../../../../etc/passwd") == "<js::MODULE_ESCAPES_ROOT>",
-		"and so is a long climb, rather than being clamped to etc/passwd (%s)",
-		@asset_path("game", "../../../../etc/passwd"));
+	test::@check(@asset_path("/srv/game", "../shared/rocks.glb") == "/srv/shared/rocks.glb",
+		"`..` climbs out of the base (%s)", @asset_path("/srv/game", "../shared/rocks.glb"));
+	test::@check(@asset_path("/srv/game", "/home/me/kit.glb") == "/home/me/kit.glb",
+		"an absolute path is the disk's (%s)", @asset_path("/srv/game", "/home/me/kit.glb"));
+	test::@check(@asset_path("/srv/game", "../..") == "/",
+		"up to the top of the disk (%s)", @asset_path("/srv/game", "../.."));
+	test::@check(@asset_path("/srv/game", "../../../etc") == "<js::MODULE_ESCAPES_ROOT>",
+		"and no further (%s)", @asset_path("/srv/game", "../../../etc"));
+}
+
+// A relative base is the working directory's folder of that name, made
+// absolute once, so a later `chdir` cannot move where the game's paths point.
+fn void a_relative_base_is_made_absolute() @test
+{
+	String cwd = (String)path::tcwd()!!;
+	String expected = string::tformat("%s/game/level_a.glb", cwd);
+	test::@check(@asset_path("game", "level_a.glb") == expected,
+		"%s, not %s", @asset_path("game", "level_a.glb"), expected);
+	test::@check(@asset_path("./game/", "level_a.glb") == expected,
+		"however the folder was typed (%s)", @asset_path("./game/", "level_a.glb"));
+}
+
+<*
+ Without a base a path is used exactly as written.
+
+ The `--mcp` case. There is no script for it to be relative to, an agent naming
+ a file names it from wherever the process was started — including the
+ `test/fixtures/textured.glb` half this suite is built on.
+*>
+fn void without_a_base_a_path_is_left_alone() @test
+{
+	test::@check(@asset_path("", "test/fixtures/textured.glb") == "test/fixtures/textured.glb",
+		"a relative path (%s)", @asset_path("", "test/fixtures/textured.glb"));
+	test::@check(@asset_path("", "../up/one.glb") == "../up/one.glb",
+		"and one that climbs (%s)", @asset_path("", "../up/one.glb"));
 }
 
 // ============================================================================
@@ -179,8 +206,8 @@ fn void an_asset_path_cannot_climb_out_of_the_game() @test
 
 <*
  The whole point of the loader, driven for real: a `main.js` whose imports
- reach a sibling directory relatively and the root absolutely, both landing on
- the same module. No device — the fixture computes rather than draws, because
+ reach a sibling directory, directly and by climbing out and back in, both
+ landing on the same module. No device — the fixture computes rather than draws, because
  what is under test is the resolution, not the renderer.
 *>
 fn void a_game_boots_from_many_files() @test
@@ -188,7 +215,7 @@ fn void a_game_boots_from_many_files() @test
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	runtime.set_assets_root("test/fixtures/game");
+	runtime.set_base("test/fixtures/game")!!;
 
 	three::RunResult booted = runtime.run_module("main.js");
 	defer booted.free();
@@ -202,94 +229,37 @@ fn void a_game_boots_from_many_files() @test
 	test::@check(read.value == "27", "state the modules set survives into a run (%s)", read.value);
 }
 
-<*
- `--no-boot` is the assets root without the game.
-
- The two-stage pipeline's first half: a bake has to run under the game's own root
- — that is what makes its imports and its paths mean what the game means by them
- — and *before* the game, which on a clean checkout is waiting on the file the
- bake has not written yet. Booting first throws on a missing file before the
- script that would have made it ever runs.
-
- The root is still set, which is the whole point of the flag: what is skipped is
- the entry module and nothing else.
-*>
-fn void no_boot_is_the_root_without_the_game() @test
-{
-	three::JsRuntime runtime;
-	runtime.open(null)!!;
-	defer runtime.close();
-
-	three::boot_world(&runtime, "test/fixtures/game", "", boot: false)!!;
-
-	three::RunResult read = runtime.run("return String(globalThis.__game);");
-	defer read.free();
-	test::@check(read.value.contains("undefined"), "main.js did not run (%s)", read.value);
-
-	// And the root did arrive: a module resolves against it, which is what the
-	// bake that runs next needs.
-	three::RunResult booted = runtime.run_module("main.js");
-	defer booted.free();
-	test::@check(booted.ok, "the root is there for whatever runs next (%s)", booted.error);
-}
-
-<*
- A `--script` is a module, and imports from its own directory.
-
- It used to be wrapped in an async function, which made an `import` declaration
- a syntax error, and a second flag, `--module`, got round that by making the
- file's directory the assets root — which also moved every path the file read.
- So both halves are checked: the imports resolve beside the file, and a path is
- still used as written, because no assets root came with them.
-*>
-fn void a_script_imports_from_its_own_directory() @test
-{
-	three::JsRuntime runtime;
-	runtime.open(null)!!;
-	defer runtime.close();
-
-	three::boot_script(&runtime, "test/fixtures/game/main.js")!!;
-	three::RunResult read = runtime.run("return String(globalThis.__game.grid);");
-	defer read.free();
-	test::@check(read.value.contains("9"), "the script and its imports evaluated (%s)", read.value);
-
-	test::@check(runtime.modules.root.len == 0, "it set no assets root (%s)", runtime.modules.root);
-	three::RunResult loaded = runtime.run("return String(three.readText('test/fixtures/game/parts/size.js') !== null);");
-	defer loaded.free();
-	test::@check(loaded.value.contains("true"), "so a path is read as written (%s)", loaded.value);
-}
-
 // Under `build/`, which is gitignored: a test may not write into the repo.
 const String TEST_SCRIPT_IMPORTS = "build/test-script-imports";
 
 <*
- A script inside the assets directory is part of the game: it imports the way
- `main.js` does and gets the same module instances. One outside it imports from
- beside itself and may not climb into the game.
+ Two `--script`s: a game, and a probe kept somewhere else that runs against it.
 
- The first is the two-stage pipeline, `--assets ./game --no-boot --script
- ./game/tools/bake.js`: a baker kept in a subdirectory reaches the game's modules
- with `..`, which under a namespace of its own would be past its root, and a
- second copy of a module would be a second copy of its state. The second is the
- other side of the same line — the script's directory is its root for `import`,
- and the game's is not reachable from it.
+ Everything the one-flag command line promises, in one boot:
+ - the scripts run in order, so the probe sees the world `main.js` built;
+ - the probe imports the game's module with `..`, from outside the game's
+   folder, and gets the same instance rather than a second copy of its state;
+ - a relative path in the probe starts from the *first* script's folder, so it
+   reads the game's files the way the game does;
+ - `import.meta.dirname` is each module's own folder, absolute, so a module
+   that wants a path beside itself can build one whoever ran it.
 *>
-fn void a_script_inside_the_game_imports_the_way_main_js_does() @test
+fn void a_probe_runs_against_the_game_it_follows() @test
 {
 	(void)path::rmtree((Path)TEST_SCRIPT_IMPORTS);
 	defer (void)path::rmtree((Path)TEST_SCRIPT_IMPORTS);
 	@pool()
 	{
 		path::mkdir((Path)string::tformat("%s/game/parts", TEST_SCRIPT_IMPORTS), recursive: true)!!;
-		path::mkdir((Path)string::tformat("%s/game/tools", TEST_SCRIPT_IMPORTS), recursive: true)!!;
-		path::mkdir((Path)string::tformat("%s/probe", TEST_SCRIPT_IMPORTS), recursive: true)!!;
+		path::mkdir((Path)string::tformat("%s/tools/probe", TEST_SCRIPT_IMPORTS), recursive: true)!!;
 		String[2][*] files = {
-			{ "game/parts/count.js", "export const seen = { n: 0 };" },
+			{ "game/parts/count.js", "export const seen = { n: 0 }; export const here = import.meta.dirname;" },
 			{ "game/main.js", "import { seen } from './parts/count.js'; seen.n++;" },
-			{ "game/tools/bake.js", "import { seen } from '../parts/count.js'; seen.n++; globalThis.__seen = seen.n;" },
-			{ "probe/helper.js", "export default 'beside';" },
-			{ "probe/probe.js", "import word from './helper.js'; globalThis.__probe = word;" },
-			{ "probe/climb.js", "import { seen } from '../game/parts/count.js'; globalThis.__climbed = seen.n;" },
+			{ "game/level.txt", "the game's own file" },
+			{ "tools/probe/probe.js",
+				"import { seen, here } from '../../game/parts/count.js';\n"
+				"seen.n++;\n"
+				"globalThis.__probe = { n: seen.n, level: three.readText('level.txt'), here, mine: import.meta.dirname };" },
 		};
 		foreach (f : files) file::save(string::tformat("%s/%s", TEST_SCRIPT_IMPORTS, f[0]), f[1])!!;
 	};
@@ -297,25 +267,35 @@ fn void a_script_inside_the_game_imports_the_way_main_js_does() @test
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	runtime.set_assets_root("build/test-script-imports/game");
-	three::RunResult booted = runtime.run_module("main.js");
-	defer booted.free();
-	test::@check(booted.ok, "the game boots (%s)", booted.error);
+	String[2] scripts = { "build/test-script-imports/game/main.js", "./build/test-script-imports/tools/probe/probe.js" };
+	three::boot_world(&runtime, scripts[..])!!;
 
-	three::boot_script(&runtime, "./build/test-script-imports/game/tools/bake.js")!!;
-	three::RunResult seen = runtime.run("return String(globalThis.__seen);");
-	defer seen.free();
-	test::@check(seen.value.contains("2"), "the baker climbed to the game's module and shares it (%s)", seen.value);
+	String root = string::tformat("%s/%s", (String)path::tcwd()!!, TEST_SCRIPT_IMPORTS);
+	test::@check(runtime.base == string::tformat("%s/game", root), "the base is the first script's folder (%s)", runtime.base);
 
-	three::boot_script(&runtime, "build/test-script-imports/probe/probe.js")!!;
-	three::RunResult probe = runtime.run("return String(globalThis.__probe);");
+	three::RunResult probe = runtime.run("return globalThis.__probe;");
 	defer probe.free();
-	test::@check(probe.value.contains("beside"), "a script outside the game imports beside itself (%s)", probe.value);
+	test::@check(probe.value.contains(`"n":2`), "the probe shares the game's module, after it ran (%s)", probe.value);
+	test::@check(probe.value.contains("the game's own file"), "and reads a relative path from the game's folder (%s)", probe.value);
+	test::@check(probe.value.contains(string::tformat(`"here":"%s/game/parts"`, root)),
+		"import.meta.dirname is the module's own folder (%s)", probe.value);
+	test::@check(probe.value.contains(string::tformat(`"mine":"%s/tools/probe"`, root)),
+		"for the probe too (%s)", probe.value);
+}
 
-	three::boot_script(&runtime, "build/test-script-imports/probe/climb.js")!!;
-	three::RunResult climbed = runtime.run("return typeof globalThis.__climbed;");
-	defer climbed.free();
-	test::@check(climbed.value.contains("undefined"), "and may not climb into the game (%s)", climbed.value);
+// A typo on the command line is raised before anything runs, so the game does
+// not boot half its scripts and then report the missing one.
+fn void a_missing_script_runs_none() @test
+{
+	three::JsRuntime runtime;
+	runtime.open(null)!!;
+	defer runtime.close();
+	String[2] scripts = { "test/fixtures/game/main.js", "test/fixtures/game/no-such.js" };
+	test::@check(@catch(three::boot_world(&runtime, scripts[..])) == three::SCRIPT_NOT_READABLE, "the typo is raised");
+
+	three::RunResult read = runtime.run("return String(globalThis.__game);");
+	defer read.free();
+	test::@check(read.value.contains("undefined"), "and main.js did not run (%s)", read.value);
 }
 
 <*
@@ -328,7 +308,7 @@ fn void a_game_may_not_import_the_preludes_internals() @test
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	runtime.set_assets_root("test/fixtures/game");
+	runtime.set_base("test/fixtures/game")!!;
 
 	three::RunResult refused = runtime.run_module("forbidden.js");
 	defer refused.free();
@@ -337,100 +317,48 @@ fn void a_game_may_not_import_the_preludes_internals() @test
 		"and the refusal names it (%s)", refused.error);
 }
 
-<*
- Without an assets root a path is used exactly as written.
-
- The `--mcp` and CLI case. There is no directory for it to be relative to, an
- agent naming a file names it from wherever the process was started, and
- confining it to nothing would refuse every path there is — including the
- `test/fixtures/textured.glb` half this suite is built on.
-*>
-fn void without_an_assets_root_a_path_is_left_alone() @test
-{
-	test::@check(@asset_path("", "test/fixtures/textured.glb") == "test/fixtures/textured.glb",
-		"a relative path (%s)", @asset_path("", "test/fixtures/textured.glb"));
-	test::@check(@asset_path("", "../up/one.glb") == "../up/one.glb",
-		"and one that climbs, which is the caller's business here (%s)",
-		@asset_path("", "../up/one.glb"));
-}
-
-<*
- Reading and writing are two doors, and the narrow one is the writer.
-
- `resolve_write` confines a script to the directory it was given, which is the
- rule that outlived the `plugin:` scheme it was first written for: a game's
- script may put a file in its own directory and may not climb out of it.
-*>
-fn void a_script_writes_only_inside_its_own_directory() @test
-{
-	three::JsRuntime runtime;
-	runtime.open(null)!!;
-	defer runtime.close();
-	runtime.set_assets_root("game");
-
-	String? ordinary = runtime.resolve_write("out.glb", tmem);
-	test::@check(!@catch(ordinary) && ordinary!! == "game/out.glb",
-		"a game writes inside its own directory");
-
-	String? rooted = runtime.resolve_write("/levels/lumbridge.json", tmem);
-	test::@check(!@catch(rooted) && rooted!! == "game/levels/lumbridge.json",
-		"a leading '/' is the assets directory, not the filesystem's");
-
-	fault escaping = @catch(runtime.resolve_write("../secrets.glb", tmem));
-	test::@check(escaping == js::MODULE_ESCAPES_ROOT,
-		"climbing out is refused, the same as a read (%s)", escaping);
-}
-
 // ============================================================================
 // A failed load names the path it actually looked for
 // ============================================================================
 
 <*
  `JsRuntime.blame` is what `three.load`, `three.readText` and `three.texture`
- build their failure sentences from, so a script whose leading `/` got rooted
- sees where its file was actually sought and not just the name it typed —
- which is on disk, readable, and nowhere near the path the old message named.
+ build their failure sentences from. A relative path was joined onto the base,
+ and the sentence says so: the file someone is looking for in the working
+ directory was sought beside the game.
 *>
 fn void a_failure_names_both_the_written_and_the_looked_for_path() @test
 {
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
-	runtime.set_assets_root("game");
+	runtime.set_base("/srv/game")!!;
 
-	// The surprising case: a leading '/' reads as the filesystem's root to
-	// anyone who has not read this file, and is rooted at the assets
-	// directory instead — this is the rewrite the sentence has to own up to.
-	String? opening = runtime.resolve_asset("/kit/buildings.glb", tmem);
-	test::@check(!@catch(opening), "the rooted path still resolves");
-	String located = opening!!;
-	test::@check(located == "game/kit/buildings.glb", "landing inside the game (%s)", located);
+	String located = runtime.resolve_asset("kit/buildings.glb", tmem)!!;
+	test::@check(located == "/srv/game/kit/buildings.glb", "landing beside the game (%s)", located);
 
-	String blamed = runtime.blame("/kit/buildings.glb", located);
-	test::@check(blamed.contains("/kit/buildings.glb"),
-		"the path as the script wrote it is named (%s)", blamed);
-	test::@check(blamed.contains("game/kit/buildings.glb"),
-		"the path actually opened is named too (%s)", blamed);
-	test::@check(blamed.contains("game"), "and the assets directory that did the rooting (%s)", blamed);
+	String blamed = runtime.blame("kit/buildings.glb", located);
+	test::@check(blamed.contains("\"kit/buildings.glb\""), "the path as the script wrote it is named (%s)", blamed);
+	test::@check(blamed.contains("/srv/game/kit/buildings.glb"), "the path actually opened is named too (%s)", blamed);
+	test::@check(blamed.contains("first script's folder"), "and why it was joined (%s)", blamed);
+
+	String plain = runtime.blame("/srv/kit.glb", "/srv/kit.glb");
+	test::@check(plain == "\"/srv/kit.glb\"", "an absolute path was not rewritten, so nothing says it was (%s)", plain);
 }
 
 <*
- Without an assets root, `resolve_asset` never rewrites anything, so the
- sentence must not claim it did — a shorter, honest form instead.
+ Without a base, `resolve_asset` never rewrites anything, so the sentence must
+ not claim it did — a shorter, honest form instead.
 *>
-fn void without_a_root_the_sentence_does_not_claim_a_rewrite() @test
+fn void without_a_base_the_sentence_does_not_claim_a_rewrite() @test
 {
 	three::JsRuntime runtime;
 	runtime.open(null)!!;
 	defer runtime.close();
 
-	String? opening = runtime.resolve_asset("does-not-exist.glb", tmem);
-	test::@check(!@catch(opening), "a plain relative path resolves as written");
-	String located = opening!!;
-	test::@check(located == "does-not-exist.glb", "and is left alone (%s)", located);
+	String located = runtime.resolve_asset("does-not-exist.glb", tmem)!!;
+	test::@check(located == "does-not-exist.glb", "a plain relative path is left alone (%s)", located);
 
 	String blamed = runtime.blame("does-not-exist.glb", located);
-	test::@check(blamed.contains("does-not-exist.glb"), "the path is still named (%s)", blamed);
-	test::@check(!blamed.contains("assets directory"),
-		"but nothing claims a rewrite that never happened (%s)", blamed);
+	test::@check(blamed == "\"does-not-exist.glb\"", "the path is named and nothing else (%s)", blamed);
 }

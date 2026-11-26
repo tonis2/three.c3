@@ -21,8 +21,8 @@
  for the historical reason that everything was, and a file that only the CLI
  compiles cannot hold a value the renderer reads.
 
- `boot_world` and `boot_script` are here for the same reason: they are what a
- run *is* once the device is up, not how it was asked for.
+ `boot_world` is here for the same reason: it is what a run *is* once the
+ device is up, not how it was asked for.
 *>
 module three;
 
@@ -38,7 +38,7 @@ import mcp;
 
 const String VERSION = "0.1.0";
 
-// Raised by `boot_script` rather than by the command line: a path that cannot be
+// Raised by `boot_world` rather than by the command line: a path that cannot be
 // read is a fact about the file, and an application that never parsed a flag
 // still has to be told. `main.c3` catches it to print its own sentence.
 excuse SCRIPT_NOT_READABLE;
@@ -61,29 +61,21 @@ const String WINDOW_DEFAULT_TITLE = "three.c3";
 *>
 alias JsSetup = fn void(JsRuntime* runtime);
 
+<*
+ The most `--script`s one run takes. Far past what a command line holds, and it
+ keeps `Options` a plain value with nothing to free.
+*>
+const usz MAX_SCRIPTS = 8;
+
 struct Options
 {
-	// The game directory: `.js` to run, `.glb` to describe.
-	String assets;
-	// One `.js` file, evaluated as an ES module before the first frame — see `boot_script`.
-	String script;
 	<*
-	 `--no-boot`: read the assets directory and do not evaluate its `main.js`.
-
-	 **For the two-stage pipeline**, which is the one shape `--assets` could not
-	 hold. A bake writes a file and a scene loads it, so the baker has to run with
-	 the game's own root under it — and booting the game first means loading a file
-	 the baker has not written, which on a clean checkout is a boot that throws
-	 before the script that would have fixed it ever runs. The workaround was to
-	 root the bake at a subdirectory with no `main.js` in it, which works and reads
-	 as a trick.
-
-	 A flag rather than `--script` suppressing the boot on its own:
-	 `--assets ./game --script probe.js` running the probe against the world
-	 `main.js` built is a composition worth keeping, and it is what the same two
-	 things do through the server.
+	 `--script`, in the order given: ES modules, run one after another before the
+	 first frame — see `boot_world`. The first one's folder is where relative
+	 paths start. `scripts()` is the list.
 	*>
-	bool no_boot;
+	String[MAX_SCRIPTS] script_list;
+	usz script_count;
 	String screenshot;
 	uint width;
 	uint height;
@@ -131,6 +123,11 @@ struct Options
 	// size (`Renderer.draw_like_quest`). 0 draws at the window's own resolution.
 	float quest;
 }
+
+<*
+ The `--script`s, in order. Borrowed from `self`.
+*>
+fn String[] Options.scripts(&self) => self.script_list[:self.script_count];
 
 
 <*
@@ -352,7 +349,8 @@ fn void? run(Options opts)
 	c3w::Window* window = engine.viewer();
 	bool windowed = engine.windowed;
 
-	if (opts.script.len == 0 && opts.assets.len == 0)
+	String[] scripts = opts.scripts();
+	if (scripts.len == 0)
 	{
 		// The placeholder for "nothing was given", and only then. A script or a
 		// game builds its own scene, and since `new three.Scene()` stopped emptying
@@ -367,7 +365,7 @@ fn void? run(Options opts)
 	SceneStats stats = renderer.pass.stats();
 	io::printfn(
 		"%s: %d draw calls, %d instances, %d unique meshes, %d textures (%d KiB), %d triangles",
-		opts.script.len > 0 || opts.assets.len > 0
+		scripts.len > 0
 			? "empty scene"
 			: "built-in triangle",
 		stats.draw_calls,
@@ -378,24 +376,20 @@ fn void? run(Options opts)
 		stats.triangles
 	);
 
-	// Before every one-shot path below: neither a server, a game nor a booted
-	// script renders one frame and exits, and all three work with or without a
-	// window. They compose — `--assets ./game --mcp` plays and answers tool calls
-	// at the same time, and `--script` adds one more thing for the same loop to
-	// have run before the first frame.
-	if (opts.mcp_port > 0 || opts.assets.len > 0 || opts.script.len > 0)
+	// Before every one-shot path below: neither a server nor a game renders one
+	// frame and exits, and both work with or without a window. They compose —
+	// `--script game/main.js --mcp` plays and answers tool calls at the same time.
+	if (opts.mcp_port > 0 || scripts.len > 0)
 	{
 		live(
 			renderer,
 			window,
 			opts.mcp_port,
-			assets: opts.assets,
+			scripts: scripts,
 			screenshot: opts.screenshot,
-			script: opts.script,
 			frames: opts.frames,
 			every: opts.every,
-			camera: opts.camera,
-			boot: !opts.no_boot
+			camera: opts.camera
 		)!;
 		return;
 	}
@@ -460,171 +454,50 @@ fn void? run(Options opts)
 
 
 <*
- Runs whatever put a world on screen: a game directory, a script, or both.
+ Runs the `--script`s, in order: what puts a world on screen.
 
- A function rather than two blocks inside `live`, because `reload` needs the same
- two things in the same order — a reload *is* this, with a teardown in front of
- it — and a second spelling of "how a game boots" is how the two would come to
- disagree about which of them runs first.
+ A function rather than a loop inside `live`, because `reload` needs the same
+ thing — a reload *is* this, with a teardown in front of it.
 
- Both orders are defensible and this one composes: `--assets ./game --script
- probe.js` runs the script against the world `main.js` built, which is what the
- same two things would do through the server.
+ **The first script's folder is where relative paths start** — see
+ `js/modules.c3`. That is the game's folder when the first script is its
+ `main.js`, which is what lets a probe given second run against the world the
+ game built, reading the game's paths the way the game does:
+ `--script game/main.js --script tools/probe.js`.
 
- A directory with no `main.js` in it is a root and not a failed boot when a
- script was given — see `wants_entry_module`. `boot: false` — `--no-boot` — is the
- other half of that: the root without the game, for a script that has to write the
- file the game is waiting on.
-
- A game that failed to boot is printed and carried on with rather than returned
- as a fault. That is exactly when someone wants to look at it — with `--mcp` that
+ A script that fails is printed and carried on with rather than returned as a
+ fault. That is exactly when someone wants to look at it — with `--mcp` that
  means attaching and asking, and with a window it means seeing an empty scene
  beside the reason for it.
 
- @return ? SCRIPT_NOT_READABLE : `Only from --script: nothing at that path. A game directory that will not boot is reported and not raised.`
+ @param scripts : `The files, as typed. Empty boots nothing.`
+ @return? SCRIPT_NOT_READABLE : `A path that is not a file: a typo on the command line, raised before anything runs.`
+ @return? from_working_directory!
 *>
-fn void? boot_world(JsRuntime* runtime, String assets, String script, bool boot = true)
+fn void? boot_world(JsRuntime* runtime, String[] scripts)
 {
-	if (assets.len > 0)
+	if (scripts.len == 0) return;
+	foreach (script : scripts)
 	{
-		// The root goes in either way: it is what makes a kit's own relative paths
-		// resolve and what confines them, and a directory with nothing to boot is
-		// still a directory to read from.
-		runtime.set_assets_root(assets);
-
-		if (boot && wants_entry_module(assets, script))
-		{
-			RunResult booted = runtime.run_module(ENTRY_MODULE);
-			defer booted.free();
-
-			report_run(booted, string::tformat("%s/%s", assets, ENTRY_MODULE));
-		}
+		if (!file::is_file(script)) return SCRIPT_NOT_READABLE~;
 	}
 
-	// After `--assets`, which is entry-point order: the script is the probe that
-	// runs against what `main.js` built.
-	if (script.len > 0) boot_script(runtime, script)!;
-}
-
-<*
- Whether an `--assets` directory has an entry module this run should evaluate.
-
- **A missing `main.js` is only a failure when nothing else was given to run.**
-
- `--assets` is two jobs in one flag: the directory `main.js` boots from, and the
- root that makes `three.load("kit/rocks.glb")` mean something and stops it
- climbing out. `--assets kit --script probe.js` is asking for the second and has
- already said what to run, so a kit that ships models and no entry module is a
- perfectly good root rather than a run that opens by reporting a file it was
- never going to have.
-
- A `main.js` that is *there* is still booted with a script beside it — the script
- then runs against the world it built, which is the composition `boot_world`
- describes — and a `main.js` that is there and throws still says so. Only its
- absence is quiet, and only when a `--script` made it optional.
-
- @param assets : `The game directory. Never empty at the call site.`
- @param script : `The --script path, or empty when there is none.`
-*>
-fn bool wants_entry_module(String assets, String script)
-{
-	if (script.len == 0) return true;
-
-	@pool()
-	{
-		return file::is_file(string::tformat("%s/%s", assets, ENTRY_MODULE));
-	};
-}
-
-<*
- Runs one `.js` file as an ES module, before the first frame.
-
- **A module, so `import` works.** It used to be wrapped in an async function —
- the shape `run_script` still takes — and an `import` declaration inside a
- function body is a syntax error before the engine has looked at anything else.
- A module keeps what the wrapper was for, top-level `await`, and gives up
- top-level `return`, which a file on a command line has nobody to return to. It
- is strict mode, as every module is.
-
- Two questions, answered separately. They used to be one — a second flag,
- `--module`, made the file's directory the assets root — and the answer to the
- first then quietly changed the second.
-
- - **What `import` resolves against: the script's own directory.** A script
-   inside the `--assets` directory is part of the game and imports the way
-   `main.js` does: root-relative, the same module instances, `..` back up to the
-   root allowed. That is the two-stage pipeline, `--assets ./game --no-boot
-   --script ./game/bake.js` baking what `main.js` is waiting for out of the
-   modules it imports. Anywhere else the directory becomes `SCRIPT_SCHEME`, a
-   namespace of its own, so its imports neither reach into the game's root nor
-   get mistaken for files in it.
- - **What a file path means: what it means without a script.** `three.load`,
-   `readJSON` and `screenshot` resolve against `--assets` when there is one and
-   are used as written when there is not — relative to where the process was
-   started, as they are for an agent. The script's directory is not a root for
-   them, so a tool kept in one project can read and write another's files.
-
- The frame policy is the game's, though. `game_frames` decides what happens when
- a callback runs long, and the choice is between stopping it for good and
- counting it. Stopping is right when an agent is sitting there to be told and a
- runaway loop would wedge the tool surface; a script booted from a command line
- is somebody watching a window, where the answer to one slow frame is not to kill
- the animation.
-
- A script that throws is printed and carried on with, exactly as a game that
- fails to boot is.
-
- @return ? SCRIPT_NOT_READABLE : `Nothing at that path, or it is a directory — a typo on the command line, not something to debug in a running scene.`
-*>
-fn void? boot_script(JsRuntime* runtime, String path)
-{
-	if (!file::is_file(path)) return SCRIPT_NOT_READABLE~;
-
-	// The frame policy, before anything the script does can register a callback.
+	// The frame policy, before anything a script does can register a callback.
+	// See `game_frames`: a script booted from a command line is somebody watching
+	// a window, where the answer to one slow frame is not to kill the animation.
 	runtime.play_frames();
 
 	@pool()
 	{
-		String file = strip_dot(path);
-		String specifier = inside_root(runtime.modules.root, file);
-		if (specifier.len == 0)
+		runtime.set_base(folder_of(from_working_directory(scripts[0], tmem)!))!;
+		foreach (script : scripts)
 		{
-			// Its own directory, under the scheme. "/" for a file at the top of the
-			// disk and "." for one in the working directory: a root has to be a
-			// directory, and the empty string means there is none.
-			sz cut = last_separator(file);
-			String dir = cut > 0 ? file[:(usz)cut] : cut == 0 ? "/" : ".";
-			runtime.modules.set_scheme(SCRIPT_SCHEME, dir);
-			specifier = string::tformat("%s%s", SCRIPT_SCHEME, file[(usz)(cut + 1)..]);
+			String file = from_working_directory(script, tmem)!;
+			RunResult ran = runtime.run_module(file);
+			defer ran.free();
+			report_run(ran, script);
 		}
-
-		RunResult ran = runtime.run_module(specifier);
-		defer ran.free();
-
-		report_run(ran, path);
 	};
-}
-
-<*
- Where `file` sits inside the assets root, as a specifier that root resolves —
- or empty when there is no root or the file is not in it.
-
- Lexical, as the loader's own containment is: `./game/bake.js` is inside `game`,
- and `/home/me/game/bake.js` is not inside `./game` even when it is the same file.
- Such a script still runs, under `SCRIPT_SCHEME`; what it does not get is the
- game's module instances.
-*>
-fn String inside_root(String root, String file) @local
-{
-	if (root.len == 0) return "";
-	if (root == ".")
-	{
-		bool climbs = file.starts_with("/") || file.starts_with("../");
-		return climbs ? "" : file;
-	}
-	String base = strip_dot(root);
-	String prefix = base.ends_with("/") ? base : string::tformat("%s/", base);
-	return file.starts_with(prefix) ? file[prefix.len..] : "";
 }
 
 <*
@@ -642,20 +515,12 @@ fn void report_run(RunResult ran, String what)
 	if (!ran.ok) io::printfn("three: %s did not run: %s", what, ran.error);
 }
 
-// A path with its `./` taken off, so that `--assets game` and `--script
-// ./game/bake.js` are the same two words either way round.
-fn String strip_dot(String path) @local
-{
-	return path.starts_with("./") ? path[2..] : path;
-}
-
 <*
- The file a `--assets` boot runs.
+ The file a game folder boots: what the headset runs from the folder it was
+ given, and what a desktop run names with `--script <folder>/main.js`.
 
  Fixed rather than configurable, and named for the same reason `index.html` is: a
- directory that boots has to boot the same way on every machine, and a flag that
- changed the entry point would be one more thing to get wrong in a bug report
- that starts "it works here".
+ folder that boots has to boot the same way on every machine.
 *>
 const String ENTRY_MODULE = "main.js";
 

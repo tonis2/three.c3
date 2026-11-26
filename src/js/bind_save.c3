@@ -1,25 +1,21 @@
 <*
- `three.save` — the one place a script may write outside its own directory.
+ `three.save` — where a player's progress goes.
 
- Everything else a game touches is confined to the assets root, in or out:
- `js/modules.c3` resolves `import`, `three.load` and `three.writeText` inside it
- and refuses to leave, which is what makes a game directory relocatable and
- what keeps an agent's `run_script` from being an arbitrary file writer. A
- save game cannot live there. An install directory is not writable on every
- platform, a Steam depot is replaced wholesale by an update, and a player
- expects their progress to survive both.
-
- So the sandbox widens, once, and as narrowly as it can:
+ Not beside the game. `three.writeText` can write anywhere, but a save game
+ cannot live in the game's folder: an install directory is not writable on every
+ platform, a Steam depot is replaced wholesale by an update, and a player expects
+ their progress to survive both. So saves get a folder of their own, kept as
+ narrow as it can be:
 
  - **One directory**, `<platform state dir>/three.c3/<slug>`, named by
- `three.configure({ saveDir })` or derived from the assets directory's own name.
+ `three.configure({ saveDir })` or derived from the first script's folder's name.
  See `paths.c3` for which directory that is per platform, and why saves go to
  the state root rather than the cache one.
  - **A flat namespace.** A save is named, not pathed. `slot1` is a file in that
  directory; `../../etc/passwd`, `a/b` and `.` are refused by `valid_slot` before
  anything opens. There is no way to express a subdirectory and so no way to
  express an escape.
- - **Nothing implicit.** With no `saveDir` configured and no assets root to fall
+ - **Nothing implicit.** With no `saveDir` configured and no script to fall
  back on, every verb here fails and says to call `three.configure`. Inventing a
  folder would put a player's saves somewhere nobody could find twice.
 
@@ -90,26 +86,25 @@ fn bool valid_slot(String name)
  Answered in this order, and cached in `save_dir` once it is:
 
  1. What `three.configure({ saveDir })` named.
- 2. The assets directory's own last component, for a game that never configured
- one. `--assets ./wumpa-run` then saves under `wumpa-run`, which is the answer a
- person would have guessed.
+ 2. The last component of the first script's folder, for a game that never
+ configured one. `--script ./wumpa-run/main.js` then saves under `wumpa-run`,
+ which is the answer a person would have guessed.
 
- A `--script` or `--mcp` run reaches neither and gets the fault. That is the
+ An `--mcp` run with no script reaches neither and gets the fault. That is the
  case where there is nothing to name a folder after, and a folder named after
  nothing is one a player never finds again.
 
- @return ? SAVE_DIR_UNSET : `Nothing has named a save directory and there is no assets root to name one after.`
+ @return ? SAVE_DIR_UNSET : `Nothing has named a save directory and no script was run to name one after.`
  @return ? SAVE_DIR_UNAVAILABLE : `There is a name and no writable place to put it — no home directory, or a state root that cannot be created.`
 *>
 fn String? JsRuntime.save_directory(&self)
 {
 	if (self.save_dir.len() > 0) return self.save_dir.str_view();
 
-	String root = self.modules.root;
+	String root = self.base;
 	if (root.len == 0) return SAVE_DIR_UNSET~;
 
-	// The last component, with any trailing separator ignored: `--assets ./game/`
-	// and `--assets ./game` are the same directory and must be the same folder.
+	// The last component, with any trailing separator ignored.
 	usz end = root.len;
 	while (end > 0 && (root[end - 1] == '/' || root[end - 1] == '\\')) end--;
 	usz start = (usz)(last_separator(root[:end]) + 1);
@@ -179,9 +174,9 @@ fn fault JsRuntime.save_fault(&self, fault err, String verb)
 				verb, SAVE_NAME_MAX);
 		case SAVE_DIR_UNSET:
 			return self.js.fail("%s has nowhere to write: no save folder has been named. Call "
-				"three.configure({ saveDir: 'my-game' }) at the top of main.js. A game booted with "
-				"--assets takes the directory's own name when it says nothing; a --script or --mcp run "
-				"has no directory to be named after and has to be told.",
+				"three.configure({ saveDir: 'my-game' }) at the top of main.js. A game run with "
+				"--script takes its folder's name when it says nothing; an --mcp run with no script "
+				"has no folder to be named after and has to be told.",
 				verb);
 		default:
 			return self.js.fail("%s could not open the save folder. There is no writable application-data directory on this "

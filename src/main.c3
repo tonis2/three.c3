@@ -9,9 +9,9 @@
  --width <n>           the window's size in points, or the render size headless
  --height <n>          the same, vertically
  --headless            no window, no surface, no swapchain
- --script <file.js>    evaluate one file as an ES module, then keep the window running
- --assets <dir>        boot a game: evaluate <dir>/main.js as a module
- --no-boot             with --assets, use the directory as a root and do not run main.js
+ --script <file.js>    evaluate a file as an ES module, then keep the window running.
+                       Again for more, run in order; the first one's folder is where
+                       relative paths start
  --frames <n>          run n frames, then stop. Implies --headless
  --every <n>           with --frames, also shoot every n frames — see frame_path
  --camera <y,p,d>      yaw, pitch, distance, applied over whatever the script set
@@ -29,7 +29,7 @@
  hands the script an object it can place, parent and dispose — and a model the
  command line put on screen was none of those things: nothing named it, nothing
  could free it, and it sat in a scene of its own for the life of the process.
- `--script` and `--assets` are the two ways in.
+ `--script` is the way in: a game is `--script <folder>/main.js`.
 
  The window is a viewer and also a control: drag to orbit, right-drag to pan,
  scroll to zoom. It writes the same `pass.camera` a script writes through
@@ -57,6 +57,7 @@
 module three;
 
 import std::io;
+import std::io::file;
 import vk;
 
 const int DEFAULT_MCP_PORT = 8808;
@@ -83,14 +84,14 @@ fn Options? parse_args(String[] args)
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.cache_dir = args[++i];
 				opts.cache_dir_set = true;
-			case "--assets":
-				if (i + 1 >= args.len) return MISSING_VALUE~;
-				opts.assets = args[++i];
 			case "--script":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
-				opts.script = args[++i];
-			case "--no-boot":
-				opts.no_boot = true;
+				if (opts.script_count == MAX_SCRIPTS)
+				{
+					io::printfn("three takes at most %d --script files", MAX_SCRIPTS);
+					return BAD_ARGUMENT~;
+				}
+				opts.script_list[opts.script_count++] = args[++i];
 			case "--screenshot":
 				if (i + 1 >= args.len) return MISSING_VALUE~;
 				opts.screenshot = args[++i];
@@ -164,7 +165,7 @@ fn Options? parse_args(String[] args)
 				{
 					io::printfn("three takes no file argument: %s", arg);
 					io::printn("  A model is loaded from a script: three.load(\"model.glb\").");
-					io::printn("  --script <file.js> runs one; --assets <dir> boots <dir>/main.js.");
+					io::printn("  --script <file.js> runs one; a game is --script <folder>/main.js.");
 				}
 				return BAD_ARGUMENT~;
 		}
@@ -207,9 +208,8 @@ fn void usage()
 	io::printn("  --width <n>           the window's width, or the render width headless (1280)");
 	io::printn("  --height <n>          the window's height, or the render height headless (720)");
 	io::printn("  --headless            no window, no surface, no swapchain");
-	io::printn("  --script <file.js>    run one file as an ES module, then keep the window running");
-	io::printn("  --assets <dir>        boot a game: evaluate <dir>/main.js as a module");
-	io::printn("  --no-boot             with --assets: the root without the game — main.js is not run");
+	io::printn("  --script <file.js>    run a file as an ES module, then keep the window running;");
+	io::printn("                        give it again to run more, in order");
 	io::printn("  --frames <n>          run n frames and stop — implies --headless");
 	io::printn("  --every <n>           with --frames, shoot every n frames: shot-%03d.png");
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
@@ -222,12 +222,12 @@ fn void usage()
 	io::printn("  There is no file argument: a model is loaded from a script, with");
 	io::printn("  three.load(\"model.glb\"), which is what hands it back as an object.");
 	io::printn("");
-	io::printn("  --assets is also the root those paths resolve under, and the only directory");
-	io::printn("  a script may write in. It pairs with --script whether or not the directory");
-	io::printn("  has a main.js of its own to boot. Without it, paths are used as written.");
-	io::printn("");
-	io::printn("  A --script imports from its own directory; one inside --assets imports the");
-	io::printn("  way main.js does, and shares its modules.");
+	io::printn("  A game is --script <folder>/main.js. Relative paths a script names start");
+	io::printn("  from the first --script's folder; absolute paths and .. work, for reading");
+	io::printn("  and writing. Imports resolve against the importing file, from anywhere,");
+	io::printn("  and import.meta.dirname is a module's own folder. A second --script runs");
+	io::printn("  after the first, against the world it built:");
+	io::printn("    three --script game/main.js --script tools/probe.js");
 	io::printn("");
 	// Said here rather than in the flag list because it is four things, and because
 	// this is where somebody goes when a run is misbehaving. Every build has it —
@@ -295,8 +295,12 @@ fn int main(String[] args) @feat(!ANDROID) // android_main is the entry there
 		// over a path the shell may well have expanded.
 		if (err == SCRIPT_NOT_READABLE)
 		{
-			io::printfn("  --script %s: not a file this can read.", opts.script);
-			io::printn("  A directory is --assets, and it boots main.js as a module.");
+			foreach (script : opts.scripts())
+			{
+				if (file::is_file(script)) continue;
+				io::printfn("  --script %s: not a file this can read.", script);
+				if (file::is_dir(script)) io::printfn("  A game folder boots with --script %s/%s.", script, ENTRY_MODULE);
+			}
 		}
 		// Two different ways of saying "the only driver here is MoltenVK": the
 		// loader refuses to make the instance when that is all it has, and the

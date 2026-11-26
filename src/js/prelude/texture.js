@@ -209,8 +209,8 @@ export class Texture {
 	// Level 0, like `read()`. A KTX2 texture holding compressed blocks is
 	// refused by name — there are no pixels behind a block without a decoder.
 	//
-	// The path is the sandbox scene.export writes through: under --assets it
-	// is inside the game directory and cannot climb out.
+	// The path follows the rule scene.export's does: relative to the first
+	// script's folder.
 	save(path) {
 		if (this._t < 0) {
 			throw new TypeError('this texture has been disposed — save() it before dispose(), or keep a reference');

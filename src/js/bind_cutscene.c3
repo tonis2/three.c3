@@ -38,8 +38,7 @@ fn String? readable_path(JsRuntime* self, String asked) @local
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot read '%s': it climbs out of the assets directory, and a game may only read "
-				"what is inside its own",
+			return self.js.fail("cannot read '%s': it has more '..' than there is path above it",
 				asked)~;
 		}
 		return self.js.fail("cannot read '%s': %s", asked, err)~;

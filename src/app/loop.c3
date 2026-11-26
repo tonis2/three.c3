@@ -436,14 +436,13 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
 }
 
 <*
- The live loop: a JS context, a frame, and — optionally — the tool server and a
- game booted from a directory.
+ The live loop: a JS context, a frame, and — optionally — the tool server and the
+ scripts that boot a game.
 
- One loop for all three, and that is the point rather than an economy. `--mcp`
- wants a context that answers tool calls; `--assets` wants a context that runs
- `main.js` and keeps ticking; `--script` wants one that has run a file and keeps
- ticking. They are the same loop with the same frame, so `--assets ./game --mcp`
- needs no arbitration at all: the agent's `run_script` and the game's
+ One loop for both, and that is the point rather than an economy. `--mcp` wants
+ a context that answers tool calls; `--script` wants one that has run its files
+ and keeps ticking. They are the same loop with the same frame, so `--script
+ game/main.js --mcp` needs no arbitration at all: the agent's `run_script` and the game's
  `setAnimationLoop` are already the two things `JsRuntime` interleaves every
  frame, and an agent attaches to a game that is *playing*.
 
@@ -454,24 +453,20 @@ fn WindowView window_view(Renderer* renderer, c3w::Window* window)
 
  @param window : `Null when headless: the loop then only serves, and there is nothing to present.`
  @param port : `Zero to run without a listener, which is a game with no agent attached.`
- @param assets : `A game directory, or empty. The entry module is evaluated once, as a module, before the first frame.`
- @param script : `One .js file, or empty. Evaluated once, as an ES module, before the first frame — see boot_script.`
- @param boot : `False for --no-boot: take the assets directory as a root and leave its main.js alone.`
+ @param scripts : `The --script files, in order, or none. Each is evaluated once, as an ES module, before the first frame — see boot_world.`
  @param setup : `Called on the fresh runtime before anything is booted, and again after every reload — where an application that links these sources installs verbs of its own. Null for none.`
  @param memory_limit : `The JS heap's ceiling, as JsRuntime.open takes it.`
- @require port > 0 || assets.len > 0 || script.len > 0 : "a loop that neither serves nor plays has nothing to do"
+ @require port > 0 || scripts.len > 0 : "a loop that neither serves nor plays has nothing to do"
 *>
 fn void? live(
 	Renderer* renderer,
 	c3w::Window* window,
 	int port,
-	String assets = "",
+	String[] scripts = {},
 	String screenshot = "",
-	String script = "",
 	uint frames = 0,
 	uint every = 0,
 	String camera = "",
-	bool boot = true,
 	JsSetup setup = null,
 	usz memory_limit = JS_MEMORY_LIMIT
 )
@@ -490,7 +485,7 @@ fn void? live(
 	// Before the listener and before the first frame: a game that failed to boot
 	// should say so before anything invites a tool call, and a scene an agent
 	// attaches to should be the one `main.js` built.
-	boot_world(&runtime, assets, script, boot)!;
+	boot_world(&runtime, scripts)!;
 
 	// The bounded run, which is how a game is checked without a person watching it
 	// — and the only path in this function that is not an endless loop. The ticks
@@ -525,21 +520,7 @@ fn void? live(
 		io::printn("     run_script, screenshot");
 		io::printfn("     docs: %s", docs_location());
 	}
-	// Named as a game only when there is an entry module to boot; otherwise the
-	// directory is the root a `--script` loads out of, and naming a `main.js` that
-	// is not there would be the startup line telling a small lie.
-	if (assets.len > 0)
-	{
-		if (boot && wants_entry_module(assets, script))
-		{
-			io::printfn("game: %s/%s", assets, ENTRY_MODULE);
-		}
-		else
-		{
-			io::printfn("assets: %s", assets);
-		}
-	}
-	if (script.len > 0) io::printfn("script: %s", script);
+	foreach (script : scripts) io::printfn("script: %s", script);
 	if (window == null)
 	{
 		io::printn("     headless — ctrl-c to stop");
@@ -654,7 +635,7 @@ fn void? live(
 		if (runtime.reload_wanted || (debugging && window != null && wants_reload(input)))
 		{
 			Clock took = clock::now();
-			reload(&runtime, &renderer.pass, renderer, window, assets, script, boot, setup, memory_limit)!;
+			reload(&runtime, &renderer.pass, renderer, window, scripts, setup, memory_limit)!;
 			io::printfn("three: reloaded in %d ms", (long)took.to_now() / 1_000_000);
 		}
 

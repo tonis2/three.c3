@@ -30,8 +30,9 @@ the one file that still has to travel with it — see "Moving the binary".
 
     ./three --headless --script hello.js --frames 1 --screenshot hello.png
 
-`--script` and `--assets` keep running after the script returns, so a
-non-interactive run needs `--frames` or `--screenshot` to bound it.
+`--script` keeps running after the script returns, so a non-interactive run
+needs `--frames` or `--screenshot` to bound it. A game is `--script
+game/main.js`: relative paths start from the first script's folder.
 
 ## The examples
 
@@ -142,8 +143,8 @@ start drops from about 3.5 seconds to 1.6.
 ## Attaching an agent
 
 `--mcp` works in every build, including this one. `three --mcp` serves the agent
-tools on 127.0.0.1:8808 and composes with everything else — `three --assets
-./game --mcp` plays the game and answers tool calls against the same scene, in
+tools on 127.0.0.1:8808 and composes with everything else — `three --script
+game/main.js --mcp` plays the game and answers tool calls against the same scene, in
 the same loop. There is nothing to hand the agent: `run_script`'s description
 names the `docs/` folder beside the binary, and the agent reads the API there.
 

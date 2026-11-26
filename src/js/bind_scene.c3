@@ -1461,9 +1461,8 @@ fn void? js_render(JsRuntime* self)
  That costs a device round trip in the middle of a tick, so a script writing one
  file per frame of a real game is doing something it should know it is doing.
 
- The path is `writable_path`'s — under `--assets` inside the game directory and
- nowhere else — and a folder that is not there yet is made, exactly as
- `scene.export` makes one.
+ The path is `writable_path`'s, and a folder that is not there yet is made,
+ exactly as `scene.export` makes one.
 
  @return `{ path, width, height, bytes } — see written_image.`
  @return? js::THREW
@@ -2424,11 +2423,11 @@ struct SavedBake
 }
 
 <*
- `lightsSaveBake(path)` — the atlas and its tile table, into the assets directory,
- as `{ path, tiles, dirty, bytes, ms }`.
+ `lightsSaveBake(path)` — the atlas and its tile table, into a file, as
+ `{ path, tiles, dirty, bytes, ms }`.
 
- `three.writeText`'s door, so a path that climbs out of the assets directory is
- refused with the sentence every other writing verb uses.
+ `three.writeText`'s door, so the path is resolved and refused as every other
+ writing verb's is.
 
  @return? js::THREW
 *>

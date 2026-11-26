@@ -8,8 +8,10 @@ Read a `.glb` or `.gltf`. Nothing is uploaded: this parses the JSON and answers 
 knows its meshes, their bounds and the file's node tree. A mesh reaches the GPU when a Mesh drawing
 it is added to a scene, so loading a 200-piece kit to place twelve costs twelve.
 
-Under `--assets` the path is relative to the assets directory and cannot climb out of it, so
-`three.inventory()` paths go straight in; otherwise it is relative to where three was started.
+A relative path starts from the first `--script`'s folder — the game's folder when that script is
+its `main.js` — so `three.inventory()` paths go straight in. An absolute path is used as it is, and
+`..` works. A run with no script (a plain `--mcp`) uses the path as written, relative to where three
+was started. A module that wants a path beside itself builds it from `import.meta.dirname`.
 
 Loading the same path twice returns the same asset — unless it was unloaded in between, which gives
 a fresh one and makes the old handle throw. Use `asset.instantiate()` for the file's own hierarchy
@@ -38,8 +40,7 @@ uploads their proxies there, about a millisecond each.
 - A path that is still loading shares the load in flight: the file is read once, and both promises
   resolve together with the same asset.
 - Several different files load at once, each on a thread of its own.
-- A missing or broken file rejects with the sentence `three.load` throws for it, and so does a path
-  that climbs out of the assets directory.
+- A missing or broken file rejects with the sentence `three.load` throws for it.
 - The asset is not in the table until it resolves, so `three.unloadUnused()` and disposing a scene
   cannot free it under the worker.
 - `three.reset()` rejects every load still in flight, and what their workers read is dropped. The
@@ -138,9 +139,8 @@ what it is doing.
   required one.
 - **What it writes is what the window would show**: the post chain, the interface and
   `three.debug.overlay` are all in the file, at `three.renderSize()`.
-- **The path is `scene.export`'s sandbox.** Under `--assets` it is inside the game directory and
-  cannot climb out; a folder that is not there yet is made; with no assets directory it is used as
-  written, which is the `--script` and `--mcp` case.
+- **The path is resolved as `scene.export`'s is:** relative to the first `--script`'s folder, and a
+  folder that is not there yet is made.
 - Called from inside the animation callback it still happens now, submitting and waiting on its own
   command buffer the way `three.render()` does. That is a device round trip in the middle of a tick.
 - Needs a GPU device.
@@ -279,13 +279,13 @@ under `--debug`. The only way a script can tell the two apart, and what decides 
 
 ## three.inventory()
 
-Every `.glb` and `.gltf` under the assets directory, described without loading any of it:
+Every `.glb` and `.gltf` under the first `--script`'s folder, described without loading any of it:
 `[{ path, triangles, nodes, skins, meshes: [{ name, triangles }], animations: [name],
 markers: [{ name, piece, position }], bounds: { min, max } }]`.
 
 Read out of the JSON chunk, so it is cheap on a kit of any size — ask this before `three.load` to
-find out what is worth loading. `path` is what `three.load` wants. Empty when three was not started
-with `--assets`.
+find out what is worth loading. `path` is what `three.load` wants. Empty when three was started with
+no `--script`.
 
 A marker is a leaf node with no mesh — the empty a kit author drops where two pieces are meant to
 meet, the same way a Blender kit ships a connection point. `piece` is the top-level node the marker
@@ -295,8 +295,8 @@ join before it loads anything.
 
 ## three.readText(path)
 
-A text file out of the assets directory, as a string — and `three.readJSON(path)` is the same file
-parsed. The third thing that lives there beside the `.glb` and the `.png`: the level list that places
+A text file, as a string — and `three.readJSON(path)` is the same file parsed. The third thing that
+lives beside a game's `.glb` and `.png`: the level list that places
 a kit, a table of stats, a dialogue script. A file a person edits in the repo, beside the kit it
 names, that ships with the game.
 
@@ -310,10 +310,9 @@ for (const [piece, x, y, z, turns] of three.readJSON('levels/lumbridge.json') ??
 }
 ```
 
-This is `three.load`'s door with nothing loaded through it, so the sandbox is the same one: a path
-that climbs out of the assets directory throws, a leading `/` means that directory rather than the
-disk's root, and the paths `three.inventory()` hands back go straight in. Without `--assets` the path
-is used as written, exactly as `three.load`'s is.
+This is `three.load`'s door with nothing loaded through it, so the path is resolved the same way:
+relative to the first `--script`'s folder, absolute as it is, and the paths `three.inventory()`
+hands back go straight in.
 
 `three.writeText(path, text)` is this door the other way — see below.
 
@@ -322,13 +321,9 @@ A file that is not there answers null rather than throwing — `three.save.readT
 file over 4 MB throws, and so does one whose bytes are not UTF-8: this reads text, and a `.glb`
 opened by mistake says which verb it wanted.
 
-Containment is by name and not by `realpath`, as it is for `three.load` and for `import`: a symlink
-inside the assets directory pointing out of it is followed. The boundary is against a script reaching
-out, which is the one that gets written by accident.
-
 ## three.writeText(path, text)
 
-A text file into the assets directory, and `three.writeJSON(path, value)` is the same file
+A text file written, and `three.writeJSON(path, value)` is the same file
 stringified — `JSON.stringify(value, null, '\t')`, so a level list saved this way is a diff worth
 reading. `three.readText`'s door the other way: the level list a script builds has to land somewhere
 that ships with the game, and until this existed the only somewhere was
@@ -339,16 +334,14 @@ three.writeJSON('levels/lumbridge.json', rows);
 const rows2 = three.readJSON('levels/lumbridge.json');
 ```
 
-The sandbox is `scene.export(path)`'s and not a second one: a path that climbs out of the assets
-directory throws, a leading `/` means that directory rather than the disk's root, and nothing outside
-it is ever written. Without `--assets` the path is used as written, exactly as `scene.export`'s is.
+The path is resolved as `three.readText`'s is, so a level list lands where it is read back from.
+Anywhere on disk can be written.
 
 Answers the path it actually wrote to, the same way `scene.export` answers with `path` — useful when
 a caller built the path and wants to show a player, or a log, where it landed.
 
 A folder on the way that is not there yet is made, as `three.save` makes its own: the first save into
-a fresh `levels/` is the ordinary case rather than a mistake, and the sandbox has already said the path
-is inside the assets directory before anything is created. `scene.export` does the same.
+a fresh `levels/` is the ordinary case rather than a mistake. `scene.export` does the same.
 
 The same 4 MB `three.readText` stops at bounds this too: a file this writes has to be a file that
 reads back, and a second, larger limit would make that false.
@@ -459,8 +452,8 @@ counts the nodes written that way.
   do not batch. Pass `{ flatten: true }` to batch every copy of a shape in world space instead,
   giving up the hierarchy and the copies' names to do it.
 
-Images are written once and shared across every file they came from. Under `--assets` the path is
-inside the game directory and cannot climb out, as `three.load`'s is.
+Images are written once and shared across every file they came from. The path is resolved as
+`three.load`'s is.
 
 Helpers and hidden subtrees are not in the file (`skipped` counts them), and a ShaderMaterial is not
 either, because it is a Slang pipeline and glTF describes surfaces rather than programs — those
@@ -579,7 +572,7 @@ directory.
 - `path` — where the folder actually is, or null when nothing has named one.
 
 The folder is `<application data>/three.c3/<name>`, named by `three.configure({ saveDir })` or taken
-from the assets directory's own name: `~/Library/Application Support` on macOS, `%AppData%` on
+from the first `--script`'s folder's name: `~/Library/Application Support` on macOS, `%AppData%` on
 Windows, `$XDG_CONFIG_HOME` or `~/.config` elsewhere. Deliberately not the cache directory the
 compiled shaders go in — a disk cleaner may empty that one.
 
@@ -589,7 +582,7 @@ throw rather than resolving.
 
 Reading something never written answers null rather than throwing, because that is every game's first
 run, and `list()` is `[]` before a folder has even been named, so a load menu needs no guard. A
-`--script` or `--mcp` run has no assets directory to be named after: saving there throws until
+`--mcp` run with no script has no folder to be named after: saving there throws until
 `three.configure` names a folder.
 
 ## three.window
@@ -1365,9 +1358,8 @@ See the Cooldown class for `start`, `cancel`, `active`, `ready`, `recovering`, `
 ## three.cutscene.load(path, options) / create(spec, options)
 
 A timeline of actor strips, camera keys and named events — a cutscene — played on the game clock. Cutscenes
-are authored in Blender: `load` reads the `.cutscene.glb` (or `.gltf` + `.bin`) the Blender exporter writes,
-from the assets directory, and refuses any other file. `create` builds one from a spec in code. Both answer a
-Cutscene.
+are authored in Blender: `load` reads the `.cutscene.glb` (or `.gltf` + `.bin`) the Blender exporter writes, and
+refuses any other file. `create` builds one from a spec in code. Both answer a Cutscene.
 
 ```js
 const hero = three.load('characters/hero.glb').instantiate('hero', { materials: true });
@@ -2811,7 +2803,7 @@ the last bake covered, and `stats().lightmapDirty` how much of it is currently s
 
 ## three.lights.saveBake
 
-Writes the atlas and its tile table into the assets directory, so a shipped game loads its bake
+Writes the atlas and its tile table beside the game, so a shipped game loads its bake
 instead of making one on boot.
 
 ```js
@@ -2820,8 +2812,8 @@ three.lights.saveBake();                    // -> { path, tiles, dirty, bytes, m
 three.lights.saveBake('levels/forest.lightmap');
 ```
 
-The default path is `bake.lightmap`. The sandbox is `three.writeText`'s: a path that climbs out
-of the assets directory is refused, and a folder that is not there yet is made.
+The default path is `bake.lightmap`, resolved as `three.writeText`'s path is, and a folder that is
+not there yet is made.
 
 The format is the engine's own, currently version 3 — a header, one record per tile, then the
 tiles' texels packed one after another. `.ktx2` is what this project writes for textures and it is the wrong
@@ -3938,15 +3930,14 @@ three.ui.set({
 
 A directory listing a script can pick a file out of.
 
-- `start` (or `path`) — where it opens. Defaults to the root it is confined to.
+- `start` (or `path`) — where it opens. Defaults to the first `--script`'s folder.
 - `mask` — rides on `options`: a list of `path::ls`-style patterns (literal text with at most one `*`, e.g.
   `'*.glb'`), any one of which a file must match to be listed. Directories are never filtered. Empty (the default)
   shows everything.
 
-It can only look inside the assets directory a `--assets` boot was given — the same confinement `three.load` and
-`three.inventory` use — so a bad start opens at that root instead of failing, and `'../..'` cannot walk out of it.
-A process with no assets directory (`--mcp`, or the bare CLI) is not confined at all. The paths it hands back are
-relative to that root, which is exactly the path form `three.load` accepts.
+`start` is resolved as `three.load` resolves a path, and a bad start opens at the first script's folder instead of
+failing. The browser can walk anywhere on disk. The paths it hands back are the ones it lists — absolute when it
+opened at the folder — which is a path form `three.load` accepts. A run with no script opens where three was started.
 
 `onChoose(path)` fires when a row is activated (double-click, Enter) — the string path. `onSelect(path)` fires for
 a single click, highlighting a row without opening it. `onChange(path)` fires when the listing itself moves to a

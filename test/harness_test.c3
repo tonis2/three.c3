@@ -66,37 +66,47 @@ fn void the_camera_override_is_carried_verbatim() @test
 }
 
 <*
- The two flags a two-stage pipeline needs, and what each of them means.
+ `--script` is the one way in, and it can be given more than once.
 
- `--assets` used to be two jobs a script could not separate: the directory a game
- boots from, and the root that makes its paths resolve. A baker that writes the
- file the game loads has to run under that root and *before* that boot, and on a
- clean checkout the boot throws on a file that is not there yet — so the baker had
- to be rooted at a subdirectory with no `main.js` in it, which works and reads as
- a trick.
-
- `--no-boot` is the root without the game, and the baker is an ordinary
- `--script`: one inside the assets directory imports the way `main.js` does —
- see `boot_script`. `--module`, the second flag that used to be needed for
- `import`, is gone, and is refused like any other unknown flag.
+ The scripts are kept in the order given, because the order is the meaning: the
+ first one's folder is where relative paths start, and a probe given second runs
+ against the world the game built. `--assets`, `--no-boot` and `--module` are
+ gone, and are refused like any other unknown flag.
 *>
-fn void a_bake_can_run_under_the_game_root_without_booting_it() @test
+fn void scripts_are_kept_in_order_and_the_old_flags_are_gone() @test
 {
-	String[*] staged = { "three", "--assets", "./game", "--no-boot", "--script", "./game/bake.js" };
-	three::Options opts = three::parse_args(staged[..])!!;
-	test::@check(opts.assets == "./game", "the root is the game's, got '%s'", opts.assets);
-	test::@check(opts.no_boot, "and the game is not booted");
-	test::@check(opts.script == "./game/bake.js", "the script is the baker, got '%s'", opts.script);
+	String[*] two = { "three", "--script", "game/main.js", "--frames", "10", "--script", "tools/probe.js" };
+	three::Options opts = three::parse_args(two[..])!!;
+	String[] scripts = opts.scripts();
+	test::@check(scripts.len == 2, "kept %d scripts", scripts.len);
+	test::@check(scripts[0] == "game/main.js" && scripts[1] == "tools/probe.js",
+		"in the order given, got '%s', '%s'", scripts[0], scripts[1]);
 
-	// The default, and the one that must not move: a run that says nothing boots
-	// what it always booted.
-	String[*] plain = { "three", "--assets", "./game" };
-	three::Options was = three::parse_args(plain[..])!!;
-	test::@check(!was.no_boot, "--assets alone still boots main.js");
-	test::@check(was.script.len == 0, "and runs no script of its own");
+	String[*] none = { "three", "--headless" };
+	test::@check(three::parse_args(none[..])!!.scripts().len == 0, "no --script is no scripts");
 
-	String[*] gone = { "three", "--module", "./game/bake.js" };
-	test::@check(@catch(three::parse_args(gone[..])), "--module is no longer a flag");
+	String[3][*] gone = {
+		{ "three", "--assets", "./game" },
+		{ "three", "--no-boot", "--headless" },
+		{ "three", "--module", "./game/bake.js" },
+	};
+	foreach (line : gone) test::@check(@catch(three::parse_args(line[..])), "%s is no longer a flag", line[1]);
+}
+
+// A command line has room for only so many, and past that the parse says so
+// rather than dropping the rest.
+fn void too_many_scripts_are_refused() @test
+{
+	String[] line = alloc::new_array(mem, String, (sz)(1 + 2 * (three::MAX_SCRIPTS + 1)));
+	defer free(line);
+	line[0] = "three";
+	for (usz i = 0; i <= three::MAX_SCRIPTS; i++)
+	{
+		line[1 + 2 * i] = "--script";
+		line[2 + 2 * i] = "a.js";
+	}
+	test::@check(@catch(three::parse_args(line)), "%d scripts were accepted", three::MAX_SCRIPTS + 1);
+	test::@check(@ok(three::parse_args(line[:1 + 2 * three::MAX_SCRIPTS])), "but %d are fine", three::MAX_SCRIPTS);
 }
 
 <*
@@ -127,7 +137,7 @@ fn void a_bare_word_is_not_a_file_to_load() @test
 
 	String[*] flags = { "three", "--script", "boot.js", "--headless" };
 	three::Options opts = three::parse_args(flags[..])!!;
-	test::@check(opts.script == "boot.js" && opts.headless, "the flags stopped parsing");
+	test::@check(opts.scripts()[0] == "boot.js" && opts.headless, "the flags stopped parsing");
 }
 
 // The numbering, which is what makes `--every` a flipbook rather than one file
@@ -149,33 +159,4 @@ fn void a_shot_path_numbers_itself_only_when_asked() @test
 	test::@check(three::frame_path("f%02d.png", 1234) == "f1234.png");
 	// The directory part survives, which is the common shape of the flag.
 	test::@check(three::frame_path("/tmp/run/%04d.png", 9) == "/tmp/run/0009.png");
-}
-
-<*
- `--assets` is a root before it is a boot.
-
- The regression: `--assets kit --script probe.js` opened by printing
- `kit/main.js did not run: MODULE_IS_NOT_A_FILE` and then ran the script
- perfectly well. A kit is a directory of models — `--assets` is what makes
- `three.load("buildings.glb")` inside it mean the kit's own file and stops it
- climbing out — and a kit that ships no entry module was never asked to have
- one. The rule is that a missing `main.js` is only a failure when nothing else
- was given to run.
-
- `test/fixtures` is the kit here: glTF and images, no `main.js`.
- `test/fixtures/game` is the game, and still boots with a script beside it —
- losing that would take `--assets ./game --script probe.js` with it, which is
- how a running game gets probed.
-*>
-fn void a_kit_with_no_main_js_is_a_root_and_not_a_failure() @test
-{
-	test::@check(three::wants_entry_module("test/fixtures/game", ""),
-		"--assets alone boots main.js");
-	test::@check(three::wants_entry_module("test/fixtures", ""),
-		"and still asks for one that is missing, which is where the error comes from");
-
-	test::@check(three::wants_entry_module("test/fixtures/game", "probe.js"),
-		"a main.js that is there boots under --script too, and the script runs after it");
-	test::@check(!three::wants_entry_module("test/fixtures", "probe.js"),
-		"but a directory with none beside a --script is only an assets root");
 }

@@ -319,9 +319,8 @@ export class TextField extends Node { constructor(...args) { super('textfield', 
 // because a bar is a list of lists and a flat ordinal would make the panel
 // count the length of every menu before the one that was clicked.
 //
-// A FileBrowser's paths are relative to the directory it was confined to, which
-// is the assets root or the plugin's, so a path out of `onChoose` is a path
-// `three.load` takes. It sizes itself to its content and wants a Scroll above
+// A FileBrowser opens at the first script's folder and hands back the paths it
+// lists, so a path out of `onChoose` is a path `three.load` takes. It sizes itself to its content and wants a Scroll above
 // it, cui's shape for every list.
 //
 //     new Dialog({ title: 'Preferences', open: this.settings, modal: true,

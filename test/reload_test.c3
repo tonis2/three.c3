@@ -242,7 +242,7 @@ fn void a_reload_evaluates_the_modules_again() @test
 {
 	@with_js(; three::JsRuntime* run, three::MeshPass* pass)
 	{
-		run.set_assets_root("test/fixtures/game");
+		run.set_base("test/fixtures/game")!!;
 		three::RunResult booted = run.run_module("main.js");
 		defer booted.free();
 		test::@check(booted.ok, "the fixture game booted: %s", booted.error);
@@ -250,7 +250,8 @@ fn void a_reload_evaluates_the_modules_again() @test
 		String built = @answer(run, "return globalThis.__game.grid;");
 		@ok(run, "globalThis.__game = 'stale';");
 
-		three::reload(run, pass, assets: "test/fixtures/game")!!;
+		String[1] game = { "test/fixtures/game/main.js" };
+		three::reload(run, pass, scripts: game[..])!!;
 
 		test::@check(@answer(run, "return globalThis.__game.grid;") == built,
 			"main.js was not evaluated again: %s", @answer(run, "return globalThis.__game;"));

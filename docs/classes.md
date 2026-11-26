@@ -384,7 +384,7 @@ file's first bytes, not its extension.
 
 Images are deduplicated by content and by colourspace: two paths holding the same picture, or a
 `.png` and the identical image inside a `.glb`, are one upload, though each call still answers with
-its own handle. Under `--assets` the path is inside the game directory and cannot climb out.
+its own handle. A relative path starts from the first `--script`'s folder.
 
 Put it on something with `new three.MeshLambertMaterial({ map })`. 16-bit PNGs are refused by name;
 save as 8-bit. `read()` copies the pixels back off the device.
@@ -437,7 +437,7 @@ so a normal map or an ORM sheet round trips through a file unchanged and `colorS
 difference — that is the sampler's decode, and this is upstream of it.
 
 Level 0, like `read()`. A KTX2 texture holding compressed blocks is refused by name: there are no
-pixels behind a block without a decoder. The path is the sandbox `scene.export` writes through, and a
+pixels behind a block without a decoder. The path is resolved as `scene.export`'s is, and a
 device is needed, because the image is on it.
 
 ## MeshLambertMaterial

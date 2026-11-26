@@ -643,8 +643,8 @@ const lights = {
 		return answer;
 	},
 
-	// Writes the atlas and its tile table into the assets directory, so a
-	// shipped game loads it instead of baking on boot. Answers
+	// Writes the atlas and its tile table beside the game, so a shipped game
+	// loads it instead of baking on boot. Answers
 	// `{ path, tiles, dirty, bytes, ms }`.
 	saveBake(path) {
 		return H.lightsSaveBake(path == null ? '' : String(path));
@@ -2363,8 +2363,7 @@ export const three = {
 	},
 
 	// Decode a PNG, JPEG or KTX2 and upload it. Synchronous, for three.load's
-	// reason, and under --assets the path is inside the game directory and
-	// cannot climb out of it.
+	// reason, and the path is relative to the first script's folder.
 	//
 	// The format is read from the file's first bytes rather than from its
 	// extension, so a JPEG somebody named .png loads correctly instead of
@@ -2391,20 +2390,18 @@ export const three = {
 		return new Texture(H.texture(path, chosen.code, chosen.mips, chosen.nearest), path, chosen.space);
 	},
 
-	// A text file out of the assets directory. The third thing that lives
-	// there beside the .glb and the .png: the level list that places a kit, a
+	// A text file, as a string. The third thing that lives beside the game's
+	// .glb and .png: the level list that places a kit, a
 	// table of stats, a line of dialogue — a file a person edits in the repo,
 	// beside the kit it refers to, that ships with the game.
 	//
-	// It is three.load's door with nothing loaded through it, so the sandbox
-	// is the same one: a path that climbs out of the assets directory throws,
-	// a leading '/' means that directory rather than the disk's root, and the
-	// paths three.inventory() hands back are paths this accepts. Without
-	// --assets the path is used as written, exactly as three.load's is.
+	// It is three.load's door with nothing loaded through it, so the path is
+	// resolved the same way: relative to the first script's folder, absolute
+	// as it is, and the paths three.inventory() hands back are paths this
+	// accepts. With no script it is used as written, as three.load's is.
 	//
-	// three.writeText(path, text) is this door the other way — the same
-	// resolve_write sandbox scene.export(path) writes a .glb through, so a
-	// level list saves back to exactly where this reads it from.
+	// three.writeText(path, text) is this door the other way, so a level list
+	// saves back to exactly where this reads it from.
 	//
 	// null for a file that is not there — three.save.readText's answer, not
 	// three.load's throw, because "no level here yet" is a question an editor
@@ -2412,7 +2409,7 @@ export const three = {
 	// bytes are not UTF-8: this reads text, and a .glb read by mistake says so.
 	readText(path) {
 		if (typeof path !== 'string' || path.length === 0) {
-			throw new TypeError('three.readText(path) wants a path to a file in the assets directory');
+			throw new TypeError('three.readText(path) wants a path to a file');
 		}
 		return H.assetText(path);
 	},
@@ -2434,25 +2431,21 @@ export const three = {
 	// what a hand-edited level file gets wrong.
 	readJSON(path) {
 		if (typeof path !== 'string' || path.length === 0) {
-			throw new TypeError('three.readJSON(path) wants a path to a file in the assets directory');
+			throw new TypeError('three.readJSON(path) wants a path to a file');
 		}
 		const text = H.assetText(path);
 		return text === null ? null : JSON.parse(text);
 	},
 
-	// readText's door the other way — a string into the assets directory,
-	// through the same sandbox scene.export(path) writes a .glb through
-	// rather than a second one: a path that climbs out throws, a leading '/'
-	// means the assets directory and not the disk's, and nothing outside it
-	// is ever written. Without --assets the path is used as written, exactly
-	// as scene.export's is.
+	// readText's door the other way — a string into a file, the path
+	// resolved as readText resolves it.
 	//
 	// Answers the path it actually wrote to, so a caller can print where a
 	// level landed. Over 4 MB throws, the same limit three.readText stops
 	// at — a file this writes is a file that reads back.
 	writeText(path, text) {
 		if (typeof path !== 'string' || path.length === 0) {
-			throw new TypeError('three.writeText(path, text) wants a path to a file in the assets directory');
+			throw new TypeError('three.writeText(path, text) wants a path to a file');
 		}
 		return H.assetWriteText(path, String(text));
 	},
@@ -2507,9 +2500,9 @@ export const three = {
 	// would show: post-processing, the interface and three.debug.overlay
 	// included, at three.renderSize().
 	//
-	// The path is the one scene.export writes through: under --assets it is
-	// inside the game directory and cannot climb out, a folder that is not
-	// there yet is made, and with no assets directory it is used as written.
+	// The path is resolved as scene.export's is — relative to the first
+	// script's folder, as written with no script — and a folder that is not
+	// there yet is made.
 	//
 	// Needs a GPU device. Reading one back is three.texture(path), which is
 	// how a sheet baked through a post pass becomes a map on a material.
@@ -2961,11 +2954,11 @@ export const three = {
 		systems.add(FIXED_SYSTEM, fn, { phase: 'fixed' });
 	},
 
-	// Every .glb and .gltf in the assets directory, described without being
-	// loaded — mesh names and triangle counts, animation names, skin count
+	// Every .glb and .gltf under the first script's folder, described without
+	// being loaded — mesh names and triangle counts, animation names, skin count
 	// and bounds, read out of the JSON chunk with no buffer touched.
 	//
-	// Empty outside a `--assets` boot, where there is no directory to
+	// Empty in a run with no script, where there is no folder to
 	// describe. That is an answer rather than an error on purpose: a script
 	// written for a game still runs under a plain `--mcp`, and finds
 	// nothing, which is the truth.

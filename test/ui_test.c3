@@ -1204,8 +1204,8 @@ fn void an_open_dropdown_paints_over_the_rows_below_it() @test
  `FileBrowser.go_to` trims what it is handed — so `kit/` as a root contained
  nothing, not even itself. `ui_file_directory` sent the browser home, the send
  landed back in `ui_file_directory`, and the two called each other until the
- stack was gone. `--assets kit/` is what a shell's tab completion types, so this
- was one keystroke away for anybody.
+ stack was gone. `kit/` is what a shell's tab completion types, so this was one
+ keystroke away for anybody.
 
  A test that reaches the old code overflows the stack rather than failing, which
  is worth knowing before running it: the assertion is really "this returns at

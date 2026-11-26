@@ -492,12 +492,12 @@ fn void the_script_flag_names_a_file_beside_everything_else() @test
 {
 	String[*] alone = { "three", "--script", "examples/vfx.js" };
 	three::Options only = three::parse_args(alone[..])!!;
-	test::@check(only.script == "examples/vfx.js", "--script kept '%s'", only.script);
+	test::@check(only.scripts()[0] == "examples/vfx.js", "--script kept '%s'", only.scripts()[0]);
 	test::@check(only.mcp_port == 0, "and asked for no server, got %d", only.mcp_port);
 
 	String[*] served = { "three", "--mcp", "--script", "examples/vfx.js" };
 	three::Options both = three::parse_args(served[..])!!;
-	test::@check(both.script == "examples/vfx.js" && both.mcp_port > 0, "--mcp --script does both");
+	test::@check(both.scripts()[0] == "examples/vfx.js" && both.mcp_port > 0, "--mcp --script does both");
 
 	// A value it has no way to invent. The alternative — treating a bare
 	// `--script` as "no script" — is a command line that opens the built-in

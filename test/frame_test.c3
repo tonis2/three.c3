@@ -603,8 +603,8 @@ fn void a_flood_of_logging_is_bounded_and_says_what_it_dropped() @test
  A host with a terminal drains the lines *and* the reason the callback stopped.
 
  `--mcp` keeps both for the next tool call, because the next tool call is the
- first moment anyone is listening. A `--script` or `--assets` boot with no
- listener has no next call: the callback dies, the window stops moving, and
+ first moment anyone is listening. A `--script` boot with no listener has no
+ next call: the callback dies, the window stops moving, and
  without this the reason sits in a buffer until the process exits.
 
  The reason comes after the lines because that is the order they happened — a
@@ -775,9 +775,8 @@ fn void a_slow_fixed_loop_is_not_charged_to_the_animation_callback() @test
  work from a script.
 
  Nothing is logged about a long frame, and until this binding the count lived
- only in the `frame` block of an MCP `run_script` result — so the two boots that
- can produce an overrun at all, `--script` and `--assets`, were the two that
- could not read it.
+ only in the `frame` block of an MCP `run_script` result — so the boot that can
+ produce an overrun at all, `--script`, was the one that could not read it.
 
  `ms` is checked on the same frame, because the split is the point: a reader who
  knows the number is 30 and cannot see which of the four spans it was knows

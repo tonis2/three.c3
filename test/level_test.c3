@@ -57,7 +57,7 @@ macro @with_level(; @body(three::JsRuntime* run))
 	three::JsRuntime runtime;
 	runtime.open(&renderer.pass, renderer)!!;
 	defer runtime.close();
-	runtime.set_assets_root(TEST_ASSETS);
+	runtime.set_base(TEST_ASSETS)!!;
 
 	@body(&runtime);
 }

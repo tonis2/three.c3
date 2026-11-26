@@ -119,9 +119,8 @@ fn AssetId? js_load(JsRuntime* self, String path)
 <*
  The path `three.load` and `three.loadAsync` open, or the throw that refuses it.
 
- Relative to the assets directory in a `--assets` boot, and to the working
- directory otherwise. Resolved before the load so a path reaching out of the
- game is refused by name rather than opening whatever it found.
+ Relative to the first script's folder, and to the working directory in a run
+ with no script — see `resolve_asset`.
 
  @return `In tmem.`
  @return? js::THREW
@@ -133,8 +132,7 @@ fn String? load_path(JsRuntime* self, String path) @local
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot load '%s': it climbs out of the assets directory, and a game may only read "
-				"what is inside its own",
+			return self.js.fail("cannot load '%s': it has more '..' than there is path above it",
 				path)~;
 		}
 		return self.js.fail("cannot load '%s': %s", path, err)~;
@@ -220,7 +218,7 @@ fn bool is_utf8_text(char[] bytes) @private
 }
 
 <*
- `assetText(path)` — a text file from the assets directory, as a string.
+ `assetText(path)` — a text file, as a string.
 
  `js_load`'s door with nothing loaded through it. A kit is a `.glb` and the
  level that places it is a list of names and transforms somebody wrote, and
@@ -228,18 +226,13 @@ fn bool is_utf8_text(char[] bytes) @private
  into `<application data>/three.c3/<slug>`, which is not where the kit is, not
  what a person edits in a repo and not what ships beside the game.
 
- **The sandbox is `resolve_asset`'s and not a second one.** The same call
- `three.load` and `three.texture` make, so `../../etc/passwd` is refused with
- the same sentence, a leading `/` means the assets directory rather than the
- disk's, and the paths `three.inventory()` hands back are paths this accepts.
- Without an assets root the path is used as written — the `--script`/`--mcp`
- case, where `three.load` reads from wherever the process was started and
- confining to nothing would refuse every path there is.
+ **The path is `resolve_asset`'s and not a second rule.** The same call
+ `three.load` and `three.texture` make, so a relative path starts from the first
+ script's folder and the paths `three.inventory()` hands back are paths this
+ accepts.
 
- **The write door is `js_asset_write_text`, right below.** It goes through
- `resolve_write` rather than `resolve_asset` — the same narrower rule
- `scene.export` writes a `.glb` through — so a script can put a level list back
- where this reads it from without the sandbox growing a second shape.
+ **The write door is `js_asset_write_text`, right below**, through the same
+ call, so a script can put a level list back where this reads it from.
 
  Null for a file that is not there, which is `saveReadText`'s answer and not
  `js_load`'s. An editor asking "is there a level here yet" is the ordinary case
@@ -248,9 +241,9 @@ fn bool is_utf8_text(char[] bytes) @private
  something.
 
  Two refusals beyond the path. Anything over `MAX_MODULE_BYTES` is turned away
- by its size before it is read, reusing the loader's own number because this is
- the loader's own directory and a second limit would be a second thing to keep
- in step. And bytes that are not UTF-8 are refused rather than handed over: a
+ by its size before it is read, reusing the loader's own number: text a script
+ reads is bounded as text it imports, and a second limit would be a second thing
+ to keep in step. And bytes that are not UTF-8 are refused rather than handed over: a
  `String` crossing into JavaScript has to be text, and a `.glb` read by mistake
  should say what it is instead of arriving as a page of replacement characters.
 
@@ -258,15 +251,14 @@ fn bool is_utf8_text(char[] bytes) @private
 *>
 fn js::Value? js_asset_text(JsRuntime* self, String asked)
 {
-	if (asked.len == 0) return self.js.fail("three.readText(path) wants a path to a file in the assets directory")~;
+	if (asked.len == 0) return self.js.fail("three.readText(path) wants a path to a file")~;
 
 	String? opening = self.resolve_asset(asked, tmem);
 	if (catch err = opening)
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot read '%s': it climbs out of the assets directory, and a game may only read "
-				"what is inside its own",
+			return self.js.fail("cannot read '%s': it has more '..' than there is path above it",
 				asked)~;
 		}
 		return self.js.fail("cannot read '%s': %s", asked, err)~;
@@ -302,14 +294,14 @@ fn js::Value? js_asset_text(JsRuntime* self, String asked)
 
  The one thing `three.writeText`, `scene.export`, `three.screenshot` and
  `texture.save` do before opening the file, and shared so that the four doors
- cannot drift: `path_tdirname` is the folder, an empty one is the assets root
- itself and needs nothing, and `mkdir` with `recursive` answers false rather
+ cannot drift: `path_tdirname` is the folder, an empty one is the working
+ directory and needs nothing, and `mkdir` with `recursive` answers false rather
  than failing when the folder already exists.
 
  `@private` rather than `@local` because `bind_scene.c3` writes a PNG through
  the same door — the same reason `bind_shader.c3`'s `split_commas` is.
 
- @param writing : `The resolved path, already inside the sandbox.`
+ @param writing : `The resolved path.`
 *>
 fn void? make_way_for(String writing) @private
 {
@@ -321,20 +313,19 @@ fn void? make_way_for(String writing) @private
 }
 
 <*
- The whole write door as one call: resolve, refuse an escape by name, make the
- folder that is not there yet.
+ The whole write door as one call: resolve, refuse a path with too many `..` by
+ name, make the folder that is not there yet.
 
  `make_way_for`'s argument for existing, one step earlier. `three.screenshot`
  and `texture.save` are two more verbs that write a file the script named, and
- the sentence a refused path gets is the part that must not drift between them:
- it is what tells an author that a sandbox exists, rather than that their path
- was a typo. `three.writeText` and `scene.export` predate this and keep their
- own wording, which names the file kind each of them writes.
+ the sentence a refused path gets is the part that must not drift between them.
+ `three.writeText` and `scene.export` predate this and keep their own wording,
+ which names the file kind each of them writes.
 
  The exception is thrown here, so a caller has only to pass the fault on.
 
- A method, and so module-visible rather than `@private`: `resolve_write` next
- door is one for the same reason, and `bind_scene.c3` is the other caller.
+ A method, and so module-visible rather than `@private`: `resolve_asset` is one
+ for the same reason, and `bind_scene.c3` is the other caller.
 
  @param asked : `The path as the script wrote it, for the sentence.`
  @param verb : `How the script spelled the call — "three.screenshot".`
@@ -343,13 +334,12 @@ fn void? make_way_for(String writing) @private
 *>
 fn String? JsRuntime.writable_path(&self, String asked, String verb, Allocator allocator)
 {
-	String? writing = self.resolve_write(asked, allocator);
+	String? writing = self.resolve_asset(asked, allocator);
 	if (catch err = writing)
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("%s cannot write to '%s': it climbs out of the assets directory, and a game may "
-				"only write inside its own",
+			return self.js.fail("%s cannot write to '%s': it has more '..' than there is path above it",
 				verb, asked)~;
 		}
 		return self.js.fail("%s cannot write to '%s': %s", verb, asked, err)~;
@@ -394,27 +384,21 @@ fn WrittenImage written_image(String path, uint width, uint height) @private
 }
 
 <*
- `assetWriteText(path, text)` — a text file into the assets directory, and the
- path it landed at.
+ `assetWriteText(path, text)` — a text file, and the path it landed at.
 
  `js_asset_text`'s write twin and `js_export`'s text-shaped sibling: the level
  list `three.readText` reads has to come from somewhere, and until this existed
  the only place a script could put it was `<application data>/three.c3/<slug>`
  — precisely the split `js_asset_text`'s doc comment opened this door to close.
 
- **The sandbox is `resolve_write`'s and not a second one.** The same call
- `scene.export` makes, so `../../etc/passwd` is refused with the same sentence
- (adapted to say write rather than read), a leading `/` means the assets
- directory rather than the disk's, and nothing outside it is ever written.
- Without an assets root the path is used as written, exactly as `scene.export`'s
- is — the `--script`/`--mcp` case, where there is no directory to be relative
- to.
+ **The path is `resolve_asset`'s and not a second rule.** The same call
+ `scene.export` and `three.readText` make, so a level list lands where
+ `three.readText` reads it from.
 
  A missing folder on the way is made, as `three.save` makes its own: the
  first save of a level into a fresh `levels/` is the ordinary case and not a
- mistake, and the sandbox has already said the path is inside the assets
- directory before anything is created. `scene.export` does the same, so the two
- doors agree about who owns that.
+ mistake. `scene.export` does the same, so the two doors agree about who owns
+ that.
 
  The same `MAX_MODULE_BYTES` `three.readText` stops at bounds the string here,
  checked before the write rather than after: a file this writes is a file
@@ -427,7 +411,7 @@ fn String? js_asset_write_text(JsRuntime* self, String asked, String text)
 {
 	if (asked.len == 0)
 	{
-		return self.js.fail("three.writeText(path, text) wants a path to a file in the assets directory")~;
+		return self.js.fail("three.writeText(path, text) wants a path to a file")~;
 	}
 
 	if (text.len > js::MAX_MODULE_BYTES)
@@ -437,13 +421,12 @@ fn String? js_asset_write_text(JsRuntime* self, String asked, String text)
 			asked, text.len, js::MAX_MODULE_BYTES)~;
 	}
 
-	String? writing = self.resolve_write(asked, tmem);
+	String? writing = self.resolve_asset(asked, tmem);
 	if (catch err = writing)
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot write to '%s': it climbs out of the assets directory, and a game may only "
-				"write inside its own",
+			return self.js.fail("cannot write to '%s': it has more '..' than there is path above it",
 				asked)~;
 		}
 		return self.js.fail("cannot write to '%s': %s", asked, err)~;
@@ -571,8 +554,7 @@ fn void JsRuntime.release_script_textures(&self)
 <*
  `texture(path, space, mips, nearest)` — decode a PNG or JPEG and upload it.
 
- The path goes through `resolve_asset`, the same door `three.load` uses, so under
- `--assets` a texture may only come from inside the game.
+ The path goes through `resolve_asset`, the same door `three.load` uses.
 
  The index is not a generational handle, unlike an asset or a node, and does not
  need to be: the only way a script gets one is the `Texture` the prelude wraps it
@@ -592,8 +574,7 @@ fn js::Value? js_texture(JsRuntime* self, String path, int space, Opt {bool} mip
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot load '%s': it climbs out of the assets directory, and a game may only read "
-				"what is inside its own",
+			return self.js.fail("cannot load '%s': it has more '..' than there is path above it",
 				path)~;
 		}
 		return self.js.fail("cannot load '%s': %s", path, err)~;
@@ -850,9 +831,8 @@ fn int? js_texture_read(JsRuntime* self, int index, char[] dst)
  reason: there are no pixels behind a block without a decoder, and one written
  into a PNG header would produce a file that opens and is wrong.
 
- The path is `resolve_write`'s, so under `--assets` this writes inside the game
- directory and nowhere else — the same door `scene.export` and `three.screenshot`
- go through.
+ The path is `writable_path`'s — the same door `scene.export` and
+ `three.screenshot` go through.
 
  @return? js::THREW
 *>
@@ -1339,9 +1319,8 @@ struct ExportAnswer
  `exportScene(path, flatten, bake, textures)` — write the scene to a `.glb`, and
  say what went into it.
 
- `js_load`'s other half, through a narrower door: the path is resolved by
- `resolve_write`, so under `--assets` a script may write inside the game
- directory and nowhere else.
+ `js_load`'s other half: the path is resolved by `resolve_asset`, as a load's
+ is.
 
  No device is needed and none is used. `scene/export.c3` reads a mesh out of the
  file it came from or tessellates it again from its description, so an export is
@@ -1368,13 +1347,12 @@ fn ExportAnswer? js_export(JsRuntime* self, String path, bool flatten, int bake,
 	if (self.pass == null) return self.js.fail("there is no scene to export in this context")~;
 	if (path.len == 0) return self.js.fail("scene.export(path) wants a path to write a .glb to")~;
 
-	String? writing = self.resolve_write(path, tmem);
+	String? writing = self.resolve_asset(path, tmem);
 	if (catch err = writing)
 	{
 		if (err == js::MODULE_ESCAPES_ROOT)
 		{
-			return self.js.fail("cannot export to '%s': it climbs out of the assets directory, and a game may only "
-				"write inside its own",
+			return self.js.fail("cannot export to '%s': it has more '..' than there is path above it",
 				path)~;
 		}
 		return self.js.fail("cannot export to '%s': %s", path, err)~;
@@ -2337,14 +2315,14 @@ struct InventoryRecord
 }
 
 <*
- `three.inventory()` — every glTF in the assets directory, described without
- being loaded.
+ `three.inventory()` — every glTF under the first script's folder, described
+ without being loaded.
 
  `scene/inventory.c3` carries the argument. In short: without it, finding out
  what a file held means uploading it, so "what have I got" — the question an
  agent asks first — is the most expensive one it can ask.
 
- Answers with an empty array rather than throwing when there is no assets root,
+ Answers with an empty array rather than throwing when no script was run,
  because "nothing here" is the true answer for a plain `--mcp` run and an
  exception would make a script written for a game boot fail loudly under one.
 
@@ -2353,10 +2331,10 @@ struct InventoryRecord
 fn js::Value? js_inventory(JsRuntime* self)
 {
 	js::Value listed = self.js.array()!;
-	if (self.modules.root.len == 0) return listed;
+	if (self.base.len == 0) return listed;
 
-	Inventory? found = take_inventory(self.modules.root);
-	if (catch err = found) return self.js.fail("could not read %s: %s", self.modules.root, err)~;
+	Inventory? found = take_inventory(self.base);
+	if (catch err = found) return self.js.fail("could not read %s: %s", self.base, err)~;
 	defer found.free_entries();
 
 	foreach (&entry : found)

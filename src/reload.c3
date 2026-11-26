@@ -45,9 +45,7 @@ import fastjs::js;
  @param pass : `The world — renderer.pass in every caller that has a device.`
  @param renderer : `Null in a scene-math runtime, which has no post chain and nothing on a device to give back.`
  @param window : `Put back on the new runtime, which is otherwise the one thing a fresh context could not find out for itself.`
- @param assets : `The game directory this process booted from, or empty.`
- @param script : `The one .js file this process booted from, or empty.`
- @param boot : `False when this process booted with --no-boot, so a reload does not start the game the run deliberately did not.`
+ @param scripts : `The --script files this process booted from, in order, or none.`
  @param setup : `The host's own verbs, installed on the new runtime as they were on the first — see live.`
  @param memory_limit : `The heap ceiling the first runtime was opened with.`
  @return ? JS_ENGINE_FAILED : `The engine would not start a second time, which is out of memory and nothing else.`
@@ -57,9 +55,7 @@ fn void? reload(
 	MeshPass* pass,
 	Renderer* renderer = null,
 	c3w::Window* window = null,
-	String assets = "",
-	String script = "",
-	bool boot = true,
+	String[] scripts = {},
 	JsSetup setup = null,
 	usz memory_limit = JS_MEMORY_LIMIT
 )
@@ -82,7 +78,7 @@ fn void? reload(
 	runtime.activate_scene(pass.scene);
 	runtime.restore_persist(kept);
 
-	boot_world(runtime, assets, script, boot)!;
+	boot_world(runtime, scripts)!;
 }
 
 <*

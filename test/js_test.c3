@@ -4300,7 +4300,7 @@ fn void a_named_piece_comes_back_named_in_the_file() @test
 
 	@with_gpu_js(; three::JsRuntime* run)
 	{
-		run.set_assets_root(root);
+		run.set_base(root)!!;
 		three::RunResult result = run.run(`
 			const scene = new three.Scene();
 
