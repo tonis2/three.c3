@@ -492,15 +492,53 @@ struct ExportTag @local
 {
 	// Borrowed from `ExportExtras`.
 	String extras;
+	// The file body the node carries, or null. Borrowed from its asset.
+	AssetBody* body;
 	AssetId body_asset;
 	// Index into that asset's `bodies`, or -1.
-	int body;
+	int body_index;
 }
 
 fn bool ExportTag.equals(self, ExportTag other)
 {
-	if (self.extras != other.extras || self.body != other.body) return false;
-	return self.body < 0 || self.body_asset == other.body_asset;
+	if (self.extras != other.extras) return false;
+	if (self.body == null || other.body == null) return self.body == other.body;
+	if (self.body_asset == other.body_asset && self.body_index == other.body_index) return true;
+	return same_collider(self.body, other.body);
+}
+
+<*
+ Whether two file bodies say the same collider, so copies carrying them can share
+ one instanced node.
+
+ By what they state rather than by which body they are: a kit realizes each copy
+ of a part as a node of its own, each with its own body, and those still batch. A
+ collider whose geometry is another node's is only ever the same as itself.
+*>
+fn bool same_collider(AssetBody* a, AssetBody* b) @local
+{
+	if (a.geometry_node != a.gltf_node || b.geometry_node != b.gltf_node) return false;
+	if (a.shape != b.shape || a.has_collider != b.has_collider || a.trigger != b.trigger) return false;
+	if (a.has_motion || b.has_motion) return false;
+	if (a.has_material != b.has_material) return false;
+	if (a.has_material && (a.friction != b.friction || a.restitution != b.restitution)) return false;
+	if (a.size != b.size || a.radius != b.radius || a.height != b.height) return false;
+	if (a.radius_top != b.radius_top || a.radius_bottom != b.radius_bottom) return false;
+	if (a.filtered != b.filtered) return false;
+	if (!a.filtered) return true;
+	return same_names(&a.filter.systems, &b.filter.systems)
+		&& same_names(&a.filter.not_colliding, &b.filter.not_colliding)
+		&& same_names(&a.filter.colliding_with, &b.filter.colliding_with);
+}
+
+fn bool same_names(List{String}* a, List{String}* b) @local
+{
+	if (a.len() != b.len()) return false;
+	foreach (i, name : *a)
+	{
+		if (name != (*b)[i]) return false;
+	}
+	return true;
 }
 
 // Where a mesh's vertices ended up in the document, so a second node naming the
@@ -1199,11 +1237,12 @@ fn AssetBody* Exporter.file_body(&self, Node* node)
 
 fn ExportTag Exporter.tag_of(&self, NodeId id, Node* node)
 {
-	bool carried = self.file_body(node) != null;
+	AssetBody* body = self.file_body(node);
 	return {
 		.extras = self.extras_of(id),
-		.body_asset = carried ? node.file_body_asset : NO_ASSET,
-		.body = carried ? node.file_body : -1,
+		.body = body,
+		.body_asset = body != null ? node.file_body_asset : NO_ASSET,
+		.body_index = body != null ? node.file_body : -1,
 	};
 }
 

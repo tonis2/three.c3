@@ -4351,6 +4351,10 @@ fn void write_filtered_bodies(String path)
  A collision filter passes through. The solver has no layers to apply one, so the
  file's filter rides on the asset body and goes back out on the collider that
  named it — one filter for the two colliders that shared one, as the file had it.
+
+ `wall` and `fence` draw one mesh and state the same collider, so they go out as
+ one instanced node with one collider, which the reader gives each copy: two
+ colliders in the file, three again once it is placed.
 *>
 fn void a_collision_filter_round_trips() @test
 {
@@ -4367,11 +4371,16 @@ fn void a_collision_filter_round_trips() @test
 			scene.add(three.load('build/export_filtered_source.glb').instantiate(undefined, { physics: true }));
 			const report = scene.export('build/export_filtered.glb', { camera: false, light: false });
 			const back = three.load('build/export_filtered.glb');
-			return { colliders: report.colliders, filtered: back.colliders.filter((c) => c.filtered).length };
+			const placed = new three.Scene();
+			const copies = [];
+			placed.add(back.instantiate(undefined, { physics: true }));
+			placed.traverse((o) => { if (o._fileBody >= 0) copies.push(back.colliders[o._fileBody].filtered); });
+			return { colliders: report.colliders, filtered: back.colliders.filter((c) => c.filtered).length, copies };
 		`);
 		defer result.free();
 		test::@check(result.ok, "the script succeeded: %s", result.error);
-		test::@check(result.value == `{"colliders":3,"filtered":3}`, "three colliders, each filtered again: %s", result.value);
+		test::@check(result.value == `{"colliders":2,"filtered":2,"copies":[true,true,true]}`,
+			"two colliders in the file, each filtered, and three filtered copies once placed: %s", result.value);
 	};
 
 	gltf::GltfStream stream = gltf::open(path, mem)!!;
