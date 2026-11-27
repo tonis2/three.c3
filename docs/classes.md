@@ -1920,7 +1920,7 @@ are one asset, the same rule every other shape here follows.
 ## TerrainGeometry
 
 ```js
-new three.TerrainGeometry({ width, depth, segments, heights, skirt, center, colors })
+new three.TerrainGeometry({ width, depth, segments, heights, skirt, center, colors, diagonal, flat })
 ```
 
 Ground that is a surface rather than a pile of boxes, and the only geometry here that answers questions
@@ -1943,6 +1943,13 @@ out reads 0), or a `Uint8Array` of RGBA bytes, `(segments + 1)²` × 4. They are
 `LayeredMaterial` layer with `maskSource: 'vertexColor'` reads them through `s.vertex_mask` exactly as it
 reads a Blender-painted ground; a skirt vertex takes its edge's colour. `scene.export` writes them back as
 `COLOR_0`.
+
+`diagonal` is how each cell is cut into its two triangles: `'+x-z'` (the default) joins the corner at the
+lowest x and highest z to the opposite one, and `'+x+z'` joins the corner at the lowest x and z to the
+highest, which is Blender's cut. On a cell that twists they are different surfaces, so a ground moved from
+Blender keeps its cut. `flat: true` shades each triangle with its own face normal, a faceted low-poly
+ground, at three vertices a triangle; `normalAt` then gives the face's normal. `heightAt` stays bilinear
+either way, and both go through `scene.export` unchanged.
 
 ```js
 const rock = new three.Field({ width: 64, segments: 64 }).fill((x, z) => (z > 10 ? 1 : 0));

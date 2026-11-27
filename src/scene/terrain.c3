@@ -56,6 +56,33 @@ const uint MIN_TERRAIN_SEGMENTS = 1;
 excuse TERRAIN_SIZE_INVALID, TERRAIN_HEIGHTS_WRONG_LENGTH;
 
 <*
+ Which way each cell is cut into its two triangles.
+
+ A cell's corners are a (i, j), b (i + 1, j), c (i, j + 1) and d (i + 1, j + 1).
+ `BC` joins b and c; `AD` joins a and d, the corner with the lowest x and z to the
+ one with the highest, which is how Blender cuts a grid. On a cell that twists
+ the two are different surfaces, so a ground moved from Blender keeps its cut.
+*>
+enum CellDiagonal : char
+{
+	BC,
+	AD,
+}
+
+<*
+ The cell's two triangles, as corners: 0 is a, 1 b, 2 c, 3 d, so corner k sits
+ at (i + (k & 1), j + (k >> 1)). Counter-clockwise seen from +y, the front face.
+*>
+fn char[6] CellDiagonal.triangles(self)
+{
+	switch (self)
+	{
+		case BC: return { 0, 2, 1, 1, 2, 3 };
+		case AD: return { 0, 2, 3, 0, 3, 1 };
+	}
+}
+
+<*
  A grid of heights, and everything derived from it.
 
  The list is owned. `Assets.free_slot` frees it with the asset that holds it, so
@@ -86,6 +113,10 @@ struct Heightfield
 	// A colour per sample, in the heights' order, linear 0..1 — the mesh's COLOR_0,
 	// which a layer with a vertex-colour mask reads. Empty for none. Owned.
 	List{Vec4} colors;
+	CellDiagonal diagonal;
+	// Shade each triangle with its own face normal (a faceted, low-poly ground)
+	// rather than the grid's smooth normals. Costs three vertices per triangle.
+	bool flat;
 }
 
 <*
@@ -198,6 +229,18 @@ fn Vec3 Heightfield.normal_at(&self, float x, float z)
 	float fx = gx - (float)i;
 	float fz = gz - (float)j;
 
+	if (self.flat)
+	{
+		// The face under the point, as it is shaded. Off the map, the edge cell's.
+		int last = (int)self.segments - 1;
+		int ci   = math::clamp(i, 0, last);
+		int cj   = math::clamp(j, 0, last);
+		bool first = self.diagonal == CellDiagonal.BC ? fx + fz <= 1.0f : fz >= fx;
+		char[6] corners = self.diagonal.triangles();
+		usz at = first ? 0 : 3;
+		return self.face_normal((uint)ci, (uint)cj, corners[at], corners[at + 1], corners[at + 2]);
+	}
+
 	Vec3 n00 = self.grid_normal(i, j);
 	Vec3 n10 = self.grid_normal(i + 1, j);
 	Vec3 n01 = self.grid_normal(i, j + 1);
@@ -208,6 +251,30 @@ fn Vec3 Heightfield.normal_at(&self, float x, float z)
 	Vec3 blended = top + (bottom - top) * fz;
 	float length = blended.length();
 	return length > 1e-6f ? blended * (1.0f / length) : (Vec3) { 0, 1, 0 };
+}
+
+<*
+ A grid sample as a vertex position, in the asset's own space.
+*>
+fn Vec3 Heightfield.grid_point(&self, uint i, uint j)
+{
+	return {
+		self.center_x - self.width * 0.5f + (float)i / (float)self.segments * self.width,
+		self.sample((int)i, (int)j),
+		self.center_z - self.depth * 0.5f + (float)j / (float)self.segments * self.depth,
+	};
+}
+
+<*
+ The unit normal of one triangle of cell (i, j), named by its corners as
+ `CellDiagonal.triangles` names them.
+*>
+fn Vec3 Heightfield.face_normal(&self, uint i, uint j, char k0, char k1, char k2)
+{
+	Vec3 p0 = self.grid_point(i + (k0 & 1), j + (k0 >> 1));
+	Vec3 p1 = self.grid_point(i + (k1 & 1), j + (k1 >> 1));
+	Vec3 p2 = self.grid_point(i + (k2 & 1), j + (k2 >> 1));
+	return (p1 - p0).cross(p2 - p0).normalize();
 }
 
 <*
@@ -246,46 +313,76 @@ fn collision::Aabb3 Heightfield.bounds(&self)
 
  The colours, when the field has them, go on as COLOR_0 one per vertex, so a
  vertex-colour mask reads the paint where it was put.
+
+ A `flat` field gives every triangle its own three vertices instead, carrying the
+ face's normal, and the same uv and colour as the grid point they stand on.
 *>
 fn void Heightfield.build(&self, GeometryBuilder* out)
 {
+	if (self.flat)
+	{
+		self.build_faceted(out);
+		if (self.skirt > 0) self.build_skirt(out);
+		return;
+	}
+
 	uint side    = self.side();
-	float half_w = self.width * 0.5f - self.center_x;
-	float half_d = self.depth * 0.5f - self.center_z;
 	bool painted = self.has_colors();
 
 	for (uint j = 0; j < side; j++)
 	{
 		for (uint i = 0; i < side; i++)
 		{
-			float u = (float)i / (float)self.segments;
-			float v = (float)j / (float)self.segments;
-			out.vertex(
-				{ -half_w + u * self.width, self.sample((int)i, (int)j), -half_d + v * self.depth },
-				self.grid_normal((int)i, (int)j),
-				{ u, v }
-			);
+			out.vertex(self.grid_point(i, j), self.grid_normal((int)i, (int)j), self.grid_uv(i, j));
 			if (painted) out.colors.push(self.color(i, j));
 		}
 	}
 
+	char[6] corners = self.diagonal.triangles();
 	for (uint j = 0; j < self.segments; j++)
 	{
 		for (uint i = 0; i < self.segments; i++)
 		{
 			uint a = j * side + i;
-			uint b = a + 1;
-			uint c = a + side;
-			uint d = c + 1;
-			// Counter-clockwise seen from +y, which is the front face
-			// `render/pass.c3` keeps — the same winding `build_face` uses,
-			// arrived at by the same right-hand rule.
-			out.triangle(a, c, b);
-			out.triangle(b, c, d);
+			uint[6] at;
+			foreach (n, k : corners) at[n] = a + (k & 1) + (k >> 1) * side;
+			out.triangle(at[0], at[1], at[2]);
+			out.triangle(at[3], at[4], at[5]);
 		}
 	}
 
 	if (self.skirt > 0) self.build_skirt(out);
+}
+
+// The uv of a grid sample: 0..1 across the whole field.
+fn Vec2 Heightfield.grid_uv(&self, uint i, uint j) @inline
+{
+	return { (float)i / (float)self.segments, (float)j / (float)self.segments };
+}
+
+fn void Heightfield.build_faceted(&self, GeometryBuilder* out)
+{
+	bool painted    = self.has_colors();
+	char[6] corners = self.diagonal.triangles();
+	for (uint j = 0; j < self.segments; j++)
+	{
+		for (uint i = 0; i < self.segments; i++)
+		{
+			for (usz t = 0; t < 6; t += 3)
+			{
+				Vec3 normal = self.face_normal(i, j, corners[t], corners[t + 1], corners[t + 2]);
+				uint first  = (uint)out.positions.len();
+				for (usz n = t; n < t + 3; n++)
+				{
+					uint ci = i + (corners[n] & 1);
+					uint cj = j + (corners[n] >> 1);
+					out.vertex(self.grid_point(ci, cj), normal, self.grid_uv(ci, cj));
+					if (painted) out.colors.push(self.color(ci, cj));
+				}
+				out.triangle(first, first + 1, first + 2);
+			}
+		}
+	}
 }
 
 <*
@@ -404,13 +501,15 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 		ulong hash = hash_octets(KEY_SEED, field.heights.entries, (usz)(field.heights.len() * float::size));
 		if (field.colors.len() > 0) hash = hash_octets(hash, field.colors.entries, (usz)(field.colors.len() * Vec4::size));
 		String key = string::tformat(
-			"terrain:%f:%f:%d:%f:%f:%f:%x",
+			"terrain:%f:%f:%d:%f:%f:%f:%d:%d:%x",
 			field.width,
 			field.depth,
 			field.segments,
 			field.skirt,
 			field.center_x,
 			field.center_z,
+			field.diagonal.ordinal,
+			field.flat ? 1 : 0,
 			hash
 		);
 		if (try hit = self.built(key)) return hit;
@@ -430,6 +529,8 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 			.center_z = field.center_z,
 			.segments = field.segments,
 			.skirt = field.skirt,
+			.diagonal = field.diagonal,
+			.flat = field.flat,
 		};
 		slot.terrain.heights.init(mem, (usz)wanted);
 		foreach (height : field.heights) slot.terrain.heights.push(height);

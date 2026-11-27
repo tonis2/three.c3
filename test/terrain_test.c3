@@ -512,3 +512,102 @@ fn void a_painted_terrain_keeps_its_paint_through_an_export() @test
 		test::@check(math::abs(c.x - want) < 1e-6f && c.y == 0 && c.z == 0, "vertex %d is %s", i, c);
 	}
 }
+
+// One cell twisted up at its far corner: a (0, 0), b (1, 0), c (0, 1) at 0, d (1, 1)
+// at 1. The two diagonals cut it into different surfaces, so the cut can be told.
+fn three::Heightfield twisted_cell(three::CellDiagonal diagonal, bool flat)
+{
+	three::Heightfield field = { .width = 2, .depth = 2, .segments = 1, .diagonal = diagonal, .flat = flat };
+	field.heights.init(mem, 4);
+	foreach (h : (float[]){ 0, 0, 0, 1 }) field.heights.push(h);
+	return field;
+}
+
+<*
+ A cell is cut along the diagonal asked for, and a flat field shades each triangle
+ with that triangle's own normal, which `normal_at` gives back on either side.
+*>
+fn void a_cell_is_cut_and_shaded_the_way_it_is_asked() @test
+{
+	foreach (diagonal : (three::CellDiagonal[]){ BC, AD })
+	{
+		three::Heightfield smooth = twisted_cell(diagonal, false);
+		defer smooth.heights.free();
+		three::GeometryBuilder grid;
+		grid.init();
+		defer grid.free();
+		smooth.build(&grid);
+		uint[6] want = diagonal == BC ? (uint[6]){ 0, 2, 1, 1, 2, 3 } : (uint[6]){ 0, 2, 3, 0, 3, 1 };
+		test::@check(grid.positions.len() == 4 && grid.indices.len() == 6, "%s: one cell is 4 vertices and 2 triangles", diagonal);
+		foreach (n, index : want)
+		{
+			test::@check(grid.indices[n] == index, "%s: index %d is %d, the cut wants %d", diagonal, n, grid.indices[n], index);
+		}
+
+		three::Heightfield faceted = twisted_cell(diagonal, true);
+		defer faceted.heights.free();
+		three::GeometryBuilder faces;
+		faces.init();
+		defer faces.free();
+		faceted.build(&faces);
+		test::@check(faces.positions.len() == 6 && faces.indices.len() == 6, "%s: a flat cell is 6 vertices", diagonal);
+		for (sz t = 0; t < 6; t += 3)
+		{
+			Vec3 p0 = faces.positions[t];
+			Vec3 face = (faces.positions[t + 1] - p0).cross(faces.positions[t + 2] - p0).normalize();
+			test::@check(face.y > 0, "%s: triangle %d faces down", diagonal, t / 3);
+			for (sz k = t; k < t + 3; k++)
+			{
+				test::@check((faces.normals[k] - face).length() < 1e-5f, "%s: vertex %d is not shaded with its face", diagonal, k);
+			}
+		}
+
+		// Near a (the flat corner) and near d (the raised one): two different faces.
+		// Under BC the corner a is on the flat triangle; under AD both triangles touch a,
+		// so the far sides of the diagonal are probed instead.
+		Vec3 low  = diagonal == BC ? faceted.normal_at(-0.8f, -0.8f) : faceted.normal_at(-0.5f, 0.6f);
+		Vec3 high = diagonal == BC ? faceted.normal_at(0.8f, 0.8f) : faceted.normal_at(0.6f, -0.5f);
+		test::@check((low - high).length() > 0.1f, "%s: the two faces have one normal", diagonal);
+		test::@check((low - faces.normals[0]).length() < 1e-5f || (low - faces.normals[3]).length() < 1e-5f,
+			"%s: normal_at gives a face's normal", diagonal);
+	}
+}
+
+<*
+ A faceted ground cut Blender's way goes out and comes back the same: a ray at a
+ cell's centre lands on the cut's diagonal, and the file keeps the face normals.
+*>
+fn void a_faceted_terrain_keeps_its_cut_through_an_export() @test
+{
+	String path = "build/terrain_faceted.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const heights = [0, 0, 0, 1];
+			const scene = new three.Scene();
+			scene.add(new three.Mesh(new three.TerrainGeometry({ width: 2, segments: 1, heights, diagonal: '+x+z', flat: true })));
+			const before = three.query.raycastAll([0, 10, 0], [0, -1, 0], { maxDistance: 20 })[0].point.y;
+			scene.export('build/terrain_faceted.glb', { camera: false, light: false });
+
+			const back = new three.Scene();
+			back.add(three.load('build/terrain_faceted.glb').instantiate());
+			const after = three.query.raycastAll([0, 10, 0], [0, -1, 0], { maxDistance: 20 })[0].point.y;
+			return [before, after].map((y) => Math.round(y * 1000) / 1000);
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		// The centre is on a–d, halfway from 0 to 1; the other cut would give 0.
+		test::@check(result.value == `[0.5,0.5]`, "the centre is on the a–d diagonal before and after: %s", result.value);
+	};
+
+	gltf::GltfStream stream = gltf::open(path, mem)!!;
+	defer stream.close();
+	stream.load_all_buffers()!!;
+	test::@check(stream.gltf.meshes.len() == 1, "one mesh, got %d", stream.gltf.meshes.len());
+	gltf::Primitive primitive = stream.gltf.meshes[0].primitives[0];
+	long position = primitive.attributes.get("POSITION")!!;
+	usz vertices = (usz)stream.gltf.accessors[position].count;
+	test::@check(vertices == 6, "a flat cell goes out as 6 vertices, got %d", vertices);
+}

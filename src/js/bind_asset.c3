@@ -2551,7 +2551,8 @@ fn js::Value? js_inventory(JsRuntime* self)
 
  `colors` is RGBA bytes, four per sample in the heights' order, or empty for a
  terrain with no COLOR_0. The centre is where the field's middle is, in the
- asset's own space.
+ asset's own space. `diagonal` is a `CellDiagonal` ordinal, and `flat` shades each
+ triangle with its own normal.
 
  @return? js::THREW
 *>
@@ -2564,10 +2565,17 @@ fn AssetId? js_terrain(
 	double[] heights,
 	float center_x,
 	float center_z,
-	char[] colors
+	char[] colors,
+	int diagonal,
+	bool flat
 )
 {
 	need_device(self, "building a shape")!;
+
+	if (diagonal < 0 || diagonal >= (int)CellDiagonal::len)
+	{
+		return self.js.fail("a terrain's diagonal is 0 or 1, got %d", diagonal)~;
+	}
 
 	if (segments < (int)MIN_TERRAIN_SEGMENTS || segments > (int)MAX_TERRAIN_SEGMENTS)
 	{
@@ -2597,6 +2605,8 @@ fn AssetId? js_terrain(
 			.center_z = finite(center_z),
 			.segments = (uint)segments,
 			.skirt = skirt > 0 ? skirt : 0,
+			.diagonal = CellDiagonal::from_ordinal(diagonal),
+			.flat = flat,
 		};
 		field.heights.tinit((usz)wanted);
 		// A NaN here would spread through the normals into every neighbouring

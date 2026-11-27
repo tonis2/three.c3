@@ -558,14 +558,6 @@ export class ExtrudeGeometry extends Geometry {
 // and the piece measures bigger than it is — so align first and add helpers
 // after, or hang them from a Group of their own.
 
-// A surface rather than a pile of boxes — plan.md §18.4.
-//
-// The one generated shape that carries data instead of parameters, and the
-// one that answers questions afterwards. `heightAt` and `normalAt` read the
-// same grid the mesh was built from, through the same interpolation, so a
-// script cannot place something on ground that disagrees with what is drawn
-// — which is exactly what a hand-written `ground(x, z)` beside a hand-built
-// tile grid could do at any moment, and did.
 // A terrain's `colors` as the RGBA bytes the host takes: four per sample, in
 // the heights' order. `{ r, g, b, a }` of Fields on the terrain's own grid, a
 // left-out channel reading 0, or the bytes themselves. Empty for none.
@@ -596,6 +588,19 @@ function terrainColors(colors, side, where) {
 	return bytes;
 }
 
+// How each cell is cut into triangles, by the way its diagonal runs: '+x-z' joins
+// the corner at the lowest x and highest z to the opposite one, '+x+z' the corner at
+// the lowest x and z to the highest (Blender's cut). The host takes the ordinal.
+const TERRAIN_DIAGONALS = { '+x-z': 0, '+x+z': 1 };
+
+// A surface rather than a pile of boxes — plan.md §18.4.
+//
+// The one generated shape that carries data instead of parameters, and the
+// one that answers questions afterwards. `heightAt` and `normalAt` read the
+// same grid the mesh was built from, through the same interpolation, so a
+// script cannot place something on ground that disagrees with what is drawn
+// — which is exactly what a hand-written `ground(x, z)` beside a hand-built
+// tile grid could do at any moment, and did.
 export class TerrainGeometry extends Geometry {
 	constructor(options = {}) {
 		const where = 'new three.TerrainGeometry({ width, depth, segments, heights })';
@@ -686,11 +691,19 @@ export class TerrainGeometry extends Geometry {
 		}
 
 		const colors = terrainColors(options.colors, side, where);
+		const diagonal = options.diagonal ?? '+x-z';
+		if (!Object.prototype.hasOwnProperty.call(TERRAIN_DIAGONALS, diagonal)) {
+			throw new TypeError(`${where}: diagonal is '+x-z' or '+x+z', got ${JSON.stringify(options.diagonal)}`);
+		}
+		if (options.flat !== undefined && typeof options.flat !== 'boolean') {
+			throw new TypeError(`${where}: flat is true or false`);
+		}
+		const flat = options.flat === true;
 		super(
 			'TerrainGeometry',
 			options.name ?? '',
-			{ width, depth, segments, skirt, center: [cx, cz] },
-			H.terrain(width, depth, segments, skirt, heights, cx, cz, colors)
+			{ width, depth, segments, skirt, center: [cx, cz], diagonal, flat },
+			H.terrain(width, depth, segments, skirt, heights, cx, cz, colors, TERRAIN_DIAGONALS[diagonal], flat)
 		);
 	}
 
