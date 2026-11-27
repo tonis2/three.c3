@@ -848,7 +848,7 @@ have been skipped; too small drops geometry you can see.
 ## LayeredMaterial
 
 ```js
-new three.LayeredMaterial({ map, normal, mask, height, bump, metalnessRoughnessMap, aoMap, emissiveMap, layers, side, transparent, blending, opacity, roughness, metalness, reflectance, name })
+new three.LayeredMaterial({ map, normal, mask, height, bump, metalnessRoughnessMap, aoMap, emissiveMap, layers, side, transparent, blending, opacity, roughness, metalness, reflectance, name, vertex, uniforms, bounds, prelude })
 ```
 
 An ordered stack of materials blended over a base one — terrain splatting, weathering, decals.
@@ -992,12 +992,37 @@ with the stack afterwards. glTF's rule for that attribute is a multiply into the
 mask is three unrelated weights, so a painted mesh drew its mask until something put a stack on it. A
 stack with no layers left in it takes the same door.
 
+The last four options are the parts of the shader you can still write yourself. They are how a script
+cuts or folds a surface and keeps the stack it was imported with.
+
+`vertex` is ShaderMaterial's vertex body, and `bounds` is how far it moves a vertex — both exactly as
+there. The stack runs on whatever the vertex body hands the fragment stage.
+
+`uniforms` are your own, as on a ShaderMaterial: each is `s.uniforms.name` in `prelude`,
+`v.uniforms.name` in `vertex`, and live as `mat.uniforms.name`. They share `s.uniforms` with the ones
+an animated layer generates (`layer2_params`), so a name the stack already uses throws, naming it.
+
+`prelude` is statements put at the top of the generated `shade()` body, before the stack samples
+anything. It is for a `discard` — a cut-away, a dissolve — or for a change to `s` that everything after
+it reads, such as a moved `s.uv`. It sits in a block of its own, so its locals do not meet the
+generated ones. A mistake in it is reported at your line, as `prelude:2:12`.
+
+```js
+mesh.material = new three.LayeredMaterial({
+  ...asset.mesh('terrain').layers,
+  uniforms: { radius: 40 },
+  prelude: 'if (length(s.position.xz) > s.uniforms.radius) discard;',
+});
+```
+
 ### Properties
 
 - `layers` — a view per enabled layer: `layers[i].map = tex` swaps an image, and `layers[i].tint` /
   `layers[i].opacity` read and write the ones declared animated
 - `name` — what a shed-map warning calls this material, and nothing else reads it
 - `fragment` — the generated shader source — read-only, and the thing to look at first
+- `prelude` — your statements at the top of `fragment`, or an empty string; read-only
+- `vertex`, `bounds` — as ShaderMaterial; read-only
 - `stats` — what this stack costs, counted while the source was written:
   `{ layers, samplers, parallaxSolves, taps, sampleGradTaps }`. `taps` is texture reads per pixel,
   worst case, and is the number to compare between stacks — `three.stats()` cannot see a material
@@ -1009,8 +1034,33 @@ stack with no layers left in it takes the same door.
 
 ### Methods
 
+- `clone(changes)` — a new LayeredMaterial built from this one's options, with `changes` laid over
+  them. `changes` takes the constructor's options and nothing else, and each one replaces the whole
+  option, so `uniforms` there is the clone's full set. What was set after construction comes along
+  unless `changes` states it: `map`, the surface numbers, your uniforms as they are now, `alphaTest`,
+  `emissive`, `emissiveIntensity`, `repeat`, `offset`, `uvVariants`, `stochastic`, and an image or
+  animated tint swapped in through `layers` — unless `changes` gave that slot another image.
+
+  The images are shared, not copied. Each material holds its own reference to them, so disposing the
+  original leaves the clone drawing, and the other way round. The clone is built from the same
+  Texture objects, so do not `dispose()` those before cloning.
+
+  This is how an imported terrain keeps its stack and takes a disc cut:
+
+  ```js
+  const root = asset.instantiate('level', { materials: true });
+  const ground = root.getObjectByName('terrain');
+  const before = ground.material;
+  ground.material = before.clone({
+    vertex: 'v.position.y -= max(length(v.local.xz) - 60.0, 0.0) * 0.2;',
+    bounds: 20,
+    uniforms: { radius: 40 },
+    prelude: 'if (length(s.position.xz) > s.uniforms.radius) discard;',
+  });
+  before.dispose();
+  ```
 - `dispose()`
-- `toJSON()`
+- `toJSON()` — ShaderMaterial's, with `type`, `name`, `layers`, and `prelude` when there is one
 
 ## Group
 

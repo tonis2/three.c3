@@ -1612,3 +1612,376 @@ fn uint masked_metal(three::JsRuntime* run, float metalness)
 	// is what is left where the layer is not.
 	return near(&shot, 199, 199, 204);
 }
+
+// ============================================================================
+// The caller's own half: `vertex`, `uniforms`, `prelude` and `clone`
+// ============================================================================
+
+// Red pixels left and right of the middle of the frame. The plane tests below cut
+// or move one half of a red plane, so which half is empty is the statement. The
+// four columns at the middle are skipped, since the edge lands there.
+struct Halves
+{
+	uint left;
+	uint right;
+}
+
+fn Halves red_halves(image::Image* shot)
+{
+	Halves out;
+	for (uint y = 0; y < shot.height; y++)
+	{
+		for (uint x = 0; x < shot.width; x++)
+		{
+			sz i = ((sz)y * shot.width + x) * 4;
+			if (shot.pixels[i] < 200 || shot.pixels[i + 1] > 40 || shot.pixels[i + 2] > 40) continue;
+			if (x + 2 < shot.width / 2) out.left++;
+			if (x > shot.width / 2 + 2) out.right++;
+		}
+	}
+	return out;
+}
+
+<*
+ A 2 m plane facing the camera, drawn with the material `material` returns, over a
+ blue background in a fully ambient frame. A layer tinted red covers the whole
+ plane, so the plane is pure red and the uv runs 0 to 1 from left to right.
+*>
+fn Halves plane_halves(three::JsRuntime* run, String what, String material)
+{
+	@pool()
+	{
+		String source = string::tformat(`
+			const scene = new three.Scene();
+			scene.background = 0x3366ff;
+			const plane = new three.Mesh(new three.PlaneGeometry(2, 2));
+			plane.material = (() => { %s })();
+			scene.add(plane);
+			three.light.ambient = 1;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 3.5);
+			three.render(scene);
+			return three.stats().drawCalls;
+		`, material);
+		String answer = script(run, what, source)!!;
+		answer.free(mem);
+	};
+
+	image::Image shot = run.renderer.capture()!!;
+	defer shot.free();
+	return red_halves(&shot);
+}
+
+<*
+ A prelude runs before the stack and can cut the surface away.
+
+ Three frames of one plane: whole, cut at u = 0.5 by a uniform of the caller's
+ own, and cut everywhere by the same uniform written after construction. The
+ middle frame says the prelude reads `s.uniforms` and that a discard there keeps
+ the other half drawing. The last says the uniform is live.
+*>
+fn void a_prelude_cuts_the_surface_before_the_stack_reads_it() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		Halves whole = plane_halves(run, "the whole plane renders", `
+			return new three.LayeredMaterial({ layers: [{ tint: [1, 0, 0] }] });
+		`);
+		Halves cut = plane_halves(run, "the cut plane renders", `
+			return new three.LayeredMaterial({
+				layers: [{ tint: [1, 0, 0] }],
+				uniforms: { cut: 0.5 },
+				prelude: "if (s.uv.x < s.uniforms.cut) discard;",
+			});
+		`);
+		Halves gone = plane_halves(run, "the plane cut everywhere renders", `
+			const mat = new three.LayeredMaterial({
+				layers: [{ tint: [1, 0, 0] }],
+				uniforms: { cut: 0.5 },
+				prelude: "if (s.uv.x < s.uniforms.cut) discard;",
+			});
+			mat.uniforms.cut = 2.0;
+			return mat;
+		`);
+
+		test::@check(whole.left > 500 && whole.right > 500, "the plane covers both halves, got %d and %d", whole.left, whole.right);
+		test::@check(cut.left == 0, "the prelude cut the left half away, got %d red pixels there", cut.left);
+		test::@check(cut.right > 500, "and the right half still draws the stack, got %d", cut.right);
+		test::@check(gone.left + gone.right == 0, "a cut past the whole uv draws nothing, got %d", gone.left + gone.right);
+	};
+}
+
+<*
+ The caller's uniforms and prelude are checked, and a prelude's mistake is named
+ at the caller's line.
+
+ The prelude is spliced into generated source, so without its own `#line` a
+ diagnostic would name a line of `mat.fragment` the caller never wrote. The line
+ after it has to name the generated line again, which is checked by reading the
+ directive back against where it sits.
+*>
+fn void the_callers_uniforms_and_prelude_are_checked() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the caller's half is checked", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			const refuse = (f) => { try { f(); return "NOT REFUSED"; } catch (e) { return e.message; } };
+			const animated = { mask: tex, layers: [{ mask: "r", tint: [1, 0, 0], animated: true }] };
+			const mat = new three.LayeredMaterial({
+				...animated,
+				uniforms: { cut: 0.5, palette: [[1, 0, 0], [0, 1, 0]] },
+				prelude: "float edge = s.uniforms.cut;\nif (s.uv.x < edge) discard;",
+			});
+			mat.uniforms.cut = 0.25;
+			const lines = mat.fragment.split("\n");
+			const at = lines.findIndex(l => l.startsWith("#line") && l.includes('"material"'));
+			return ({
+				collides: refuse(() => new three.LayeredMaterial({ ...animated, uniforms: { layer0_params: [0, 0, 0, 0] } })),
+				line: refuse(() => new three.LayeredMaterial({ layers: [], prelude: "float a = 1.0;\nif (a > nope) discard;" })),
+				notText: refuse(() => new three.LayeredMaterial({ layers: [], prelude: 5 })),
+				cut: mat.uniforms.cut,
+				generated: mat.uniforms.layer0_params,
+				prelude: mat.toJSON().prelude,
+				first: mat.fragment.indexOf("discard") < mat.fragment.indexOf("float3 c ="),
+				restored: at > 0 && +lines[at].split(" ")[1] === at + 2,
+				plain: new three.LayeredMaterial({ layers: [] }).fragment.includes("#line"),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(
+			answer.contains("uniform 'layer0_params' is the one layer 0 is animated through"),
+			"a name the stack generates is refused by name: %s",
+			answer
+		);
+		test::@check(answer.contains("prelude:2:"), "a prelude's error names the caller's second line: %s", answer);
+		test::@check(answer.contains("`prelude` wants shady statements"), "a prelude that is not text is refused: %s", answer);
+		test::@check(answer.contains(`"cut":0.25`), "the caller's uniform is live: %s", answer);
+		test::@check(answer.contains(`"generated":[1,0,0,1]`), "beside the generated one: %s", answer);
+		test::@check(answer.contains(`"prelude":"float edge`), "toJSON carries the prelude: %s", answer);
+		test::@check(answer.contains(`"first":true`), "which runs before the stack samples: %s", answer);
+		test::@check(answer.contains(`"restored":true`), "and the generated numbering resumes after it: %s", answer);
+		test::@check(answer.contains(`"plain":false`), "a stack with no prelude generates what it did: %s", answer);
+	};
+}
+
+<*
+ A vertex body runs under the stack.
+
+ The plane is moved one metre right, half its width, so its left edge sits in the
+ middle of the frame: the left half is empty and the right half is the stack.
+*>
+fn void a_vertex_body_moves_the_stack() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		Halves moved = plane_halves(run, "the moved plane renders", `
+			const mat = new three.LayeredMaterial({
+				layers: [{ tint: [1, 0, 0] }],
+				vertex: "v.position.x += 1.0;",
+				bounds: 1,
+			});
+			if (mat.bounds !== 1 || !mat.vertex.includes("v.position")) throw new Error("bounds or vertex lost");
+			return mat;
+		`);
+		test::@check(moved.left == 0, "the plane left the left half, got %d red pixels there", moved.left);
+		test::@check(moved.right > 500, "and draws its stack on the right, got %d", moved.right);
+	};
+}
+
+// Pixels that differ by more than `tolerance` in any channel.
+fn uint differing(image::Image* a, image::Image* b, int tolerance = 8)
+{
+	uint found = 0;
+	for (sz i = 0; i + 3 < a.pixels.len && i + 3 < b.pixels.len; i += 4)
+	{
+		for (sz c = 0; c < 3; c++)
+		{
+			if (math::abs((int)a.pixels[i + c] - (int)b.pixels[i + c]) <= tolerance) continue;
+			found++;
+			break;
+		}
+	}
+	return found;
+}
+
+<*
+ The fixture's level, imported with its stacks, after `swap` has run on the
+ terrain node `t`. The caller frees the image.
+*>
+fn image::Image level_shot(three::JsRuntime* run, String what, String swap)
+{
+	@pool()
+	{
+		String source = string::tformat(`
+			const asset = three.load("test/fixtures/layered.glb");
+			const scene = new three.Scene();
+			scene.background = 0x3366ff;
+			const root = asset.instantiate("level", { materials: true });
+			scene.add(root);
+			let t = null;
+			root.traverse((o) => { if (o.name === "terrain") t = o; });
+			%s
+			three.light.ambient = 1;
+			three.camera.lookAt(0, 0, 0);
+			three.camera.orbit(0, 0, 4);
+			three.render(scene);
+			return three.stats().drawCalls;
+		`, swap);
+		String answer = script(run, what, source)!!;
+		answer.free(mem);
+	};
+	return run.renderer.capture()!!;
+}
+
+<*
+ A clone of an imported stack draws the same picture, with either material
+ disposed.
+
+ The game's case: it clones the material `instantiate` built and drops the
+ original. Each material holds its own references to the images, so the
+ original's dispose leaves the clone's images in place. The plain frame is the
+ control: it shows the stack is on screen, so "the same picture" is a statement
+ about the stack.
+*>
+fn void a_clone_of_an_imported_stack_draws_the_same_picture() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		image::Image original = level_shot(run, "the original renders", "");
+		defer original.free();
+		image::Image plain = level_shot(run, "the plain terrain renders", "t.material = null;");
+		defer plain.free();
+		image::Image cloned = level_shot(run, "the clone renders", `
+			const was = t.material;
+			const copy = was.clone();
+			if (copy.fragment !== was.fragment) throw new Error("the clone generated another body");
+			t.material = copy;
+			was.dispose();
+		`);
+		defer cloned.free();
+		image::Image kept = level_shot(run, "the original renders beside a disposed clone", `
+			t.material.clone().dispose();
+		`);
+		defer kept.free();
+
+		uint stack = differing(&original, &plain);
+		test::@check(stack > 200, "the stack is on screen, %d pixels differ from the plain terrain", stack);
+		uint drift = differing(&original, &cloned);
+		test::@check(drift == 0, "the clone draws the original's picture, %d pixels differ", drift);
+		uint left = differing(&original, &kept);
+		test::@check(left == 0, "and disposing a clone leaves the original drawing, %d pixels differ", left);
+	};
+}
+
+<*
+ `clone({ prelude })` adds the cut to a stack, and the clone outlives its
+ original.
+*>
+fn void a_clone_takes_a_cut_and_outlives_its_original() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		Halves cut = plane_halves(run, "the cut clone renders", `
+			const mat = new three.LayeredMaterial({ layers: [{ tint: [1, 0, 0] }] });
+			const cut = mat.clone({ uniforms: { cut: 0.5 }, prelude: "if (s.uv.x < s.uniforms.cut) discard;" });
+			mat.dispose();
+			return cut;
+		`);
+		test::@check(cut.left == 0, "the clone's prelude cut the left half, got %d red pixels there", cut.left);
+		test::@check(cut.right > 500, "and the clone draws after its original was disposed, got %d", cut.right);
+	};
+}
+
+<*
+ A clone carries what was set after construction.
+
+ `instantiate` sets the cut-out, the glow and the uv transform after it builds a
+ stack, and a script swaps images and animated tints through `layers`. A clone
+ built from the options alone would lose all of it. A slot that `changes` fills
+ with another image keeps that image rather than the swap.
+*>
+fn void a_clone_carries_what_was_set_after_construction() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "the clone carries state", `
+			const pixel = (r, g, b) => new three.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1);
+			const red = pixel(255, 0, 0);
+			const green = pixel(0, 255, 0);
+			const blue = pixel(0, 0, 255);
+			const refuse = (f) => { try { f(); return "NOT REFUSED"; } catch (e) { return e.message; } };
+			const mat = new three.LayeredMaterial({
+				mask: red,
+				layers: [
+					{ name: "painted", map: red, mask: "r" },
+					{ name: "live", mask: "g", tint: [1, 0, 0], animated: true },
+				],
+				uniforms: { cut: 0.5 },
+				prelude: "if (s.uv.x < s.uniforms.cut) discard;",
+				name: "ground",
+			});
+			mat.alphaTest = 0.25;
+			mat.emissive = [0.5, 0, 0];
+			mat.emissiveIntensity = 2;
+			mat.repeat = [2, 3];
+			mat.offset = [0.5, 0];
+			mat.roughness = 0.5;
+			mat.layers[0].map = blue;
+			mat.layers[1].tint = [0, 1, 0];
+			mat.uniforms.cut = 0.75;
+			const copy = mat.clone();
+			const refilled = mat.clone({
+				layers: [
+					{ name: "painted", map: green, mask: "r" },
+					{ name: "live", mask: "g", tint: [1, 0, 0], animated: true },
+				],
+			});
+			return ({
+				same: copy.fragment === mat.fragment,
+				name: copy.name,
+				alphaTest: copy.alphaTest,
+				emissive: copy.emissive,
+				intensity: copy.emissiveIntensity,
+				repeat: copy.repeat,
+				offset: copy.offset,
+				roughness: copy.roughness,
+				swapped: copy.layers[0].map === blue,
+				tint: copy.layers[1].tint,
+				cut: copy.uniforms.cut,
+				prelude: copy.prelude === mat.prelude,
+				refilled: refilled.layers[0].map === green,
+				refilledTint: refilled.layers[1].tint,
+				unknown: refuse(() => mat.clone({ alphaTest: 0.5 })),
+			});
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains(`"same":true`), "the clone generates the same body: %s", answer);
+		test::@check(answer.contains(`"name":"ground"`), "under the same name: %s", answer);
+		test::@check(answer.contains(`"alphaTest":0.25`), "with the cut-out: %s", answer);
+		test::@check(
+			answer.contains(`"emissive":[0.5,0,0]`) && answer.contains(`"intensity":2`),
+			"the glow: %s",
+			answer
+		);
+		test::@check(
+			answer.contains(`"repeat":[2,3]`) && answer.contains(`"offset":[0.5,0]`),
+			"the uv transform: %s",
+			answer
+		);
+		test::@check(answer.contains(`"roughness":0.5`), "the surface numbers: %s", answer);
+		test::@check(answer.contains(`"swapped":true`), "an image swapped in after construction: %s", answer);
+		test::@check(answer.contains(`"tint":[0,1,0]`), "an animated tint written after construction: %s", answer);
+		test::@check(answer.contains(`"cut":0.75`), "the caller's uniform as it is now: %s", answer);
+		test::@check(answer.contains(`"prelude":true`), "and the prelude: %s", answer);
+		test::@check(answer.contains(`"refilled":true`), "a slot the changes refilled keeps their image: %s", answer);
+		test::@check(answer.contains(`"refilledTint":[0,1,0]`), "while the tint it left alone carries: %s", answer);
+		test::@check(
+			answer.contains("LayeredMaterial has no option called 'alphaTest'"),
+			"changes are constructor options and nothing else: %s",
+			answer
+		);
+	};
+}

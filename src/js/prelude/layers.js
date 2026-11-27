@@ -138,10 +138,15 @@ const MASK_SOURCES = new Set(['texture', 'vertexColor']);
 // `name` is for diagnostics only. A generated stack that sheds a map says which
 // material shed it, and "LayeredMaterial" is not an answer in a level with eight
 // of them.
+//
+// `vertex`, `uniforms` and `bounds` go through to ShaderMaterial as they are, and
+// `prelude` runs at the top of the generated body. They are how a script adds a
+// cut or a fold to a stack it imported instead of replacing the stack.
 const TOP_KEYS = new Set([
 	'map', 'normal', 'mask', 'layers', 'side', 'transparent', 'blending', 'opacity',
 	'roughness', 'metalness', 'reflectance', 'height', 'bump',
 	'metalnessRoughnessMap', 'aoMap', 'emissiveMap', 'name',
+	'vertex', 'uniforms', 'bounds', 'prelude',
 ]);
 
 // The parts of the extension this renderer parses and cannot evaluate, and the
@@ -512,7 +517,9 @@ function windowGradients(layer, surface, i) {
 // solves it does and how many taps a pixel can cost, which is the only way to
 // read the price of a stack without disassembling it. `mat.stats` is where it
 // surfaces.
-function emit(base, layers) {
+//
+// `prelude` is the caller's own statements, run before the stack reads anything.
+function emit(base, layers, prelude = '') {
 	const textures = {};
 	const uniforms = {};
 	const body = [];
@@ -575,6 +582,21 @@ function emit(base, layers) {
 
 	body.push('fn float3 shade(Surface s)');
 	body.push('{');
+
+	// The caller's statements come first, so a `discard` there costs the pixel no
+	// taps and a write to `s` reaches every read below. They sit in a block of
+	// their own so their locals cannot meet the generated ones. Spliced in without
+	// re-indenting, because the compiler's columns are the caller's. The first
+	// `#line` numbers them from 1 as `prelude`, so a diagnostic names the caller's
+	// line. The second puts back the generated numbering, which is the line of
+	// `mat.fragment`.
+	if (prelude.trim().length > 0) {
+		body.push('    {');
+		body.push('#line 1 "prelude"');
+		for (const line of prelude.split('\n')) body.push(line.replace(/\r$/, ''));
+		body.push(`#line ${body.length + 2} "material"`);
+		body.push('    }');
+	}
 
 	// The uv everything on this surface is sampled at.
 	//
@@ -1164,6 +1186,16 @@ export class LayeredMaterial extends ShaderMaterial {
 		}
 		const bump = readBump(options.bump, 'LayeredMaterial', true);
 		const name = options.name === undefined || options.name === null ? '' : String(options.name);
+		const prelude = options.prelude ?? '';
+		if (typeof prelude !== 'string') {
+			throw new TypeError(
+				'`prelude` wants shady statements, like `if (length(s.position.xz) > s.uniforms.radius) discard;`'
+			);
+		}
+		const own = options.uniforms ?? {};
+		if (typeof own !== 'object' || Array.isArray(own)) {
+			throw new TypeError('`uniforms` wants an object like { radius: 40, centre: [0, 0] }');
+		}
 		const base = {
 			map: checkTexture(options.map, 'LayeredMaterial: map'),
 			normal: checkTexture(options.normal, 'LayeredMaterial: normal'),
@@ -1203,14 +1235,14 @@ export class LayeredMaterial extends ShaderMaterial {
 			);
 		}
 
-		let { fragment, textures, uniforms, stats } = emit(base, layers);
+		let { fragment, textures, uniforms, stats } = emit(base, layers, prelude);
 		const wanted = Object.keys(textures).length;
 		const shed = [];
 		for (const step of shedding(base, layers)) {
 			if (Object.keys(textures).length <= TEXTURE_LIMIT) break;
 			step.drop();
 			shed.push(step.what);
-			({ fragment, textures, uniforms, stats } = emit(base, layers));
+			({ fragment, textures, uniforms, stats } = emit(base, layers, prelude));
 		}
 		const count = Object.keys(textures).length;
 		if (count > TEXTURE_LIMIT) {
@@ -1234,10 +1266,23 @@ export class LayeredMaterial extends ShaderMaterial {
 			);
 		}
 
+		// The caller's uniforms share `s.uniforms` with the generated ones, so a
+		// name both use would be one field with two meanings.
+		for (const key of Object.keys(own)) {
+			if (uniforms[key] === undefined) continue;
+			const layer = layers.find(l => l.samplers.params === key);
+			throw new TypeError(
+				`LayeredMaterial: uniform '${key}' is the one ${layer ? layer.label : 'the stack'} `
+				+ 'is animated through — give yours another name'
+			);
+		}
+
 		super({
 			fragment,
 			textures,
-			uniforms,
+			uniforms: { ...uniforms, ...own },
+			...(options.vertex !== undefined ? { vertex: options.vertex } : {}),
+			...(options.bounds !== undefined ? { bounds: options.bounds } : {}),
 			side: options.side ?? FrontSide,
 			...(options.transparent !== undefined ? { transparent: options.transparent } : {}),
 			...(options.blending !== undefined ? { blending: options.blending } : {}),
@@ -1264,6 +1309,16 @@ export class LayeredMaterial extends ShaderMaterial {
 		this.stats = stats;
 		this._layers = layers;
 		this.layers = layers.map(l => new LayerView(this, l));
+		this.prelude = prelude;
+
+		// What `clone()` builds from. The description is copied a layer deep, so a
+		// caller editing its own objects later does not change what a clone gets.
+		// `_built` and `_generated` are what each sampler and generated uniform
+		// started as, so a clone can tell a later swap from the description.
+		this._options = { ...options, layers: raw.map(l => ({ ...l })) };
+		this._own = Object.keys(own);
+		this._built = textures;
+		this._generated = uniforms;
 
 		// **The stack crosses a second time, as a description.** The first
 		// crossing was the shader, and a shader cannot be read back: "this layer
@@ -1312,11 +1367,63 @@ export class LayeredMaterial extends ShaderMaterial {
 		}
 	}
 
+	// A new LayeredMaterial from this one's options, with `changes` laid over
+	// them: `mat.clone({ vertex, uniforms, prelude })` adds a cut to a stack that
+	// was imported rather than written.
+	//
+	// What was set after construction comes along unless `changes` states it:
+	// the base map, the surface numbers, the caller's uniforms, the uv transform,
+	// the cut-out and the glow, and any image or animated tint swapped into a
+	// sampler or uniform the clone still declares with the same starting value.
+	//
+	// The images are shared, not copied. Each material holds its own reference to
+	// them on the host, so disposing either material leaves the other drawing. The
+	// clone is built from the same Texture objects, so they must still be alive
+	// when it is made.
+	clone(changes = {}) {
+		if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) {
+			throw new TypeError('mat.clone(changes) wants an object of LayeredMaterial options, like { prelude }');
+		}
+		const live = {
+			map: this._map,
+			side: this.side,
+			opacity: this.opacity,
+			roughness: this.roughness,
+			metalness: this.metalness,
+			reflectance: this.reflectance,
+			uniforms: Object.fromEntries(this._own.map(n => [n, this._values[n]])),
+		};
+		const made = new LayeredMaterial({ ...this._options, ...live, ...changes });
+
+		made.alphaTest = this.alphaTest;
+		made.emissiveIntensity = this.emissiveIntensity;
+		made.emissive = this.emissive;
+		made.repeat = this.repeat;
+		made.offset = this.offset;
+		const variants = this.uvVariants;
+		if (variants.length > 0) made.uvVariants = variants;
+		if (this.stochastic) made.stochastic = true;
+
+		// A swap made after construction, carried only where the clone's slot
+		// started from the same image: a slot `changes` refilled keeps the new one.
+		for (const [slot, was] of Object.entries(this._built)) {
+			const now = this._textureValues[slot];
+			if (now !== was && made._built[slot] === was) made.textures[slot] = now;
+		}
+		for (const [slot, was] of Object.entries(this._generated)) {
+			const start = made._generated[slot];
+			if (start !== undefined && start.every((c, i) => c === was[i])) made.uniforms[slot] = this._values[slot];
+		}
+		return made;
+	}
+
 	toJSON() {
 		return {
 			...super.toJSON(),
 			type: 'LayeredMaterial',
 			name: this.name,
+			// Only when there is one, so a plain stack serialises as it did before.
+			...(this.prelude ? { prelude: this.prelude } : {}),
 			layers: this.layers.map(l => l.toJSON()),
 		};
 	}
