@@ -1339,6 +1339,9 @@ export class LayeredMaterial extends ShaderMaterial {
 			textures.base_height_map !== undefined ? 'base_height_map' : '',
 			base.bump.strength,
 			base.bump.distance,
+			textures.base_surface_map !== undefined ? 'base_surface_map' : '',
+			textures.base_ao_map !== undefined ? 'base_ao_map' : '',
+			textures.base_emissive_map !== undefined ? 'base_emissive_map' : '',
 		);
 		for (const l of layers) {
 			H.addMaterialLayer(

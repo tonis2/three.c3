@@ -1024,12 +1024,14 @@ fn void flattening_batches_copies_that_are_not_siblings() @test
 
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 		// Grouped: twelve white instance channels, because the six shades are in
-		// six materials. Flattened: the six shades themselves, in batch order —
+		// the materials, six for each of the file's two (`checker_a` and
+		// `checker_b`, which share one image and stay two by name). Flattened: the
+		// file's two materials and the six shades themselves, in batch order —
 		// every copy of the first shape, then every copy of the second, which is
 		// the hierarchy going away and is stated here rather than hidden.
 		test::@check(
-			result.value == `{"grouped":{"wrote":[12,6,0],"drawCalls":[2,12],"tints":[100,100,100,100,100,100,100,100,100,100,100,100]},"flat":{"wrote":[2,1,2],"drawCalls":[2,2],"tints":[0,20,40,60,80,100,0,20,40,60,80,100]}}`,
-			"grouped costs six materials, twelve draws and the per-copy channel; flattened keeps all three; got %s",
+			result.value == `{"grouped":{"wrote":[12,12,0],"drawCalls":[2,12],"tints":[100,100,100,100,100,100,100,100,100,100,100,100]},"flat":{"wrote":[2,2,2],"drawCalls":[2,2],"tints":[0,20,40,60,80,100,0,20,40,60,80,100]}}`,
+			"grouped costs a material per shade, twelve draws and the per-copy channel; flattened keeps all three; got %s",
 			result.value
 		);
 	};
@@ -1309,7 +1311,7 @@ fn void a_generated_texture_survives_the_round_trip_byte_for_byte() @test
 	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
 	renderer.pass.scene.set_material(node, material);
 
-	three::ExportReport report = renderer.pass.export_scene(path)!!;
+	three::ExportReport report = renderer.pass.export_scene(renderer.pass.scene, path)!!;
 	test::@check(report.images == 1, "one image should have been written, got %d", report.images);
 	test::@check(report.shaded == 0,
 		"a texture material is a thing glTF describes, so nothing was lost, got shaded = %d", report.shaded);
@@ -2154,10 +2156,9 @@ fn void a_source_materials_normal_map_is_written_across() @test
  the factor beside it crossed — which is worse than losing both, because the file
  then states an emissive colour multiplying an image that is not there.
 
- All three at once, because they are one omission: `normalMap`, `aoMap` and
- `emissiveMap` are the three of the built-in material's four slots that glTF has a
- place for. The fourth is the metallic-roughness map, and `material_for` writes
- the two *factors* instead — see `surface_for` for why.
+ All four at once, because they are one omission: `normalMap`, `aoMap`,
+ `emissiveMap` and `metalnessRoughnessMap` are the built-in material's four slots,
+ and glTF has a place for each.
 
  Out of the JSON chunk, for the check above's reason. The images are generated
  rather than loaded, so this is also the path where the pixels come back off the
@@ -2181,6 +2182,8 @@ fn void a_built_in_materials_own_maps_are_written_across() @test
 				aoMap: flat(),
 				emissiveMap: new three.DataTexture(new Uint8Array([255, 200, 40, 255]), 1, 1),
 				emissive: 0xffffff,
+				metalnessRoughnessMap: new three.DataTexture(new Uint8Array([0, 200, 40, 255]), 1, 1,
+					{ colorSpace: three.LinearSRGBColorSpace, generateMipmaps: false }),
 			});
 			scene.add(new three.Mesh(new three.BoxGeometry(1, 1, 1), material));
 			return scene.export("build/export_builtin_maps.glb");
@@ -2192,6 +2195,7 @@ fn void a_built_in_materials_own_maps_are_written_across() @test
 		test::@check(json.contains(`"normalTexture"`), "the normal map crossed: %s", json);
 		test::@check(json.contains(`"occlusionTexture"`), "the occlusion map crossed: %s", json);
 		test::@check(json.contains(`"emissiveTexture"`), "the emissive map crossed: %s", json);
+		test::@check(json.contains(`"metallicRoughnessTexture"`), "the metallic-roughness map crossed: %s", json);
 	};
 }
 
@@ -2258,6 +2262,137 @@ fn void a_files_maps_import_onto_the_built_in_material() @test
 			result.value
 		);
 	};
+}
+
+// The material of a parsed document called `name`, or null.
+fn gltf::Material* material_named(gltf::Gltf* doc, String name)
+{
+	foreach (&material : doc.materials)
+	{
+		if (material.name == name) return material;
+	}
+	return null;
+}
+
+<*
+ What a file's material was goes back out of the source document: its name, its
+ metallic-roughness map and a `CUSTOM_materials_layers` holding only a `base`.
+
+ `relief_plain.glb`'s `relief` is the base-only stack — a height map and a bump
+ pair with no layers over them, which reaches the frame as a built-in material's
+ height map rather than as a stack. `tiled.glb`'s `tiled` carries a tiled
+ metallic-roughness map under a real stack. All three were lost, and every
+ material and image came back unnamed.
+*>
+fn void a_files_material_names_and_surface_maps_come_back() @test
+{
+	String path = "build/export_material_detail.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			for (const name of ['tiled.glb', 'relief_plain.glb']) {
+				scene.add(three.load('test/fixtures/' + name).instantiate(undefined, { materials: true }));
+			}
+			const report = scene.export('build/export_material_detail.glb', { camera: false, light: false });
+			const back = three.load('build/export_material_detail.glb');
+			const wall = back.mesh('wall').material;
+			return {
+				materials: report.materials, images: report.images,
+				wall: [wall.heightMap !== null, Math.round(wall.heightScale * 1000) / 1000],
+				tiled: back.mesh('tiled_ground').material.metalnessRoughnessMap !== null,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"materials":3,"images":4,"wall":[true,0.04],"tiled":true}`,
+			"three materials over four images, the relief and the surface map back on reload: %s", result.value);
+	};
+
+	gltf::GltfStream stream = gltf::open(path, mem)!!;
+	defer stream.close();
+	gltf::Gltf* doc = &stream.gltf;
+	gltf::Material* tiled = material_named(doc, "tiled");
+	gltf::Material* relief = material_named(doc, "relief");
+	test::@check(tiled != null && relief != null && material_named(doc, "plain") != null,
+		"every material keeps its name");
+
+	gltf::TextureInfo surface = tiled.metallicRoughnessTexture;
+	test::@check(surface.source >= 0 && doc.images[surface.source].name == "detail",
+		"the metallic-roughness map is the file's `detail`, by name");
+	test::@check(surface.scale.x == 3 && surface.offset.y == 0.5f, "and tiles as the file tiled it");
+
+	gltf::MaterialLayers* stack = &relief.layers_ext;
+	test::@check(stack.present && stack.layers.len() == 0, "the base-only stack is still a stack of no layers");
+	test::@check(stack.heightTexture.source >= 0 && doc.images[stack.heightTexture.source].name == "height",
+		"holding the file's `height` map");
+	test::@check(stack.bump.strength == 0.5f && math::abs(stack.bump.distance - 0.08f) < 1e-6f,
+		"and its bump: %f %f", stack.bump.strength, stack.bump.distance);
+}
+
+// A file whose materials `a` and `b` say the same thing, `a` on two nodes and `b`
+// on a third.
+fn void write_twin_materials(String path)
+{
+	gltf::GltfBuilder out = gltf::builder();
+	defer out.free();
+
+	Vec3[3] corners = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 } };
+	uint[3] face = { 0, 1, 2 };
+	gltf::WriteAttribute[1] position = { { .name = "POSITION", .accessor = out.add_positions(corners[..]) } };
+	int indices = (int)out.add_indices(face[..]);
+
+	uint region = out.add_node("region");
+	foreach (i, name : (String[]){ "a", "b" })
+	{
+		uint material = out.add_material(name, { 0.5, 0.25, 0.125, 1 }, metallic: 0, roughness: 0.5);
+		uint mesh = out.add_mesh(string::tformat("tri_%s", name));
+		out.add_primitive(mesh, position[..], indices, (int)material);
+		out.add_child(region, out.add_node(string::tformat("%s_one", name), mesh: (int)mesh, translation: { (float)i * 2, 0, 0 }));
+		if (i == 0) out.add_child(region, out.add_node("a_two", mesh: (int)mesh, translation: { 0, 0, 2 }));
+	}
+	out.add_root(region);
+	out.save_glb(path)!!;
+}
+
+<*
+ A name splits two materials only where the file had two.
+
+ `a` and `b` agree about everything but their names, so they are two materials in
+ the source and stay two. A second copy of the same file brings `a` and `b` again,
+ and those are the same two materials, not four: the name joined the dedup key
+ without splitting what was one.
+*>
+fn void a_name_keeps_two_materials_two_and_one_material_one() @test
+{
+	String source = "build/export_twins_source.glb";
+	String copy = "build/export_twins_copy.glb";
+	String path = "build/export_twins.glb";
+	write_twin_materials(source);
+	file::save(copy, file::load_temp(source)!!)!!;
+	defer (void)file::delete(source);
+	defer (void)file::delete(copy);
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			for (const name of ['source', 'copy']) {
+				scene.add(three.load('build/export_twins_' + name + '.glb').instantiate(undefined, { materials: true }));
+			}
+			return scene.export('build/export_twins.glb', { camera: false, light: false }).materials;
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "2", "two materials from two files of two each: %s", result.value);
+	};
+
+	String json = json_chunk(path);
+	test::@check(occurrences(json, `"name":"a"`) == 1 && occurrences(json, `"name":"b"`) == 1,
+		"each written once, by name: %s", json);
 }
 
 <*
@@ -2859,7 +2994,7 @@ fn void a_baked_texture_lands_the_right_way_up() @test
 	renderer.pass.scene.set_material(node, material);
 
 	const uint SIZE = 64;
-	three::ExportReport report = renderer.pass.export_scene(path, bake: SIZE)!!;
+	three::ExportReport report = renderer.pass.export_scene(renderer.pass.scene, path, bake: SIZE)!!;
 	test::@check(report.images == 1 && report.shaded == 0,
 		"the body baked into one image, got images = %d and shaded = %d",
 		report.images, report.shaded);
@@ -2938,7 +3073,7 @@ fn void a_baked_image_is_opaque_unless_the_body_cuts() @test
 	renderer.pass.scene.set_material(node, material);
 
 	const uint SIZE = 64;
-	three::ExportReport report = renderer.pass.export_scene(path, bake: SIZE)!!;
+	three::ExportReport report = renderer.pass.export_scene(renderer.pass.scene, path, bake: SIZE)!!;
 	test::@check(report.baked_images == 1,
 		"the body varies across the surface, so it should have baked an image; got %d",
 		report.baked_images);
@@ -3319,12 +3454,12 @@ fn void an_export_can_write_its_textures_as_blocks() @test
 	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
 	renderer.pass.scene.set_material(node, material);
 
-	three::ExportReport before = renderer.pass.export_scene(plain)!!;
+	three::ExportReport before = renderer.pass.export_scene(renderer.pass.scene, plain)!!;
 	test::@check(before.images == 1, "the plain export wrote %d images", before.images);
 	test::@check(before.compressed_images == 0,
 		"a plain export compressed %d images", before.compressed_images);
 
-	three::ExportReport after = renderer.pass.export_scene(packed, false, 0, three::ExportTextureFormat.KTX2_BC7)!!;
+	three::ExportReport after = renderer.pass.export_scene(renderer.pass.scene, packed, false, 0, three::ExportTextureFormat.KTX2_BC7)!!;
 	test::@check(after.images == 1, "the compressed export wrote %d images", after.images);
 	test::@check(after.compressed_images == 1,
 		"the compressed export compressed %d of its images", after.compressed_images);
@@ -3411,7 +3546,7 @@ fn void an_export_can_write_its_textures_as_basis() @test
 	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
 	renderer.pass.scene.set_material(node, material);
 
-	three::ExportReport report = renderer.pass.export_scene(
+	three::ExportReport report = renderer.pass.export_scene(renderer.pass.scene,
 		packed, false, 0, three::ExportTextureFormat.KTX2_BASIS
 	)!!;
 	test::@check(report.images == 1, "the basis export wrote %d images", report.images);
@@ -3493,7 +3628,7 @@ fn void a_copied_through_basis_texture_keeps_its_own_extension() @test
 	three::NodeId node = renderer.pass.scene.add_mesh(box, 0);
 	renderer.pass.scene.set_material(node, material);
 
-	(void)renderer.pass.export_scene(made_file, false, 0, three::ExportTextureFormat.KTX2_BASIS)!!;
+	(void)renderer.pass.export_scene(renderer.pass.scene, made_file, false, 0, three::ExportTextureFormat.KTX2_BASIS)!!;
 
 	// The scene that wrote it steps aside, so what goes out next is the file's
 	// own image and nothing else.
@@ -3507,7 +3642,7 @@ fn void a_copied_through_basis_texture_keeps_its_own_extension() @test
 		"the reloaded mesh should carry the file's image, got texture %d",
 		mesh == null ? -99 : mesh.texture);
 
-	three::ExportReport report = renderer.pass.export_scene(copied)!!;
+	three::ExportReport report = renderer.pass.export_scene(renderer.pass.scene, copied)!!;
 	test::@check(report.images == 1, "the copy wrote %d images", report.images);
 	test::@check(report.compressed_images == 0,
 		"a PNG export encoded %d images, and copying is not encoding", report.compressed_images);
@@ -4111,4 +4246,150 @@ fn void a_script_stacks_file_textures_are_copied() @test
 	}
 	test::@check(copied == 3, "the three files went in byte for byte, %d did", copied);
 	test::@check(encoded == 1, "and the mask was encoded, %d were", encoded);
+
+	// A KTX2 is named under its extension, as glTF requires, and never as a core source.
+	String json = json_chunk(path);
+	test::@check(json.contains(`{"extensions":{"KHR_texture_basisu":{"source":`),
+		"the UASTC texture names its image under KHR_texture_basisu");
+	test::@check(json.contains(`{"extensions":{"CUSTOM_texture_ktx2":{"source":`),
+		"the BC7 texture names its image under CUSTOM_texture_ktx2");
+}
+
+<*
+ `scene.export` writes the Scene it is called on, not the one being rendered.
+
+ Building the next level while this one runs and saving it is the ordinary case,
+ and it wrote whatever was on screen instead: here the shown scene's two spheres
+ under its own sun, rather than the level's box and the level's light. The level
+ stays off screen afterwards, and a root from the shown scene is still refused.
+*>
+fn void an_inactive_scene_exports_itself() @test
+{
+	String path = "build/export_inactive.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const level = new three.Scene();
+			level.add(new three.Mesh(new three.BoxGeometry(1, 1, 1)));
+			three.light.intensity = 2;
+			const shown = new three.Scene();
+			shown.add(new three.Mesh(new three.SphereGeometry(0.5)));
+			shown.add(new three.Mesh(new three.SphereGeometry(0.5)));
+			three.light.intensity = 0.5;
+
+			const report = level.export('build/export_inactive.glb');
+			let refused = '';
+			try { level.export('build/export_inactive_never.glb', { root: shown.children[0] }); } catch (e) { refused = e.message; }
+			return { instances: report.instances, shown: shown.isActive, refused };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"instances":1,"shown":true,"refused":"scene.export options.root is an object in this scene"}`,
+			"the level's one copy, the shown scene still shown, the foreign root refused: %s", result.value);
+	};
+
+	String json = json_chunk(path);
+	test::@check(json.contains(`"name":"box"`) && !json.contains(`"name":"sphere"`), "the level's box and no sphere: %s", json);
+	test::@check(json.contains(`"intensity":6.283`), "under the level's own sun, 2 at pi Watts each: %s", json);
+}
+
+<*
+ A file with a collision filter on every collider: `wall` and `fence` share one
+ that is in `walls` and collides with `player`, and the `ghost` box is in `ghosts`
+ and does not collide with `walls`.
+*>
+fn void write_filtered_bodies(String path)
+{
+	gltf::GltfBuilder out = gltf::builder();
+	defer out.free();
+
+	Vec3[3] corners = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 0, 1 } };
+	uint[3] face = { 0, 2, 1 };
+	uint mesh = out.add_mesh("tile");
+	gltf::WriteAttribute[1] position = { { .name = "POSITION", .accessor = out.add_positions(corners[..]) } };
+	out.add_primitive(mesh, position[..], (int)out.add_indices(face[..]));
+
+	gltf::CollisionFilter solid;
+	solid.systems.tinit();
+	solid.colliding_with.tinit();
+	solid.not_colliding.tinit();
+	solid.systems.push("walls");
+	solid.colliding_with.push("player");
+	gltf::CollisionFilter spirit;
+	spirit.systems.tinit();
+	spirit.colliding_with.tinit();
+	spirit.not_colliding.tinit();
+	spirit.systems.push("ghosts");
+	spirit.not_colliding.push("walls");
+	int walls = (int)out.add_collision_filter(solid);
+	int ghosts = (int)out.add_collision_filter(spirit);
+
+	gltf::Collider none = { .shape = -1, .node = -1, .material = -1, .collision_filter = -1, .mesh = -1, .base_node = -1 };
+	uint region = out.add_node("region");
+	foreach (i, name : (String[]){ "wall", "fence" })
+	{
+		uint node = out.add_node(name, mesh: (int)mesh, translation: { (float)i * 3, 0, 0 });
+		gltf::Collider over = none;
+		over.mesh = (int)mesh;
+		over.collision_filter = walls;
+		out.add_collider(node, over);
+		out.add_child(region, node);
+	}
+	uint ghost = out.add_node("ghost", translation: { 0, 0, 5 });
+	gltf::Collider boxed = none;
+	boxed.shape = (int)out.add_shape({ .type = BOX, .size = { 1, 2, 1 } });
+	boxed.collision_filter = ghosts;
+	out.add_collider(ghost, boxed);
+	out.add_child(region, ghost);
+	out.add_root(region);
+	out.save_glb(path)!!;
+}
+
+<*
+ A collision filter passes through. The solver has no layers to apply one, so the
+ file's filter rides on the asset body and goes back out on the collider that
+ named it — one filter for the two colliders that shared one, as the file had it.
+*>
+fn void a_collision_filter_round_trips() @test
+{
+	String source = "build/export_filtered_source.glb";
+	String path = "build/export_filtered.glb";
+	write_filtered_bodies(source);
+	defer (void)file::delete(source);
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			scene.add(three.load('build/export_filtered_source.glb').instantiate(undefined, { physics: true }));
+			const report = scene.export('build/export_filtered.glb', { camera: false, light: false });
+			const back = three.load('build/export_filtered.glb');
+			return { colliders: report.colliders, filtered: back.colliders.filter((c) => c.filtered).length };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"colliders":3,"filtered":3}`, "three colliders, each filtered again: %s", result.value);
+	};
+
+	gltf::GltfStream stream = gltf::open(path, mem)!!;
+	defer stream.close();
+	gltf::Gltf* doc = &stream.gltf;
+	test::@check(doc.collision_filters.len() == 2, "two filters, the shared one written once: %d", doc.collision_filters.len());
+	foreach (collider : doc.colliders)
+	{
+		test::@check(collider.has_filter() && collider.collision_filter < doc.collision_filters.len(), "every collider names one");
+		gltf::CollisionFilter* filter = &doc.collision_filters[(usz)collider.collision_filter];
+		test::@check(filter.systems.len() == 1, "one system apiece");
+		if (collider.has_shape())
+		{
+			test::@check(filter.systems[0] == "ghosts" && filter.not_colliding.len() == 1 && filter.not_colliding[0] == "walls"
+				&& filter.colliding_with.len() == 0, "the ghost's filter as the file stated it");
+			continue;
+		}
+		test::@check(filter.systems[0] == "walls" && filter.colliding_with.len() == 1 && filter.colliding_with[0] == "player"
+			&& filter.not_colliding.len() == 0, "the walls' filter as the file stated it");
+	}
 }

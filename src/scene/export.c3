@@ -120,13 +120,14 @@
  The materials carry `doubleSided` from `material.side`, `KHR_texture_transform`
  from `material.repeat` and `material.offset` — a tiling floor is the most
  ordinary thing a script builds, and its texture would otherwise arrive stretched
- once across the whole surface — and the normal, occlusion and emissive maps of
- the source material.
+ once across the whole surface — and the normal, occlusion, emissive and
+ metallic-roughness maps of the material or of its source.
 
- The metallic-roughness *factors* go across as well, because the specular term
- reads them and so the frame was drawn with them. Not the metallic-roughness
- *map*: this renderer's roughness is one number per material rather than a value
- per texel, so there is nothing to write one from.
+ The metallic-roughness factors go across beside their map, because the specular
+ term reads both: the map varies the pair per texel and the factors scale it.
+
+ A material out of a file keeps the file's name for it, and an image the file's
+ name for that, both read from the source document.
 
  ## Material layers, recovered from the file rather than the frame
 
@@ -587,6 +588,11 @@ struct ExportBind @local
 *>
 struct ExportSurface @local
 {
+	// The source document's material name, or empty for a material no file
+	// named. Borrowed from the asset's document. In the key, so two of a file's
+	// materials stay two however alike they are, while every copy of one material
+	// still shares one name and so one entry.
+	String name;
 	float[4] base_color;
 	// The document's texture index, or -1. Named for what it identifies rather
 	// than for the array it indexes, because the image and the texture are
@@ -612,9 +618,9 @@ struct ExportSurface @local
 	// two single-sided values differ in which face they keep, which glTF cannot say
 	// at all. `FrontSide` and `BackSide` therefore both write `false`.
 	bool double_sided;
-	// The three core maps, already resolved to this document's texture indices
+	// The four core maps, already resolved to this document's texture indices
 	// rather than named by where they came from.
-	// 
+	//
 	// That is the difference between a key that dedups and one that does not. Two
 	// source materials of two different files can name two different images whose
 	// bytes are identical; `ExportImage` collapses those to one exported texture,
@@ -623,10 +629,11 @@ struct ExportSurface @local
 	gltf::WriteTextureRef normal;
 	gltf::WriteTextureRef occlusion;
 	gltf::WriteTextureRef emissive;
+	gltf::WriteTextureRef metallic_roughness;
 	float[3] emissive_factor;
 	// The `CUSTOM_materials_layers` stack, named by where it was read from: the
 	// asset, and the index of the material inside that asset's own document.
-	// `NO_ASSET`/-1 for a material with no layers.
+	// `NO_ASSET`/-1 for a material whose file carried no stack, not even a `base`.
 	// 
 	// An identity rather than a resolved value, because a stack is a list of
 	// eighteen-field records and two nodes naming one material of one asset have
@@ -641,12 +648,13 @@ struct ExportSurface @local
 
 fn bool ExportSurface.equals(self, ExportSurface other)
 {
-	if (self.texture != other.texture) return false;
+	if (self.texture != other.texture || self.name != other.name) return false;
 	if (self.transparent != other.transparent || self.double_sided != other.double_sided) return false;
 	if (self.cutout != other.cutout) return false;
 	if (!self.normal.same_as(other.normal)) return false;
 	if (!self.occlusion.same_as(other.occlusion)) return false;
 	if (!self.emissive.same_as(other.emissive)) return false;
+	if (!self.metallic_roughness.same_as(other.metallic_roughness)) return false;
 	if (self.layers_material != other.layers_material) return false;
 	if (self.script_material != other.script_material) return false;
 	if (self.layers_material >= 0 && !(self.layers_asset == other.layers_asset)) return false;
@@ -818,6 +826,8 @@ const float WATTS_PER_POINT @local = (float)(4.0 * math::PI * math::PI);
 struct Exporter @local
 {
 	MeshPass* pass;
+	// The scene being written, which need not be the one on screen.
+	Scene* scene;
 	gltf::GltfBuilder* out;
 	List{ExportGeometry} geometry;
 	List{ExportMaterial} materials;
@@ -850,8 +860,9 @@ struct Exporter @local
 }
 
 <*
- Writes the scene to a `.glb`.
+ Writes a scene to a `.glb`.
 
+ @param [&inout] scene : `The scene to write, active or not. Its lights go in with it; the camera is the renderer's, which every scene shares.`
  @param path : `Where to write. The extension is not inspected; the bytes are always a binary glTF.`
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
  @param bake : `Texels a side to run each ShaderMaterial's body into, or 0 to write the file the way it always was. Needs a device; without one the export still happens and the report says so through shaded. See render/bake.c3.`
@@ -865,6 +876,7 @@ struct Exporter @local
 *>
 fn ExportReport? MeshPass.export_scene(
 	&self,
+	Scene* scene,
 	String path,
 	bool flatten = false,
 	uint bake = 0,
@@ -877,7 +889,7 @@ fn ExportReport? MeshPass.export_scene(
 {
 	if (path.len == 0) return EXPORT_PATH_IS_EMPTY~;
 	// The root is written at its world transform, and an export is not a frame.
-	self.scene.update_world_matrices();
+	scene.update_world_matrices();
 
 	gltf::GltfBuilder builder = gltf::builder(mem);
 	defer builder.free();
@@ -885,9 +897,10 @@ fn ExportReport? MeshPass.export_scene(
 
 	Exporter state = {
 		.pass = self,
+		.scene = scene,
 		.out = &builder,
 		.textures = textures,
-		.top = root.is_set() && self.scene.node(root) != null ? root : self.scene.root,
+		.top = root.is_set() && scene.node(root) != null ? root : scene.root,
 		.extras = extras,
 	};
 	state.geometry.init(mem, 16);
@@ -927,7 +940,7 @@ fn ExportReport? MeshPass.export_scene(
 		// built a scene and never rendered has never run the walk that fills them.
 		// `flatten_scene` makes the same call a moment later and it costs nothing the
 		// second time — `Scene.matrices_current` turns the traversal into a compare.
-		self.scene.update_world_matrices();
+		scene.update_world_matrices();
 		// A runtime with no device writes the file without baking rather than
 		// refusing to write it. That is the same call every other optional stage
 		// here makes: a feature that could not run is a file without it, never a
@@ -985,7 +998,7 @@ fn ExportReport? MeshPass.export_scene(
 *>
 fn int? Exporter.walk(&self, NodeId id)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	if (node == null) return -1;
 
 	// The two exclusions, and both are the same rule: the file is what the frame
@@ -1032,7 +1045,7 @@ fn int? Exporter.walk(&self, NodeId id)
 	Vec3 position        = node.position;
 	Quaternionf rotation = node.rotation;
 	Vec3 scale           = node.scale;
-	if (id == self.top && id != self.pass.scene.root) decompose(node.world, &position, &rotation, &scale);
+	if (id == self.top && id != self.scene.root) decompose(node.world, &position, &rotation, &scale);
 
 	int written = self.draw_node(id, node, entry, position, rotation, scale, &children)!;
 
@@ -1128,7 +1141,7 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 *>
 fn Node* Exporter.collapsible(&self, NodeId id)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	if (node == null) return null;
 	if (node.material == LINE_MATERIAL || !node.visible) return null;
 	if (node.children.len() > 0) return null;
@@ -1145,10 +1158,10 @@ fn Node* Exporter.collapsible(&self, NodeId id)
 	// colour and none for those. Both are written as themselves, which costs a
 	// node apiece and never a wrong picture.
 	if (node.skin >= 0) return null;
-	if (self.pass.scene.morph_weights(id).len > 0) return null;
+	if (self.scene.morph_weights(id).len > 0) return null;
 	// A solver body is one node's, with its own motion: the extension has no
 	// per-copy channel for one.
-	if (self.pass.scene.physics.body_for(id) != null) return null;
+	if (self.scene.physics.body_for(id) != null) return null;
 	return node;
 }
 
@@ -1196,7 +1209,7 @@ fn ExportTag Exporter.tag_of(&self, NodeId id, Node* node)
 
 fn bool Exporter.has_body(&self, NodeId id, Node* node)
 {
-	return self.pass.scene.physics.body_for(id) != null || self.file_body(node) != null;
+	return self.scene.physics.body_for(id) != null || self.file_body(node) != null;
 }
 
 <*
@@ -1248,7 +1261,7 @@ fn void Exporter.write_extras(&self, NodeId id, uint written)
 *>
 fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 {
-	Node* first = self.pass.scene.node(batch.members[0]);
+	Node* first = self.scene.node(batch.members[0]);
 	// Untinted, deliberately: the material is what a reader without `_COLOR_0`
 	// falls back to, so it has to be the shape's own colour rather than the first
 	// copy's. The tints go in the array below.
@@ -1280,7 +1293,7 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	bool tinted  = false;
 	foreach (member : batch.members)
 	{
-		Node* copy = self.pass.scene.node(member);
+		Node* copy = self.scene.node(member);
 
 		Vec3 position        = copy.position;
 		Quaternionf rotation = copy.rotation;
@@ -1376,7 +1389,7 @@ fn int? Exporter.flatten_scene(&self)
 
 	if (children.len() == 0) return -1;
 
-	Node* root   = self.pass.scene.node(self.top);
+	Node* root   = self.scene.node(self.top);
 	uint written = self.out.add_node(root == null ? "" : root.name);
 	self.write_extras(self.top, written);
 	foreach (child : children) self.out.add_child(written, child);
@@ -1390,7 +1403,7 @@ fn int? Exporter.flatten_scene(&self)
 *>
 fn uint Exporter.placed_marker(&self, NodeId id)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	Vec3 position;
 	Quaternionf rotation;
 	Vec3 scale;
@@ -1413,7 +1426,7 @@ fn bool Exporter.children_carry(&self, Node* node, String extras)
 {
 	foreach (child : node.children)
 	{
-		Node* each = self.pass.scene.node(child);
+		Node* each = self.scene.node(child);
 		if (each == null) continue;
 		if (each.children.len() > 0 || !each.asset.is_set() || self.extras_of(child) != extras) return false;
 	}
@@ -1432,7 +1445,7 @@ fn bool Exporter.children_carry(&self, Node* node, String extras)
 *>
 fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches, List{NodeId}* markers)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	if (node == null) return;
 
 	if (node.material == LINE_MATERIAL || !node.visible)
@@ -1446,8 +1459,8 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches, List{Node
 		// `collapsible`'s refusals, in the walk that never consults it: here a copy
 		// *is* a batch, so refusing to share one is how a skinned or morphing copy,
 		// or one the solver holds, keeps a node of its own.
-		bool solo = node.skin >= 0 || self.pass.scene.morph_weights(id).len > 0
-			|| self.pass.scene.physics.body_for(id) != null;
+		bool solo = node.skin >= 0 || self.scene.morph_weights(id).len > 0
+			|| self.scene.physics.body_for(id) != null;
 		ExportTag tag = self.tag_of(id, node);
 		int index = solo ? -1 : batch_of(batches, node.asset, node.mesh, node.material, tag);
 		if (index < 0 && self.geometry_for(node.asset, node.mesh)! >= 0)
@@ -1483,7 +1496,7 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches, List{Node
 *>
 fn int? Exporter.placed_node(&self, NodeId id)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	int entry  = self.mesh_entry(id, node, node.color, false)!;
 	if (entry < 0) return -1;
 
@@ -1600,7 +1613,7 @@ fn int? Exporter.draw_node(
 *>
 fn void Exporter.write_node_physics(&self, NodeId id, uint written, int entry)
 {
-	Scene* scene = self.pass.scene;
+	Scene* scene = self.scene;
 	Node* node   = scene.node(id);
 	if (node == null) return;
 
@@ -1677,8 +1690,8 @@ fn gltf::Collider no_collider(bool trigger) @local
  mesh no node draws, which is the shape the scene collided with and reads back
  as the same hull however many round trips it makes.
 
- The filter is not written: the solver has no layers, and the importer reports
- rather than applies it.
+ The collision filter goes back as the file stated it. The solver has no layers
+ to apply it, so it passes through untouched.
 *>
 fn void Exporter.write_file_collider(&self, AssetId asset, AssetBody* file, uint written, int entry)
 {
@@ -1709,6 +1722,7 @@ fn void Exporter.write_file_collider(&self, AssetId asset, AssetBody* file, uint
 	}
 	// One friction, because the importer keeps one: both coefficients are it.
 	if (file.has_material) collider.material = (int)self.physics_material_index(file.friction, file.friction, file.restitution);
+	if (file.filtered) collider.collision_filter = (int)self.collision_filter_index(&file.filter);
 	self.out.add_collider(written, collider);
 	self.report.colliders++;
 }
@@ -1741,7 +1755,7 @@ fn void Exporter.write_solver_collider(&self, NodeId id, Node* node, PhysicsBody
 				.radius_top = capsule.radius_top, .radius_bottom = capsule.radius_bottom });
 	}
 
-	collision::Rigidbody* rigid = self.pass.scene.physics.rigidbody_for(id);
+	collision::Rigidbody* rigid = self.scene.physics.rigidbody_for(id);
 	if (rigid != null)
 	{
 		collider.material = (int)self.physics_material_index(
@@ -1807,6 +1821,27 @@ fn uint Exporter.physics_material_index(&self, float static_friction, float dyna
 	});
 }
 
+// A collision filter, written once per distinct set of systems.
+fn uint Exporter.collision_filter_index(&self, gltf::CollisionFilter* filter)
+{
+	foreach (i, &known : self.out.collision_filters)
+	{
+		if (same_systems(&known.systems, &filter.systems) && same_systems(&known.colliding_with, &filter.colliding_with)
+			&& same_systems(&known.not_colliding, &filter.not_colliding)) return (uint)i;
+	}
+	return self.out.add_collision_filter(*filter);
+}
+
+fn bool same_systems(List{String}* a, List{String}* b) @local
+{
+	if (a.len() != b.len()) return false;
+	foreach (i, name : *a)
+	{
+		if (name != (*b)[i]) return false;
+	}
+	return true;
+}
+
 <*
  What this copy's blend shapes are set to, on its own node.
 
@@ -1822,7 +1857,7 @@ fn uint Exporter.physics_material_index(&self, float static_friction, float dyna
 fn void Exporter.write_node_weights(&self, NodeId id, int entry, uint written)
 {
 	if (entry < 0) return;
-	float[] weights = self.pass.scene.morph_weights(id);
+	float[] weights = self.scene.morph_weights(id);
 	if (weights.len == 0) return;
 	self.out.set_node_weights(written, weights);
 	self.report.morphed++;
@@ -2375,7 +2410,7 @@ fn void Exporter.name_meshes(&self)
 	{
 		if (!known.alone) continue;
 
-		Node* node = self.pass.scene.node(known.owner);
+		Node* node = self.scene.node(known.owner);
 		if (node == null || node.name.len == 0) continue;
 
 		ExportGeometry* streams = &self.geometry[(usz)known.geometry];
@@ -2783,9 +2818,7 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 	// No memo entry: `ExportImage` is keyed on a device slot and a bake has none.
 	// Two keys that baked the same picture write it twice, which is the honest
 	// answer — they are two surfaces that agreed, not one image shared.
-	uint image = self.out.add_image("", encoded, mime);
-	self.declare_image(encoded, mime);
-	key.texture = (int)self.out.add_texture(image);
+	key.texture = (int)self.add_image_texture("", encoded, mime);
 	self.report.images++;
 	return key;
 }
@@ -2800,7 +2833,7 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 *>
 fn void Exporter.count_shading(&self, NodeId id, bool shared)
 {
-	Node* node = self.pass.scene.node(id);
+	Node* node = self.scene.node(id);
 	if (node == null || !self.loses_its_shader(node.material)) return;
 
 	ExportBake baked = self.bake_for(id, node, shared);
@@ -2883,10 +2916,8 @@ fn int Exporter.texture_slot(&self, Node* node)
  happens once per *device slot* rather than once per mesh, which is what the
  cache above it is for.
 
- The image is written without a name. A glTF image name is decorative, and the
- source file's is not readable this late: `gltf::Image.name` is a slice into the
- JSON document, which does not outlive the load. Reading it here produced nine
- bytes of fill pattern inside a JSON string and a file nothing could parse.
+ An image copied out of a file keeps the name the file gave it. A generated one
+ has none to keep.
 *>
 fn int? Exporter.texture_for(&self, Node* node)
 {
@@ -2909,20 +2940,17 @@ fn int? Exporter.texture_for(&self, Node* node)
 		if (source >= 0)
 		{
 			char[]? from_file = asset.stream.get_image_data((uint)source);
-			if (try from_file) return self.add_device_image(slot, from_file, asset.stream.gltf.images[source].mimeType);
+			gltf::Image* image = &asset.stream.gltf.images[source];
+			if (try from_file) return self.add_device_image(slot, image.name, from_file, image.mimeType);
 		}
 	}
 	return self.device_texture_for(slot);
 }
 
 // One image and its texture, remembered by the device slot it stands for.
-fn int Exporter.add_device_image(&self, int slot, char[] encoded, gltf::ImageType mime)
+fn int Exporter.add_device_image(&self, int slot, String name, char[] encoded, gltf::ImageType mime)
 {
-	uint image = self.out.add_image("", encoded, mime);
-	self.declare_image(encoded, mime);
-	// No sampler: a texture that names none takes the viewer's default, which is
-	// repeat with mipmapped linear filtering — what `Assets` uploads with.
-	uint texture = self.out.add_texture(image);
+	uint texture = self.add_image_texture(name, encoded, mime);
 	self.images.push({ .device = slot, .texture = texture });
 	self.report.images++;
 	return (int)texture;
@@ -2968,7 +2996,27 @@ fn char[]? Exporter.encode_pixels(&self, image::Image* decoded, ColorSpace space
 }
 
 <*
- Declares whichever extension these image bytes actually need.
+ Adds one image and the texture sampling it, and returns the texture's index.
+
+ A KTX2 is named under its extension rather than the core `source`, which glTF
+ keeps for PNG and JPEG: a reader without the extension refuses the file instead
+ of decoding a KTX2 it does not know.
+
+ @param name : "The image's name, or empty"
+ @param [in] encoded : "The image's bytes"
+ @param mime : "What the bytes are, as the source said or the encoder chose"
+*>
+fn uint Exporter.add_image_texture(&self, String name, char[] encoded, gltf::ImageType mime)
+{
+	uint image = self.out.add_image(name, encoded, mime);
+	String extension = self.declare_image(encoded, mime);
+	// No sampler: a texture that names none takes the viewer's default, which is
+	// repeat with mipmapped linear filtering — what `Assets` uploads with.
+	return self.out.add_texture(image, -1, extension);
+}
+
+<*
+ Declares whichever extension these image bytes actually need, and names it.
 
  **By the payload and never by the mime type**, which is the distinction that
  makes this a function rather than a line in the writer. `image/ktx2` covers two
@@ -2981,15 +3029,17 @@ fn char[]? Exporter.encode_pixels(&self, image::Image* decoded, ColorSpace space
  gets an image it cannot decode and renders the material untextured with no
  indication why. Required makes it refuse the file instead.
 
- Called at every `add_image`, including the copy-through path, so there is no
- door an image can arrive by without being declared.
+ Called only by `add_image_texture`, which every image goes through, including
+ the copy-through path, so there is no door an image can arrive by undeclared.
+
+ @return `The extension's name, or "" for an image core glTF holds.`
 *>
-fn void Exporter.declare_image(&self, char[] encoded, gltf::ImageType mime)
+fn String Exporter.declare_image(&self, char[] encoded, gltf::ImageType mime)
 {
-	if (mime != gltf::ImageType.IMAGE_KTX2 && !is_ktx2(encoded)) return;
-	self.out.require_extension(
-		is_basis_ktx2(encoded) ? gltf::TEXTURE_BASISU_EXTENSION : gltf::TEXTURE_KTX2_EXTENSION
-	);
+	if (mime != gltf::ImageType.IMAGE_KTX2 && !is_ktx2(encoded)) return "";
+	String extension = is_basis_ktx2(encoded) ? gltf::TEXTURE_BASISU_EXTENSION : gltf::TEXTURE_KTX2_EXTENSION;
+	self.out.require_extension(extension);
+	return extension;
 }
 
 <*
@@ -3037,10 +3087,12 @@ fn char[]? Exporter.encode_from_device(&self, int slot, gltf::ImageType* mime)
 
  @param [out] mime : `What the bytes are.`
  @param [out] own : `Whether the caller frees them.`
+ @param [out] name : `The file's name for the image, or empty. Borrowed from the asset.`
  @return? EXPORT_HAS_NOTHING_TO_WRITE
 *>
-fn char[]? Exporter.source_bytes(&self, int slot, gltf::ImageType* mime, bool* own)
+fn char[]? Exporter.source_bytes(&self, int slot, gltf::ImageType* mime, bool* own, String* name)
 {
+	*name = "";
 	String path = self.pass.assets.texture_source(slot);
 	if (path.len > 0)
 	{
@@ -3061,6 +3113,7 @@ fn char[]? Exporter.source_bytes(&self, int slot, gltf::ImageType* mime, bool* o
 			char[]? bytes = asset.stream.get_image_data((uint)memo.image);
 			if (catch bytes) continue;
 			*mime = asset.stream.gltf.images[memo.image].mimeType;
+			*name = asset.stream.gltf.images[memo.image].name;
 			*own = false;
 			return bytes;
 		}
@@ -3173,11 +3226,8 @@ fn int Exporter.layer_texture_for(&self, AssetId id, int image)
 	if (catch encoded) return -1;
 	if (encoded.len == 0) return -1;
 
-	uint written = self.out.add_image("", encoded, asset.stream.gltf.images[image].mimeType);
-	self.declare_image(encoded, asset.stream.gltf.images[image].mimeType);
-	// No sampler, for the reason `texture_for` gives: a texture that names none
-	// takes the viewer's default, which is what `Assets` uploads with.
-	uint texture = self.out.add_texture(written);
+	gltf::Image* source = &asset.stream.gltf.images[image];
+	uint texture = self.add_image_texture(source.name, encoded, source.mimeType);
 	self.layer_images.push({ .asset = id, .image = image, .texture = texture });
 	self.report.images++;
 	return (int)texture;
@@ -3297,7 +3347,7 @@ fn void Exporter.write_script_layers(&self, uint material, Material* source)
 {
 	uint stack = self.out.add_material_layers(
 		material,
-		self.script_layer_texture(source, source.script_layers.base_height_binding),
+		self.material_map(source, source.script_layers.base_height_binding, source.uv_transform_or_identity()),
 		{
 			.strength = source.script_layers.base_bump_strength,
 			.distance = source.script_layers.base_bump_distance,
@@ -3394,7 +3444,8 @@ fn int Exporter.device_texture_for(&self, int slot)
 
 	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
 	bool own = true;
-	char[]? encoded = self.source_bytes(slot, &mime, &own);
+	String name;
+	char[]? encoded = self.source_bytes(slot, &mime, &own, &name);
 	if (catch encoded)
 	{
 		own = true;
@@ -3409,7 +3460,7 @@ fn int Exporter.device_texture_for(&self, int slot)
 		return -1;
 	}
 	defer if (own) free(encoded);
-	return self.add_device_image(slot, encoded, mime);
+	return self.add_device_image(slot, name, encoded, mime);
 }
 
 <*
@@ -3446,7 +3497,7 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 	// rather than being written as `BLEND` with an alpha of 1 — the two render the
 	// same and only one of them tells a viewer it may skip the sort.
 	uint written = self.out.add_material(
-		"",
+		surface.name,
 		{ surface.base_color[0], surface.base_color[1], surface.base_color[2], surface.base_color[3] },
 		metallic: surface.surface[1],
 		roughness: surface.surface[0],
@@ -3470,7 +3521,8 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 		normal: surface.normal,
 		occlusion: surface.occlusion,
 		emissive: surface.emissive,
-		emissive_factor: { surface.emissive_factor[0], surface.emissive_factor[1], surface.emissive_factor[2] }
+		emissive_factor: { surface.emissive_factor[0], surface.emissive_factor[1], surface.emissive_factor[2] },
+		metallic_roughness: surface.metallic_roughness
 	);
 
 	// After `add_material`, because the stack hangs off the material that was just
@@ -3512,12 +3564,16 @@ fn int Exporter.material_for(&self, ExportSurface surface)
  script's base normal; a node drawing it under a `MeshLambertMaterial` with a
  `normalMap` on it shows that one. Writing the file's would be a picture the frame
  did not draw. Where the script stated nothing the file's map crosses, which is
- the rule `emissive_factor` already followed and is now what all three follow.
+ the rule `emissive_factor` already followed and is now what all four follow.
 
- Not the metallic-roughness *map*: this renderer's roughness and metalness are one
- number each for a whole material rather than a texel-by-texel pair, so there is
- nothing to write one from, and `gltf::GltfBuilder` has no slot for it either. The
- two factors do go across — see `material_for`.
+ The metallic-roughness map is one of the four: the built-in material samples it
+ per texel (`METALNESS_ROUGHNESS_MAP`) and multiplies the two factors by it, as
+ glTF does. A built-in map carries the material's uv transform, because the frame
+ sampled every map through it.
+
+ What else of the source material crosses is read from the source document, as
+ the layer stack is: its name, and its `CUSTOM_materials_layers` object even when
+ that holds only a `base` height map and no layers.
 
  ## What a bake replaces
 
@@ -3536,7 +3592,11 @@ fn int Exporter.material_for(&self, ExportSurface surface)
 *>
 fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of, float[4] color, ExportBake baked)
 {
+	int source_material    = self.source_material_of(node);
+	gltf::Material* source = source_material < 0 ? null
+		: self.pass.assets.slot(node.asset).stream.gltf.materials.get_ref((usz)source_material);
 	ExportSurface surface = {
+		.name = source == null ? "" : source.name,
 		.base_color = color, // `texture_for` is skipped entirely when the body ran, not merely
 		// overridden: it writes the image into the document on the way past, and an
 		// image the bake already sampled has no reader left.
@@ -3564,6 +3624,7 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		.normal = gltf::NO_TEXTURE_REF,
 		.occlusion = gltf::NO_TEXTURE_REF,
 		.emissive = gltf::NO_TEXTURE_REF,
+		.metallic_roughness = gltf::NO_TEXTURE_REF,
 		.layers_asset = NO_ASSET,
 		.layers_material = -1,
 		.script_material = self.script_material_index(node),
@@ -3584,49 +3645,37 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		Material* script = self.pass.material((uint)surface.script_material);
 		if (script != null)
 		{
-			surface.normal = gltf::texture_ref(
-				self.device_texture_for(script.textures.at(script.script_layers.base_normal_binding))
-			);
+			ScriptLayers* stack = &script.script_layers;
+			float[4] uv = script.uv_transform_or_identity();
+			surface.normal = self.material_map(script, stack.base_normal_binding, uv);
+			surface.metallic_roughness = self.material_map(script, stack.base_surface_binding, uv);
+			surface.occlusion = self.material_map(script, stack.base_occlusion_binding, uv);
+			surface.emissive = self.material_map(script, stack.base_emissive_binding, uv);
 		}
-		// After the normal map, which survives a bake, and before the return: the
-		// stack does not. See the header above.
+		// After the base maps, which a bake of albedo leaves alone, and before the
+		// return: the stack does not survive one. See the header above.
 		if (baked.baked) surface.script_material = -1;
 		return surface;
 	}
 
-	// A built-in material's own maps — `MeshLambertMaterial`'s `normalMap`, `aoMap`
-	// and `emissiveMap`, which are three sampler slots on the pipeline every
-	// untextured mesh already uses. This used to look at a `LayeredMaterial`'s
-	// stack and at the source document and at nothing else, so a script that set
-	// one of these and exported lost it silently.
+	// A built-in material's own maps — `MeshLambertMaterial`'s `normalMap`, `aoMap`,
+	// `emissiveMap` and `metalnessRoughnessMap`, four sampler slots on the pipeline
+	// every untextured mesh already uses.
 	//
 	// **Asked by pipeline**, through `shades_built_in`, and that is not a detail:
 	// a `ShaderMaterial`'s own samplers sit at the *same bindings*, so reading them
 	// here without the test would write an agent's noise texture out as a normal
 	// map. It is the same guard `MeshPass.map_flags` puts on the same four slots.
-	//
-	// The metallic-roughness map is the fourth slot and is deliberately absent:
-	// `gltf::GltfBuilder` has no `metallicRoughnessTexture`, and this renderer's
-	// roughness and metalness are one number each for a whole material — which is
-	// what `material_for` writes instead.
 	if (material_of != null && self.pass.shades_built_in(material_of))
 	{
-		surface.normal = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(MaterialBinding.NORMAL_MAP))
-		);
-		surface.occlusion = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(MaterialBinding.OCCLUSION_MAP))
-		);
-		surface.emissive = gltf::texture_ref(
-			self.device_texture_for(material_of.textures.at(MaterialBinding.EMISSIVE_MAP))
-		);
+		float[4] uv = material_of.uv_transform_or_identity();
+		surface.normal = self.material_map(material_of, MaterialBinding.NORMAL_MAP, uv);
+		surface.occlusion = self.material_map(material_of, MaterialBinding.OCCLUSION_MAP, uv);
+		surface.emissive = self.material_map(material_of, MaterialBinding.EMISSIVE_MAP, uv);
+		surface.metallic_roughness = self.material_map(material_of, MaterialBinding.METALNESS_ROUGHNESS_MAP, uv);
 	}
 
-	int source_material = self.source_material_of(node);
-	if (source_material < 0) return surface;
-
-	Asset* asset           = self.pass.assets.slot(node.asset);
-	gltf::Material* source = asset.stream.gltf.materials.get_ref((usz)source_material);
+	if (source == null) return surface;
 	// The file's maps, and only where the script did not state one — the rule the
 	// emissive *factor* below already follows, applied to the images beside it. A
 	// script that put its own normal map on a file's mesh drew with the script's,
@@ -3640,6 +3689,10 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	{
 		surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
 	}
+	if (surface.metallic_roughness.texture < 0)
+	{
+		surface.metallic_roughness = self.source_texture_ref(node.asset, source.metallicRoughnessTexture);
+	}
 	// The file's factor, and only where the script did not state one. Every other
 	// field here is read off the source material unconditionally because the script
 	// has no way to say them; `material.emissive` is a way to say this one, and a
@@ -3649,8 +3702,9 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 		surface.emissive_factor = { source.emissiveFactor.x, source.emissiveFactor.y, source.emissiveFactor.z };
 	}
 	// The imported stack, on the same terms as the script's one above: a body that
-	// baked has already applied it.
-	if (source.has_layers() && !baked.baked)
+	// baked has already applied it. A stack of no layers still has a `base` height
+	// map to carry, which is the one place the extension gives a material's relief.
+	if (source.layers_ext.present && !baked.baked)
 	{
 		surface.layers_asset = node.asset;
 		surface.layers_material = source_material;
@@ -3672,6 +3726,14 @@ fn float[3] clamped_emissive(Material* material) @local
 		math::clamp(value[1], 0.0f, 1.0f),
 		math::clamp(value[2], 0.0f, 1.0f),
 	};
+}
+
+// The map in one of a material's bindings, with the uv transform the frame
+// sampled it through. None at all for an empty one, so no transform is written.
+fn gltf::WriteTextureRef Exporter.material_map(&self, Material* material, uint binding, float[4] uv)
+{
+	int texture = self.device_texture_for(material.textures.at(binding));
+	return texture < 0 ? gltf::NO_TEXTURE_REF : uv_texture_ref(texture, uv);
 }
 
 // A source document's textureInfo as a written one: its image resolved to an
@@ -3898,9 +3960,12 @@ fn void Exporter.write_camera(&self)
 *>
 fn void Exporter.write_light(&self)
 {
-	for (uint i = 0; i < self.pass.lighting.count; i++)
+	// The scene's own copy, which `set_lighting` keeps equal to the frame's while
+	// the scene is on screen and which is the only copy while it is not.
+	Lighting* lighting = &self.scene.look.lighting;
+	for (uint i = 0; i < lighting.count; i++)
 	{
-		Light light   = self.pass.lighting.lights[i];
+		Light light   = lighting.lights[i];
 		if (light.meta[2] >= 2)
 		{
 			Vec3 right = { light.area_right[0], light.area_right[1], light.area_right[2] };

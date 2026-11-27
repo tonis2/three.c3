@@ -345,7 +345,8 @@ export class Scene extends Object3D {
 		return H.unloadUnused();
 	}
 
-	// Write the scene to a `.glb`.
+	// Write this Scene to a `.glb` — this one, with its own lights, whether
+	// or not it is the one being rendered.
 	//
 	// The other direction of `three.load`, and the point at which "linked,
 	// not duplicated" stops being an internal detail: a thousand walls
@@ -487,7 +488,7 @@ export class Scene extends Object3D {
 	// at its world transform; `camera: false` and `light: false` leave the
 	// scene's camera and lights out. A collider the file stated and
 	// `instantiate({ physics: true })` placed goes back as the file stated
-	// it; `colliders` counts what was written.
+	// it, collision filter included; `colliders` counts what was written.
 	export(path, options) {
 		this._check();
 		if (typeof path !== 'string' || path.length === 0) {
@@ -575,7 +576,7 @@ export class Scene extends Object3D {
 			for (let i = 0; i < o.children.length; i++) gather(o.children[i]);
 		};
 		gather(root);
-		return H.exportScene(path, flatten, bake, textures, root === this ? null : root._h, camera, light,
+		return H.exportScene(this._sid, path, flatten, bake, textures, root === this ? null : root._h, camera, light,
 			extras, fileExtras, standIns);
 	}
 

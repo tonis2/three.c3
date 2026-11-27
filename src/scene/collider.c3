@@ -138,9 +138,11 @@ struct AssetBody
 	// and its drawing is out — see `Assets.flatten_node`.
 	int proxy;
 
-	// The file named a `collisionFilter`. Reported rather than applied: this
-	// solver has no layers or masks to put one in.
+	// The file's `collisionFilter`, when it named one. This solver has no layers
+	// or masks to apply it, so it is kept for an export to write back. The system
+	// names are owned here.
 	bool filtered;
+	gltf::CollisionFilter filter;
 }
 
 <*
@@ -258,8 +260,12 @@ fn void Assets.record_physics(&self, Gpu* gpu, Asset* asset, gltf::GltfStream* s
 			gltf::Collider* collider = &doc.colliders[(uint)source.collider];
 			body.has_collider = true;
 			body.trigger = collider.is_trigger;
-			body.filtered = collider.has_filter();
 			body.shape = collider.convex_hull ? AssetShape.HULL : AssetShape.MESH;
+			if (collider.has_filter() && collider.collision_filter < doc.collision_filters.len())
+			{
+				body.filtered = true;
+				body.filter = copy_filter(&doc.collision_filters[(uint)collider.collision_filter]);
+			}
 
 			if (collider.has_material() && collider.material < doc.physics_materials.len())
 			{
@@ -332,6 +338,27 @@ fn String collider_name(String node) @local
 {
 	if (node.len == 0) return "collider".copy(mem);
 	return string::format(mem, "%s.collider", node);
+}
+
+// A filter's three lists with their names copied, freed by `free_filter`.
+fn gltf::CollisionFilter copy_filter(gltf::CollisionFilter* from) @local
+{
+	gltf::CollisionFilter copy;
+	copy.systems.init(mem);
+	copy.colliding_with.init(mem);
+	copy.not_colliding.init(mem);
+	foreach (system : from.systems) copy.systems.push(system.copy(mem));
+	foreach (system : from.colliding_with) copy.colliding_with.push(system.copy(mem));
+	foreach (system : from.not_colliding) copy.not_colliding.push(system.copy(mem));
+	return copy;
+}
+
+fn void free_filter(gltf::CollisionFilter* filter) @local
+{
+	foreach (system : filter.systems) system.free(mem);
+	foreach (system : filter.colliding_with) system.free(mem);
+	foreach (system : filter.not_colliding) system.free(mem);
+	filter.free();
 }
 
 // The shape's numbers, in its own units. Cylinder and capsule share the height
@@ -621,8 +648,8 @@ fn AssetJointLimit read_joint_limit(uint kind, gltf::Limit limit) @local
 }
 
 <*
- Give back what `record_physics` allocated: the proxy names and the joints'
- limit lists.
+ Give back what `record_physics` allocated: the proxy names, the collision
+ filters and the joints' limit lists.
 
  One helper rather than inline in both places that free an asset, for
  `free_nodes`' reason.
@@ -632,6 +659,7 @@ fn void free_physics(Asset* asset)
 	foreach (&body : asset.bodies)
 	{
 		if (body.name.len > 0) body.name.free(mem);
+		if (body.filtered) free_filter(&body.filter);
 	}
 	asset.bodies.free();
 	foreach (&joint : asset.joints) joint.limits.free();

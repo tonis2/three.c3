@@ -618,6 +618,11 @@ struct ScriptLayers
 	uint base_height_binding;
 	float base_bump_strength;
 	float base_bump_distance;
+	// The base material's metallic-roughness, occlusion and emissive maps, as
+	// bindings, or zero. Written as the glTF material's own three maps.
+	uint base_surface_binding;
+	uint base_occlusion_binding;
+	uint base_emissive_binding;
 	List{ScriptLayer} layers;
 }
 
@@ -948,6 +953,9 @@ fn void Material.bind_table(&self)
 
  @param mask_binding : `The sampler several layers read a channel of, or 0 for a stack where no two share one.`
  @param base_normal_binding : `The base material's normal map, or 0. Written as the glTF material's own normalTexture rather than as any layer's.`
+ @param base_surface_binding : `The base metallic-roughness map, or 0. Like the normal map, the glTF material's own.`
+ @param base_occlusion_binding : `The base occlusion map, or 0.`
+ @param base_emissive_binding : `The base emissive map, or 0.`
 *>
 fn void Material.begin_script_layers(
 	&self,
@@ -955,7 +963,10 @@ fn void Material.begin_script_layers(
 	uint base_normal_binding = 0,
 	uint base_height_binding = 0,
 	float bump_strength = 1.0,
-	float bump_distance = 1.0
+	float bump_distance = 1.0,
+	uint base_surface_binding = 0,
+	uint base_occlusion_binding = 0,
+	uint base_emissive_binding = 0
 )
 {
 	self.free_script_layers();
@@ -965,6 +976,9 @@ fn void Material.begin_script_layers(
 	self.script_layers.base_height_binding = base_height_binding;
 	self.script_layers.base_bump_strength = bump_strength;
 	self.script_layers.base_bump_distance = bump_distance;
+	self.script_layers.base_surface_binding = base_surface_binding;
+	self.script_layers.base_occlusion_binding = base_occlusion_binding;
+	self.script_layers.base_emissive_binding = base_emissive_binding;
 	self.script_layers.layers.init(mem, 4);
 }
 

@@ -741,7 +741,8 @@ fn void? js_set_material(JsRuntime* self, NodeRef ref, uint material)
 
 <*
  `beginMaterialLayers(material, sharedMask, baseNormal, baseHeight, bumpStrength,
- bumpDistance)` — start recording what a `LayeredMaterial` *is*.
+ bumpDistance, baseSurface, baseOcclusion, baseEmissive)` — start recording what a
+ `LayeredMaterial` *is*.
 
  Everything else on this file's surface crosses in one direction: a description
  goes in and a compiled pipeline comes out, and the description is not needed
@@ -763,7 +764,9 @@ fn void? js_set_material(JsRuntime* self, NodeRef ref, uint material)
  becomes the glTF material's own `normalTexture` rather than any layer's, and
  `baseHeight` with the bump pair beside it is the relief under the whole stack —
  the extension's `base` object, which is the only place a height map can go
- because core glTF has no slot for one.
+ because core glTF has no slot for one. `baseSurface`, `baseOcclusion` and
+ `baseEmissive` are the base metallic-roughness, occlusion and emissive maps,
+ which become the glTF material's own three the way `baseNormal` does.
 
  @return? js::THREW
 *>
@@ -774,7 +777,10 @@ fn void? js_begin_material_layers(
 	String base_normal,
 	String base_height,
 	float bump_strength,
-	float bump_distance
+	float bump_distance,
+	String base_surface,
+	String base_occlusion,
+	String base_emissive
 )
 {
 	Material* material = self.pass.material(index);
@@ -785,7 +791,10 @@ fn void? js_begin_material_layers(
 		base_normal.len == 0 ? 0 : material.binding_of_texture(base_normal),
 		base_height.len == 0 ? 0 : material.binding_of_texture(base_height),
 		bump_strength,
-		bump_distance
+		bump_distance,
+		base_surface.len == 0 ? 0 : material.binding_of_texture(base_surface),
+		base_occlusion.len == 0 ? 0 : material.binding_of_texture(base_occlusion),
+		base_emissive.len == 0 ? 0 : material.binding_of_texture(base_emissive)
 	);
 }
 

@@ -802,8 +802,8 @@ export class Asset {
 	//
 	// `proxy` says the shape got a collision-only mesh of its own, which is what
 	// a box or a capsule needs to be in a query at all. `filtered` says the file
-	// named a `collisionFilter`; this solver has no layers to put one in and it
-	// is reported rather than applied.
+	// named a `collisionFilter`; this solver has no layers to put one in, so it
+	// is kept rather than applied, and `scene.export` writes it back.
 	//
 	// Read at load out of the JSON chunk, so this costs no upload; cached, for
 	// `nodes`' reason.

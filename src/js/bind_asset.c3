@@ -1410,8 +1410,12 @@ struct ExportAnswer
 }
 
 <*
- `exportScene(path, flatten, bake, textures)` — write the scene to a `.glb`, and
- say what went into it.
+ `exportScene(scene, path, flatten, bake, textures, ...)` — write a scene to a
+ `.glb`, and say what went into it.
+
+ `scene` is the id of the Scene the call was made on, which need not be the one
+ being rendered: building the next level while this one runs and saving it is the
+ ordinary case.
 
  `js_load`'s other half: the path is resolved by `resolve_asset`, as a load's
  is.
@@ -1444,6 +1448,7 @@ struct ExportAnswer
 *>
 fn ExportAnswer? js_export(
 	JsRuntime* self,
+	uint scene,
 	String path,
 	bool flatten,
 	int bake,
@@ -1457,6 +1462,8 @@ fn ExportAnswer? js_export(
 )
 {
 	if (self.pass == null) return self.js.fail("there is no scene to export in this context")~;
+	Scene* target = self.pass.scene_by_id(scene);
+	if (target == null) return self.js.fail("this Scene was disposed, so there is nothing to export")~;
 	if (path.len == 0) return self.js.fail("scene.export(path) wants a path to write a .glb to")~;
 
 	String? writing = self.resolve_asset(path, tmem);
@@ -1507,14 +1514,14 @@ fn ExportAnswer? js_export(
 		if (data) tags.stand_ins.push(unpack_id(data, NodeId));
 	}
 
-	// The scene the subtree is in, which is the one being exported: a root from
-	// another scene would walk nodes this pass cannot see.
-	if (root.is_set() && root.ref.scene != self.pass.scene)
+	// A root from another scene would walk nodes the exported one does not hold.
+	if (root.is_set() && root.ref.scene != target)
 	{
 		return self.js.fail("scene.export options.root is in another scene than the one being exported")~;
 	}
 
 	ExportReport? report = self.pass.export_scene(
+		target,
 		writing,
 		flatten,
 		bake > 0 ? (uint)bake : 0,

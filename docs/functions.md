@@ -430,6 +430,10 @@ compressedImages, nodes, instances, batches, skipped, shaded, bakedImages, baked
 markers, colliders, bytes }`. A folder on the way that is not there yet is made, as
 `three.writeText` makes one.
 
+It writes the Scene it is called on, whether or not that is the one being rendered, with that
+scene's own lights; the camera is the renderer's one camera. Exporting leaves the active scene as it
+was, so a level built off screen can be saved while another one runs.
+
 **Options** (all optional):
 
 - `root` — an object in this scene. Only its subtree is written, the root at its world transform,
@@ -452,7 +456,9 @@ on the node that carries it: the drawing for a mesh or hull, the instanced node 
 collider, which every copy gets back), the node itself for a shape. A collision-only proxy is never
 a second collider. A solver body with no file behind it is written as the solver holds it, and a
 terrain the solver holds as a heightfield goes out as a mesh collider over its own mesh. Collider
-identity is part of the batch key. `colliders` counts what was written; collision filters are not.
+identity is part of the batch key. `colliders` counts what was written. A file's collision filter
+goes back on its collider unchanged, one filter per distinct set of systems: the solver has no layers
+to apply it, so it passes through.
 
 **Lights** are written in the importer's units, Blender's Watts: a sun of intensity `i` as `i·π`, a
 point light as `i·4π²`. The importer divides by the same, so a round trip is exact.
@@ -550,8 +556,12 @@ The scene around the meshes goes too: the camera as a glTF camera and every ligh
 KHR_lights_punctual directional light, each on its own node, so the file opens framed and lit the way
 three had it. The ambient floor has no glTF equivalent and is the one thing lost. Materials carry
 `side` as `doubleSided`, `repeat` and `offset` as KHR_texture_transform — which an import reads back
-onto the same two properties, so a tiling survives the round trip — and a source material's normal,
-occlusion and emissive maps with the metalness and roughness the specular term drew them with. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
+onto the same two properties, so a tiling survives the round trip — and the normal, occlusion,
+emissive and metallic-roughness maps, each with that same transform, beside the metalness and
+roughness the map multiplies. A material out of a file keeps the file's name, and an image the file's
+name for it. Its `CUSTOM_materials_layers` goes back as the file stated it even when it holds only a
+`base` height map and bump, which is how a material's relief travels. Two of a file's materials stay
+two however alike they are, and copies of one material stay one. Reflectance is not written and does not need to be — glTF fixes a dielectric's F0 at 0.04, which is
 what an import applies, so a material that came in at 0.5 comes back at 0.5. Lines are not written yet.
 
 ## three.renderSize()
@@ -3145,7 +3155,7 @@ name, `"<node>.collider"`; and `shape` is one of `'mesh'`, `'hull'`, `'box'`, `'
 engine's.
 
 `proxy` says the shape got a collision-only mesh of its own. `filtered` says the file named a
-`collisionFilter`, which is reported and not applied.
+`collisionFilter`, which is kept and not applied: `scene.export` writes it back on the same collider.
 
 `asset.physicsJoints` is the same door onto the file's joints: `{ a, b, pivot, collide, limits }`, with
 `a` and `b` glTF node indices and each limit `{ linearAxes | angularAxes, min, max, stiffness, damping }`
