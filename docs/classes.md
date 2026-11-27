@@ -234,6 +234,7 @@ pipeline you can build draws triangles.
 - `offset` — `[u, v]`: where the map starts, in whole repeats
 - `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
 - `stochastic` — sample this material's maps so a tiled surface stops having a period; for a texture with no structure in it
+- `castShadow` — true by default; false keeps this material out of the shadow maps (grass, wheat), and it still receives
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -499,6 +500,7 @@ sRGB — the default — and a linear one is refused.
 - `offset` — `[u, v]`: where the map starts, in whole repeats
 - `uvVariants` — up to eight `[offsetU, offsetV, turns, flip]` rows, one uv transform per copy, picked by `mesh.variant`; `null` clears it
 - `stochastic` — sample this material's maps so a tiled surface stops having a period; for a texture with no structure in it
+- `castShadow` — true by default; false keeps this material out of the shadow maps (grass, wheat), and it still receives
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -838,6 +840,7 @@ have been skipped; too small drops geometry you can see.
 - `uvVariants` — one uv transform per copy, picked by `mesh.variant` — see Material
 - `stochastic` — scatters this material's own `map`; a body's declared textures go through
   `stochastic_sample(image, uv)` instead — see Material
+- `castShadow` — false keeps this material out of the shadow maps — see Material
 - `alive` — false once `dispose()` has been called on it
 
 ### Methods
@@ -1028,7 +1031,7 @@ mesh.material = new three.LayeredMaterial({
   worst case, and is the number to compare between stacks — `three.stats()` cannot see a material
 - `uniforms, textures` — the ShaderMaterial proxies, under the generated names
 - `map, side, transparent, blending, opacity, roughness, metalness, reflectance, alphaTest, emissive,
-  emissiveIntensity, repeat, offset, uvVariants, stochastic, alive` — as ShaderMaterial. The
+  emissiveIntensity, repeat, offset, uvVariants, stochastic, castShadow, alive` — as ShaderMaterial. The
   material's own `emissive` is added on top of whatever the layers glow, so a stack imported with an
   emissive layer and a material given one of its own do both.
 
@@ -1038,7 +1041,7 @@ mesh.material = new three.LayeredMaterial({
   them. `changes` takes the constructor's options and nothing else, and each one replaces the whole
   option, so `uniforms` there is the clone's full set. What was set after construction comes along
   unless `changes` states it: `map`, the surface numbers, your uniforms as they are now, `alphaTest`,
-  `emissive`, `emissiveIntensity`, `repeat`, `offset`, `uvVariants`, `stochastic`, and an image or
+  `emissive`, `emissiveIntensity`, `repeat`, `offset`, `uvVariants`, `stochastic`, `castShadow`, and an image or
   animated tint swapped in through `layers` — unless `changes` gave that slot another image.
 
   The images are shared, not copied. Each material holds its own reference to them, so disposing the

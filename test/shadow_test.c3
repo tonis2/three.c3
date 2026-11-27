@@ -515,6 +515,44 @@ fn void glass_and_helpers_cast_nothing() @test
 	};
 }
 
+<*
+ A material with `castShadow` off stays out of the map, and turning it back on
+ puts it back: grass that would cost a place in the map for nothing.
+*>
+fn void a_material_that_asks_casts_nothing() @test
+{
+	@with_js(; three::JsRuntime* run, three::Renderer* renderer)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.PlaneGeometry(12, 12), new three.MeshLambertMaterial());
+			ground.rotation.x = -Math.PI / 2;
+			scene.add(ground);
+			const solid = new three.Mesh(new three.BoxGeometry(2, 2, 2), new three.MeshLambertMaterial());
+			solid.position.set(-2, 2, 0);
+			scene.add(solid);
+			const grass = new three.Mesh(new three.BoxGeometry(2, 2, 2), new three.MeshLambertMaterial({ castShadow: false }));
+			grass.position.set(2, 2, 0);
+			scene.add(grass);
+			three.light.shadow = true;
+			three.camera.frameAll();
+			three.render();
+			const off = three.stats().shadowDraws;
+			const asked = grass.material.castShadow;
+			grass.material.castShadow = true;
+			three.render();
+			return [three.stats().drawCalls, off, three.stats().shadowDraws, asked].join(',');
+		`);
+		defer result.free();
+
+		test::@check(result.ok, "the script ran: %s", result.error);
+		test::@check(
+			result.value == `"3,2,3,false"`,
+			"three buckets, two casters, then three once it asks again, got '%s'", result.value
+		);
+	};
+}
+
 // ============================================================================
 // Skinning, which is what a second geometry pass is hardest on
 // ============================================================================

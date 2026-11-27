@@ -3226,9 +3226,9 @@ is what decides whether an edge reads as a shadow or as a staircase. `live: fals
 Nothing is allocated and no shader compiled until the first frame with it on; turning it off costs nothing and
 keeps the map for next time; and activating a scene — which `new three.Scene()` does — turns it off.
 
-Everything opaque casts and everything shaded receives: there is no `castShadow` or `receiveShadow`, because two
-copies of one mesh disagreeing about it would be two draw calls. Glass casts nothing and neither do debug
-helpers.
+Everything opaque casts and everything shaded receives: there is no per-object `castShadow` or `receiveShadow`,
+because two copies of one mesh disagreeing about it would be two draw calls. `material.castShadow = false` is
+the switch instead, since every copy shares its material. Glass casts nothing and neither do debug helpers.
 
 There is one map, fitted around the whole scene every frame, so blocky shadows mean a large scene rather than a
 small map. While the pass is on the camera frustum stops culling, because a caster you cannot see still throws a
@@ -3325,6 +3325,22 @@ It costs three taps instead of one, and it flattens contrast a little where thre
 a distinctive mark in the image turns up about three times as often, at a third of the strength,
 which is the same fact seen from the other side. The version that does not do that wants a histogram
 of the image built ahead of time, which is a build step rather than a sampler.
+
+## material.castShadow
+
+```js
+grass.material.castShadow = false;
+new three.ShaderMaterial({ fragment, castShadow: false });
+```
+
+Whether this material's geometry goes into the shadow maps, the sun's and the lamps'. True by default. Turn it
+off for cover too small and too many to be worth a place in the map: grass, flowers, wheat. The surface still
+receives shadows.
+
+On the material, not on the object as in Three.js: every copy of a mesh shares its material, so copies can't
+disagree and no draw call splits (see shadow-cast-receive in differences.md). A copy the camera can't see is
+not kept for the pass either, so it saves the cull as well as the draw. Changing it rebuilds the cached static
+maps.
 
 ## mapped_normal(s, texel) — normal maps in a ShaderMaterial
 

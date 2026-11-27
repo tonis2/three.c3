@@ -512,6 +512,12 @@ struct Material
 	// here than usual: it is three taps instead of one on every map, so a
 	// material that never asked for it must never pay for it.
 	bool stochastic;
+	// `material.castShadow = false` — this material's geometry stays out of the
+	// sun's and the lamps' shadow maps, and still receives. A material and not a
+	// node, because every copy of a mesh shares its material: no bucket splits.
+	// Stored as the refusal so the zero fill is "casts", which every material that
+	// predates it did.
+	bool cast_shadow_off;
 }
 
 <*

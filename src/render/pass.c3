@@ -1300,10 +1300,12 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		// same shape — something the *material* knows that the *scene* needs while
 		// it is culling. See `Material.bounds`.
 		float[] margins    = alloc::new_array(tmem, float, self.materials.len());
+		bool[] casting     = alloc::new_array(tmem, bool, self.materials.len());
 		foreach (i, &material : self.materials)
 		{
 			transparent[i] = material.alive && material.blend != BlendMode.NONE;
 			margins[i] = material.alive ? material.bounds : 0;
+			casting[i] = !material.alive || self.casts_shadow(material);
 		}
 		// The fit above wrote `light_view_projection`, so the box the pass will
 		// rasterise into and the box the cull is against are the same box by
@@ -1319,7 +1321,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 			&reserve_instances,
 			&copies,
 			self.point_shadows.live,
-			extra_projections
+			extra_projections,
+			casting
 		);
 	};
 	if (self.scene.buckets.len() == 0)
@@ -2010,6 +2013,9 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
  `PipelineCache.acquire` hands the same pointer back for the same source and
  state — so this covers any material drawn as lines.
 
+ And one the script asked for: `material.castShadow = false`, for grass and other
+ cover too small and too many to be worth a place in the map.
+
  A **cut-out** material is neither of those and does cast. `material.alphaTest`
  is opaque — it keeps the depth test and the depth write and simply has holes in
  it — so it is exactly the case a shadow map can record, and `record_casters`
@@ -2021,6 +2027,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 *>
 fn bool MeshPass.casts_shadow(&self, Material* material)
 {
+	if (material.cast_shadow_off) return false;
 	if (material.blend != BlendMode.NONE) return false;
 	if (material.pipeline == self.line_pipeline) return false;
 	return true;
@@ -3797,6 +3804,32 @@ fn bool MeshPass.material_stochastic(&self, uint index)
 {
 	if (index >= self.materials.len()) return false;
 	return self.materials[index].stochastic;
+}
+
+<*
+ `material.castShadow` — whether this material's geometry goes into the shadow
+ maps. Free to change between frames: the shadow pass asks `casts_shadow` as it
+ records, and a change rebuilds the cached static maps.
+
+ @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+*>
+fn void? MeshPass.set_material_cast_shadow(&self, uint index, bool on)
+{
+	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+	if (self.materials[index].cast_shadow_off == !on) return;
+	self.materials[index].cast_shadow_off = !on;
+	// The cached static maps, the sun's and the lamps', hold this material's casters.
+	self.scene.static_revision++;
+}
+
+<*
+ What that reads back as. True for an index that names nothing: a material nobody
+ asked anything of casts.
+*>
+fn bool MeshPass.material_cast_shadow(&self, uint index)
+{
+	if (index >= self.materials.len()) return true;
+	return !self.materials[index].cast_shadow_off;
 }
 
 <*

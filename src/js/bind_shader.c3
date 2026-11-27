@@ -45,6 +45,8 @@ fn void? JsRuntime.bind_shader_verbs(&self, js::Value host)
 	self.js.@bind(host, "getUvVariants", &js_get_uv_variants, self)!;
 	self.js.@bind(host, "setStochastic", &js_set_stochastic, self)!;
 	self.js.@bind(host, "getStochastic", &js_get_stochastic, self)!;
+	self.js.@bind(host, "setCastShadow", &js_set_cast_shadow, self)!;
+	self.js.@bind(host, "getCastShadow", &js_get_cast_shadow, self)!;
 	self.js.@bind(host, "setMaterial", &js_set_material, self)!;
 	self.js.@bind(host, "disposeMaterial", &js_dispose_material, self)!;
 	self.js.@bind(host, "beginMaterialLayers", &js_begin_material_layers, self)!;
@@ -623,6 +625,18 @@ fn void? js_set_stochastic(JsRuntime* self, uint index, bool on)
 }
 
 fn bool js_get_stochastic(JsRuntime* self, uint index) => self.pass.material_stochastic(index);
+
+<*
+ `material.castShadow = false` — keep this material out of the shadow maps.
+
+ @return? js::THREW
+*>
+fn void? js_set_cast_shadow(JsRuntime* self, uint index, bool on)
+{
+	if (catch self.pass.set_material_cast_shadow(index, on)) return self.js.fail("that material is not in this context")~;
+}
+
+fn bool js_get_cast_shadow(JsRuntime* self, uint index) => self.pass.material_cast_shadow(index);
 
 <*
  `new three.MeshLambertMaterial({ map })` — the built-in shader, with an image.

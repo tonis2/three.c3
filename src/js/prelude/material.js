@@ -477,8 +477,22 @@ export class Material {
 		H.setStochastic(this._index(), v);
 	}
 
-	// `{ roughness, metalness, reflectance, alphaTest }` off a constructor's
-	// options, for every constructor that takes options.
+	// Whether this material's geometry goes into the shadow maps. True by default;
+	// false for cover too small and too many to be worth a place in the map, like
+	// grass. It still receives.
+	//
+	// On the material rather than on a node, unlike Three.js's
+	// `object.castShadow`: every copy of a mesh shares its material, so copies
+	// cannot disagree and no draw call splits (differences.md, shadow-cast-receive).
+	get castShadow() { return H.getCastShadow(this._index()); }
+
+	set castShadow(v) {
+		if (typeof v !== 'boolean') throw new TypeError('material.castShadow is true or false');
+		H.setCastShadow(this._index(), v);
+	}
+
+	// `{ roughness, metalness, reflectance, alphaTest, castShadow }` off a
+	// constructor's options, for every constructor that takes options.
 	//
 	// After the handle exists rather than as part of it, exactly as `opacity`
 	// is: these are writes through the handle, and going through the setters is
@@ -488,6 +502,7 @@ export class Material {
 		if (options.metalness !== undefined) material.metalness = options.metalness;
 		if (options.reflectance !== undefined) material.reflectance = options.reflectance;
 		if (options.alphaTest !== undefined) material.alphaTest = options.alphaTest;
+		if (options.castShadow !== undefined) material.castShadow = options.castShadow;
 		// The intensity first, so a description that states both lands on the pair
 		// it wrote whichever order the setters read the other half back in.
 		if (options.emissiveIntensity !== undefined) {
@@ -560,6 +575,7 @@ export class Material {
 			emissive: this.alive ? this.emissive : null,
 			emissiveIntensity: this.alive ? this.emissiveIntensity : null,
 			alphaTest: this.alive ? this.alphaTest : null,
+			castShadow: this.alive ? this.castShadow : null,
 		};
 	}
 }

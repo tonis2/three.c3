@@ -721,7 +721,9 @@ it back off.
 ## shadow-cast-receive
 
 Everything opaque casts and everything shaded receives. There is no `castShadow` or `receiveShadow` per
-object, because two copies of one mesh disagreeing about it would be two draw calls.
+object, because two copies of one mesh disagreeing about it would be two draw calls. A material can opt out
+of casting instead, `material.castShadow = false`, because every copy shares its material: grass and other
+cover that is too small and too many to be worth a place in the map.
 
 A transparent material casts nothing — a shadow map holds one depth per texel, so glass would have to be
 either solid or absent, and absent is the better wrong answer — and neither does a debug helper.

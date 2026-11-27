@@ -2619,6 +2619,7 @@ alias InstanceReserve = fn Instance*(void* context, sz count);
  @param transparent : `One bool per material index — whether that material blends. Empty means an entirely opaque frame, which is what every caller but MeshPass.record passes.`
  @param light_view_projection : `The light's clip matrix when a shadow pass will read this draw list, null otherwise. Its frustum keeps casters the camera cannot see — but as a second test beside the camera's rather than instead of it, so both passes get a cull.`
  @param reserve : `Where the instance array goes — see InstanceReserve. Null puts it in Scene.instances, which is what every caller but a frame does.`
+ @param casting : `One bool per material index — whether it goes into a shadow map. Empty, or an index past its end, casts.`
 *>
 fn void Scene.update(
 	&self,
@@ -2630,7 +2631,8 @@ fn void Scene.update(
 	InstanceReserve reserve = null,
 	void* reserve_context = null,
 	bool shadow_all = false,
-	Matrix4f[] extra_view_projections = { }
+	Matrix4f[] extra_view_projections = { },
+	bool[] casting = { }
 )
 {
 	self.update_world_matrices();
@@ -2657,7 +2659,8 @@ fn void Scene.update(
 		reserve,
 		reserve_context,
 		shadow_all,
-		extra_frustums
+		extra_frustums,
+		casting
 	);
 	// Promoted here rather than inside `build_draw_list`, because this call is what
 	// "a frame happened" means and the other caller is a query. Assigned
@@ -2722,6 +2725,7 @@ fn uint draw_order(uint material, bool transparent) @local
  @param near : `The camera's near plane, for the back-to-front sort. Null means no sort, which is stats()' configuration: a query has no camera to sort by.`
  @param light : `The light's frustum when a shadow pass will read this list, null otherwise. A draw kept by this and not by the camera goes into the tail of its bucket — see Bucket.visible.`
  @param counts_only : `Build the buckets and leave the instance array empty — stats()' configuration, and nothing a frame may pass. See Scene.stats.`
+ @param casting : `One bool per material index — whether it goes into a shadow map (MeshPass.casts_shadow). Empty, or an index past its end, casts.`
 *>
 fn void Scene.build_draw_list(
 	&self,
@@ -2736,7 +2740,8 @@ fn void Scene.build_draw_list(
 	InstanceReserve reserve = null,
 	void* reserve_context = null,
 	bool shadow_all = false,
-	Frustum[] extra_frustums = { }
+	Frustum[] extra_frustums = { },
+	bool[] casting = { }
 )
 {
 	self.draws.clear();
@@ -2839,12 +2844,14 @@ fn void Scene.build_draw_list(
 			// The second test, and the reason a draw can survive the first rejection.
 			// A caster the camera cannot see still throws a shadow into the frame, so
 			// the light's box gets its own say — but only for geometry that will
-			// actually be rasterised into the map. A blended material casts nothing
-			// (`MeshPass.casts_shadow`), so keeping a transparent draw the camera
-			// rejected would put an instance in the array neither pass will read.
+			// actually be rasterised into the map. A blended material, or one with
+			// `castShadow` off, casts nothing (`MeshPass.casts_shadow`), so keeping such
+			// a draw the camera rejected would put an instance in the array neither pass
+			// will read.
 			if (!visible)
 			{
-				bool casts = !is_transparent && (shadow_all || (light != null && light.contains(box)));
+				bool material_casts = node.material >= casting.len || casting[node.material];
+				bool casts = material_casts && (shadow_all || (light != null && light.contains(box)));
 				if (!casts)
 				{
 					if (light != null) self.shadow_culled++;

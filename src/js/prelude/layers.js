@@ -1406,6 +1406,7 @@ export class LayeredMaterial extends ShaderMaterial {
 		const variants = this.uvVariants;
 		if (variants.length > 0) made.uvVariants = variants;
 		if (this.stochastic) made.stochastic = true;
+		if (!this.castShadow) made.castShadow = false;
 
 		// A swap made after construction, carried only where the clone's slot
 		// started from the same image: a slot `changes` refilled keeps the new one.
