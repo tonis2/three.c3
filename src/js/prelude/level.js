@@ -61,9 +61,11 @@ export class Level {
 		// Each row's piece's own extras, by id — what `toJSON` diffs against, so a
 		// row's file keeps only what the level says on top of the kit.
 		this._pieceExtras = new Map();
-		// Whether pieces are placed with the kit's colliders — `three.level.load`'s
-		// `physics`. An `add()` that names its own wins.
+		// Whether pieces are placed with the kit's colliders, and with the kit's own
+		// materials (alpha cut-outs, two-sided faces, layer stacks) — `three.level.load`'s
+		// `physics` and `materials`. An `add()` that names its own wins.
 		this.physics = false;
+		this.materials = false;
 	}
 
 	_assetFor(path) {
@@ -131,12 +133,15 @@ export class Level {
 		}
 
 		// `nth` picks among same-named nodes — an imported scene repeats names.
-		// `physics` places the piece with the colliders the kit gave it, which is
-		// what a level exported again with `scene.export` keeps.
+		// `physics` places the piece with the colliders the kit gave it, and
+		// `materials` with its materials, both of which a level exported again with
+		// `scene.export` keeps.
 		const physics = options?.physics ?? this.physics;
+		const materials = options?.materials ?? this.materials;
 		const placing = {};
 		if (row.nth !== undefined) placing.nth = row.nth;
 		if (physics) placing.physics = true;
+		if (materials) placing.materials = true;
 		const object = asset.node(piece, placing);
 		object.name = id;
 		// The row's extras over the piece's own: a row names what this placement
@@ -248,7 +253,9 @@ export class Level {
 //
 // `options.physics` places every piece with the colliders its kit gave it
 // (`asset.node(piece, { physics: true })`), so the level collides and a
-// `scene.export` of it writes them back. Rows added later follow it.
+// `scene.export` of it writes them back. `options.materials` places them with
+// the kit's own materials, so cut-outs and two-sided faces draw and export as
+// the kit has them. Rows added later follow both.
 //
 // Null for a file that is not there, the same answer `three.readJSON` gives
 // — a cold editor start is one `??` rather than a guard.
@@ -266,6 +273,7 @@ export function load(path, parent, options = {}) {
 	const level = new Level(data.kit);
 	level.parent = parent;
 	level.physics = !!(options?.physics);
+	level.materials = !!(options?.materials);
 	for (const row of data.rows ?? []) level.add(row, { refit });
 	return level;
 }

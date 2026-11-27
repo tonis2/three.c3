@@ -1485,7 +1485,12 @@ export class Asset {
 		// descriptions but not the same object, so this dedupes on the *shape*
 		// rather than on identity — which is what keeps a kit of ninety pieces
 		// from compiling ninety shaders that differ in nothing.
-		const materialCache = opt.materials ? new Map() : null;
+		//
+		// Kept on the asset, so every `instantiate` and `node()` of it shares them,
+		// as a clone shares its materials in Three.js. A level placing a kit's
+		// pieces two hundred times is then one set of materials, and `scene.export`
+		// can batch their copies, which it keys on the material.
+		const materialCache = opt.materials ? (this._materialCache ??= new Map()) : null;
 		const built = new Array(rows.length);
 		let root = into;
 		let undo = null;

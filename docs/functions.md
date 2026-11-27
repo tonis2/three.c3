@@ -407,7 +407,9 @@ the file says either way.
 - `three.level.load(path, parent, options = {})` — reads the file, places every row under `parent`,
   and returns a `Level`. `null` for a file that is not there, like `three.readJSON`. `{ physics: true }`
   places every piece with its kit's colliders (`asset.node(piece, { physics: true })`), so the level
-  collides and `scene.export` writes them back; rows `level.add` places later follow it.
+  collides and `scene.export` writes them back. `{ materials: true }` places them with the kit's own
+  materials, so alpha cut-outs and two-sided faces draw and export as the kit has them. Rows
+  `level.add` places later follow both (`level.physics`, `level.materials`).
 - `three.level.save(path, level)` — writes `level` back, each row's transform read fresh off its
   object. Answers the path it actually wrote to.
 - `three.level.create(kit)` — an empty `Level`, for an editor that starts from nothing.
