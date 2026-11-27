@@ -3405,15 +3405,22 @@ A KTX2 may hold Basis (ETC1S or UASTC, which is what KHR_texture_basisu means) o
 compressed or not, and a `.glb` whose textures are KTX2 loads with them. The format comes from the file's first
 bytes rather than its name.
 
-It reaches the device as blocks wherever it can. A BCn or ASTC file lends its own, untouched. A Basis one is
-transcoded to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as RGBA8.
-No device samples ETC1S or UASTC, but both are BC7's own shape, so the transcode rewrites each block as a BC7
-block instead of decoding and re-encoding: a 1024x1024 image with its eleven levels is tens of milliseconds.
+It reaches the device as blocks wherever it can. A BCn, ETC2 or ASTC file lends its own, untouched. A Basis one
+is transcoded to BC7, keeping the mip chain the file carries — a quarter of the memory the same image cost as
+RGBA8. No device samples ETC1S or UASTC, but both are BC7's own shape, so the transcode rewrites each block as a
+BC7 block instead of decoding and re-encoding: a 1024x1024 image with its eleven levels is tens of milliseconds.
 
-A mobile GPU — the Quest's among them — samples no BC format, and there a UASTC image becomes ASTC 4x4 instead:
-a UASTC block is an ASTC block in another layout, so that rewrite is lossless and costs the same byte a texel.
-So UASTC is the format for a texture that ships to both. ETC1S has no ASTC mapping. It, anything else, and any
-device that can sample neither arrives as RGBA8 with a chain built on the device.
+A mobile GPU — the Quest's among them — samples no BC format, and there the two kinds go two ways:
+
+- UASTC becomes ASTC 4x4. A UASTC block is an ASTC block in another layout, so that rewrite is lossless and
+  costs the same byte a texel.
+- ETC1S becomes ETC2. An ETC1S block is an ETC1 block, which ETC2 reads unchanged, so the colour is exact: an
+  opaque image goes as ETC2 RGB at half a byte a texel, and one with alpha as ETC2 RGBA, whose EAC alpha lands
+  within 3 of the file's. A device that samples ETC2 takes an ETC1S image that way even when it has BC7 too.
+
+A file written without mips still gets a chain: its own base is mapped and the levels below are built and
+encoded, which for ETC2 costs about what it does for BC7. Anything else, and a device that can sample none of
+these, arrives as RGBA8 with a chain built on the device.
 
 One image at a time is what a path costs. A `.glb`'s own images are not: `three.load` transcodes every one the
 file names at once, across every core, before any material asks for one, which is what keeps a scene of sixty of

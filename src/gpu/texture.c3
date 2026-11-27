@@ -81,6 +81,10 @@ enum ColorSpace : char
 
  `ASTC4` is ASTC with 4x4 blocks, what a mobile GPU samples instead of BC7: a
  UASTC file becomes one block for block, and a KTX2 can hold one directly.
+
+ `ETC2_RGB` and `ETC2_RGBA` are what a mobile GPU samples an ETC1S file as,
+ whose blocks are ETC1's: the colour alone at 8 bytes a block, or with EAC
+ alpha in front of it at 16.
 *>
 enum TextureFamily : char
 {
@@ -90,6 +94,8 @@ enum TextureFamily : char
 	BC5,
 	BC7,
 	ASTC4,
+	ETC2_RGB,
+	ETC2_RGBA,
 }
 
 <*
@@ -131,6 +137,8 @@ fn vk::Format TextureFormat.vk(self)
 		case BC5: return FORMAT_BC5_UNORM_BLOCK;
 		case BC7: return srgb ? FORMAT_BC7_SRGB_BLOCK : FORMAT_BC7_UNORM_BLOCK;
 		case ASTC4: return srgb ? FORMAT_ASTC_4X4_SRGB_BLOCK : FORMAT_ASTC_4X4_UNORM_BLOCK;
+		case ETC2_RGB: return srgb ? FORMAT_ETC2_R8G8B8_SRGB_BLOCK : FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+		case ETC2_RGBA: return srgb ? FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK : FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
 		default:  return srgb ? FORMAT_R8G8B8A8_SRGB : FORMAT_R8G8B8A8_UNORM;
 	}
 }
@@ -138,7 +146,7 @@ fn vk::Format TextureFormat.vk(self)
 fn bool TextureFormat.is_block(self) => self.family != TextureFamily.RGBA8;
 
 <*
- The side of one block in texels: 4 for every BC family and ASTC4, 1 for RGBA8.
+ The side of one block in texels: 4 for every block family, 1 for RGBA8.
 
  RGBA8 answering 1 rather than being a special case is what lets `image_size`
  be one calculation instead of two.
@@ -150,7 +158,8 @@ fn uint TextureFormat.block_bytes(self)
 	switch (self.family)
 	{
 		case RGBA8: return 4;
-		case BC1: return 8;
+		case BC1:
+		case ETC2_RGB: return 8;
 		default: return 16;
 	}
 }
@@ -197,6 +206,8 @@ fn String block_family_name(TextureFamily family)
 		case BC5: return "BC5";
 		case BC7: return "BC7";
 		case ASTC4: return "ASTC 4x4";
+		case ETC2_RGB: return "ETC2 RGB";
+		case ETC2_RGBA: return "ETC2 RGBA";
 		default: return "RGBA8";
 	}
 }

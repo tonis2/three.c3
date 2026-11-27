@@ -33,8 +33,8 @@ struct AssetLoad
 {
 	// As resolved, which is what the table is keyed on. Owned.
 	String path;
-	// `basis_family`'s answer, asked on the main thread.
-	TextureFamily family;
+	// `basis_targets`' answer, asked on the main thread.
+	BasisTargets targets;
 	// The main thread's heap. A spawned thread's `mem` is libc's directly, and
 	// everything this reads is freed on the main thread — under `c3c test` that
 	// is the leak tracker, which panics on a pointer it never saw.
@@ -63,7 +63,7 @@ fn AssetLoad* Assets.start_load(&self, Gpu* gpu, String path)
 	if (!self.started) self.init();
 
 	AssetLoad* load = mem::new(AssetLoad);
-	*load = { .path = path.copy(mem), .family = basis_family(gpu), .allocator = mem };
+	*load = { .path = path.copy(mem), .targets = basis_targets(gpu), .allocator = mem };
 	if (catch load.thread.create(&load_main, load))
 	{
 		load.run();
@@ -90,7 +90,7 @@ fn int load_main(void* arg) @local
 
 fn void AssetLoad.run(&self)
 {
-	Asset? read = read_asset(self.path, self.family, ahead: true, cancelled: &self.cancelled);
+	Asset? read = read_asset(self.path, self.targets, ahead: true, cancelled: &self.cancelled);
 	if (catch err = read)
 	{
 		self.failure = err;

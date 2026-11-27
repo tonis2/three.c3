@@ -34,8 +34,8 @@
  Transcoding took the other road once those three changes to the GPU side
  existed. `transcode_ktx2_blocks` puts a Basis texture on the device as BC7 with
  the file's own chain — a quarter of the RGBA8 the same file used to cost — or,
- on a device without BC7, a UASTC one as ASTC 4x4 at the same size.
- `decode_ktx2_basis` below is what a device with neither still gets.
+ on a mobile GPU, a UASTC one as ASTC 4x4 and an ETC1S one as ETC2.
+ `decode_ktx2_basis` below is what a device with none of them still gets.
 
  A cubemap or an array reads face 0 of layer 0, which is what a material's
  base colour map wants. Faces are what `three.sky` will ask for and it asks
@@ -49,6 +49,7 @@ import ktx::basis;
 import ktx::bc7;
 import ktx::uastc;
 import ktx::uastc_astc;
+import ktx::etc1s_etc2;
 import ktx::codec;
 import ktx::mipgen;
 import std::time;
@@ -225,6 +226,44 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
 fn bool is_uastc_ktx2(char[] encoded) => basis::info(encoded).uastc ?? false;
 
 <*
+ The block families a device samples that a Basis image can become.
+
+ Asked of the device on the main thread (`basis_targets`) and carried to the
+ load's workers, which never reach for the device themselves. Which one an image
+ takes depends on the image as well — `family_for`.
+*>
+bitstruct BasisTargets : char
+{
+	bool bc7;
+	bool astc;
+	bool etc2;
+}
+
+<*
+ What this Basis image becomes here: RGBA8 when the device samples nothing it maps
+ to, and for bytes that are not a Basis KTX2.
+
+ Every answer is a block rewrite, never an encode:
+ - UASTC takes BC7, else ASTC 4x4. Both are lossless.
+ - ETC1S takes ETC2, else BC7. Its blocks are ETC1 blocks, so ETC2 keeps the
+   colour exact, and an opaque file goes at 8 bytes a block, half of BC7.
+*>
+fn TextureFamily BasisTargets.family_for(self, char[] encoded)
+{
+	basis::Info? info = basis::info(encoded);
+	if (catch info) return TextureFamily.RGBA8;
+	if (info.uastc)
+	{
+		if (self.bc7) return TextureFamily.BC7;
+		if (self.astc) return TextureFamily.ASTC4;
+		return TextureFamily.RGBA8;
+	}
+	if (self.etc2) return info.alpha ? TextureFamily.ETC2_RGBA : TextureFamily.ETC2_RGB;
+	if (self.bc7) return TextureFamily.BC7;
+	return TextureFamily.RGBA8;
+}
+
+<*
  How much work a Basis image is, near enough to order a queue by.
 
  Texels rather than bytes, because the transcode's cost is per block and a mip
@@ -356,7 +395,15 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  and until ASTC was a target every Basis image reached it as RGBA8. A UASTC
  block *is* an ASTC 4x4 block in another layout, so `ASTC4` is the same block
  rewrite as BC7 and a lossless one, at the same byte a texel. ETC1S has no such
- mapping and is refused here, which leaves it the RGBA8 path it had.
+ mapping and is refused here.
+
+ ## ETC2 for ETC1S
+
+ An ETC1S block is an ETC1 block, which ETC2 reads unchanged, so the colour maps
+ exactly: `ETC2_RGB`, half a byte a texel, for a file with no alpha. A file with
+ alpha takes `ETC2_RGBA`, whose EAC alpha is fitted per block and lands within 3
+ of the file's. UASTC has no ETC mapping and is refused for both, as an alpha
+ file is for `ETC2_RGB`, which would drop it.
 
  ## What it costs: a block rewrite, not an encode
 
@@ -400,7 +447,10 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  levels of a 1024x1024 image; the whole chain cost 3.3 s before either saving,
  and a no-mip `evil_forest.glb` went from a 30.1 s load to 4.0 s against the
  2.3 s the same file with its chains takes. `encode_ktx2_bc7` below encodes
- full-precision pixels and still asks for the whole search.
+ full-precision pixels and still asks for the whole search. ASTC and ETC2 have
+ no encoder of their own here: `encode_astc` goes through UASTC, and
+ `encode_etc2` fits each block as ETC1S would — 37 ms for the ten levels of a
+ 1024x1024, against 29 for BC7.
 
  `threads` is the mapper's and `encode_threads` the encoder's, because a caller
  running whole images at once has already filled the machine and the two do not
@@ -419,7 +469,7 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
  `quiet` goes with it: the per-image line is printed by the caller after the
  join rather than by sixteen threads into one stream.
 
- @param format : `The target: BC7, or ASTC4 for a UASTC file, in the caller's space.`
+ @param format : `The target in the caller's space: BC7, ASTC4 for a UASTC file, or ETC2_RGB / ETC2_RGBA for an ETC1S one (BasisTargets.family_for).`
  @param threads : `The block mapper's thread count. 0 decides from the core count; 1 pins it to this thread.`
  @param quiet : `True to leave the --debug line to a caller that is timing this itself.`
  @param encode_threads : `The generated levels' encoder, when the file ships no chain. 0 follows the mapper's count; a caller already running whole images at once passes 1.`
@@ -434,14 +484,10 @@ fn BlockImage? transcode_ktx2_blocks(
 	uint encode_threads = 0
 )
 {
-	bool astc = format.family == TextureFamily.ASTC4;
-	if (format.family != TextureFamily.BC7 && !astc) return UNSUPPORTED_IMAGE~;
-
 	basis::Info? maybe = basis::info(encoded);
 	if (catch maybe) return UNSUPPORTED_IMAGE~;
 	basis::Info info = maybe;
-	if (astc && !info.uastc) return UNSUPPORTED_IMAGE~;
-	uint target = astc ? basis::TF_ASTC_4X4_RGBA : basis::TF_BC7_RGBA;
+	uint target = mapper_target(format.family, info)!;
 
 	if (info.width == 0 || info.height == 0) return UNSUPPORTED_IMAGE~;
 	if (info.levels == 0 || info.levels > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
@@ -514,7 +560,14 @@ fn BlockImage? transcode_ktx2_blocks(
 		lw = lw > 1 ? lw >> 1 : 1;
 		lh = lh > 1 ? lh >> 1 : 1;
 
-		char[]? blocks = astc ? encode_astc(allocator, pixels, lw, lh, encoder) : bc7::encode(allocator, pixels, lw, lh, true, encoder, true);
+		char[]? blocks;
+		switch (target)
+		{
+			case basis::TF_ASTC_4X4_RGBA: blocks = encode_astc(allocator, pixels, lw, lh, encoder);
+			case basis::TF_ETC1_RGB: blocks = encode_etc2(allocator, pixels, lw, lh, ETC1_RGB, encoder);
+			case basis::TF_ETC2_RGBA: blocks = encode_etc2(allocator, pixels, lw, lh, ETC2_RGBA, encoder);
+			default: blocks = bc7::encode(allocator, pixels, lw, lh, true, encoder, true);
+		}
 		if (catch blocks) return UNSUPPORTED_IMAGE~;
 		out.levels[level] = blocks;
 	}
@@ -529,6 +582,34 @@ fn BlockImage? transcode_ktx2_blocks(
 }
 
 <*
+ The library's transcode target for a family, from this kind of Basis file.
+
+ @return? UNSUPPORTED_IMAGE : `A family the file has no block mapping to.`
+*>
+fn uint? mapper_target(TextureFamily family, basis::Info info) @local
+{
+	switch (family)
+	{
+		case BC7:
+			return basis::TF_BC7_RGBA;
+		case ASTC4:
+			if (!info.uastc) return UNSUPPORTED_IMAGE~;
+			return basis::TF_ASTC_4X4_RGBA;
+		case ETC2_RGB:
+			if (info.uastc || info.alpha) return UNSUPPORTED_IMAGE~;
+			return basis::TF_ETC1_RGB;
+		case ETC2_RGBA:
+			if (info.uastc) return UNSUPPORTED_IMAGE~;
+			return basis::TF_ETC2_RGBA;
+		case RGBA8:
+		case BC1:
+		case BC3:
+		case BC5:
+			return UNSUPPORTED_IMAGE~;
+	}
+}
+
+<*
  A generated level as ASTC 4x4. There is no ASTC encoder here, so the level is
  encoded to UASTC at its fastest and mapped, which is ASTC's own blocks.
 *>
@@ -540,11 +621,23 @@ fn char[]? encode_astc(Allocator allocator, char[] pixels, uint width, uint heig
 }
 
 <*
+ A generated level as ETC2. Each block is fitted the way an ETC1S encoder fits
+ one with a codebook entry of its own, and packed as the file's blocks are; an
+ ETC1S encode would spend its time on a codebook nothing keeps.
+*>
+fn char[]? encode_etc2(Allocator allocator, char[] pixels, uint width, uint height, etc1s_etc2::Target target,
+	uint threads) @local => @pool()
+{
+	return etc1s_etc2::encode_image(allocator, pixels, width, height, target, tmem, threads);
+}
+
+<*
  Which block family a Vulkan format number is, if it is one this can upload.
 
  `ktx::vk`'s constants are numerically the Vulkan ones — 131 to 146 across the BC
- range, 157 and 158 for ASTC 4x4 — so the file's `vkFormat` is compared directly
- rather than translated.
+ range, 147 to 152 for ETC2, 157 and 158 for ASTC 4x4 — so the file's `vkFormat`
+ is compared directly rather than translated. ETC2's 1-bit alpha (149, 150) has
+ no family and takes the RGBA8 path.
 
  The sRGB and UNORM members of a pair map to the same family on purpose. Their
  blocks are bit-identical and the difference is only how a sample is decoded, so
@@ -566,6 +659,12 @@ fn TextureFamily? block_family_of(uint vk_format) @local
 		case 145:
 		case 146:
 			return TextureFamily.BC7;
+		case 147:
+		case 148:
+			return TextureFamily.ETC2_RGB;
+		case 151:
+		case 152:
+			return TextureFamily.ETC2_RGBA;
 		case 157:
 		case 158:
 			return TextureFamily.ASTC4;

@@ -24,8 +24,8 @@
 - `textures` — Unique images on the device, deduplicated by content across every loaded file.
 - `textureBytes` — What those cost.
 - `textureCompressedBytes` — How much of that is block-compressed, so `textureBytes` minus this is
-  the uncompressed share. A KTX2 map arrives as BC7 blocks (ASTC 4x4 on a mobile GPU, if it is
-  UASTC or ASTC) and stays that way; a PNG or a JPEG is
+  the uncompressed share. A KTX2 map arrives as BC7 blocks (on a mobile GPU, ASTC 4x4 if it is
+  UASTC or ASTC and ETC2 if it is ETC1S or ETC2) and stays that way; a PNG or a JPEG is
   decoded and held as RGBA8, which is four times the bytes and four times the sampling bandwidth for
   the same picture. Both numbers count the whole mip chain. An uncompressed share worth megabytes is
   a fact about the exporter rather than about the engine — the fix is to write the maps as KTX2, not

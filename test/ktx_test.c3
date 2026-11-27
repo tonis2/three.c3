@@ -30,6 +30,8 @@ import ktx::container;
 import ktx::basis;
 import ktx::bc7;
 import ktx::codec;
+import ktx::etc2;
+import ktx::mipgen;
 import std::core::test;
 import std::io::file;
 import std::math;
@@ -740,6 +742,220 @@ fn void an_astc_texture_lends_its_blocks() @test
 	{
 		test::@check(kept.levels[l] == level.data, "level %d is not the file's blocks", l);
 	}
+}
+
+// ============================================================================
+// ETC2, for ETC1S on a GPU without BC7
+// ============================================================================
+
+// VkFormat ETC2_R8G8B8_UNORM_BLOCK, spelled out for the reason `format` is.
+const uint ETC2_RGB_UNORM = 147;
+
+<* `detailed`'s picture as ETC1S, with its alpha or with every texel opaque. *>
+fn char[] etc1s_blob(uint side, bool mipmaps, bool alpha)
+{
+	char[] source = detailed(side);
+	defer free(source);
+	if (!alpha)
+	{
+		for (sz i = 3; i < source.len; i += 4) source[i] = 0xff;
+	}
+	char[][1] images = { source };
+	return basis::encode(
+		mem, basis::ETC1S, images[..], side, side, basis::TexType.D2,
+		{ .quality = 90, .effort = 2, .srgb = true, .mipmaps = mipmaps }
+	)!!;
+}
+
+<* Every level of `made` is `family`'s size for its extent, and the chain is whole. *>
+fn void check_chain(three::BlockImage* made, three::TextureFormat format, uint side)
+{
+	uint chain = three::mip_levels(side, side);
+	test::@check(made.levels.len == chain, "%d levels, not the %d a %dx%d chain has", (int)made.levels.len, chain, side, side);
+	for (uint level = 0; level < made.levels.len; level++)
+	{
+		uint extent = three::level_extent(side, level);
+		test::@check(made.levels[level].len == format.image_size(extent, extent),
+			"level %d is %d bytes, not a %dx%d %s image's %d", level, (int)made.levels[level].len,
+			extent, extent, three::block_family_name(format.family), (int)format.image_size(extent, extent));
+	}
+}
+
+<*
+ An opaque ETC1S file becomes ETC2 RGB, every level, at 8 bytes a block. An
+ ETC1S block is an ETC1 block, so what the device samples is the file's colour
+ exactly — checked here through `ktx.c3l`'s ETC2 decoder, which is held to
+ Ericsson's in that library.
+*>
+fn void an_opaque_etc1s_texture_becomes_etc2_rgb() @test
+{
+	const uint SIDE = 32;
+	char[] blob = etc1s_blob(SIDE, true, false);
+	defer free(blob);
+
+	three::TextureFormat etc = { three::TextureFamily.ETC2_RGB, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, etc)!!;
+	defer made.free();
+	test::@check(made.format.equals(etc), "the blocks are not ETC2 RGB");
+	check_chain(&made, etc, SIDE);
+
+	basis::Transcoded want = basis::transcode(mem, blob, 0, 0, 0, basis::TF_RGBA32, 4)!!;
+	defer free(want.data);
+	char[] got = etc2::decode(mem, etc2::Layout.RGB, made.levels[0], SIDE, SIDE)!!;
+	defer free(got);
+	uint off = worst_channel(got, want.data);
+	test::@check(off == 0, "ETC2 RGB is %d off the file's own colours", off);
+}
+
+<*
+ An ETC1S file with alpha becomes ETC2 RGBA: the colour exact, the EAC alpha
+ within the 3 its fit allows. ETC2 RGB is refused for it, since it would drop
+ the alpha.
+*>
+fn void an_etc1s_texture_with_alpha_becomes_etc2_rgba() @test
+{
+	const uint SIDE = 32;
+	char[] blob = etc1s_blob(SIDE, true, true);
+	defer free(blob);
+
+	three::TextureFormat rgb = { three::TextureFamily.ETC2_RGB, three::ColorSpace.SRGB };
+	test::@check(@catch(three::transcode_ktx2_blocks(blob, rgb)) == three::UNSUPPORTED_IMAGE,
+		"ETC2 RGB was made from a file with alpha");
+
+	three::TextureFormat etc = { three::TextureFamily.ETC2_RGBA, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, etc)!!;
+	defer made.free();
+	test::@check(made.format.equals(etc), "the blocks are not ETC2 RGBA");
+	check_chain(&made, etc, SIDE);
+
+	basis::Transcoded want = basis::transcode(mem, blob, 0, 0, 0, basis::TF_RGBA32, 4)!!;
+	defer free(want.data);
+	char[] got = etc2::decode(mem, etc2::Layout.RGBA, made.levels[0], SIDE, SIDE)!!;
+	defer free(got);
+	uint off = worst_channel(got, want.data);
+	test::@check(off <= 3, "ETC2 RGBA is %d off the file's own pixels", off);
+}
+
+<*
+ An ETC1S file with no chain gets an ETC2 one: its own base mapped, and the
+ levels below encoded straight to ETC2. Level 1 is checked against the base
+ filtered here, so a level that is the right size but the wrong picture fails.
+*>
+fn void a_chainless_etc1s_texture_gets_an_etc2_chain() @test
+{
+	const uint SIDE = 16;
+	char[] blob = etc1s_blob(SIDE, false, true);
+	defer free(blob);
+	test::@check(basis::info(blob)!!.levels == 1, "the fixture already has a chain, so this asserts nothing");
+
+	three::TextureFormat etc = { three::TextureFamily.ETC2_RGBA, three::ColorSpace.SRGB };
+	three::BlockImage made = three::transcode_ktx2_blocks(blob, etc)!!;
+	defer made.free();
+	check_chain(&made, etc, SIDE);
+
+	basis::Transcoded base = basis::transcode(mem, blob, 0, 0, 0, basis::TF_ETC2_RGBA, 16)!!;
+	defer free(base.data);
+	test::@check(made.levels[0] == base.data, "level 0 is not the file's own blocks, mapped");
+
+	basis::Transcoded pixels = basis::transcode(mem, blob, 0, 0, 0, basis::TF_RGBA32, 4)!!;
+	defer free(pixels.data);
+	char[] want = mipgen::next_level(mem, pixels.data, SIDE, SIDE, { .srgb = true });
+	defer free(want);
+	char[] got = etc2::decode(mem, etc2::Layout.RGBA, made.levels[1], SIDE / 2, SIDE / 2)!!;
+	defer free(got);
+	uint off = worst_channel(got, want);
+	test::@check(off <= 48, "generated level 1 is %d off the filtered base", off);
+}
+
+<* UASTC has no ETC mapping: a device with ETC2 samples ASTC too, and takes it as that. *>
+fn void a_uastc_texture_is_not_made_etc2() @test
+{
+	char[] blob = uastc_blob(16, true);
+	defer free(blob);
+	foreach (family : (three::TextureFamily[]){ three::TextureFamily.ETC2_RGB, three::TextureFamily.ETC2_RGBA })
+	{
+		three::TextureFormat etc = { family, three::ColorSpace.SRGB };
+		test::@check(@catch(three::transcode_ktx2_blocks(blob, etc)) == three::UNSUPPORTED_IMAGE,
+			"a UASTC file was turned into %s", three::block_family_name(family));
+	}
+}
+
+<*
+ A KTX2 already holding ETC2 lends its blocks, as an ASTC one does, and a
+ device without ETC2 still gets the picture through the RGBA8 decode.
+*>
+fn void an_etc2_texture_lends_its_blocks() @test
+{
+	const uint SIDE = 32;
+	char[] blob = etc1s_blob(SIDE, true, false);
+	defer free(blob);
+	basis::Transcoded[] levels = basis::transcode_levels(mem, blob, 0, 0, basis::TF_ETC1_RGB, 1)!!;
+	defer
+	{
+		foreach (level : levels) free(level.data);
+		free(levels.ptr);
+	}
+
+	container::Texture tex = container::create(mem, {
+		.vk_format = ETC2_RGB_UNORM,
+		.width = SIDE,
+		.height = SIDE,
+		.level_count = (uint)levels.len,
+	})!!;
+	defer tex.free();
+	foreach (l, level : levels) tex.set_image((uint)l, 0, 0, level.data)!!;
+	char[] file = container::write(mem, &tex, { .scheme = container::Scheme.ZSTD })!!;
+	defer free(file);
+
+	three::BlockImage kept = three::decode_ktx2_blocks(file, three::ColorSpace.LINEAR)!!;
+	defer kept.free();
+	test::@check(kept.format.family == three::TextureFamily.ETC2_RGB, "an ETC2 file was not read as ETC2");
+	test::@check(kept.levels.len == levels.len, "%d levels became %d", (int)levels.len, (int)kept.levels.len);
+	foreach (l, level : levels)
+	{
+		test::@check(kept.levels[l] == level.data, "level %d is not the file's blocks", l);
+	}
+
+	basis::Transcoded want = basis::transcode(mem, blob, 0, 0, 0, basis::TF_RGBA32, 4)!!;
+	defer free(want.data);
+	image::Image decoded = three::decode_ktx2(file)!!;
+	defer decoded.free();
+	uint off = worst_channel(decoded.pixels, want.data);
+	test::@check(off == 0, "the RGBA8 decode of the ETC2 file is %d off", off);
+}
+
+<*
+ What each kind of Basis file becomes, by what the device samples: UASTC takes
+ BC7, else ASTC; ETC1S takes ETC2, else BC7; anything with no mapping the device
+ samples, and bytes that are not Basis, take RGBA8.
+*>
+fn void each_basis_file_takes_a_family_its_device_samples() @test
+{
+	char[] uastc = uastc_blob(8, false);
+	defer free(uastc);
+	char[] opaque = etc1s_blob(8, false, false);
+	defer free(opaque);
+	char[] alpha = etc1s_blob(8, false, true);
+	defer free(alpha);
+	char[] plain = quadrants();
+	defer free(plain);
+
+	three::BasisTargets desktop = { .bc7 = true };
+	three::BasisTargets quest = { .astc = true, .etc2 = true };
+	three::BasisTargets both = { .bc7 = true, .etc2 = true };
+	three::BasisTargets astc_only = { .astc = true };
+	three::BasisTargets none = {};
+
+	test::@check(desktop.family_for(uastc) == three::TextureFamily.BC7, "desktop UASTC is not BC7");
+	test::@check(desktop.family_for(opaque) == three::TextureFamily.BC7, "desktop ETC1S is not BC7");
+	test::@check(quest.family_for(uastc) == three::TextureFamily.ASTC4, "Quest UASTC is not ASTC");
+	test::@check(quest.family_for(opaque) == three::TextureFamily.ETC2_RGB, "Quest opaque ETC1S is not ETC2 RGB");
+	test::@check(quest.family_for(alpha) == three::TextureFamily.ETC2_RGBA, "Quest ETC1S with alpha is not ETC2 RGBA");
+	test::@check(both.family_for(opaque) == three::TextureFamily.ETC2_RGB, "ETC1S took BC7 over the exact ETC2");
+	test::@check(both.family_for(uastc) == three::TextureFamily.BC7, "UASTC left BC7 with ETC2 beside it");
+	test::@check(astc_only.family_for(opaque) == three::TextureFamily.RGBA8, "ETC1S found a mapping to ASTC");
+	test::@check(none.family_for(uastc) == three::TextureFamily.RGBA8, "a device with no blocks got some");
+	test::@check(quest.family_for(plain) == three::TextureFamily.RGBA8, "bytes that are not Basis got a family");
 }
 
 // ============================================================================
