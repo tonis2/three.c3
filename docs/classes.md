@@ -792,6 +792,16 @@ number you wrote. Needs a GPU device.
 this copy's `mesh.color` alpha, so a body cannot make geometry invisible by accident and a script can,
 deliberately. `discard` works in a body and is how a dissolve or a cutout is done.
 
+A `transparent` material's body may also write `fn float opacity(Surface s)`, in the whole-function form beside
+its `shade`: what it answers multiplies that alpha, per pixel — a texture's own alpha, a fade along `s.uv`, a
+rim. It is the material's own third hole and is read only for a blended draw; an opaque material ignores it.
+A body that writes none pays nothing for it. `three.UiPanel` is a material of this kind:
+
+```shady
+fn float3 shade(Surface s) { float4 t = s.textures.sheet.Sample(s.uv); return t.rgb / max(t.a, 0.0001); }
+fn float opacity(Surface s) { return s.textures.sheet.Sample(s.uv).a; }
+```
+
 `vertex` is the other half: a function `void displace(inout Vertex v)` that runs per vertex,
 before anything is projected. `Vertex` is the varyings — write `v.position` (object space, before the
 mesh's own transform, so a displacement scales and turns with the mesh) to move the vertex, and `v.normal`, `v.uv`, `v.color`, `v.vertex_color` and
@@ -2352,10 +2362,14 @@ pause screen over it are two classes, and unmounting one leaves the other standi
 it. An unmounted widget is a legitimate thing: `new Bar()` as a child of another's `render()` has its own
 state and marks its owner dirty, which is how a row of stats is written once and used four times.
 
-`three.ui.set` and `three.ui.draw` are refused while anything is mounted, because they are the other door
-onto one interface and the class layer would overwrite them on the next frame. `three.ui.clear()` and
-`three.Widget.unmountAll()` are how the class layer goes away. `onMount()` and `onUnmount()` are the hooks
-there are.
+`three.ui.set` and `three.ui.draw` are refused while anything is mounted over the frame, because they are the
+other door onto one interface and the class layer would overwrite them on the next frame. `three.ui.clear()`
+takes the widgets over the frame down, and `three.Widget.unmountAll()` takes every widget down, panels
+included. `onMount()` and `onUnmount()` are the hooks there are.
+
+`widget.mount(panel)` draws it on a `three.UiPanel` in the scene instead of over the frame — the same as
+`panel.mount(widget)`. A panel's widgets are floors of that panel's interface and nothing else's: they do not
+block `three.ui.set`, and `count`, `all()` and `unmountAll()` on the class count them with the rest.
 
 ### Properties
 
@@ -2365,13 +2379,139 @@ there are.
 
 ### Methods
 
-- `mount()`
+- `mount(target)` — over the frame, or on the `three.UiPanel` given
 - `unmount()`
 - `update()`
 - `render()`
 - `mount(...args)`
 - `all()`
 - `unmountAll()`
+
+## UiPanel
+
+```js
+new three.UiPanel({ width = 512, height = 512, size = 0.5, pixelRatio = 1 })
+```
+
+The interface on a quad in the scene: the tree `three.ui.set` takes, `three.ui.patch`'s values and the
+`three.Widget` classes, drawn into an image of the panel's own and worn by a plane. It is a `Mesh`, so it is
+added to a scene, parented, moved and hidden like one — `three.xr.left.grip.add(panel)` is a wrist panel.
+
+```js
+const menu = new three.UiPanel({ width: 512, height: 320, size: 0.3 });
+menu.set({ type: 'column', gap: 8, children: [
+  { key: 'fps', type: 'label', text: '— fps' },
+  { type: 'button', text: 'Shadows', onClick: () => toggleShadows() },
+]});
+menu.position.set(0, 0.05, -0.1);
+three.xr.left.grip.add(menu);
+three.frame(() => {
+  menu.pointer(three.xr.right);                  // the right hand's laser and trigger
+  menu.patch('fps', { text: `${three.stats().gpuMs.toFixed(1)} ms gpu` });
+});
+```
+
+This is how a headset shows text. `three.ui` is drawn over the finished frame at the same pixels in both
+eyes, which on a headset reads as infinitely far away; a panel is in the world, at its distance in both eyes,
+behind a hand that is in front of it, and in a screenshot.
+
+`width` and `height` are the image's pixels. `size` is how wide the plane is, in metres; its height follows
+the image's aspect. The front is the side +Z faces, so a panel added straight to a scene faces down +Z.
+`pixelRatio` is image pixels per interface point, as `three.ui.scale` is for the frame: the tree is laid
+out in `width / pixelRatio` by `height / pixelRatio` points and drawn at the full pixels, so `pixelRatio: 2`
+makes text sharper without changing a number in the tree. Unknown options throw.
+
+**It is drawn only when it changed.** The interface is retained, so a `set`, a `patch`, a hover or a press
+redraws the image once, before the frame that shows it, and a panel nothing touched costs one quad and
+nothing else — not a pass, not an upload. `redraws` counts the draws, which is how to check that a panel
+written to every frame (`patch` with the same text) is not redrawn every frame.
+
+**How it looks.** Unlit: the colours are the interface's own, as the same tree over the frame would draw them,
+whatever the lights do; it casts no shadow and is out of every spatial query (`collides` is false). It is
+drawn blended, by the image's alpha, so a rounded corner and the edge of a glyph are smooth over the world
+behind them, and `material.opacity` or a `color` alpha fades the whole panel. The image keeps its colour
+premultiplied, has a mip chain built after each draw and is sampled half a level sharp, so text stays clean
+when the panel is small in the view. A tone curve (`three.toneMapping`) is applied to it as to everything
+else; under the default `'none'` the colours are exact.
+
+**Pointing at it.** `pointer(origin, direction, down)` is one frame of pointer: a ray in the world and whether
+its button is held. It answers `{ x, y, distance, point, onWidget }` where the ray meets the front of the
+quad — `x` and `y` in the interface's points from its top-left corner, `point` a world Vector3, `onWidget`
+whether a widget is under it or holding it — or null for a miss, a ray from behind, or a hidden panel. Widget
+handlers (`onClick`, `onChange`, …) run inside the call, exactly as they do for `three.ui`, and a `set` one of
+them makes is applied before it returns. Call it every frame the panel should answer, hit or not: a miss is
+what ends a hover, and a drag that leaves the panel goes on until the button is let go.
+
+```js
+menu.pointer(three.xr.right);                                  // aim and trigger
+const p = three.input.pointer, r = three.camera.ray(p.x, p.y);
+menu.pointer(r.origin, r.direction, p.down);                   // the mouse, at a desk
+```
+
+`pointer(origin, direction, down, scroll)` takes a fourth number, wheel notches over the panel this frame
+(positive away from the user), which is what scrolls a `scroll` node — a thumbstick's y, say.
+
+One pointer per panel: two calls in one frame are two frames to it. `three.xr.emulate` puts the right hand on
+the mouse, so `pointer(three.xr.right)` works at a desk unchanged. There is no keyboard on a panel, so a
+`textfield` on one can be pointed at but not typed into.
+
+A panel lives until `dispose()` or until the script's context ends (a reload), whichever scene it is in or
+none. `dispose()` takes the interface down; the quad keeps its last picture until it is removed from the
+scene. Needs a GPU device.
+
+### Properties
+
+- `texture` — the image the quad wears, a `Texture`: `panel.texture.save('menu.png')`, or another material's map
+- `width` — the image's pixels across
+- `height` — the image's pixels down
+- `pixelRatio` — image pixels per interface point
+- `size` — `[width, height]` of the plane, in metres
+- `redraws` — how many times the image has been drawn
+- `alive` — false once `dispose()` has been called
+- `position`
+- `rotation`
+- `scale`
+- `visible`
+- `name`
+- `geometry` — the plane
+- `material` — the panel's own unlit, blended ShaderMaterial; another material draws something else
+- `children`
+- `parent`
+- `color` — per copy, free: its alpha fades the panel
+- `variant` — meaningless here: the panel's material has no table
+- `static` — meaningless here: a panel casts no shadow to cache
+- `collides` — false by default: a panel is pointed at with `pointer`, not found by a query
+- `collisionOnly` — meaningless here
+- `blocks` — meaningless here while `collides` is false
+- `animations` — always empty
+- `animation` — always null
+- `morphs, weights` — inherited from Mesh; a plane has no morph targets
+
+### Methods
+
+- `set(tree)` — the interface, as `three.ui.set` takes it; `null` takes it down. Throws while widgets are mounted on the panel
+- `patch(key, props)` — one keyed node, as `three.ui.patch`
+- `clear()` — the interface down, this panel's widgets included
+- `mount(widget)` — draws a `three.Widget` on this panel, and answers with it
+- `pointer(origin, direction, down, scroll)` — one frame of pointer; `pointer(hand)` takes `three.xr.left`/`right`'s aim and trigger
+- `dispose()`
+- `add(...)`
+- `remove(...)`
+- `traverse(fn)`
+- `getObjectByName(name)`
+- `getWorldPosition()`
+- `boundingBox()`
+- `boundsInParent()`
+- `align(axis, edge, at)`
+- `snapTo(other, side, axes)`
+- `alignTo(other, axes)`
+- `row(axis, pieces, opts)`
+- `play(name, opts)` — throws: a panel carries no clips
+- `blend(weights, opts)` — throws, for the same reason
+- `stop()` — throws, for the same reason
+- `socket(bone)` — throws: a panel has no bones
+- `footIk(options)` — throws: a panel has no legs
+- `toJSON()`
 
 ## Cooldown
 

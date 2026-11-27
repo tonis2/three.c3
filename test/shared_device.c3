@@ -333,6 +333,9 @@ fn void reset(Slot* slot) @private
 
 	renderer.gpu.handle.waitIdle();
 	renderer.ui.free();
+	// A context frees its own panels as it closes; this is for one made without.
+	renderer.free_panels();
+	renderer.panel_epoch = 0;
 	renderer.post.release_textures(&renderer.gpu, &renderer.pass.assets);
 	renderer.post.free(&renderer.gpu);
 	renderer.pass.free(&renderer.gpu);

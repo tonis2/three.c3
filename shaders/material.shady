@@ -15,15 +15,15 @@
 // base one. The relief helpers and the `standard` overloads a layered body
 // calls are here too; the lightmap variant is a separate module.
 
-// **The material's own functions: the template's two holes.** Everything else
-// here is the built-in look; a material replaces exactly these two, and its text
+// **The material's own functions: the template's holes.** Everything else
+// here is the built-in look; a material replaces exactly these, and its text
 // is spliced in after this file and `mesh.shady`, so whatever it defines is the
 // second definition of its name and a clash is reported on the author's line.
 //
-// Both are `@fallback`s: a definition with the same signature replaces each one
-// wherever it comes, and a material that wrote none of either keeps the answer
-// here - the built-in look, and a vertex stage that moves nothing, which every
-// compiler folds away. A body written with the wrong signature is refused at the
+// All are `@fallback`s: a definition with the same signature replaces each one
+// wherever it comes, and a material that wrote none keeps the answer here - the
+// built-in look, a vertex stage that moves nothing and an opacity of 1, which
+// every compiler folds away. A body written with the wrong signature is refused at the
 // author's line rather than becoming an overload this file never calls.
 fn float3 shade(Surface s) @fallback
 {
@@ -32,6 +32,16 @@ fn float3 shade(Surface s) @fallback
 
 fn void displace(inout Vertex v) @fallback
 {
+}
+
+// How much of a blended surface shows, multiplied into the alpha the material's
+// opacity and the copy's colour give. Called after `shade` with the same surface,
+// and only for a blended draw: an opaque one covers what is behind it whatever
+// this says. The fallback's 1 folds away, so a material that writes none keeps
+// nothing live across the shading.
+fn float opacity(Surface s) @fallback
+{
+	return 1.0;
 }
 
 // How much of the sky each pixel sees, worked out by the occlusion pass at half
@@ -1143,5 +1153,6 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// Toned as it is written when this pipeline writes a headset's eye image
 	// itself; linear light for the post chain otherwise.
 	float3 color = scene_tone(shade(s), push.frame[0].camera.w);
+	if ((draw.flags & FLAG_BLENDED) != 0) alpha *= opacity(s);
 	return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : coverage);
 }

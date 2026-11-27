@@ -1060,6 +1060,9 @@ fn String UiNode.keep_listed(&self, String text)
  uses it — see `active`. Its address is given to cui through `Ui.provide`, so it
  must not move while the interface is up; `Renderer` is already addressed by
  pointer everywhere for the MCP server's sake, which is what makes that true.
+
+ Every `UiPanel` has one of its own as well, brought up over the panel's image
+ by `ensure_sized`, in a panel that is heap-allocated for the same reason.
 *>
 struct UiLayer
 {
@@ -1222,9 +1225,22 @@ fn bool UiLayer.active(&self) => self.ui != null;
 *>
 fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 {
+	return self.ensure_sized(gpu, target.extent, target.color_format);
+}
+
+<*
+ Brings the layer up over an image of its own rather than the frame's target —
+ what a `UiPanel` draws into.
+
+ @param gpu : `Borrowed by the pass, and must outlive the layer.`
+ @param extent : `The image's pixels: the space a Cursor fed to this layer arrives in.`
+ @param format : `The colour format of the attachment record will draw into.`
+*>
+fn void? UiLayer.ensure_sized(&self, Gpu* gpu, vk::Extent2D extent, vk::Format format)
+{
 	if (self.ui != null) return;
 
-	self.extent = { (float)target.extent.width, (float)target.extent.height };
+	self.extent = { (float)extent.width, (float)extent.height };
 	Vec2 size = self.points(self.extent);
 
 	self.ui = cui::new_ui(size);
@@ -1259,7 +1275,7 @@ fn void? UiLayer.ensure(&self, Gpu* gpu, Target* target)
 		gpu.handle,
 		&gpu.allocator,
 		gpu.graphics,
-		target.color_format,
+		format,
 		FORMAT_UNDEFINED,
 		size
 	)!;
@@ -2798,6 +2814,10 @@ fn void UiLayer.push_op(&self, uint node, UiOp op)
 	op.radius = math::max(op.radius, 0.0f);
 	op.thickness = math::max(op.thickness, 0.0f);
 	op.blur = math::max(op.blur, 0.0f);
+	// A handle indexes this layer's sampler array, and a panel's layer is not the
+	// overlay's: a picture from another layer is drawn as nothing rather than as
+	// whatever lies past the end of the array.
+	if (op.kind == UiOpKind.IMAGE && !self.owns_texture(op.texture)) op.texture = 0;
 	held.ops.push(op);
 }
 
@@ -3000,7 +3020,12 @@ fn void UiLayer.patch(&self, uint node, UiPatch fields)
 	{
 		case LABEL:
 			cui::widgets::Label* widget = elem.widget_as(cui::widgets::Label);
-			if (fields.has_text)
+			// A readout written every frame with the value it already shows asks
+			// for no picture: a panel draws only when something asked.
+			bool same_text = !fields.has_text || widget.text == fields.text;
+			bool same_color = !fields.has_color || widget.color == (cui::Color)fields.color;
+			if (same_text && same_color) return;
+			if (!same_text)
 			{
 				widget.text = live.retext(fields.text);
 				resize = true;
@@ -4022,8 +4047,30 @@ fn uint UiLayer.picture_serial(&self)
 *>
 fn void? UiLayer.upload(&self, Target* target)
 {
+	return self.upload_sized(target.extent);
+}
+
+<*
+ `upload` for a layer drawn into an image of its own, under the same contract.
+
+ @param extent : `The pixels of the image record will draw into.`
+*>
+fn void? UiLayer.upload_sized(&self, vk::Extent2D extent)
+{
 	if (self.ui == null) return;
-	self.pass.upload(self.ui, self.points({ (float)target.extent.width, (float)target.extent.height }))!;
+	self.pass.upload(self.ui, self.points({ (float)extent.width, (float)extent.height }))!;
+}
+
+<*
+ Whether anything asked for a picture since the last `take_request`: a paint,
+ a layout, a mount, an animation's tick. Read and cleared by a layer drawn into
+ an image of its own, which draws only when this says so.
+*>
+fn bool UiLayer.take_request(&self)
+{
+	if (self.ui == null || !self.ui.frame_requested) return false;
+	self.ui.frame_requested = false;
+	return true;
 }
 
 <*

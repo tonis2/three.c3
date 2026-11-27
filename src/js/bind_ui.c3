@@ -96,6 +96,72 @@ fn void UiHandlers.drop(&self, js::Engine* js)
 }
 
 <*
+ One interface a script describes: the layer that draws it, the functions its
+ widgets call, and a snapshot a handler asked for while cui was dispatching.
+
+ The frame's overlay has one on `JsRuntime` and every `UiPanel` one of its own,
+ so a panel's handlers and a held `set` are its own and never the overlay's. Its
+ address is the listener's host, so it does not move while its layer is up.
+*>
+struct UiBinding
+{
+	JsRuntime* runtime;
+	// Null until there is a layer to draw with: a context with no renderer has none.
+	UiLayer* layer;
+	// One entry per node of the live snapshot, in `UiLayer.nodes`'s order.
+	List{UiHandlers} handlers;
+	// What the sentences that stop a handler call it: "three.ui" or "UiPanel".
+	String name;
+	// What a handler asked for mid-dispatch (NO_ROOT for a clear), for `flush_tree`.
+	js::Root pending;
+	bool pending_active;
+	// True while one of its handlers runs: a `set` then waits for `flush_tree`.
+	bool dispatching;
+}
+
+<*
+ Points the layer's widgets at this binding's handlers.
+
+ @require self.layer != null : "A binding listens to a layer"
+*>
+fn void UiBinding.listen(&self)
+{
+	self.layer.on_event(&js_ui_event, self);
+	self.layer.on_query(&js_ui_query);
+}
+
+<*
+ Drops every held widget callback, and any snapshot waiting for a dispatch to end.
+*>
+fn void UiBinding.clear_handlers(&self, js::Engine* js)
+{
+	foreach (&handler : self.handlers) handler.drop(js);
+	self.handlers.clear();
+	js.drop(&self.pending);
+	self.pending_active = false;
+}
+
+<*
+ Holds a snapshot a handler asked for until the dispatch it came from is over;
+ null or undefined is a clear.
+
+ One slot, not a queue: two `set` calls in one dispatch mean the second is what
+ the script wanted, exactly as two calls outside one do.
+*>
+fn void UiBinding.hold(&self, js::Engine* js, js::Value tree)
+{
+	if (tree.is_nullish())
+	{
+		js.drop(&self.pending);
+	}
+	else
+	{
+		js.rehold(&self.pending, tree);
+	}
+	self.pending_active = true;
+}
+
+<*
  Which handler an event goes to, and its name for the sentence that stops it.
 *>
 fn js::Root* UiHandlers.for_event(&self, UiEventKind kind, String* name)
@@ -511,8 +577,8 @@ fn UiLayer*? JsRuntime.ui_layer(&self)
 	{
 		return self.js.fail("the interface layer could not start — the font or its pipeline failed to load")~;
 	}
-	self.renderer.ui.on_event(&js_ui_event, self);
-	self.renderer.ui.on_query(&js_ui_query);
+	self.ui_main.layer = &self.renderer.ui;
+	self.ui_main.listen();
 	return &self.renderer.ui;
 }
 
@@ -527,35 +593,42 @@ fn UiLayer*? JsRuntime.ui_layer(&self)
 *>
 fn void? js_ui_set(JsRuntime* self, js::Value tree)
 {
-	// A handler that rebuilds the tree it was called from would restructure the
-	// one cui is dispatching on. Held instead, and applied by `flush_ui` the
-	// moment `process_input` returns — which is the same frame, so a button that
-	// swaps the panel still swaps it before anything is drawn.
-	if (self.ui_dispatching)
+	if (!tree.is_nullish() && !self.ui_main.dispatching) self.ui_layer()!;
+	self.set_tree(&self.ui_main, tree)!;
+}
+
+<*
+ Replaces a binding's interface with this snapshot, or takes it down for null.
+
+ A handler that rebuilds the tree it was called from would restructure the one
+ cui is dispatching on. Held instead, and applied by `flush_tree` the moment
+ `process_input` returns — which is the same frame, so a button that swaps the
+ panel still swaps it before anything is drawn.
+
+ @return? js::THREW
+*>
+fn void? JsRuntime.set_tree(&self, UiBinding* binding, js::Value tree)
+{
+	if (binding.dispatching)
 	{
-		self.hold_ui_tree(tree);
+		binding.hold(self.js, tree);
 		return;
 	}
 	if (tree.is_nullish())
 	{
-		self.drop_ui_tree();
+		self.drop_tree(binding);
 		return;
 	}
 	@pool()
 	{
-		self.apply_ui_tree(tree)!;
+		self.apply_tree(binding, tree)!;
 	};
 }
 
 // `three.ui.clear()` — take the interface down, leaving the debug line alone.
 fn void js_ui_clear(JsRuntime* self)
 {
-	if (self.ui_dispatching)
-	{
-		self.hold_ui_tree(js::UNDEFINED);
-		return;
-	}
-	self.drop_ui_tree();
+	(void)self.set_tree(&self.ui_main, js::UNDEFINED);
 }
 
 <*
@@ -677,13 +750,23 @@ fn void? js_ui_patch(JsRuntime* self, js::Call* c, String key, js::Value props)
 {
 	UiLayer* layer = self.ui_layer()!;
 	if (c.args.len < 2) return self.js.fail("three.ui.patch(key, props) wants a key and the fields to write")~;
+	self.patch_tree(layer, key, props, "three.ui")!;
+}
 
+<*
+ Writes the named fields of one keyed node of a layer's live snapshot.
+
+ @param verb : "What the script called, for the sentence that refuses a key"
+ @return? js::THREW
+*>
+fn void? JsRuntime.patch_tree(&self, UiLayer* layer, String key, js::Value props, String verb)
+{
 	uint? node = layer.node_for(key);
 	if (catch node)
 	{
-		return self.js.fail("three.ui.patch: nothing in the interface is keyed '%s'. "
-			"A key only exists between the three.ui.set that named it and the next one",
-			key)~;
+		return self.js.fail("%s.patch: nothing in the interface is keyed '%s'. "
+			"A key only exists between the %s.set that named it and the next one",
+			verb, key, verb)~;
 	}
 
 	js::Engine* js = self.js;
@@ -724,33 +807,33 @@ fn void? js_ui_patch(JsRuntime* self, js::Call* c, String key, js::Value props)
 	if (has_field(js, props, k.ops)!)
 	{
 		layer.reset_list(node);
-		self.read_ops(props, node)!;
+		self.read_ops(layer, props, node)!;
 	}
 	else if (has_field(js, props, k.options)!)
 	{
 		layer.reset_list(node);
-		self.read_options(props, node)!;
+		self.read_options(layer, props, node)!;
 	}
 	else if (has_field(js, props, k.rows)!)
 	{
 		layer.reset_list(node);
-		self.read_rows(props, node)!;
+		self.read_rows(layer, props, node)!;
 	}
 	else if (has_field(js, props, k.menus)!)
 	{
 		layer.reset_list(node);
-		self.read_menus(props, node)!;
+		self.read_menus(layer, props, node)!;
 	}
 	else if (has_field(js, props, k.items)!)
 	{
 		layer.reset_list(node);
-		self.read_entries(props, node)!;
+		self.read_entries(layer, props, node)!;
 	}
 	else if (has_field(js, props, k.nodes)! || has_field(js, props, k.ports)! || has_field(js, props, k.wires)!)
 	{
 		// The three share the node's strings, so a patch naming one is a reset
 		// of all three — the two it did not name are put back as they were.
-		self.relist_graph(props, node)!;
+		self.relist_graph(layer, props, node)!;
 	}
 	else
 	{
@@ -772,9 +855,10 @@ fn void? js_ui_patch(JsRuntime* self, js::Call* c, String key, js::Value props)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.apply_ui_tree(&self, js::Value tree)
+fn void? JsRuntime.apply_tree(&self, UiBinding* binding, js::Value tree)
 {
-	UiLayer* layer = self.ui_layer()!;
+	UiLayer* layer = binding.layer;
+	if (layer == null) return self.js.fail("drawing an interface needs a GPU device and this context has none")~;
 	if (catch layer.begin_tree(&self.renderer.gpu, &self.renderer.target))
 	{
 		return self.js.fail("the interface layer could not start")~;
@@ -783,19 +867,19 @@ fn void? JsRuntime.apply_ui_tree(&self, js::Value tree)
 	List{UiHandlers} handlers;
 	handlers.tinit(8);
 
-	if (catch self.read_node(tree, -1, &handlers))
+	if (catch self.read_node(layer, tree, -1, &handlers))
 	{
 		foreach (&handler : handlers) handler.drop(self.js);
 		layer.abandon_tree();
 		return self.js.fail(
-			"three.ui.set was handed a node the interface does not recognise — every node needs a type, "
+			"a snapshot was handed a node the interface does not recognise — every node needs a type, "
 			"and a child list has to be an array of nodes"
 		)~;
 	}
 
 	layer.commit_tree();
-	self.clear_ui_handlers();
-	foreach (handler : handlers) self.ui_handlers.push(handler);
+	binding.clear_handlers(self.js);
+	foreach (handler : handlers) binding.handlers.push(handler);
 }
 
 <*
@@ -871,9 +955,8 @@ fn UiHandlers? JsRuntime.take_ui_handlers(&self, js::Value value)
  @param parent : `The index this node hangs under, or -1 for the tree's own root.`
  @return? js::THREW, UI_BAD_PARENT
 *>
-fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers}* handlers)
+fn void? JsRuntime.read_node(&self, UiLayer* layer, js::Value value, int parent, List{UiHandlers}* handlers)
 {
-	UiLayer* layer = &self.renderer.ui;
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
 
@@ -989,31 +1072,31 @@ fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers
 	switch (spec.kind)
 	{
 		case DRAW:
-			self.read_ops(value, index)!;
+			self.read_ops(layer, value, index)!;
 		case SELECT:
-			self.read_options(value, index)!;
+			self.read_options(layer, value, index)!;
 		case TREE:
-			self.read_rows(value, index)!;
+			self.read_rows(layer, value, index)!;
 		case MENU:
-			self.read_menus(value, index)!;
+			self.read_menus(layer, value, index)!;
 		case FILE_BROWSER:
 			// The mask rides on `options` because it is the same thing: a
 			// borrowed `String[]` the snapshot fills in, and a second pair of
 			// push verbs for it would differ from `push_option` by nothing.
-			self.read_options(value, index)!;
+			self.read_options(layer, value, index)!;
 		case NODE_GRAPH:
-			self.read_graph_nodes(value, index)!;
-			self.read_graph_ports(value, index)!;
-			self.read_graph_wires(value, index)!;
+			self.read_graph_nodes(layer, value, index)!;
+			self.read_graph_ports(layer, value, index)!;
+			self.read_graph_wires(layer, value, index)!;
 		case CONTEXT_MENU:
-			self.read_entries(value, index)!;
+			self.read_entries(layer, value, index)!;
 		default:
 			break;
 	}
 
 	@each_entry(js, value, k.children; js::Value child)
 	{
-		self.read_node(child, (int)index, handlers)!;
+		self.read_node(layer, child, (int)index, handlers)!;
 	}!;
 }
 
@@ -1023,11 +1106,10 @@ fn void? JsRuntime.read_node(&self, js::Value value, int parent, List{UiHandlers
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_ops(&self, js::Value node, uint index)
+fn void? JsRuntime.read_ops(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
-	UiLayer* layer = &self.renderer.ui;
 	@each_entry(js, node, k.ops; js::Value entry)
 	{
 		// An op this build does not draw is skipped, not refused.
@@ -1059,11 +1141,11 @@ fn void? JsRuntime.read_ops(&self, js::Value node, uint index)
 <*
  @return? js::THREW
 *>
-fn void? JsRuntime.read_options(&self, js::Value node, uint index)
+fn void? JsRuntime.read_options(&self, UiLayer* layer, js::Value node, uint index)
 {
 	@each_entry(self.js, node, self.ui_keys.options; js::Value entry)
 	{
-		self.renderer.ui.push_option(index, self.js.text(entry, tmem));
+		layer.push_option(index, self.js.text(entry, tmem));
 	}!;
 }
 
@@ -1076,11 +1158,10 @@ fn void? JsRuntime.read_options(&self, js::Value node, uint index)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_menus(&self, js::Value node, uint index)
+fn void? JsRuntime.read_menus(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
-	UiLayer* layer = &self.renderer.ui;
 	@each_entry(js, node, k.menus; js::Value menu)
 	{
 		layer.push_menu(index, field_text(js, menu, k.title)!);
@@ -1132,7 +1213,7 @@ fn void? JsRuntime.read_tree_style(&self, js::Value node, UiNodeSpec* spec)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
+fn void? JsRuntime.read_rows(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
@@ -1153,7 +1234,7 @@ fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
 				};
 			}
 		}
-		self.renderer.ui.push_row(
+		layer.push_row(
 			index,
 			field_text(js, entry, k.label)!,
 			field_text(js, entry, k.trailing)!,
@@ -1173,13 +1254,13 @@ fn void? JsRuntime.read_rows(&self, js::Value node, uint index)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_graph_nodes(&self, js::Value node, uint index)
+fn void? JsRuntime.read_graph_nodes(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
 	@each_entry(js, node, k.nodes; js::Value entry)
 	{
-		self.renderer.ui.push_graph_node(index, {
+		layer.push_graph_node(index, {
 			.pos = field_vec2(js, entry, k.pos)!,
 			.width = field_float(js, entry, k.width)!,
 			.title = field_text(js, entry, k.title)!,
@@ -1196,13 +1277,13 @@ fn void? JsRuntime.read_graph_nodes(&self, js::Value node, uint index)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_graph_ports(&self, js::Value node, uint index)
+fn void? JsRuntime.read_graph_ports(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
 	@each_entry(js, node, k.ports; js::Value entry)
 	{
-		self.renderer.ui.push_graph_port(index, {
+		layer.push_graph_port(index, {
 			.node = field_uint(js, entry, k.node)!,
 			.output = field_truth(js, entry, k.output)!,
 			.label = field_text(js, entry, k.label)!,
@@ -1218,13 +1299,13 @@ fn void? JsRuntime.read_graph_ports(&self, js::Value node, uint index)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_graph_wires(&self, js::Value node, uint index)
+fn void? JsRuntime.read_graph_wires(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
 	@each_entry(js, node, k.wires; js::Value entry)
 	{
-		self.renderer.ui.push_graph_wire(index, {
+		layer.push_graph_wire(index, {
 			.from = field_uint(js, entry, k.from)!,
 			.to = field_uint(js, entry, k.to)!,
 			.color = field_vec4(js, entry, k.color)!,
@@ -1239,16 +1320,16 @@ fn void? JsRuntime.read_graph_wires(&self, js::Value node, uint index)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.relist_graph(&self, js::Value props, uint node)
+fn void? JsRuntime.relist_graph(&self, UiLayer* layer, js::Value props, uint node)
 {
 	UiKeys* k = &self.ui_keys;
 	bool nodes = has_field(self.js, props, k.nodes)!;
 	bool ports = has_field(self.js, props, k.ports)!;
 	bool wires = has_field(self.js, props, k.wires)!;
-	self.renderer.ui.reset_graph(node, nodes, ports, wires);
-	if (nodes) self.read_graph_nodes(props, node)!;
-	if (ports) self.read_graph_ports(props, node)!;
-	if (wires) self.read_graph_wires(props, node)!;
+	layer.reset_graph(node, nodes, ports, wires);
+	if (nodes) self.read_graph_nodes(layer, props, node)!;
+	if (ports) self.read_graph_ports(layer, props, node)!;
+	if (wires) self.read_graph_wires(layer, props, node)!;
 }
 
 <*
@@ -1256,13 +1337,13 @@ fn void? JsRuntime.relist_graph(&self, js::Value props, uint node)
 
  @return? js::THREW
 *>
-fn void? JsRuntime.read_entries(&self, js::Value node, uint index)
+fn void? JsRuntime.read_entries(&self, UiLayer* layer, js::Value node, uint index)
 {
 	js::Engine* js = self.js;
 	UiKeys* k = &self.ui_keys;
 	@each_entry(js, node, k.items; js::Value entry)
 	{
-		self.renderer.ui.push_context_item(index, {
+		layer.push_context_item(index, {
 			.label = field_text(js, entry, k.label)!,
 			.category = field_text(js, entry, k.category)!,
 			.hint = field_text(js, entry, k.hint)!,
@@ -1457,14 +1538,15 @@ fn usz? JsRuntime.ui_event_args(&self, UiEvent event, js::Value[] argv)
 *>
 fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 {
-	JsRuntime* self = (JsRuntime*)host;
+	UiBinding* binding = (UiBinding*)host;
+	JsRuntime* self = binding.runtime;
 	if (!self.ready) return true;
-	if ((sz)node >= self.ui_handlers.len()) return true;
-	UiHandlers* handlers = &self.ui_handlers[node];
+	if ((sz)node >= binding.handlers.len()) return true;
+	UiHandlers* handlers = &binding.handlers[node];
 	if (handlers.can_connect == js::NO_ROOT) return true;
 
-	self.ui_dispatching = true;
-	defer self.ui_dispatching = false;
+	binding.dispatching = true;
+	defer binding.dispatching = false;
 	bool yes = true;
 	@pool()
 	{
@@ -1472,9 +1554,8 @@ fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 		js::Value? answer = self.js.call(self.js.held(handlers.can_connect), js::UNDEFINED, &argv);
 		if (catch answer)
 		{
-			self.report_frame_failure(
-				string::tformat("a three.ui canConnect handler threw and was stopped: %s", self.js.take_error(tmem))
-			);
+			self.report_frame_failure(string::tformat("a %s canConnect handler threw and was stopped: %s",
+				binding.name, self.js.take_error(tmem)));
 			self.js.drop(&handlers.can_connect);
 		}
 		else
@@ -1488,9 +1569,10 @@ fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 <*
  One widget callback, from inside `Ui.process_input`.
 
- Installed as the layer's listener by `ui_layer`. The node index is the position
- in `UiLayer.nodes`, which is the position in `ui_handlers` — the two tables are
- built in one pass and replaced in one call, which is what keeps them aligned.
+ Installed as the layer's listener, with the binding as its host. The node index
+ is the position in `UiLayer.nodes`, which is the position in `handlers` — the two
+ tables are built in one pass and replaced in one call, which is what keeps them
+ aligned.
 
  A handler that throws is stopped for good, the rule every other callback in this
  project follows: a click handler that fails once fails sixty times a second, and
@@ -1498,26 +1580,27 @@ fn bool js_ui_query(void* host, uint node, UiEvent event) @local
 *>
 fn void js_ui_event(void* host, uint node, UiEvent event) @local
 {
-	JsRuntime* self = (JsRuntime*)host;
+	UiBinding* binding = (UiBinding*)host;
+	JsRuntime* self = binding.runtime;
 	if (!self.ready) return;
-	if ((sz)node >= self.ui_handlers.len()) return;
+	if ((sz)node >= binding.handlers.len()) return;
 
 	String what;
-	js::Root* handler = self.ui_handlers[node].for_event(event.kind, &what);
+	js::Root* handler = binding.handlers[node].for_event(event.kind, &what);
 	if (*handler == js::NO_ROOT) return;
 
-	// Raised for the whole of the call, so a handler calling `three.ui.set` is
-	// held rather than restructuring the tree cui is walking. The layer raises
-	// its own flag around `process_input`; this one is narrower and is what the
+	// Raised for the whole of the call, so a handler calling `set` is held
+	// rather than restructuring the tree cui is walking. The layer raises its
+	// own flag around `process_input`; this one is narrower and is what the
 	// verbs actually read, because a `patch` from a handler is perfectly safe and
 	// only a rebuild is not.
-	self.ui_dispatching = true;
-	defer self.ui_dispatching = false;
+	binding.dispatching = true;
+	defer binding.dispatching = false;
 
 	bool kept = true;
 	@pool()
 	{
-		String who = string::tformat("a three.ui %s handler", what);
+		String who = string::tformat("a %s %s handler", binding.name, what);
 		js::Value[3] argv;
 		usz? argc = self.ui_event_args(event, &argv);
 		if (catch argc)
@@ -1537,77 +1620,53 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 // ============================================================================
 
 <*
- Holds a snapshot a handler asked for until the dispatch it came from is over;
- null or undefined is a clear.
-
- One slot, not a queue: two `set` calls in one dispatch mean the second is what
- the script wanted, exactly as two calls outside one do.
-*>
-fn void JsRuntime.hold_ui_tree(&self, js::Value tree)
-{
-	if (tree.is_nullish())
-	{
-		self.js.drop(&self.ui_pending);
-	}
-	else
-	{
-		self.js.rehold(&self.ui_pending, tree);
-	}
-	self.ui_pending_active = true;
-}
-
-<*
- Applies whatever a handler asked for while it was being dispatched.
+ Applies whatever a handler of the overlay asked for while it was being
+ dispatched.
 
  Called by the window loop immediately after `UiLayer.feed`, which is the first
  moment cui is not walking the tree. A frame where no handler ran does nothing at
  all.
 *>
-fn void JsRuntime.flush_ui(&self)
-{
-	if (!self.ui_pending_active || !self.ready) return;
-	self.ui_pending_active = false;
+fn void JsRuntime.flush_ui(&self) => self.flush_tree(&self.ui_main);
 
-	if (self.ui_pending == js::NO_ROOT)
+<*
+ `flush_ui` for any binding: a panel's is flushed the moment its pointer has been
+ fed.
+*>
+fn void JsRuntime.flush_tree(&self, UiBinding* binding)
+{
+	if (!binding.pending_active || !self.ready) return;
+	binding.pending_active = false;
+
+	if (binding.pending == js::NO_ROOT)
 	{
-		self.drop_ui_tree();
+		self.drop_tree(binding);
 		return;
 	}
 
-	// Taken out of the runtime's slot first, because applying it clears the
+	// Taken out of the binding's slot first, because applying it clears the
 	// handler table and the slot with it.
-	js::Root pending = self.ui_pending;
-	self.ui_pending = js::NO_ROOT;
+	js::Root pending = binding.pending;
+	binding.pending = js::NO_ROOT;
 	defer self.js.drop(&pending);
 
 	@pool()
 	{
-		if (catch self.apply_ui_tree(self.js.held(pending)))
+		if (catch self.apply_tree(binding, self.js.held(pending)))
 		{
 			(void)self.js.take_exception();
-			self.report_frame_failure("three.ui.set from a widget handler could not be applied");
+			self.report_frame_failure(string::tformat("%s.set from a widget handler could not be applied", binding.name));
 		}
 	};
 }
 
 <*
- Takes the interface down and forgets every function it was holding.
+ Takes a binding's interface down and forgets every function it was holding.
 *>
-fn void JsRuntime.drop_ui_tree(&self)
+fn void JsRuntime.drop_tree(&self, UiBinding* binding)
 {
-	if (self.renderer != null) self.renderer.ui.clear_tree();
-	self.clear_ui_handlers();
-}
-
-<*
- Drops every held widget callback, and any snapshot waiting for a dispatch to end.
-*>
-fn void JsRuntime.clear_ui_handlers(&self)
-{
-	foreach (&handler : self.ui_handlers) handler.drop(self.js);
-	self.ui_handlers.clear();
-	self.js.drop(&self.ui_pending);
-	self.ui_pending_active = false;
+	if (binding.layer != null) binding.layer.clear_tree();
+	binding.clear_handlers(self.js);
 }
 
 <*
@@ -1620,6 +1679,7 @@ fn void JsRuntime.clear_ui_handlers(&self)
 *>
 fn void JsRuntime.release_ui(&self)
 {
+	self.release_panels();
 	if (self.renderer == null) return;
 	self.renderer.ui.clear_tree();
 	self.renderer.ui.on_event(null, null);

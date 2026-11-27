@@ -673,6 +673,49 @@ function normaliseTreeStyle(style, where) {
 }
 
 // -----------------------------------------------------------------------
+// `patch`'s fields, checked and in the shape the host reads — shared with
+// `UiPanel.patch`, which writes into a panel's interface the same way.
+// `verb` is what the script called, for the sentence that refuses a field.
+export function patchFields(key, props, verb) {
+	if (key === null || key === undefined) throw new TypeError(`${verb}.patch(key, props) wants a key`);
+	if (props === null || typeof props !== 'object') {
+		throw new TypeError(`${verb}.patch(key, props) wants an object of fields to write`);
+	}
+	const out = {};
+	const where = `${verb}.patch('${key}')`;
+	if ('text' in props) out.text = String(props.text);
+	if ('value' in props) out.value = num(props.value, `${where} value`);
+	if ('checked' in props) out.checked = !!props.checked;
+	// A confirmDialog or a dialog going up and coming down is a patch and not
+	// a rebuild: a `set` would build a second panel, and the answer somebody
+	// is halfway through giving — or the form they are halfway through
+	// filling in — would belong to the one just thrown away.
+	if ('open' in props) out.checked = !!props.open;
+	if ('selected' in props) out.selected = num(props.selected, `${where} selected`);
+	if ('offset' in props) out.offset = num(props.offset, `${where} offset`);
+	if ('disabled' in props) out.disabled = !!props.disabled;
+	if ('color' in props) out.color = colour(props.color, `${where} color`);
+	if ('min' in props) out.min = num(props.min, `${where} min`);
+	if ('max' in props) out.max = num(props.max, `${where} max`);
+	if ('size' in props) out.size = pair(props.size, `${where} size`, [0, 0]);
+	if ('ops' in props) out.ops = normaliseOps(props.ops, `${where} ops`);
+	if ('options' in props) out.options = (props.options ?? []).map(String);
+	if ('rows' in props) out.rows = normaliseRows(props.rows, `${where} rows`);
+	if ('menus' in props) out.menus = normaliseMenus(props.menus, `${where} menus`);
+	// A node graph's data and view, and where a context menu opens.
+	if ('nodes' in props) out.nodes = normaliseGraphNodes(props.nodes, `${where} nodes`);
+	if ('ports' in props) out.ports = normaliseGraphPorts(props.ports, `${where} ports`);
+	if ('wires' in props) out.wires = normaliseGraphWires(props.wires, `${where} wires`);
+	if ('view' in props) readView(props.view, `${where} view`, out);
+	if ('items' in props) out.items = normaliseEntries(props.items, `${where} items`);
+	if ('at' in props) out.at = pair(props.at, `${where} at`, [0, 0]);
+	return out;
+}
+
+// A whole snapshot, checked and in the shape the host reads — `set`'s half,
+// shared with `UiPanel.set`.
+export function normaliseTree(tree) { return normalise(tree, 'root'); }
+
 // The raw verbs
 
 // The two below without the guard, for `widget.js` — which IS the class layer
@@ -791,39 +834,7 @@ export const ui = {
 	// size — plus `ops`, `options`, `rows` and `menus`, which replace a list
 	// wholesale. Anything that would change the shape of the tree is a `set`.
 	patch(key, props) {
-		if (key === null || key === undefined) throw new TypeError('three.ui.patch(key, props) wants a key');
-		if (props === null || typeof props !== 'object') {
-			throw new TypeError('three.ui.patch(key, props) wants an object of fields to write');
-		}
-		const out = {};
-		const where = `three.ui.patch('${key}')`;
-		if ('text' in props) out.text = String(props.text);
-		if ('value' in props) out.value = num(props.value, `${where} value`);
-		if ('checked' in props) out.checked = !!props.checked;
-		// A confirmDialog or a dialog going up and coming down is a patch and not
-		// a rebuild: a `set` would build a second panel, and the answer somebody
-		// is halfway through giving — or the form they are halfway through
-		// filling in — would belong to the one just thrown away.
-		if ('open' in props) out.checked = !!props.open;
-		if ('selected' in props) out.selected = num(props.selected, `${where} selected`);
-		if ('offset' in props) out.offset = num(props.offset, `${where} offset`);
-		if ('disabled' in props) out.disabled = !!props.disabled;
-		if ('color' in props) out.color = colour(props.color, `${where} color`);
-		if ('min' in props) out.min = num(props.min, `${where} min`);
-		if ('max' in props) out.max = num(props.max, `${where} max`);
-		if ('size' in props) out.size = pair(props.size, `${where} size`, [0, 0]);
-		if ('ops' in props) out.ops = normaliseOps(props.ops, `${where} ops`);
-		if ('options' in props) out.options = (props.options ?? []).map(String);
-		if ('rows' in props) out.rows = normaliseRows(props.rows, `${where} rows`);
-		if ('menus' in props) out.menus = normaliseMenus(props.menus, `${where} menus`);
-		// A node graph's data and view, and where a context menu opens.
-		if ('nodes' in props) out.nodes = normaliseGraphNodes(props.nodes, `${where} nodes`);
-		if ('ports' in props) out.ports = normaliseGraphPorts(props.ports, `${where} ports`);
-		if ('wires' in props) out.wires = normaliseGraphWires(props.wires, `${where} wires`);
-		if ('view' in props) readView(props.view, `${where} view`, out);
-		if ('items' in props) out.items = normaliseEntries(props.items, `${where} items`);
-		if ('at' in props) out.at = pair(props.at, `${where} at`, [0, 0]);
-		H.uiPatch(String(key), out);
+		H.uiPatch(String(key), patchFields(key, props, 'three.ui'));
 	},
 
 	// Adds an icon a `tree` row can name, and answers its number.

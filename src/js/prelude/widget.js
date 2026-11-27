@@ -432,10 +432,33 @@ export class Panel extends Node {
 // Widgets
 // ---------------------------------------------------------------------------
 
-// Every mounted widget, in the order they are drawn: `layer` first, then the
-// order they were mounted in. A modal declares `static layer = 1` and lands
-// over a HUD whenever it is mounted.
-const mounted = [];
+// One interface the class layer draws into: the frame's overlay, or a
+// `three.UiPanel` in the scene. `set` and `patch` are its two doors and `clear`
+// takes it down; `mounted` is every widget on it, in the order they are drawn —
+// `layer` first, then the order they were mounted in. A modal declares
+// `static layer = 1` and lands over a HUD whenever it is mounted.
+export class Surface {
+	constructor(set, patch, clear) {
+		this.mounted = [];
+		this.set = set;
+		this.patch = patch;
+		this.clear = clear;
+	}
+}
+
+// The frame's overlay, which `mount()` with no target means.
+const screen = new Surface(tree => setTree(tree), (key, fields) => ui.patch(key, fields), () => clearTree());
+
+// Every surface with a widget on it. A panel joins on its first mount and leaves
+// when its last widget does, so a disposed panel is not kept here.
+const surfaces = new Set();
+
+function everyRecord() {
+	const out = [];
+	for (const surface of surfaces) out.push(...surface.mounted);
+	return out;
+}
+
 let nextId = 0;
 let nextSeq = 0;
 let installed = false;
@@ -482,15 +505,26 @@ export class Widget {
 		throw new Error(`${this.constructor.name} has no render() — a widget is a class with one method, and that is the method`);
 	}
 
-	// Draw this widget. Answers with the widget, so `Hud.mount()` and
+	// Draw this widget: over the frame, or on a `three.UiPanel` given as
+	// `target`. Answers with the widget, so `Hud.mount()` and
 	// `new Hud().mount()` are the same expression.
-	mount() {
+	mount(target) {
 		const state = this[STATE];
 		if (state.record !== null) return state.proxy;
+
+		let surface = screen;
+		if (target !== undefined && target !== null) {
+			if (!(target._surface instanceof Surface)) {
+				throw new TypeError(
+					`${this.constructor.name}.mount(target) draws on a three.UiPanel, or over the frame with no target`);
+			}
+			surface = target._surface;
+		}
 
 		const Class = this.constructor;
 		const record = {
 			widget: state.proxy,
+			surface,
 			Class,
 			id: nextId++,
 			layer: Number(Class.layer) || 0,
@@ -507,8 +541,9 @@ export class Widget {
 		};
 		state.owner = record;
 		state.record = record;
-		mounted.push(record);
-		mounted.sort((a, b) => (a.layer - b.layer) || (a.seq - b.seq));
+		surface.mounted.push(record);
+		surface.mounted.sort((a, b) => (a.layer - b.layer) || (a.seq - b.seq));
+		surfaces.add(surface);
 
 		if (!installed) {
 			systems.frame(SYSTEM, flush, { order: RENDER_ORDER });
@@ -526,12 +561,13 @@ export class Widget {
 		const state = this[STATE];
 		const record = state.record;
 		if (record === null) return false;
-		const at = mounted.indexOf(record);
-		if (at >= 0) mounted.splice(at, 1);
+		const surface = record.surface;
+		const at = surface.mounted.indexOf(record);
+		if (at >= 0) surface.mounted.splice(at, 1);
 		state.record = null;
 		state.owner = null;
 		if (typeof this.onUnmount === 'function') this.onUnmount();
-		rebuild();
+		rebuild(surface);
 		return true;
 	}
 
@@ -551,19 +587,24 @@ export class Widget {
 	// On a subclass, that class's widgets; on `three.Widget` itself, every
 	// widget there is — which is the reading somebody asking the base class for
 	// a count means.
+	//
+	// Every surface counts: the overlay and every panel.
 	static all() {
-		return (this === Widget ? mounted : mounted.filter(r => r.Class === this)).map(r => r.widget);
+		const every = everyRecord();
+		return (this === Widget ? every : every.filter(r => r.Class === this)).map(r => r.widget);
 	}
 
 	static get count() {
-		return this === Widget ? mounted.length : mounted.reduce((n, r) => n + (r.Class === this ? 1 : 0), 0);
+		const every = everyRecord();
+		return this === Widget ? every.length : every.reduce((n, r) => n + (r.Class === this ? 1 : 0), 0);
 	}
 	static [Symbol.iterator]() { return this.all()[Symbol.iterator](); }
 
 	// Every widget of this class, or — on `three.Widget` itself — every widget
 	// there is, which is what a scene transition wants.
 	static unmountAll() {
-		const doomed = this === Widget ? [...mounted] : mounted.filter(r => r.Class === this);
+		const every = everyRecord();
+		const doomed = this === Widget ? every : every.filter(r => r.Class === this);
 		for (const record of doomed) record.widget.unmount();
 		return doomed.length;
 	}
@@ -757,35 +798,34 @@ function changes(a, b, out) {
 // Sending it
 // ---------------------------------------------------------------------------
 
-// Every mounted widget's tree under one root. A `Stack` because the widgets are
-// FLOORS of one interface — a modal over a HUD over a crosshair — and cui
-// paints a stack's children in order.
-function root() {
-	const kids = mounted.map(r => r.tree).filter(t => t !== null);
+// Every mounted widget's tree on one surface, under one root. A `Stack`
+// because the widgets are FLOORS of one interface — a modal over a HUD over a
+// crosshair — and cui paints a stack's children in order.
+function root(surface) {
+	const kids = surface.mounted.map(r => r.tree).filter(t => t !== null);
 	return { type: 'stack', children: kids };
 }
 
-function rebuild() {
-	if (mounted.length === 0) {
-		if (installed) { systems.remove(SYSTEM); installed = false; }
-		clearTree();
+function rebuild(surface) {
+	if (surface.mounted.length === 0) {
+		surfaces.delete(surface);
+		if (surfaces.size === 0 && installed) { systems.remove(SYSTEM); installed = false; }
+		surface.clear();
 		return;
 	}
-	setTree(root());
+	surface.set(root(surface));
 }
 
-// Re-render what is dirty and send the difference. One `set` if any widget's
-// shape changed, and a `patch` per changed value otherwise.
+// Re-render what is dirty on one surface and send the difference. One `set` if
+// any widget's shape changed, and a `patch` per changed value otherwise.
 //
 // The two are exclusive on purpose: a `set` replaces the whole interface, so a
 // patch computed against the tree it replaced would be writing into a node that
 // no longer exists.
-function flush() {
-	if (mounted.length === 0) return;
-
+function flushSurface(surface) {
 	const dirty = [];
 	let structural = false;
-	for (const record of mounted) {
+	for (const record of surface.mounted) {
 		if (!record.dirty) continue;
 		record.dirty = false;
 		record.next = compile(record);
@@ -804,7 +844,7 @@ function flush() {
 				if (!record.handlers.has(id)) record.dispatch.delete(id);
 			}
 		}
-		setTree(root());
+		surface.set(root(surface));
 	} else {
 		const out = [];
 		for (const record of dirty) {
@@ -812,16 +852,26 @@ function flush() {
 			record.tree = record.next;
 			record.byKey = record.nextByKey;
 		}
-		for (const [key, fields] of out) ui.patch(key, fields);
+		for (const [key, fields] of out) surface.patch(key, fields);
 	}
 	for (const record of dirty) record.next = null;
 }
 
+// Every surface, once a frame and from `three.ui.flush()`.
+function flush() {
+	for (const surface of [...surfaces]) flushSurface(surface);
+}
+
 // `three.ui` asks these three things and knows nothing else about this file, so
-// the dependency runs one way and there is no cycle to unpick.
-composed.count = () => mounted.length;
+// the dependency runs one way and there is no cycle to unpick. They are about
+// the overlay alone: a panel's widgets are the panel's business.
+composed.count = () => screen.mounted.length;
 composed.flush = flush;
-composed.clear = () => Widget.unmountAll();
+composed.clear = () => {
+	const doomed = [...screen.mounted];
+	for (const record of doomed) record.widget.unmount();
+	return doomed.length;
+};
 
 // `three.reset()`, and the context teardown behind it.
 export function unmountAll() { return Widget.unmountAll(); }

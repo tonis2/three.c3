@@ -35,6 +35,7 @@ import vk;
 import image;
 import std::time;
 import std::math;
+import std::collections::list;
 
 const uint MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -241,6 +242,13 @@ struct Renderer
 	// something asks for it, the same way `post` is inert until a script sets a
 	// shader.
 	UiLayer ui;
+	// Interfaces drawn into images of their own, which quads in the scene wear —
+	// `render/ui_panel.c3`. Empty until a script makes one.
+	List{UiPanel*} panels;
+	// Bumped whenever a panel's image is drawn again: a material sampling it shows
+	// a new picture with nothing else moving, so the picture key and the scene
+	// cache fold it in.
+	uint panel_epoch;
 	// Where the frame is composed at the window's own resolution so the
 	// interface can be drawn into it sharp. Only the present path touches it,
 	// and only while there is an interface — see `gpu/swapchain.c3`.
@@ -519,6 +527,9 @@ fn void Renderer.free(&self)
 	// ordering dance here — only the idle above, which the pass needs for the
 	// same reason `post` does.
 	self.ui.free();
+	// Before the mesh pass for the post chain's reason: each holds a slot in
+	// `pass.assets`.
+	self.free_panels();
 	self.post.release_textures(&self.gpu, &self.pass.assets);
 	self.post.free(&self.gpu);
 	self.scene_cache.free();
@@ -558,6 +569,7 @@ fn ulong Renderer.picture_key(&self)
 	key = @hash_value(key, self.ui.active());
 	key = @hash_value(key, self.ui.picture_serial());
 	key = @hash_value(key, self.ui.slot_generation);
+	key = @hash_value(key, self.panel_epoch);
 	key = @hash_value(key, self.post.tonemap_mode.ordinal);
 	key = @hash_value(key, self.post.tonemap_exposure);
 	key = @hash_value(key, self.post.stages.len());
@@ -656,6 +668,9 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// records nothing into `cmd` — see `UiLayer.upload` for the contract it
 	// keeps with the fence wait each caller opens with.
 	self.ui.upload(&self.target)!;
+	// The panels the scene samples, drawn before anything opens a rendering and
+	// before the picture key is read, since a redrawn panel moves it.
+	self.record_panels(cmd)!;
 
 	// Before the render pass, because a dispatch cannot be inside one. This is
 	// the scene update, the frame's buffers, and the compute skinning for any
@@ -702,6 +717,7 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	// The whole cache, not a region of it: which meshes sample the image a kernel
 	// just rewrote is not something the scene's own dirty rectangles know.
 	cache_global = @hash_value(cache_global, self.compute.image_epoch);
+	cache_global = @hash_value(cache_global, self.panel_epoch);
 	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
 	// Not with MSAA: a partial redraw would need last frame's samples, which are never stored.
 	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial && !display

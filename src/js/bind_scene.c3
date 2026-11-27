@@ -54,8 +54,10 @@ fn void JsRuntime.install_bindings(&self)
 	// The one post shader (js/bind_post.c3)
 	self.bind_post_verbs(host)!!;
 
-	// The interface (js/bind_ui.c3)
+	// The interface (js/bind_ui.c3), and the panels in the scene that wear one
+	// (js/bind_panel.c3)
 	self.bind_ui_verbs(host)!!;
+	self.bind_panel_verbs(host)!!;
 
 	// The animation loop (js/frame_loop.c3)
 	self.bind_frame_verbs(host)!!;

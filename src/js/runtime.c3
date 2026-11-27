@@ -153,6 +153,7 @@ const char[*] PRELUDE_DECORATORS = $embed("prelude/decorators.js");
 const char[*] PRELUDE_API      = $embed("prelude/api.js");
 const char[*] PRELUDE_UI       = $embed("prelude/ui.js");
 const char[*] PRELUDE_WIDGET   = $embed("prelude/widget.js");
+const char[*] PRELUDE_PANEL    = $embed("prelude/panel.js");
 const char[*] PRELUDE_XR       = $embed("prelude/xr.js");
 
 <*
@@ -167,7 +168,7 @@ const char[*] PRELUDE_XR       = $embed("prelude/xr.js");
 *>
 fn js::EmbeddedModule[] prelude_parts()
 {
-	static js::EmbeddedModule[27] parts;
+	static js::EmbeddedModule[28] parts;
 	parts = {
 		{ "three:math.js", (char[])PRELUDE_MATH[..] },
 		{ "three:object3d.js", (char[])PRELUDE_OBJECT3D[..] },
@@ -194,6 +195,7 @@ fn js::EmbeddedModule[] prelude_parts()
 		{ "three:decorators.js", (char[])PRELUDE_DECORATORS[..] },
 		{ "three:ui.js", (char[])PRELUDE_UI[..] },
 		{ "three:widget.js", (char[])PRELUDE_WIDGET[..] },
+		{ "three:panel.js", (char[])PRELUDE_PANEL[..] },
 		{ "three:xr.js", (char[])PRELUDE_XR[..] },
 		{ "three:api.js", (char[])PRELUDE_API[..] },
 	};
@@ -398,19 +400,18 @@ struct JsRuntime
 	FrameSpend frame_spend;
 
 	<*
-	 The widget callbacks `three.ui.set` attached, one entry per node of the live
-	 snapshot — `js/bind_ui.c3`. Held like `frame_loop`, and dropped before the
-	 context closes for the same reason. `ui_keys` are the names the tree walk reads.
-
-	 `ui_pending` is a snapshot a widget handler asked for while it was being
-	 dispatched (NO_ROOT for a clear): cui is mid-walk of the tree at that moment,
-	 so the rebuild waits for `flush_ui` at the top of the next thing the loop does.
+	 The overlay as `three.ui` describes it — `js/bind_ui.c3`: the widget callbacks
+	 of the live snapshot, held like `frame_loop` and dropped before the context
+	 closes for the same reason, and a snapshot a handler asked for mid-dispatch.
+	 `ui_keys` are the names the tree walk reads.
 	*>
-	List{UiHandlers} ui_handlers;
+	UiBinding ui_main;
 	UiKeys ui_keys;
-	js::Root ui_pending;
-	bool ui_pending_active;
-	bool ui_dispatching;
+	<*
+	 The panels this context made — `js/bind_panel.c3`. Indexed by the id a
+	 script's `UiPanel` holds; a disposed one leaves a null so no id is reused.
+	*>
+	List{PanelBinding*} panels;
 
 	// The keyboard, owned by `js/bind_input.c3`. `input` is one frame old at worst
 	// and is replaced whole by every tick; `input_text` backs its `text`, which
@@ -675,7 +676,9 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	self.kernel_slots.init(mem, 4);
 	// One entry per node of the interface, and empty for every run that never
 	// draws one — `js/bind_ui.c3`.
-	self.ui_handlers.init(mem, 0);
+	self.ui_main = { .runtime = self, .layer = self.renderer != null ? &self.renderer.ui : null, .name = "three.ui" };
+	self.ui_main.handlers.init(mem, 0);
+	self.panels.init(mem, 0);
 	self.frame_loop = held_nothing();
 	self.fixed_loop = held_nothing();
 	self.late_loop = held_nothing();
@@ -727,7 +730,7 @@ fn void JsRuntime.close(&self)
 	// The interface's callbacks, and then the interface itself: the layer belongs
 	// to the Renderer and outlives this context, so a reload must not leave it
 	// holding a listener into the one that just went.
-	self.clear_ui_handlers();
+	self.ui_main.clear_handlers(self.js);
 	self.release_ui();
 	// The same idea as the five above, for the one resource whose reference is
 	// held by a *handle* rather than by a callback: the images this context's
@@ -757,7 +760,8 @@ fn void JsRuntime.close(&self)
 	self.input_text.free();
 	self.save_dir.free();
 	self.texture_handles.free();
-	self.ui_handlers.free();
+	self.ui_main.handlers.free();
+	self.panels.free();
 	self.modules.free();
 	if (self.base.len > 0) self.base.free(mem);
 	*self = { };

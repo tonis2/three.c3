@@ -44,6 +44,7 @@ import { track, Entity, entity, instanceOf, emit, setScriptHandler, setClickShap
 import { ui } from './ui.js';
 import { xr } from './xr.js';
 import { Widget, nodes as uiNodes, unmountAll as unmountAllWidgets } from './widget.js';
+import { UiPanel } from './panel.js';
 
 const H = globalThis.__three;
 
@@ -2285,6 +2286,11 @@ export const three = {
 	// script carry — a unique key per value and the rule that every tree must
 	// still contain the keys the loop patches — stop existing.
 	Widget,
+
+	// The interface on a quad in the scene: the same tree, `patch` and widgets
+	// as `three.ui`, drawn into an image of its own when it changes. What a
+	// headset shows text with, and what a laser presses.
+	UiPanel,
 
 	// Which instance owns this object — a drawn node, one of its meshes, or a
 	// trigger volume — or null. Walks up the parent chain, because a raycast

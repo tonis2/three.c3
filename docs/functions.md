@@ -1722,6 +1722,10 @@ its own, and the tonemap puts the two side by side. Geometry, the depth prepass 
 depth are recorded once for both. A script sees nothing of it except in `three.stats()`, where the prepass
 counts in `sceneMs`.
 
+Text and menus go on a `three.UiPanel`, a quad in the scene with the interface drawn on it, which the right
+hand's laser presses with `panel.pointer(three.xr.right)`. `three.ui` and `three.debug.overlay` are drawn over
+the finished frame, the same in both eyes, and are for a desk.
+
 A post pass runs once per eye, and each eye is a frame of its own: `p.uv` runs 0..1 across one eye and
 `p.resolution` is one eye's, a blur's neighbours stop at the eye's edge instead of reaching into the other
 eye, and a pass image keeps one copy per eye, so a history is each eye's own. A pass costs two draws (or
@@ -3959,6 +3963,10 @@ the frame does not wait.
 
 It is drawn over the finished frame into the same image a screenshot reads, so an agent sees the interface a
 person sees. `three.ui.set(null)` takes it down.
+
+On a headset that is the wrong place for it: one picture at the same pixels in both eyes reads as infinitely far
+away. `new three.UiPanel(...)` takes the same tree, `patch` and widgets and draws them on a quad in the scene —
+see UiPanel in `classes.md`.
 
 Call this when the shape changed and `three.ui.patch` when a value did: the tree is retained and a node that did
 not change costs nothing to redraw, so rebuilding it every frame is the one thing worth not doing.
