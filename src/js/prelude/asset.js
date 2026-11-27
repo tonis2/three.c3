@@ -81,6 +81,14 @@ const POINT_FROM_WATTS = 1 / (4 * Math.PI * Math.PI);
 // file that states a `range` is left alone.
 const LIGHT_THRESHOLD = 0.01;
 
+// Marks the objects of a tree that came from these glTF nodes as standing in for
+// what the scene now holds — see `Object3D._standsIn`.
+function standIn(root, nodes, what) {
+	if (!root || !nodes.length) return;
+	const wanted = new Set(nodes);
+	root.traverse((o) => { if (wanted.has(o._gltfNode)) o._standsIn = what; });
+}
+
 // What an imported material's `reflectance` is, against 0 for one a script wrote.
 //
 // **Because glTF does state it.** The specification fixes a dielectric's F0 at
@@ -1037,7 +1045,7 @@ export class Asset {
 		// neither reads it — the order only matters for what a script sees if it
 		// throws, and a half-built tree is the more useful half to have.
 		if (opt.lights) this._placeLights(root);
-		if (opt.camera) this._placeCamera(opt.camera);
+		if (opt.camera) this._placeCamera(opt.camera, root);
 		return root;
 	}
 
@@ -1228,6 +1236,10 @@ export class Asset {
 			});
 		}
 
+		// The nodes the lights were read off: `scene.export` writes the scene's lights
+		// on nodes of its own, so these would be a second `sun` every round trip.
+		standIn(root, [...(sun ? [sun] : []), ...lit].map((l) => l.node.index), 'light');
+
 		const dropped = found.filter((l) => l !== sun && !lit.includes(l));
 		if (dropped.length) {
 			console.warn(
@@ -1259,7 +1271,7 @@ export class Asset {
 	// distance and the scene's bounds every frame, and a file's fixed pair would
 	// be overwritten before the first draw — `asset.cameras` reports them so a
 	// script can see what the file asked for.
-	_placeCamera(which) {
+	_placeCamera(which, root = null) {
 		const all = this.cameras;
 		if (!all.length) return;
 		const cam = typeof which === 'string'
@@ -1281,6 +1293,7 @@ export class Asset {
 			boom,
 		);
 		three.camera.roll = rollOf(cam.node.direction, cam.up);
+		if (root) standIn(root, [cam.node.index], 'camera');
 	}
 
 	// `three.physics` filled from the file — `instantiate({ physics: true })`.
@@ -1480,6 +1493,7 @@ export class Asset {
 			const {
 				name: label, parent, owner, mesh, position: [px, py, pz], euler: [ex, ey, ez], scale: [sx, sy, sz],
 				quaternion: [qx, qy, qz, qw], gltfNode, color: [r, g, b, a], skin, collides, collisionOnly, extras,
+				fileBody,
 			} = rows[i];
 			// A skinned mesh is a root of the walk wherever the file hangs it (see
 			// `Assets.flatten_node`), so a subtree takes it along by where it hangs:
@@ -1519,6 +1533,12 @@ export class Asset {
 			// found and `_materialize` sends nothing.
 			node._collides = collides;
 			node._collisionOnly = collisionOnly;
+			// Which of the file's colliders this object carries, for `scene.export`
+			// to write back as the file stated it. Only with `physics: true`.
+			if (fileBody >= 0) {
+				node._fileBody = fileBody;
+				node._fileAsset = this._h;
+			}
 			// The glTF node's `extras`, parsed here once per object rather than
 			// on each read. Its own object per node, so writing one copy's tags
 			// leaves the other copies' alone.

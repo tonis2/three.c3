@@ -27,6 +27,7 @@ import vk;
 import std::core::test;
 import std::io::file;
 import std::io::path;
+import gltf;
 
 const String TEST_ASSETS = "build/test-level-assets";
 const String FIXTURE = "test/fixtures/hierarchy.glb";
@@ -346,5 +347,86 @@ fn void a_row_can_be_placed_hidden() @test
 		test::@check(result.value.contains(`"a":false`) && result.value.contains(`"b":true`),
 			"only the visible:false row is hidden, got '%s'", result.value);
 		test::@check(result.value.contains(`"kept":true`), "the row keeps visible:false when saved, got '%s'", result.value);
+	};
+}
+
+// ============================================================================
+// Row extras and physics
+// ============================================================================
+
+<*
+ A kit of one piece, `wall`: a unit box carrying `{"solid":true,"footprint":"2x1"}`
+ and a box collider, so placing it with physics gives it a proxy.
+*>
+fn void write_tagged_kit(String path)
+{
+	gltf::GltfBuilder out = gltf::builder();
+	defer out.free();
+	float[<3>][8] corners = {
+		{ -0.5, -0.5, -0.5 }, { 0.5, -0.5, -0.5 }, { 0.5, 0.5, -0.5 }, { -0.5, 0.5, -0.5 },
+		{ -0.5, -0.5, 0.5 }, { 0.5, -0.5, 0.5 }, { 0.5, 0.5, 0.5 }, { -0.5, 0.5, 0.5 },
+	};
+	uint[36] faces = {
+		0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+		3, 6, 2, 3, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+	};
+	uint mesh = out.add_mesh("wall");
+	gltf::WriteAttribute[1] position = { { .name = "POSITION", .accessor = out.add_positions(corners[..]) } };
+	out.add_primitive(mesh, position[..], (int)out.add_indices(faces[..]));
+	uint wall = out.add_node("wall", mesh: (int)mesh);
+	out.set_node_extras(wall, `{"solid":true,"footprint":"2x1"}`);
+	out.add_collider(wall, {
+		.shape = (int)out.add_shape({ .type = BOX, .size = { 1, 1, 1 } }),
+		.node = -1, .material = -1, .collision_filter = -1, .mesh = -1, .base_node = -1,
+	});
+	out.add_root(wall);
+	out.save_glb(path)!!;
+}
+
+<*
+ A row's extras go over the piece's own, `null` takes one of the piece's away,
+ and a save writes back only what differs from the piece. `physics: true` on
+ the load places every piece with its kit's colliders.
+*>
+fn void row_extras_merge_over_the_pieces_own() @test
+{
+	@with_level(; three::JsRuntime* run)
+	{
+		write_tagged_kit(string::tformat("%s/tagged.glb", TEST_ASSETS));
+		three::RunResult result = run.run(`
+			const canon = (e) => JSON.stringify(Object.fromEntries(Object.entries(e).sort(([a], [b]) => (a < b ? -1 : 1))));
+			const scene = new three.Scene();
+			const level = three.level.create('tagged.glb');
+			level.parent = scene;
+			const a = level.add({ id: 'a', piece: 'wall', extras: { door: 'north', solid: false } });
+			const b = level.add({ id: 'b', piece: 'wall' });
+			const c = level.add({ id: 'c', piece: 'wall', extras: { footprint: null } });
+			const merged = [a, b, c].map((o) => canon(o.extras));
+			a.extras.lit = true;
+			b.extras.solid = true;
+			three.level.save('tagged.json', level);
+			const saved = three.readJSON('tagged.json').rows.map((r) => (r.extras ? canon(r.extras) : null));
+
+			const proxies = (lvl) => [...lvl.objects.values()].filter((o) => o.children.some((k) => k.collisionOnly)).length;
+			const plain = three.level.load('tagged.json', new three.Scene());
+			const solid = three.level.load('tagged.json', new three.Scene(), { physics: true });
+			return {
+				merged, saved,
+				again: canon(solid.objects.get('a').extras),
+				plain: proxies(plain), physics: proxies(solid),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(
+			`"merged":["{\"door\":\"north\",\"footprint\":\"2x1\",\"solid\":false}","{\"footprint\":\"2x1\",\"solid\":true}","{\"solid\":true}"]`),
+			"the row's extras over the piece's, and null takes one away: %s", result.value);
+		test::@check(result.value.contains(
+			`"saved":["{\"door\":\"north\",\"lit\":true,\"solid\":false}",null,"{\"footprint\":null}"]`),
+			"only what differs from the piece is saved: %s", result.value);
+		test::@check(result.value.contains(`"again":"{\"door\":\"north\",\"footprint\":\"2x1\",\"lit\":true,\"solid\":false}"`),
+			"and it loads back the same: %s", result.value);
+		test::@check(result.value.contains(`"plain":0,"physics":3`),
+			"physics places the kit's colliders, and only when asked: %s", result.value);
 	};
 }

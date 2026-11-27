@@ -592,8 +592,8 @@ fn collision::Heightmap* build_heightmap(Heightfield* field)
 	collision::Heights heights;
 	heights.init(mem, (usz)nx * (usz)nz);
 
-	float low_x = -field.width * 0.5f;
-	float low_z = -field.depth * 0.5f;
+	float low_x = field.center_x - field.width * 0.5f;
+	float low_z = field.center_z - field.depth * 0.5f;
 
 	// Row-major in z then x, which is the order `Heightmap.get_height_at_grid`
 	// reads and the same order `Heightfield.heights` is already in.

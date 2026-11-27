@@ -1180,6 +1180,11 @@ fn NodeId Scene.instantiate(
 		// query index once per node of the level.
 		node.collides = entry.collides;
 		node.collision_only = entry.collision_only;
+		if (entry.file_body >= 0)
+		{
+			node.file_body_asset = asset;
+			node.file_body = entry.file_body;
+		}
 		// The rest pose, which is a baked frame like any other — so this node draws
 		// correctly before anything is played and needs no branch to.
 		self.set_skin(id, entry.skin);
@@ -1775,6 +1780,9 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 	node.lightmap = { 0, 0, 0, 0 };
 	node.lightmap_dirty = false;
 	node.lightmap_seed = false;
+	// Reset for `material`'s reason: a stranger's collider would go into the file.
+	node.file_body_asset = NO_ASSET;
+	node.file_body = -1;
 	node.visible = true;
 	node.world_visible = true;
 	// Reset for `material`'s reason: a recycled slot that stayed non-colliding
@@ -2092,6 +2100,21 @@ fn void Scene.set_collision_only(&self, NodeId id, bool only)
 	Node* node = self.node(id);
 	if (node == null) return;
 	node.collision_only = only;
+}
+
+<*
+ Records which of a file's bodies this node carries, for `scene.export` to write
+ back. See `Node.file_body`.
+
+ @param asset : "The asset the body is in"
+ @param body : "Index into that asset's bodies, or -1 for none"
+*>
+fn void Scene.set_file_body(&self, NodeId id, AssetId asset, int body)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+	node.file_body_asset = body < 0 ? NO_ASSET : asset;
+	node.file_body = body < 0 ? -1 : body;
 }
 
 <*

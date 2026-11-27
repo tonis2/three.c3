@@ -61,6 +61,10 @@ import std::io::file;
 import gltf;
 import std::collections::list;
 import image;
+import std::math::vector;
+import std::math;
+import std::io;
+import image::png;
 
 const String FIXTURE = "test/fixtures/textured.glb";
 
@@ -2312,9 +2316,10 @@ fn void the_camera_and_the_light_are_in_the_file() @test
 		test::@check(json.contains(`{"name":"sun","extensions"`),
 			"whose rotation is the identity for a light straight down +z: %s", json);
 
-		// The second one, with the colour and the strength it was given — and named
-		// so that reloading puts it back as a light that does not cast.
-		test::@check(json.contains(`{"name":"light 1","type":"directional","color":[0,0,1],"intensity":2}`),
+		// The second one, with the colour and the strength it was given — in the
+		// importer's Watts, 2 pi for a sun of 2 — and named so that reloading puts it
+		// back as a light that does not cast.
+		test::@check(json.contains(`{"name":"light 1","type":"directional","color":[0,0,1],"intensity":6.28318`),
 			"the fill light is in the file with its own colour and strength: %s", json);
 
 		// Five nodes: the scene root, the box under it, the camera and two lights.
@@ -2410,12 +2415,11 @@ fn void an_area_light_round_trips_watts_shape_and_basis() @test
  written as the surface-to-light vector and read back as the travel direction
  lights the far side of everything, which reads as the normals being wrong.
 
- **The intensities do not round trip, deliberately.** `scene.export` writes this
- renderer's own multiplier because glTF has no unit to convert it to, and the
- import reads a file's number as Blender's Watts — 2 out and 2/pi back for the
- sun, 9 out and 9/(4 pi²) back for the point. `asset.lights` reports the file's
- raw numbers either way, which is the door out of both defaults, and
- `docs/functions.md` says all of this once.
+ **The intensities round trip.** The import reads a file's number as Blender's
+ Watts and divides — by pi for a sun, by 4 pi² for a point — so the export writes
+ in Watts: 2 goes out as 2 pi and comes back as 2, and 9 as 36 pi² and comes back
+ as 9. `asset.lights` reports the file's raw numbers, and `docs/functions.md`
+ says all of this once.
 *>
 fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
 {
@@ -2447,7 +2451,7 @@ fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
 			three.camera.orbit(90, 45, 3);
 
 			const back = three.load("build/export_relight.glb");
-			const said = back.lights.map(l => [l.name, l.type, l.intensity, l.range]);
+			const said = back.lights.map(l => [l.name, l.type, Math.round(l.intensity * 1e4) / 1e4, l.range]);
 			back.instantiate("back", { lights: true, camera: true });
 
 			const round = n => Math.round(n * 1e4) / 1e4;
@@ -2470,8 +2474,8 @@ fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
 		defer result.free();
 		test::@check(result.ok, "the script succeeded: %s", result.error);
 
-		test::@check(result.value.contains(`"said":[["sun","directional",2,0],["light 1","point",9,9]]`),
-			"the file's own numbers come back as the file wrote them: %s", result.value);
+		test::@check(result.value.contains(`"said":[["sun","directional",6.2832,0],["light 1","point",355.3058,9]]`),
+			"the file's own numbers are Watts: %s", result.value);
 
 		test::@check(result.value.contains(`"count":2`),
 			"both lights reach a slot: %s", result.value);
@@ -2479,15 +2483,15 @@ fn void the_lights_and_the_camera_come_back_out_of_the_file() @test
 			"the sun points back the way it was aimed, and not at the other side: %s", result.value);
 		test::@check(result.value.contains(`"sunColor":[1,0.5,0.25]`),
 			"with its colour: %s", result.value);
-		test::@check(result.value.contains(`"sunIntensity":0.6366`),
-			"and 2 Watts read as 2/pi here: %s", result.value);
+		test::@check(result.value.contains(`"sunIntensity":2,`),
+			"and the sun as bright as it was: %s", result.value);
 
 		test::@check(result.value.contains(`"lamp":[2,3,4]`),
 			"the point light stands where it stood: %s", result.value);
 		test::@check(result.value.contains(`"lampRange":9`),
 			"reaching as far as it did: %s", result.value);
-		test::@check(result.value.contains(`"lampIntensity":0.228`),
-			"and 9 Watts read as 9/(4 pi squared), Blender's own arithmetic: %s", result.value);
+		test::@check(result.value.contains(`"lampIntensity":9,`),
+			"and the lamp as bright as it was: %s", result.value);
 
 		test::@check(result.value.contains(`"fov":60`),
 			"the camera gets its field of view back, in degrees: %s", result.value);
@@ -3515,4 +3519,596 @@ fn void a_copied_through_basis_texture_keeps_its_own_extension() @test
 		"a copied ETC1S image lost the extension it arrived under");
 	test::@check(!json.contains("CUSTOM_texture_ktx2"),
 		"a copied ETC1S image was relabelled as our own BCn extension");
+}
+
+// ============================================================================
+// A world written back: extras, markers, subtrees, colliders
+// ============================================================================
+
+// A JSON value with every object's keys sorted, so two parses of one document
+// compare equal whatever order a map kept them in.
+const String CANON = `
+	const canon = (v) => JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x)
+		? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x);
+`;
+
+<*
+ Every JSON type an extras object can hold comes back as itself: on a mesh, on an
+ empty, and on the file. Compared as canonical JSON, because the reader keeps an
+ object's keys in its own order.
+*>
+fn void extras_of_every_json_type_come_back_unchanged() @test
+{
+	String path = "build/export_extras.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(CANON +++ `
+			const kinds = {
+				s: 'cellar – café "q" \\ \n tab\t', n: 1.5, i: 3, neg: -2, tiny: 1e-7, big: 12345678901,
+				third: 1 / 3, t: true, f: false, z: null, arr: [1, 'a', [2, { k: false }], []],
+				obj: { deep: { x: 1, y: [] } }, empty: {},
+			};
+			const file = { version: 3, name: 'r_0_0', grid: [16, 16], meta: { a: null, b: 'x' } };
+			const scene = new three.Scene();
+			const box = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+			box.name = 'box';
+			box.extras = kinds;
+			scene.add(box);
+			const spot = new three.Group();
+			spot.name = 'spot';
+			spot.extras = { piece: 'well', footprint: '2x2' };
+			scene.add(spot);
+			const report = scene.export('build/export_extras.glb', { extras: file });
+
+			const back = new three.Scene();
+			const asset = three.load('build/export_extras.glb');
+			const root = asset.instantiate();
+			back.add(root);
+			let gotBox = null, gotSpot = null;
+			root.traverse((o) => { if (o.name === 'box') gotBox = o; if (o.name === 'spot') gotSpot = o; });
+			return {
+				box: canon(gotBox.extras) === canon(kinds),
+				spot: canon(gotSpot.extras) === canon(spot.extras),
+				file: canon(asset.extras) === canon(file),
+				markers: report.markers,
+				got: canon(gotBox.extras),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"box":true,"spot":true,"file":true,"markers":1`),
+			"a mesh's, an empty's and the file's extras come back unchanged: %s", result.value);
+	};
+}
+
+<*
+ A childless empty is a marker and survives, with and without `flatten`, at its
+ world placement: a spawn with no extras is found by name, an area by its scale.
+ A group whose children all dropped out is dropped; a placed piece flattened
+ leaves a marker behind while its meshes batch with the rest.
+*>
+fn void markers_survive_with_and_without_flatten() @test
+{
+	defer (void)file::delete("build/export_markers.glb");
+	defer (void)file::delete("build/export_markers_flat.glb");
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(CANON +++ `
+			const scene = new three.Scene();
+			const box = new three.BoxGeometry(1, 1, 1);
+			scene.add(new three.Mesh(box));
+			const spawn = new three.Group();
+			spawn.name = 'spawn';
+			spawn.position.set(4, 0, 2);
+			scene.add(spawn);
+			const holder = new three.Group();
+			holder.name = 'holder';
+			holder.position.set(10, 0, 0);
+			const area = new three.Group();
+			area.name = 'area';
+			area.extras = { kind: 'roam', count: 3 };
+			area.position.set(-3, 0, 5);
+			area.scale.set(2, 1, 3);
+			holder.add(area);
+			scene.add(holder);
+			const hollow = new three.Group();
+			hollow.name = 'hollow';
+			const hidden = new three.Mesh(box);
+			hidden.visible = false;
+			hollow.add(hidden);
+			scene.add(hollow);
+			const house = new three.Group();
+			house.name = 'house';
+			house.extras = { piece: 'house', footprint: '8x7' };
+			house.position.set(0, 0, 20);
+			for (const x of [-1, 1]) {
+				const wall = new three.Mesh(box);
+				wall.position.x = x;
+				house.add(wall);
+			}
+			scene.add(house);
+
+			// Two paths, because a load of a path already loaded is the asset already loaded.
+			const read = (flatten, path) => {
+				scene.activate();
+				const report = scene.export(path, { flatten });
+				const back = new three.Scene();
+				const root = three.load(path).instantiate();
+				back.add(root);
+				const found = {};
+				root.traverse((o) => { if (o.name) found[o.name] = o; });
+				const at = (o) => o && o.getWorldPosition().toArray().map((v) => Math.round(v * 1000) / 1000);
+				const out = {
+					markers: report.markers,
+					spawn: at(found.spawn),
+					area: at(found.area),
+					areaScale: found.area && found.area.scale.toArray().map((v) => Math.round(v * 1000) / 1000),
+					areaExtras: found.area && canon(found.area.extras),
+					hollow: !!found.hollow,
+					house: found.house ? [!!found.house.geometry, canon(found.house.extras), at(found.house)] : null,
+					batches: report.batches,
+				};
+				return out;
+			};
+			const plain = read(false, 'build/export_markers.glb');
+			return { plain, flat: read(true, 'build/export_markers_flat.glb') };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"plain":{"markers":2,"spawn":[4,0,2],"area":[7,0,5],"areaScale":[2,1,3]`),
+			"the spawn and the area are markers where they stood: %s", result.value);
+		test::@check(result.value.contains(`"hollow":false`),
+			"a group whose children dropped out is dropped: %s", result.value);
+		test::@check(result.value.contains(`"house":[false,"{\"footprint\":\"8x7\",\"piece\":\"house\"}",[0,0,20]],"batches":1}`),
+			"the house is a group that keeps its extras and its walls batch: %s", result.value);
+		test::@check(result.value.contains(`"flat":{"markers":3,"spawn":[4,0,2],"area":[7,0,5],"areaScale":[2,1,3],"areaExtras":"{\"count\":3,\"kind\":\"roam\"}"`),
+			"flattened, the two markers are at their world placement: %s", result.value);
+		test::@check(result.value.ends_with(`"house":[false,"{\"footprint\":\"8x7\",\"piece\":\"house\"}",[0,0,20]],"batches":1}}`),
+			"and the house is a marker while its walls batch with the box: %s", result.value);
+	};
+}
+
+<*
+ Copies that disagree about their extras are separate instanced nodes, each
+ carrying its own, and every copy reads its own back.
+*>
+fn void different_extras_split_a_batch() @test
+{
+	String path = "build/export_split_extras.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const box = new three.BoxGeometry(1, 1, 1);
+			const tags = [{ walk: true }, { walk: true }, { walk: false }, { walk: false }, null, null];
+			tags.forEach((tag, i) => {
+				const m = new three.Mesh(box);
+				m.position.x = i * 2;
+				if (tag) m.extras = tag;
+				scene.add(m);
+			});
+			const report = scene.export('build/export_split_extras.glb');
+			const back = new three.Scene();
+			const root = three.load('build/export_split_extras.glb').instantiate();
+			back.add(root);
+			const read = [];
+			root.traverse((o) => { if (o.geometry) read.push([o.getWorldPosition().x, JSON.stringify(o.extras)]); });
+			read.sort((a, b) => a[0] - b[0]);
+			return { batches: report.batches, instances: report.instances, read: read.map((r) => r[1]) };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"batches":3,"instances":6`),
+			"three tags are three instanced nodes: %s", result.value);
+		test::@check(result.value.contains(
+			`"read":["{\"walk\":true}","{\"walk\":true}","{\"walk\":false}","{\"walk\":false}","{}","{}"]`),
+			"and every copy comes back with its own: %s", result.value);
+
+		String json = json_chunk(path);
+		test::@check(occurrences(json, `"extras":{"walk":true}`) == 1 && occurrences(json, `"extras":{"walk":false}`) == 1,
+			"each batch carries its tag once: %s", json);
+	};
+}
+
+<*
+ `root` writes one subtree and nothing else, at its world transform, and the
+ report counts only it. `camera: false` and `light: false` leave both out.
+*>
+fn void a_root_only_export() @test
+{
+	String path = "build/export_root.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const outer = new three.Group();
+			outer.position.set(0, 2, 0);
+			const a = new three.Group();
+			a.name = 'a';
+			a.position.set(5, 0, 0);
+			a.rotation.y = Math.PI / 4;
+			for (let i = 0; i < 3; i++) {
+				const m = new three.Mesh(new three.BoxGeometry(1, 1, 1));
+				m.position.z = i * 2;
+				a.add(m);
+			}
+			outer.add(a);
+			scene.add(outer);
+			for (let i = 0; i < 4; i++) scene.add(new three.Mesh(new three.SphereGeometry(0.5)));
+
+			const report = scene.export('build/export_root.glb', { root: a, camera: false, light: false });
+			const back = new three.Scene();
+			const root = three.load('build/export_root.glb').instantiate();
+			back.add(root);
+			const got = root.children[0];
+			const p = got.getWorldPosition().toArray().map((v) => Math.round(v * 1000) / 1000);
+			let spheres = 0;
+			root.traverse((o) => { if (o.geometry && o.geometry.name === 'sphere') spheres++; });
+			return {
+				instances: report.instances, nodes: report.nodes, name: got.name, at: p,
+				yaw: Math.round(got.rotation.y * 1000) / 1000, spheres,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"instances":3,"nodes":2,"name":"a","at":[5,2,0],"yaw":0.785,"spheres":0`),
+			"the subtree alone, where it stood in the world: %s", result.value);
+
+		String json = json_chunk(path);
+		test::@check(!json.contains(`"cameras"`) && !json.contains(`KHR_lights_punctual`),
+			"no camera and no light: %s", json);
+	};
+}
+
+<*
+ A file with a collider of each kind a level uses: a mesh collider with a
+ physics material on `wall`, a 1x2x1 box trigger on `crate`, a mesh collider on
+ an instanced `posts` of three copies, a convex hull on two instanced `rock`s,
+ and a sphere on the empty `zone`. Nothing moves, so placing it makes no solver
+ bodies.
+*>
+fn void write_bodies(String path)
+{
+	gltf::GltfBuilder out = gltf::builder();
+	defer out.free();
+
+	Vec3[8] corners = {
+		{ -0.5, -0.5, -0.5 }, { 0.5, -0.5, -0.5 }, { 0.5, 0.5, -0.5 }, { -0.5, 0.5, -0.5 },
+		{ -0.5, -0.5, 0.5 }, { 0.5, -0.5, 0.5 }, { 0.5, 0.5, 0.5 }, { -0.5, 0.5, 0.5 },
+	};
+	uint[36] faces = {
+		0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+		3, 6, 2, 3, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+	};
+	uint mesh = out.add_mesh("tile");
+	gltf::WriteAttribute[1] position = { { .name = "POSITION", .accessor = out.add_positions(corners[..]) } };
+	out.add_primitive(mesh, position[..], (int)out.add_indices(faces[..]));
+
+	gltf::Collider none = { .shape = -1, .node = -1, .material = -1, .collision_filter = -1, .mesh = -1, .base_node = -1 };
+	uint stone = out.add_physics_material({ .static_friction = 0.3, .dynamic_friction = 0.3, .restitution = 0.1 });
+
+	uint wall = out.add_node("wall", mesh: (int)mesh);
+	gltf::Collider over_wall = none;
+	over_wall.mesh = (int)mesh;
+	over_wall.material = (int)stone;
+	out.add_collider(wall, over_wall);
+
+	uint crate = out.add_node("crate", mesh: (int)mesh, translation: { 3, 0, 0 });
+	gltf::Collider boxed = none;
+	boxed.shape = (int)out.add_shape({ .type = BOX, .size = { 1, 2, 1 } });
+	boxed.is_trigger = true;
+	out.add_collider(crate, boxed);
+
+	uint posts = out.add_node("posts", mesh: (int)mesh, translation: { 0, 0, 4 });
+	Vec3[3] spots = { { 6, 0, 0 }, { 8, 0, 0 }, { 10, 0, 0 } };
+	gltf::WriteAttribute[1] placed = { { .name = "TRANSLATION", .accessor = out.add_vec3(spots[..]) } };
+	out.add_instancing(posts, placed[..]);
+	gltf::Collider over_posts = none;
+	over_posts.mesh = (int)mesh;
+	out.add_collider(posts, over_posts);
+
+	uint rock = out.add_node("rock", mesh: (int)mesh, translation: { -3, 0, 0 });
+	Vec3[2] stones = { { 0, 0, 0 }, { 0, 0, -3 } };
+	gltf::WriteAttribute[1] stoned = { { .name = "TRANSLATION", .accessor = out.add_vec3(stones[..]) } };
+	out.add_instancing(rock, stoned[..]);
+	gltf::Collider hull = none;
+	hull.mesh = (int)mesh;
+	hull.convex_hull = true;
+	out.add_collider(rock, hull);
+
+	uint zone = out.add_node("zone", translation: { 0, 0, 8 });
+	gltf::Collider ball = none;
+	ball.shape = (int)out.add_shape({ .type = SPHERE, .radius = 0.5 });
+	out.add_collider(zone, ball);
+
+	uint region = out.add_node("region");
+	foreach (child : (uint[]){ wall, crate, posts, rock, zone }) out.add_child(region, child);
+	out.add_root(region);
+	out.save_glb(path)!!;
+}
+
+<*
+ The file's colliders go back as the file stated them, with and without
+ `flatten`: each kind once, the trigger still a trigger, the material still on
+ the wall, one collider on the instanced node, and every copy colliding again on
+ the way back in. A proxy is not a second collider.
+*>
+fn void file_colliders_round_trip() @test
+{
+	String source = "build/export_bodies_source.glb";
+	write_bodies(source);
+	defer (void)file::delete(source);
+	defer (void)file::delete("build/export_bodies.glb");
+	defer (void)file::delete("build/export_bodies_flat.glb");
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = three.load('build/export_bodies_source.glb');
+			scene.add(asset.instantiate(undefined, { physics: true }));
+			const describe = (cs) => cs.map((c) => [c.shape, c.trigger, c.material ? Math.round(c.friction * 100) / 100 : null])
+				.map((c) => c.join(':')).sort().join(' ');
+			const probe = () => [[6, 4], [8, 4], [10, 4], [0, 0], [-3, 0], [20, 0]]
+				.map(([x, z]) => three.query.raycastAll([x, 10, z], [0, -1, 0], { maxDistance: 20 }).length);
+			const read = (flatten, path) => {
+				scene.activate();
+				const r = scene.export(path, { flatten, camera: false, light: false });
+				const back = new three.Scene();
+				const a = three.load(path);
+				back.add(a.instantiate(undefined, { physics: true }));
+				return { instances: r.instances, colliders: r.colliders, file: describe(a.colliders), hits: probe().join(',') };
+			};
+			const before = { file: describe(asset.colliders), hits: probe().join(',') };
+			const plain = read(false, 'build/export_bodies.glb');
+			return { before, plain, flat: read(true, 'build/export_bodies_flat.glb') };
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		String kinds = `"file":"box:true: hull:false: mesh:false: mesh:false:0.3 sphere:false:","hits":"1,1,1,1,1,0"`;
+		test::@check(result.value.contains(string::tformat(`"before":{%s}`, kinds)),
+			"the source reads as five colliders, every copy hit: %s", result.value);
+		// Seven copies draw: the rocks' hull proxies are not two more.
+		test::@check(result.value.contains(string::tformat(`"plain":{"instances":7,"colliders":5,%s}`, kinds)),
+			"exported as itself, the same five come back: %s", result.value);
+		test::@check(result.value.contains(string::tformat(`"flat":{"instances":7,"colliders":5,%s}`, kinds)),
+			"and flattened: %s", result.value);
+	};
+
+	String json = json_chunk("build/export_bodies_flat.glb");
+	test::@check(occurrences(json, `"collider":`) == 4 && occurrences(json, `"trigger":`) == 1,
+		"four colliders and a trigger in the file: %s", json);
+	test::@check(occurrences(json, `"staticFriction"`) == 1, "and one physics material: %s", json);
+}
+
+<*
+ A terrain the solver holds as a heightfield goes out as a mesh collider over its
+ own mesh — no shape, no hull — and a ray finds the same ground in the reload.
+*>
+fn void a_terrain_collider_round_trips_its_heights() @test
+{
+	String path = "build/export_terrain_collider.glb";
+	defer (void)file::delete(path);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const ground = new three.Mesh(new three.TerrainGeometry({
+				width: 20, segments: 16, heights: (x, z) => Math.sin(x * 0.4) * 2 + z * 0.1,
+			}));
+			ground.name = 'ground';
+			scene.add(ground);
+			scene.physics.add(ground, { shape: 'heightfield', mass: 0 });
+			const points = [[0.3, 0.2], [3.7, -5.1], [-8, 7.5], [9, 9], [-9.9, -9.9]];
+			const probe = () => points.map(([x, z]) => {
+				const hits = three.query.raycastAll([x, 50, z], [0, -1, 0], { maxDistance: 100 });
+				return hits.length ? Math.round(hits[0].point.y * 1e4) / 1e4 : null;
+			});
+			const before = probe();
+			const report = scene.export('build/export_terrain_collider.glb', { camera: false, light: false });
+			const back = new three.Scene();
+			const asset = three.load('build/export_terrain_collider.glb');
+			back.add(asset.instantiate(undefined, { physics: true }));
+			const after = probe();
+			return {
+				colliders: report.colliders, shapes: asset.colliders.map((c) => c.shape).join(','),
+				same: JSON.stringify(before) === JSON.stringify(after), before, after,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value.contains(`"colliders":1,"shapes":"mesh","same":true`),
+			"one mesh collider, and the reload's ground is where it was: %s", result.value);
+		test::@check(!result.value.contains("null"), "every probe found ground: %s", result.value);
+	};
+
+	String json = json_chunk(path);
+	test::@check(json.contains(`"collider":{"geometry":{"mesh":0},`),
+		"a mesh collider over the terrain's own mesh, with no shape and no hull: %s", json);
+	test::@check(!json.contains("KHR_implicit_shapes"), "and no implicit shape: %s", json);
+}
+
+<*
+ Every image in an exported `.glb`, as bytes: the file's own, copied.
+*>
+fn List{char[]} glb_images(String path)
+{
+	List{char[]} found;
+	found.init(mem, 4);
+	gltf::GltfStream? opened = gltf::open(path, mem);
+	if (catch opened) return found;
+	gltf::GltfStream stream = opened;
+	defer stream.close();
+	if (catch stream.load_all_buffers()) return found;
+	if (catch stream.load_all_images()) return found;
+	for (sz i = 0; i < stream.gltf.images.len(); i++)
+	{
+		char[]? bytes = stream.get_image_data((uint)i);
+		if (try bytes) found.push(((String)bytes).copy(mem));
+	}
+	return found;
+}
+
+fn void free_images(List{char[]}* images)
+{
+	foreach (bytes : *images) free(bytes);
+	images.free();
+}
+
+// A KTX2's DFD transfer function: 1 linear, 2 sRGB.
+fn uint ktx2_transfer(char[] ktx2)
+{
+	uint at = (uint)ktx2[48] | (uint)ktx2[49] << 8 | (uint)ktx2[50] << 16 | (uint)ktx2[51] << 24;
+	return ktx2[at + 14];
+}
+
+<*
+ A mask written as UASTC stays a mask: linear in the file, so it reads back as
+ data, and every value within a few steps of what `Field.mask` packed.
+*>
+fn void a_uastc_mask_keeps_its_values() @test
+{
+	String path = "build/export_uastc_mask.glb";
+	String raw = "build/export_uastc_mask.raw";
+	defer (void)file::delete(path);
+	defer (void)file::delete(raw);
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const r = new three.Field({ width: 10, segments: 63 }).fill((x, z) => 0.5 + 0.5 * Math.sin(x) * Math.cos(z * 1.3));
+			const g = new three.Field({ width: 10, segments: 63 }).fill((x) => (x + 5) / 10);
+			const mask = three.Field.mask({ r, g });
+			const grass = new three.DataTexture(new Uint8Array(4 * 4 * 4).fill(90), 4, 4);
+			const mat = new three.LayeredMaterial({
+				map: grass, mask,
+				layers: [{ name: 'rock', tint: [1, 0, 0], mask: 'r' }, { name: 'sand', tint: [0, 1, 0], mask: 'g' }],
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+			const report = scene.export('build/export_uastc_mask.glb', { textures: 'uastc' });
+			const q = (v) => (v <= 0 ? 0 : v >= 1 ? 255 : Math.round(v * 255));
+			const bytes = new Uint8Array(64 * 64 * 4);
+			for (let i = 0; i < 64 * 64; i++) {
+				bytes[i * 4] = q(r.values[i]);
+				bytes[i * 4 + 1] = q(g.values[i]);
+			}
+			three.writeBytes('build/export_uastc_mask.raw', bytes);
+			return [report.images, report.compressedImages, report.layers];
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[2,2,2]", "two images, both UASTC, under two layers: %s", result.value);
+	};
+
+	char[] expected = file::load(mem, raw)!!;
+	defer free(expected);
+	List{char[]} images = glb_images(path);
+	defer free_images(&images);
+
+	uint masks = 0;
+	foreach (bytes : images)
+	{
+		test::@check(three::is_basis_ktx2(bytes), "every image is a Basis KTX2");
+		image::Image decoded = three::decode_ktx2(bytes)!!;
+		defer decoded.free();
+		if (decoded.width != 64) continue;
+		masks++;
+		test::@check(ktx2_transfer(bytes) == 1, "the mask's KTX2 says linear, got transfer %d", ktx2_transfer(bytes));
+		char[] pixels = decoded.pixels;
+		int worst = 0;
+		long total = 0;
+		for (usz i = 0; i < 64 * 64; i++)
+		{
+			for (usz c = 0; c < 2; c++)
+			{
+				int gap = math::abs((int)pixels[i * 4 + c] - (int)expected[i * 4 + c]);
+				if (gap > worst) worst = gap;
+				total += gap;
+			}
+		}
+		double mean = (double)total / (64.0 * 64.0 * 2.0);
+		io::printfn("uastc mask: worst %d, mean %.3f", worst, mean);
+		// UASTC is lossy at the block level: 9 and 2.2 measured on this mask.
+		test::@check(worst <= 12 && mean <= 3.0, "the mask moved by up to %d steps, %.3f on average", worst, mean);
+	}
+	test::@check(masks == 1, "one 64x64 mask in the file, found %d", masks);
+}
+
+<*
+ A `LayeredMaterial` a script built from files writes those files: a UASTC KTX2,
+ a BC7 KTX2 the device holds as blocks and cannot read back, and a PNG, each
+ byte for byte. Only the mask a `Field` made is encoded, and nothing is skipped.
+*>
+fn void a_script_stacks_file_textures_are_copied() @test
+{
+	String path = "build/export_copied_layers.glb";
+	String made = "build/export_copied_checker_uastc.ktx2";
+	defer (void)file::delete(path);
+	defer (void)file::delete(made);
+
+	char[] checker_png = file::load(mem, "test/fixtures/checker.png")!!;
+	defer free(checker_png);
+	image::Image checker = png::load_bytes(checker_png)!!;
+	defer checker.free();
+	char[] uastc = three::encode_ktx2_uastc(&checker)!!;
+	defer free(uastc);
+	file::save(made, uastc)!!;
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const uastc = three.texture('build/export_copied_checker_uastc.ktx2');
+			const bc7 = three.texture('test/fixtures/oblong_bc7.ktx2');
+			const png = three.texture('test/fixtures/oblong.png');
+			const mask = three.Field.mask({ r: new three.Field({ segments: 15 }).fill((x) => (x > 0 ? 1 : 0)) });
+			const mat = new three.LayeredMaterial({
+				map: png, mask,
+				layers: [{ name: 'a', map: uastc, mask: 'r' }, { name: 'b', map: bc7, mask: 'g' }],
+			});
+			scene.add(new three.Mesh(new three.PlaneGeometry(2, 2), mat));
+			const report = scene.export('build/export_copied_layers.glb');
+			const back = three.load('build/export_copied_layers.glb');
+			const stack = back.meshAt(0).layers;
+			return {
+				skipped: report.skipped, images: report.images, compressed: report.compressedImages,
+				maps: stack.layers.map((l) => l.map !== null), mask: stack.mask !== null,
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"skipped":0,"images":4,"compressed":0,"maps":[true,true],"mask":true}`,
+			"four images, nothing skipped, and the reloaded stack has every map: %s", result.value);
+	};
+
+	char[] bc7 = file::load(mem, "test/fixtures/oblong_bc7.ktx2")!!;
+	defer free(bc7);
+	char[] oblong = file::load(mem, "test/fixtures/oblong.png")!!;
+	defer free(oblong);
+	List{char[]} images = glb_images(path);
+	defer free_images(&images);
+
+	uint copied = 0;
+	uint encoded = 0;
+	foreach (bytes : images)
+	{
+		if ((String)bytes == (String)uastc || (String)bytes == (String)bc7 || (String)bytes == (String)oblong)
+		{
+			copied++;
+			continue;
+		}
+		encoded++;
+		test::@check(bytes.len > 8 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G', "the mask is a PNG");
+	}
+	test::@check(copied == 3, "the three files went in byte for byte, %d did", copied);
+	test::@check(encoded == 1, "and the mask was encoded, %d were", encoded);
 }

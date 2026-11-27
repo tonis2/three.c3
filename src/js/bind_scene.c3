@@ -105,6 +105,7 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "setStatic", &js_set_static, self)!;
 	self.js.@method(node, "setCollides", &js_set_collides, self)!;
 	self.js.@method(node, "setCollisionOnly", &js_set_collision_only, self)!;
+	self.js.@method(node, "setFileBody", &js_set_file_body, self)!;
 	self.js.@method(node, "setBlocks", &js_set_blocks, self)!;
 	self.js.@method(node, "setName", &js_set_name, self)!;
 	self.js.@method(node, "setColor", &js_set_color, self)!;
@@ -982,6 +983,9 @@ fn void js_set_blocks(JsRuntime* self, NodeRef ref, bool on) => ref.scene.set_bl
  and what nothing else here can be. `Node.collision_only` has the argument.
 *>
 fn void js_set_collision_only(JsRuntime* self, NodeRef ref, bool on) => ref.scene.set_collision_only(ref.id, on);
+
+// `node.setFileBody(asset, body)` — which of a file's colliders this node carries.
+fn void js_set_file_body(JsRuntime* self, NodeRef ref, AssetId asset, int body) => ref.scene.set_file_body(ref.id, asset, body);
 
 <*
  `node.setStatic(on)` — put this node in the cached half of the shadow map, and

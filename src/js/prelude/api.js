@@ -2450,6 +2450,32 @@ export const three = {
 		return H.assetWriteText(path, String(text));
 	},
 
+	// Bytes into a file and back, with writeText's path rules: relative to
+	// the first script's folder, the folder made on the way. writeBytes takes
+	// any typed array or ArrayBuffer and answers the path it wrote to;
+	// readBytes answers a Uint8Array the caller owns, or null for a file that
+	// is not there. Both stop at 64 MB.
+	writeBytes(path, bytes) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.writeBytes(path, bytes) wants a path to a file');
+		}
+		if (!(ArrayBuffer.isView(bytes) || bytes instanceof ArrayBuffer)) {
+			throw new TypeError('three.writeBytes(path, bytes) wants a typed array or an ArrayBuffer');
+		}
+		return H.assetWriteBytes(path, bytes);
+	},
+	readBytes(path) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.readBytes(path) wants a path to a file');
+		}
+		const size = H.assetSize(path);
+		if (size < 0) return null;
+		const out = new Uint8Array(size);
+		if (size === 0) return out;
+		const moved = H.assetReadInto(path, out);
+		return moved === size ? out : out.subarray(0, moved);
+	},
+
 	// The same file, stringified. What three.save.write is to
 	// three.save.writeText.
 	//

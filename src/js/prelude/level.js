@@ -58,6 +58,12 @@ export class Level {
 		// One Asset per path a row has named, loaded once and shared by every
 		// row that names it again — `kit` most often, `asset` for the rest.
 		this._assets = new Map();
+		// Each row's piece's own extras, by id — what `toJSON` diffs against, so a
+		// row's file keeps only what the level says on top of the kit.
+		this._pieceExtras = new Map();
+		// Whether pieces are placed with the kit's colliders — `three.level.load`'s
+		// `physics`. An `add()` that names its own wins.
+		this.physics = false;
 	}
 
 	_assetFor(path) {
@@ -120,9 +126,29 @@ export class Level {
 				+ pieceList(asset.nodes));
 		}
 
+		if (row.extras !== undefined && (row.extras === null || typeof row.extras !== 'object' || Array.isArray(row.extras))) {
+			throw new TypeError(`three.level: row ${JSON.stringify(id)}'s extras must be an object`);
+		}
+
 		// `nth` picks among same-named nodes — an imported scene repeats names.
-		const object = asset.node(piece, row.nth === undefined ? undefined : { nth: row.nth });
+		// `physics` places the piece with the colliders the kit gave it, which is
+		// what a level exported again with `scene.export` keeps.
+		const physics = options?.physics ?? this.physics;
+		const placing = {};
+		if (row.nth !== undefined) placing.nth = row.nth;
+		if (physics) placing.physics = true;
+		const object = asset.node(piece, placing);
 		object.name = id;
+		// The row's extras over the piece's own: a row names what this placement
+		// says on top of the kit, and `null` takes a key of the piece's away.
+		const own = { ...(object.extras ?? {}) };
+		this._pieceExtras.set(id, own);
+		const merged = { ...own };
+		for (const [key, value] of Object.entries(row.extras ?? {})) {
+			if (value === null) delete merged[key];
+			else merged[key] = value;
+		}
+		object.extras = merged;
 		// `scale` has no whole-vector setter — only `position` and `rotation`
 		// do — so every one of the three is set through `.set(...)` here rather
 		// than two of them by assignment and one not.
@@ -160,6 +186,7 @@ export class Level {
 		}
 		if (object.parent) object.parent.remove(object);
 		this.objects.delete(id);
+		this._pieceExtras.delete(id);
 		const at = this.rows.findIndex(r => r.id === id);
 		if (at >= 0) this.rows.splice(at, 1);
 	}
@@ -182,12 +209,27 @@ export class Level {
 	// saved where it is now — by mutating the row objects themselves rather
 	// than rebuilding them, which is what keeps a field an editor added, e.g.
 	// `"locked": true`, through the round trip.
+	//
+	// `extras` is written as what differs from the piece's own, so a kit that
+	// changes a tag reaches every row that did not override it; a key the
+	// object dropped is written as null. A row with nothing to add has none.
 	toJSON() {
 		for (const row of this.rows) {
 			const object = this.objects.get(row.id);
 			row.position = object.position.toArray();
 			row.rotation = object.rotation.toArray();
 			row.scale = object.scale.toArray();
+			const own = this._pieceExtras.get(row.id) ?? {};
+			const now = object.extras ?? {};
+			const said = {};
+			for (const [key, value] of Object.entries(now)) {
+				if (JSON.stringify(value) !== JSON.stringify(own[key])) said[key] = value;
+			}
+			for (const key of Object.keys(own)) {
+				if (!(key in now)) said[key] = null;
+			}
+			if (Object.keys(said).length) row.extras = said;
+			else delete row.extras;
 		}
 		return { kit: this.kit, rows: this.rows };
 	}
@@ -204,6 +246,10 @@ export class Level {
 // grew taller lifts the storey snapped on top of it; a freehand row is left
 // exactly where the file says either way.
 //
+// `options.physics` places every piece with the colliders its kit gave it
+// (`asset.node(piece, { physics: true })`), so the level collides and a
+// `scene.export` of it writes them back. Rows added later follow it.
+//
 // Null for a file that is not there, the same answer `three.readJSON` gives
 // — a cold editor start is one `??` rather than a guard.
 export function load(path, parent, options = {}) {
@@ -219,6 +265,7 @@ export function load(path, parent, options = {}) {
 	const refit = !!(options?.refit);
 	const level = new Level(data.kit);
 	level.parent = parent;
+	level.physics = !!(options?.physics);
 	for (const row of data.rows ?? []) level.add(row, { refit });
 	return level;
 }

@@ -29,6 +29,10 @@ import std::core::test;
 import std::math;
 import std::math::vector;
 import std::collections::list;
+import std::io::file;
+import image;
+import image::png;
+import gltf;
 
 alias Vec3 = float[<3>];
 
@@ -332,4 +336,179 @@ fn void the_skirt_does_not_overlap_the_fields_uv() @test
 		"%d wall columns have a different uv at the foot than at the top, so the strip covers "
 		"area in uv space and a bake would draw it over the ground",
 		mismatched);
+}
+
+// ============================================================================
+// Fields on disk and on their region, and painted ground
+// ============================================================================
+
+macro @with_js(; @body(three::JsRuntime* run))
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	@body(&runtime);
+}
+
+<*
+ `field.save` and `three.Field.load` round trip a field — its grid, its size, its
+ centre, and every sample to float32 precision. A missing file is null; a file
+ that is not a field says so.
+*>
+fn void a_field_saves_and_loads() @test
+{
+	String path = "build/terrain_field.bin";
+	defer (void)file::delete(path);
+	defer (void)file::delete("build/terrain_not_a_field.bin");
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const field = new three.Field({ width: 64, depth: 32, segments: 32, center: [32, 16] });
+			field.fill((x, z) => x * 0.1 + Math.sin(z));
+			field.circle(40, 20, 3, 9, 1);
+			field.save('build/terrain_field.bin');
+			const back = three.Field.load('build/terrain_field.bin');
+			let worst = 0;
+			for (let i = 0; i < field.values.length; i++) worst = Math.max(worst, Math.abs(back.values[i] - field.values[i]));
+			three.writeBytes('build/terrain_not_a_field.bin', new Uint8Array(40));
+			let refused = '';
+			try { three.Field.load('build/terrain_not_a_field.bin'); } catch (e) { refused = e.message; }
+			return {
+				shape: [back.width, back.depth, back.segments, ...back.center],
+				close: worst < 1e-5,
+				missing: three.Field.load('build/no_such_field.bin'),
+				bytes: three.readBytes('build/terrain_field.bin').length,
+				refused: refused.includes('not a field file'),
+			};
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `{"shape":[64,32,32,32,16],"close":true,"missing":null,"bytes":4384,"refused":true}`,
+			"the field comes back as it went: %s", result.value);
+	};
+}
+
+<*
+ A field centred on its region takes world coordinates for every stamp, and a
+ terrain built from it lands there with its mesh at the origin: the query, the
+ ground a ray finds and the field agree at a point far from the origin.
+*>
+fn void a_centred_field_lands_on_its_region() @test
+{
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const field = new three.Field({ width: 64, segments: 32, center: [96, 32] });
+			field.fill((x, z) => (x - 64) * 0.05);
+			field.flatten({ x: 100, z: 40, width: 8, depth: 8 }, 7);
+			const scene = new three.Scene();
+			const terrain = new three.TerrainGeometry({ width: 64, segments: 32, heights: field });
+			scene.add(new three.Mesh(terrain));
+			const hit = three.query.raycastAll([100, 50, 40], [0, -1, 0], { maxDistance: 100 })[0];
+			const r = (v) => Math.round(v * 1000) / 1000;
+			return [field.xAt(0), field.zAt(32), r(field.valueAt(100, 40)), r(terrain.heightAt(100, 40)), r(hit.point.y),
+				r(terrain.heightAt(70, 10)), r(field.valueAt(70, 10))];
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == "[64,64,7,7,7,0.3,0.3]",
+			"the field spans its region and the ground is where the field says: %s", result.value);
+	};
+}
+
+// The share of a PNG pixel's light that is red, and how far its red and green differ.
+fn float[<2>] redness(image::Image* shot, uint x, uint y)
+{
+	char[] px = shot.pixels;
+	usz i = ((usz)y * shot.width + x) * 4;
+	float r = px[i];
+	float g = px[i + 1];
+	float b = px[i + 2];
+	return { r / (r + g + b + 1), math::abs(r - g) / (r + 1) };
+}
+
+// One shot's two halves: [left red share, right red share].
+fn float[<2>] halves(String path)
+{
+	char[] bytes = file::load_temp(path)!!;
+	image::Image shot = png::load_bytes(bytes)!!;
+	defer shot.free();
+	char[] rgba = shot.to_rgba();
+	defer free(rgba);
+	image::Image wide = { .width = shot.width, .height = shot.height, .bit_depth = 8, .format = image::PixelFormat.RGBA, .pixels = rgba };
+	return { redness(&wide, wide.width / 4, wide.height / 2).x, redness(&wide, wide.width * 3 / 4, wide.height / 2).x };
+}
+
+<*
+ Painted ground: a terrain whose COLOR_0 is paint, read by a layer with a
+ vertex-colour mask. Red where the paint is and plain where it is not, before an
+ export and after it; and the file carries the paint as COLOR_0, value for value.
+*>
+fn void a_painted_terrain_keeps_its_paint_through_an_export() @test
+{
+	String path = "build/terrain_painted.glb";
+	defer (void)file::delete(path);
+	defer (void)file::delete("build/terrain_painted_before.png");
+	defer (void)file::delete("build/terrain_painted_after.png");
+
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const paint = new three.Field({ width: 4, segments: 8 }).fill((x) => (x < 0 ? 1 : 0));
+			const layered = () => new three.LayeredMaterial({
+				layers: [{ name: 'paint', tint: [1, 0, 0], maskSource: 'vertexColor', mask: 'r' }],
+			});
+			const shoot = (file) => {
+				three.camera.lookAt(0, 0, 0);
+				three.camera.orbit(0, 89, 4);
+				three.screenshot(file);
+			};
+			const scene = new three.Scene();
+			scene.background = 0x000000;
+			const ground = new three.Mesh(new three.TerrainGeometry({ width: 4, segments: 8, colors: { r: paint } }), layered());
+			ground.name = 'ground';
+			scene.add(ground);
+			shoot('build/terrain_painted_before.png');
+			scene.export('build/terrain_painted.glb', { camera: false, light: false });
+
+			const back = new three.Scene();
+			back.background = 0x000000;
+			const asset = three.load('build/terrain_painted.glb');
+			back.add(asset.instantiate(undefined, { materials: true }));
+			shoot('build/terrain_painted_after.png');
+			const stack = asset.meshAt(0).layers;
+			return [stack.layers.length, stack.layers[0].maskSource, stack.layers[0].mask];
+		`);
+		defer result.free();
+		test::@check(result.ok, "the script succeeded: %s", result.error);
+		test::@check(result.value == `[1,"vertexColor","r"]`, "the stack still reads the vertex colour: %s", result.value);
+	};
+
+	foreach (shot : (String[]){ "build/terrain_painted_before.png", "build/terrain_painted_after.png" })
+	{
+		float[<2>] red = halves(shot);
+		float painted = math::max(red.x, red.y);
+		float plain   = math::min(red.x, red.y);
+		test::@check(painted > 0.6f && plain < 0.45f, "%s: the painted half is %.2f red and the plain one %.2f", shot, painted, plain);
+	}
+
+	List{float[<4>]} colours;
+	colours.init(mem, 81);
+	defer colours.free();
+	gltf::GltfStream stream = gltf::open(path, mem)!!;
+	defer stream.close();
+	stream.load_all_buffers()!!;
+	foreach (mesh : stream.gltf.meshes)
+	{
+		if (mesh.primitives.len() > 0) three::read_colors(&stream, mesh.primitives[0], &colours);
+	}
+	test::@check(colours.len() == 81, "every vertex has a colour: %d", colours.len());
+	foreach (i, c : colours)
+	{
+		float want = (i % 9) < 4 ? 1.0f : 0.0f;
+		test::@check(math::abs(c.x - want) < 1e-6f && c.y == 0 && c.z == 0, "vertex %d is %s", i, c);
+	}
 }

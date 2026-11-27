@@ -566,6 +566,36 @@ export class ExtrudeGeometry extends Geometry {
 // script cannot place something on ground that disagrees with what is drawn
 // — which is exactly what a hand-written `ground(x, z)` beside a hand-built
 // tile grid could do at any moment, and did.
+// A terrain's `colors` as the RGBA bytes the host takes: four per sample, in
+// the heights' order. `{ r, g, b, a }` of Fields on the terrain's own grid, a
+// left-out channel reading 0, or the bytes themselves. Empty for none.
+function terrainColors(colors, side, where) {
+	if (colors === undefined || colors === null) return new Uint8Array(0);
+	const wanted = side * side;
+	if (colors instanceof Uint8Array) {
+		if (colors.length !== wanted * 4) {
+			throw new RangeError(`${where}: colors as bytes are four per sample, ${wanted * 4}, got ${colors.length}`);
+		}
+		return colors;
+	}
+	if (typeof colors !== 'object') {
+		throw new TypeError(`${where}: colors is { r, g, b, a } of three.Fields, or a Uint8Array of RGBA bytes`);
+	}
+	const bytes = new Uint8Array(wanted * 4);
+	['r', 'g', 'b', 'a'].forEach((key, c) => {
+		const field = colors[key];
+		if (field === undefined || field === null) return;
+		if (!field.values || field.values.length !== wanted) {
+			throw new RangeError(`${where}: colors.${key} is not a Field on the terrain's grid of ${side}x${side}`);
+		}
+		for (let i = 0; i < wanted; i++) {
+			const v = field.values[i];
+			bytes[i * 4 + c] = v <= 0 ? 0 : (v >= 1 ? 255 : Math.round(v * 255));
+		}
+	});
+	return bytes;
+}
+
 export class TerrainGeometry extends Geometry {
 	constructor(options = {}) {
 		const where = 'new three.TerrainGeometry({ width, depth, segments, heights })';
@@ -585,6 +615,17 @@ export class TerrainGeometry extends Geometry {
 		const wanted = side * side;
 		const heights = new Float64Array(wanted);
 		const source = options.heights;
+		// Where the middle of the ground is: the `center` given, or the Field's own,
+		// so a region's terrain lands on its region with the mesh at the origin.
+		const fromField = source && typeof source.valueAt === 'function' && Array.isArray(source.center);
+		const center = options.center ?? (fromField ? source.center : [0, 0]);
+		if (!Array.isArray(center) || center.length !== 2 || !center.every((c) => Number.isFinite(+c))) {
+			throw new TypeError(`${where}: center is [x, z]`);
+		}
+		const [cx, cz] = [+center[0], +center[1]];
+		if (fromField && (source.center[0] !== cx || source.center[1] !== cz)) {
+			throw new RangeError(`${where}: the Field is centred on [${source.center}] and the terrain on [${center}] — give one`);
+		}
 
 		if (typeof source === 'function') {
 			// **Sampled here rather than passed across**, because a callback that
@@ -598,9 +639,9 @@ export class TerrainGeometry extends Geometry {
 			// uses is one that can be reused for the mask, the scatter and the
 			// carve without a change of frame.
 			for (let j = 0; j < side; j++) {
-				const z = -depth / 2 + (j / segments) * depth;
+				const z = cz - depth / 2 + (j / segments) * depth;
 				for (let i = 0; i < side; i++) {
-					const x = -width / 2 + (i / segments) * width;
+					const x = cx - width / 2 + (i / segments) * width;
 					const y = +source(x, z);
 					if (!Number.isFinite(y)) {
 						throw new RangeError(
@@ -644,11 +685,12 @@ export class TerrainGeometry extends Geometry {
 			throw new TypeError(`${where}: heights must be an array of numbers or a function (x, z) => y`);
 		}
 
+		const colors = terrainColors(options.colors, side, where);
 		super(
 			'TerrainGeometry',
 			options.name ?? '',
-			{ width, depth, segments, skirt },
-			H.terrain(width, depth, segments, skirt, heights)
+			{ width, depth, segments, skirt, center: [cx, cz] },
+			H.terrain(width, depth, segments, skirt, heights, cx, cz, colors)
 		);
 	}
 

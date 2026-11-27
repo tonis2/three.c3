@@ -22,6 +22,14 @@
 
 import { DataTexture } from './texture.js';
 
+const H = globalThis.__three;
+
+// The `field.save` file: 'FLD1', then version, segments, width, depth and the
+// centre, then the samples as float32, little-endian, row-major in z then x.
+const FILE_MAGIC = 0x31444c46;
+const FILE_VERSION = 1;
+const FILE_HEADER = 28;
+
 // Squared distance from (px, pz) to the segment (ax, az)-(bx, bz), and how
 // far along it the closest point was. The `t` is returned because a stroke
 // with a feather needs the distance and a taper needs the position, and
@@ -93,6 +101,10 @@ export class Field {
 	// `segments` cells a side, so `(segments + 1)^2` samples — the same grid a
 	// TerrainGeometry of the same segment count uses, which is what lets a
 	// field be handed straight to one.
+	//
+	// `center: [x, z]` is where the middle of the field is in the world, so a
+	// region's field sits on its region and every stamp takes world
+	// coordinates. A TerrainGeometry built from it lands there too.
 	constructor(options = {}) {
 		const where = 'new three.Field({ width, depth, segments })';
 		if (options === null || typeof options !== 'object') {
@@ -109,6 +121,11 @@ export class Field {
 		}
 		this.segments = segments;
 		this.side = segments + 1;
+		const center = options.center ?? [0, 0];
+		if (!Array.isArray(center) || center.length !== 2) {
+			throw new TypeError(`${where}: center is [x, z]`);
+		}
+		this.center = [finite(center[0], where, 'center x'), finite(center[1], where, 'center z')];
 		this.values = new Float64Array(this.side * this.side);
 		if (options.value !== undefined) this.values.fill(finite(options.value, where, 'value'));
 	}
@@ -116,8 +133,59 @@ export class Field {
 	// World x, z of a sample. Public because a caller writing its own loop
 	// over `values` needs the same mapping the stamps use, and re-deriving it
 	// is how the two come to disagree.
-	xAt(i) { return -this.width / 2 + (i / this.segments) * this.width; }
-	zAt(j) { return -this.depth / 2 + (j / this.segments) * this.depth; }
+	xAt(i) { return this.center[0] - this.width / 2 + (i / this.segments) * this.width; }
+	zAt(j) { return this.center[1] - this.depth / 2 + (j / this.segments) * this.depth; }
+
+	// ---------------------------------------------------------------
+	// On disk
+	// ---------------------------------------------------------------
+
+	// The field as a small binary file — a header and the samples as float32 —
+	// through `three.writeBytes`'s door. Answers the path written. Float32 is
+	// what the terrain is built from, so nothing the ground shows is lost.
+	save(path) {
+		if (typeof path !== 'string' || path.length === 0) throw new TypeError('field.save(path) wants a path to a file');
+		const bytes = new Uint8Array(FILE_HEADER + this.values.length * 4);
+		const view = new DataView(bytes.buffer);
+		view.setUint32(0, FILE_MAGIC, true);
+		view.setUint32(4, FILE_VERSION, true);
+		view.setUint32(8, this.segments, true);
+		view.setFloat32(12, this.width, true);
+		view.setFloat32(16, this.depth, true);
+		view.setFloat32(20, this.center[0], true);
+		view.setFloat32(24, this.center[1], true);
+		for (let i = 0; i < this.values.length; i++) view.setFloat32(FILE_HEADER + i * 4, this.values[i], true);
+		return H.assetWriteBytes(path, bytes);
+	}
+
+	// A field `save` wrote, or null for a file that is not there. A file that
+	// is there and is not one throws, saying which.
+	static load(path) {
+		const where = 'three.Field.load(path)';
+		if (typeof path !== 'string' || path.length === 0) throw new TypeError(`${where} wants a path to a file`);
+		const size = H.assetSize(path);
+		if (size < 0) return null;
+		const bytes = new Uint8Array(size);
+		if (size > 0) H.assetReadInto(path, bytes);
+		const view = new DataView(bytes.buffer);
+		if (size < FILE_HEADER || view.getUint32(0, true) !== FILE_MAGIC) {
+			throw new Error(`${where}: ${path} is not a field file`);
+		}
+		const version = view.getUint32(4, true);
+		if (version !== FILE_VERSION) throw new Error(`${where}: ${path} is version ${version}, and this reads ${FILE_VERSION}`);
+		const segments = view.getUint32(8, true);
+		const field = new Field({
+			segments,
+			width: view.getFloat32(12, true),
+			depth: view.getFloat32(16, true),
+			center: [view.getFloat32(20, true), view.getFloat32(24, true)],
+		});
+		if (size !== FILE_HEADER + field.values.length * 4) {
+			throw new Error(`${where}: ${path} is ${size} bytes, and a ${segments}-segment field is ${FILE_HEADER + field.values.length * 4}`);
+		}
+		for (let i = 0; i < field.values.length; i++) field.values[i] = view.getFloat32(FILE_HEADER + i * 4, true);
+		return field;
+	}
 
 	// ---------------------------------------------------------------
 	// Whole-field
@@ -327,8 +395,8 @@ export class Field {
 	// which is what the village needed when it placed buildings during the
 	// same pass that laid the tiles.
 	valueAt(x, z) {
-		const gx = ((+x + this.width / 2) / this.width) * this.segments;
-		const gz = ((+z + this.depth / 2) / this.depth) * this.segments;
+		const gx = ((+x - this.center[0] + this.width / 2) / this.width) * this.segments;
+		const gz = ((+z - this.center[1] + this.depth / 2) / this.depth) * this.segments;
 		const i = Math.floor(gx);
 		const j = Math.floor(gz);
 		const fx = gx - i;

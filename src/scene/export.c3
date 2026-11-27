@@ -230,6 +230,25 @@
 
  So: leave it off for a file a person will open, turn it on for a file that is a
  payload.
+
+ ## A world written back: extras, markers and colliders
+
+ A level edited here goes back out as the region file the game reads, so what
+ the game reads has to survive. Three things did not.
+
+ **Extras.** A script's `object.extras` lives on the JavaScript object, so the
+ prelude hands them over (`ExportExtras`) and each goes on its node verbatim.
+ They join the batch key (`ExportTag`): an instanced node holds one extras
+ object, so copies that disagree are separate nodes.
+
+ **Markers.** A childless empty is a place — a spawn, an area, a placed piece —
+ and is written whether or not it has extras (`is_marker`). Flattened, a group
+ with extras leaves a marker at its world placement while its meshes batch.
+
+ **Colliders.** A level with nothing moving has no solver bodies, so the file's
+ own colliders are recorded on the nodes placed from them (`Node.file_body`) and
+ written as the file stated them (`write_file_collider`). Collider identity is in
+ the batch key too, and an instanced node carries one.
 *>
 module three;
 
@@ -237,6 +256,7 @@ import std::io::file;
 import std::math;
 import std::math::vector;
 import std::collections::list;
+import std::collections::map;
 import gltf;
 import image;
 import image::png;
@@ -265,12 +285,20 @@ excuse EXPORT_HAS_NOTHING_TO_WRITE, EXPORT_PATH_IS_EMPTY;
  which every glTF toolchain implements, at a fifth of BC7's size — and visibly
  lossy, and slow to load back here, since there is no GPU-side transcode. For a
  file leaving the engine rather than one returning to it.
+ - `KTX2_UASTC` is the same extension at near-BC7 quality: UASTC 4x4 blocks,
+ Zstd supercompressed, which the loader transcodes to BC7 or ASTC without a
+ decode. Larger than ETC1S, and the one to pick for a mask, whose values are
+ weights and should not move.
+
+ Every compressed kind is written in the texture's own colourspace, so a mask
+ (`srgb-linear`) goes out as a linear KTX2 rather than as a picture.
 *>
 enum ExportTextureFormat
 {
 	PNG,
 	KTX2_BC7,
 	KTX2_BASIS,
+	KTX2_UASTC,
 }
 
 
@@ -347,7 +375,131 @@ struct ExportReport
 	// different questions: how many pictures the file holds, and how many of them
 	// were compressed.
 	uint compressed_images;
+	// Nodes written that draw nothing and stand for a place: a script's empty, a
+	// placed piece `flatten` dissolved, a collider with no mesh. Counted in `nodes`.
+	uint markers;
+	// `KHR_physics_rigid_bodies` colliders written, the file's own and the solver's.
+	uint colliders;
 	usz bytes;
+}
+
+<*
+ What a script knows about its scene that the scene graph does not hold, handed
+ to an export by whoever calls it.
+
+ `object.extras` lives on the JavaScript object, not on the host node, so the
+ prelude collects it at `scene.export` and hands it over as JSON text, written
+ verbatim. Everything here is owned.
+*>
+struct ExportExtras
+{
+	Allocator allocator;
+	// A node's `extras` object, keyed by `NodeId.key`.
+	HashMap{ulong, String} nodes;
+	// The file's own root `extras`, one entry per key.
+	List{ExportExtra} file;
+	// Nodes that held a camera or a light the export writes on a node of its own.
+	// One left as a bare marker would add a second `sun` every round trip.
+	List{NodeId} stand_ins;
+}
+
+// One root `extras` key and its value as JSON text.
+struct ExportExtra
+{
+	String key;
+	String json;
+}
+
+<*
+ @param [&inout] allocator : "Where the copies live"
+*>
+fn void ExportExtras.init(&self, Allocator allocator)
+{
+	self.allocator = allocator;
+	self.nodes.init(allocator);
+	self.file.init(allocator);
+	self.stand_ins.init(allocator);
+}
+
+fn void ExportExtras.free(&self)
+{
+	self.nodes.@each(; ulong key, String json)
+	{
+		json.free(self.allocator);
+	};
+	self.nodes.free();
+	foreach (extra : self.file)
+	{
+		extra.key.free(self.allocator);
+		extra.json.free(self.allocator);
+	}
+	self.file.free();
+	self.stand_ins.free();
+}
+
+<*
+ Give a node its `extras`. Setting it again replaces it.
+
+ @param json : "A JSON object, copied. Empty is none"
+ @require json.len == 0 || json[0] == '{' : "extras must be a JSON object"
+*>
+fn void ExportExtras.set(&self, NodeId id, String json)
+{
+	if (try old = self.nodes.get(id.key())) old.free(self.allocator);
+	if (json.len == 0)
+	{
+		self.nodes.remove(id.key());
+		return;
+	}
+	self.nodes.set(id.key(), json.copy(self.allocator));
+}
+
+<*
+ One key of the file's root `extras`.
+
+ @param json : "One JSON value, copied"
+ @require key.len > 0 && json.len > 0 : "A key and a value"
+*>
+fn void ExportExtras.add_file(&self, String key, String json)
+{
+	self.file.push({ .key = key.copy(self.allocator), .json = json.copy(self.allocator) });
+}
+
+<*
+ @return "The node's extras as JSON text, or empty. Borrowed"
+*>
+fn String ExportExtras.of(&self, NodeId id) => self.nodes.get(id.key()) ?? "";
+
+fn bool ExportExtras.stands_in(&self, NodeId id)
+{
+	foreach (held : self.stand_ins)
+	{
+		if (held == id) return true;
+	}
+	return false;
+}
+
+<*
+ What a copy carries that instancing cannot vary per copy: its `extras` and the
+ collider the file gave it.
+
+ Part of the batch key for that reason. One instanced node holds one extras object
+ and one collider, so copies that disagree about either are separate batches — a
+ walkable floor and an unwalkable one cut from one mesh stay two things.
+*>
+struct ExportTag @local
+{
+	// Borrowed from `ExportExtras`.
+	String extras;
+	AssetId body_asset;
+	// Index into that asset's `bodies`, or -1.
+	int body;
+}
+
+fn bool ExportTag.equals(self, ExportTag other)
+{
+	if (self.extras != other.extras || self.body != other.body) return false;
+	return self.body < 0 || self.body_asset == other.body_asset;
 }
 
 // Where a mesh's vertices ended up in the document, so a second node naming the
@@ -555,7 +707,16 @@ struct ExportBatch @local
 	// `collapsible` to consult, that refusal is this flag: `batch_of` never matches
 	// one, so nothing accumulates into it and it stays a batch of one.
 	bool solo;
+	ExportTag tag;
 	List{NodeId} members;
+}
+
+// A mesh written for a collider alone, and its `mesh` entry.
+struct ExportCollisionMesh @local
+{
+	AssetId asset;
+	uint mesh;
+	uint entry;
 }
 
 // One `(geometry, material)` pair, and the `mesh` entry that is that pair.
@@ -647,6 +808,11 @@ struct ExportBake @local
 // worth exporting is worth an image.
 const int BAKE_FLAT_TOLERANCE @local = 4;
 
+// A light's intensity as the file states it, in Watts, per unit of this
+// renderer's: the inverse of the importer's division. See `write_light`.
+const float WATTS_PER_DIRECTIONAL @local = (float)math::PI;
+const float WATTS_PER_POINT @local = (float)(4.0 * math::PI * math::PI);
+
 // Everything one export is part-way through, so the walk can be a plain
 // recursive function rather than a closure over nine locals.
 struct Exporter @local
@@ -667,6 +833,8 @@ struct Exporter @local
 	bool baking;
 	MaterialBaker baker;
 	List{ExportBake} bakes;
+	// The collider-only meshes written so far — see `collision_mesh`.
+	List{ExportCollisionMesh} collision_meshes;
 	// One bake's pixels, allocated once and reused: they are `size * size * 4`
 	// bytes and every bake fills all of them.
 	char[] texels;
@@ -674,6 +842,10 @@ struct Exporter @local
 	// whatever this says — re-encoding what an artist already compressed is the
 	// one thing this option must not do.
 	ExportTextureFormat textures;
+	// What is being exported: the scene root, or the subtree `root` named.
+	NodeId top;
+	// The caller's extras, or null for an export that has none.
+	ExportExtras* extras;
 	ExportReport report;
 }
 
@@ -684,30 +856,47 @@ struct Exporter @local
  @param flatten : `Collapse every copy of a shape into one instanced node in world space, giving up the hierarchy and the copies' names to do it. See the header.`
  @param bake : `Texels a side to run each ShaderMaterial's body into, or 0 to write the file the way it always was. Needs a device; without one the export still happens and the report says so through shaded. See render/bake.c3.`
  @param textures : `What to encode generated textures as. Minutes rather than seconds for a large scene either way it compresses — a build step. Source files are copied unchanged whichever is chosen. See ExportTextureFormat.`
+ @param root : `The subtree to write, at its world transform, or NO_NODE for the whole scene.`
+ @param camera : `Whether the scene's camera goes in.`
+ @param light : `Whether the scene's lights go in.`
+ @param [in] extras : `The script's extras, per node and for the file, or null.`
  @return ? EXPORT_PATH_IS_EMPTY : `No path was given.`
- @return ? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws — an empty scene, or one holding only helpers and hidden subtrees.`
+ @return ? EXPORT_HAS_NOTHING_TO_WRITE : `Nothing in the scene draws or marks a place — an empty scene, or one holding only helpers and hidden subtrees.`
 *>
 fn ExportReport? MeshPass.export_scene(
 	&self,
 	String path,
 	bool flatten = false,
 	uint bake = 0,
-	ExportTextureFormat textures = ExportTextureFormat.PNG
+	ExportTextureFormat textures = ExportTextureFormat.PNG,
+	NodeId root = NO_NODE,
+	bool camera = true,
+	bool light = true,
+	ExportExtras* extras = null
 )
 {
 	if (path.len == 0) return EXPORT_PATH_IS_EMPTY~;
+	// The root is written at its world transform, and an export is not a frame.
+	self.scene.update_world_matrices();
 
 	gltf::GltfBuilder builder = gltf::builder(mem);
 	defer builder.free();
 	builder.generator = "three.c3";
 
-	Exporter state = { .pass = self, .out = &builder, .textures = textures };
+	Exporter state = {
+		.pass = self,
+		.out = &builder,
+		.textures = textures,
+		.top = root.is_set() && self.scene.node(root) != null ? root : self.scene.root,
+		.extras = extras,
+	};
 	state.geometry.init(mem, 16);
 	state.materials.init(mem, 8);
 	state.entries.init(mem, 16);
 	state.images.init(mem, 8);
 	state.layer_images.init(mem, 8);
 	state.bakes.init(mem, 4);
+	state.collision_meshes.init(mem, 4);
 	state.skeletons.init(mem, 2);
 	state.binds.init(mem, 2);
 	defer
@@ -722,6 +911,7 @@ fn ExportReport? MeshPass.export_scene(
 		state.images.free();
 		state.layer_images.free();
 		state.bakes.free();
+		state.collision_meshes.free();
 		if (state.baking)
 		{
 			state.baker.free();
@@ -756,11 +946,15 @@ fn ExportReport? MeshPass.export_scene(
 	// and hoisting would drop that transform on the floor. Flattened, that
 	// transform is already inside every world matrix, so the root written there is
 	// at identity instead.
-	int root = flatten ? state.flatten_scene()! : state.walk(self.scene.root)!;
-	if (root < 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
-	builder.add_root((uint)root);
+	int written = flatten ? state.flatten_scene()! : state.walk(state.top)!;
+	if (written < 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+	builder.add_root((uint)written);
 
-	if (state.report.instances == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+	if (state.report.instances == 0 && state.report.markers == 0) return EXPORT_HAS_NOTHING_TO_WRITE~;
+	if (extras != null)
+	{
+		foreach (extra : extras.file) builder.set_extra_json(extra.key, extra.json);
+	}
 
 	// After the walk, for the same reason the animations are: what a mesh should
 	// be called depends on how many nodes turned out to draw it.
@@ -773,8 +967,8 @@ fn ExportReport? MeshPass.export_scene(
 	// After the scene and only when there was one to write: a file with nothing in
 	// it should be refused above rather than come back holding a camera and a light
 	// pointed at nothing.
-	state.write_camera();
-	state.write_light();
+	if (camera) state.write_camera();
+	if (light) state.write_light();
 
 	builder.save_glb(path)!;
 	// The file's size rather than the blob's, so the number reported is the one a
@@ -816,8 +1010,8 @@ fn int? Exporter.walk(&self, NodeId id)
 
 	// A node's own children may all have dropped out; it is still written when it
 	// draws, and dropped when it does not, so an exported document has no groups
-	// standing over nothing.
-	// 
+	// standing over nothing. A marker is the exception — see `is_marker`.
+	//
 	// Heap-backed rather than `tmem`: this recurses, and a temp allocation per
 	// level of a deep hierarchy is not freed until the enclosing pool exits —
 	// which for a caller that opened none is never.
@@ -826,13 +1020,21 @@ fn int? Exporter.walk(&self, NodeId id)
 	defer children.free();
 	self.place_children(node, &children)!;
 
-	if (entry < 0 && children.len() == 0 && self.pass.scene.physics.body_for(id) == null)
+	if (entry < 0 && children.len() == 0)
 	{
 		// Not counted as skipped: nothing was left out, there was nothing there.
-		return -1;
+		if (!self.has_body(id, node) && !self.is_marker(id, node)) return -1;
+		self.report.markers++;
 	}
 
-	int written = self.draw_node(id, node, entry, node.position, node.rotation, node.scale, &children)!;
+	// The subtree being exported goes where it stands in the world: its parent is
+	// not in the file to place it.
+	Vec3 position        = node.position;
+	Quaternionf rotation = node.rotation;
+	Vec3 scale           = node.scale;
+	if (id == self.top && id != self.pass.scene.root) decompose(node.world, &position, &rotation, &scale);
+
+	int written = self.draw_node(id, node, entry, position, rotation, scale, &children)!;
 
 	if (entry >= 0)
 	{
@@ -876,11 +1078,12 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 		Node* copy = self.collapsible(child);
 		if (copy == null) continue;
 
-		int index = batch_of(&batches, copy.asset, copy.mesh, copy.material);
+		ExportTag tag = self.tag_of(child, copy);
+		int index = batch_of(&batches, copy.asset, copy.mesh, copy.material, tag);
 		if (index < 0)
 		{
 			if (self.geometry_for(copy.asset, copy.mesh)! < 0) continue;
-			ExportBatch fresh = { .asset = copy.asset, .mesh = copy.mesh, .material = copy.material };
+			ExportBatch fresh = { .asset = copy.asset, .mesh = copy.mesh, .material = copy.material, .tag = tag };
 			fresh.members.init(mem, 8);
 			batches.push(fresh);
 			index = (int)batches.len() - 1;
@@ -891,7 +1094,7 @@ fn void? Exporter.place_children(&self, Node* node, List{uint}* into)
 	foreach (child : node.children)
 	{
 		Node* copy = self.collapsible(child);
-		int index  = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh, copy.material);
+		int index  = copy == null ? -1 : batch_of(&batches, copy.asset, copy.mesh, copy.material, self.tag_of(child, copy));
 		if (index >= 0)
 		{
 			ExportBatch* batch = batches.get_ref((usz)index);
@@ -930,6 +1133,9 @@ fn Node* Exporter.collapsible(&self, NodeId id)
 	if (node.material == LINE_MATERIAL || !node.visible) return null;
 	if (node.children.len() > 0) return null;
 	if (!node.asset.is_set()) return null;
+	// A collision proxy is not drawn, so it is not a copy of anything; its owner
+	// writes the collider. `walk` drops it.
+	if (node.collision_only) return null;
 	if (self.pass.assets.mesh(node.asset, node.mesh) == null) return null;
 	// Two more the instancing block cannot hold. A skinned copy is placed by where
 	// its joints are and not by its own transform — glTF says a skinned node's is
@@ -940,21 +1146,86 @@ fn Node* Exporter.collapsible(&self, NodeId id)
 	// node apiece and never a wrong picture.
 	if (node.skin >= 0) return null;
 	if (self.pass.scene.morph_weights(id).len > 0) return null;
+	// A solver body is one node's, with its own motion: the extension has no
+	// per-copy channel for one.
+	if (self.pass.scene.physics.body_for(id) != null) return null;
 	return node;
 }
 
-// The batch drawing this shape with this material, or -1. A linear scan: the
-// count is the number of *distinct buckets* among one node's children, which is
-// single digits in a scene anybody wrote and stays single digits in one a script
-// generated — a thousand crates in six colours are six.
-fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh, uint material) @local
+// The batch drawing this shape with this material and tag, or -1. A linear scan:
+// the count is the number of *distinct buckets* among one node's children, which
+// is single digits in a scene anybody wrote and stays single digits in one a
+// script generated — a thousand crates in six colours are six.
+fn int batch_of(List{ExportBatch}* batches, AssetId asset, uint mesh, uint material, ExportTag tag) @local
 {
 	foreach (i, &known : batches)
 	{
 		if (known.solo) continue;
-		if (known.asset == asset && known.mesh == mesh && known.material == material) return (int)i;
+		if (known.asset == asset && known.mesh == mesh && known.material == material && known.tag.equals(tag)) return (int)i;
 	}
 	return -1;
+}
+
+// The node's extras, or empty.
+fn String Exporter.extras_of(&self, NodeId id) => self.extras == null ? "" : self.extras.of(id);
+
+<*
+ The body the file gave this node, or null.
+
+ Checked against the asset rather than trusted, because a node outlives nothing
+ it names here: an asset unloaded under a group that only carried its collider
+ leaves an index into a slot somebody else now holds.
+*>
+fn AssetBody* Exporter.file_body(&self, Node* node)
+{
+	if (node.file_body < 0) return null;
+	Asset* asset = self.pass.assets.slot(node.file_body_asset);
+	if (asset == null || node.file_body >= asset.bodies.len()) return null;
+	return &asset.bodies[(sz)node.file_body];
+}
+
+fn ExportTag Exporter.tag_of(&self, NodeId id, Node* node)
+{
+	bool carried = self.file_body(node) != null;
+	return {
+		.extras = self.extras_of(id),
+		.body_asset = carried ? node.file_body_asset : NO_ASSET,
+		.body = carried ? node.file_body : -1,
+	};
+}
+
+fn bool Exporter.has_body(&self, NodeId id, Node* node)
+{
+	return self.pass.scene.physics.body_for(id) != null || self.file_body(node) != null;
+}
+
+<*
+ Whether a node that draws nothing and holds nothing is still worth a node.
+
+ **A childless empty is a marker**: a spawn point, a placed piece, an area whose
+ scale is its size. It is a place in the world and nothing else, so it is kept
+ whether or not it has extras — a spawn is found by name. A group whose children
+ all dropped out is still dropped, unless it has extras to say.
+
+ Three are not markers: the subtree being exported, which would be a file of
+ nothing; a collision proxy, whose owner writes its collider; and a node that held
+ a camera or light the export writes on a node of its own.
+*>
+fn bool Exporter.is_marker(&self, NodeId id, Node* node)
+{
+	if (id == self.top || node.collision_only || node.asset.is_set()) return false;
+	bool said = self.extras_of(id).len > 0;
+	if (node.children.len() > 0) return said;
+	return said || self.extras == null || !self.extras.stands_in(id);
+}
+
+<*
+ Writes a node's extras, when it has any.
+*>
+fn void Exporter.write_extras(&self, NodeId id, uint written)
+{
+	String json = self.extras_of(id);
+	if (json.len > 0) self.out.set_node_extras(written, json);
 }
 
 <*
@@ -1036,6 +1307,11 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
 	GpuMesh* mesh = self.pass.assets.mesh(batch.asset, batch.mesh);
 	uint written  = self.out.add_node(mesh.name, entry, -1);
 	self.out.add_instancing(written, attributes[:used]);
+	// Shared by every member, which is what the tag in the key guarantees. A reader
+	// hands each copy the node's extras and one collider apiece.
+	if (batch.tag.extras.len > 0) self.out.set_node_extras(written, batch.tag.extras);
+	AssetBody* body = self.file_body(first);
+	if (body != null) self.write_file_collider(first.file_body_asset, body, written, entry);
 
 	self.report.nodes++;
 	self.report.batches++;
@@ -1065,23 +1341,30 @@ fn int? Exporter.instanced_node(&self, ExportBatch* batch, bool world)
  of one, keeping its name and its tinted material. Its transform is the world one,
  because there is no longer a parent to be relative to.
 
+ **A placed piece leaves a marker behind.** The groups go, and a group with
+ extras is the one thing a group says that its meshes do not: what was placed
+ there. So it becomes a node that draws nothing, at its world placement, carrying
+ its extras, while its meshes batch with everything else. A childless empty is a
+ marker the same way. The root carries the subtree's own extras.
+
  @return `The document's root node index, or -1 for a scene with nothing to write.`
 *>
 fn int? Exporter.flatten_scene(&self)
 {
-	self.pass.scene.update_world_matrices();
-
 	List{ExportBatch} batches;
 	batches.init(mem, 8);
+	List{NodeId} markers;
+	markers.init(mem, 8);
 	defer
 	{
 		foreach (&batch : batches) batch.members.free();
 		batches.free();
+		markers.free();
 	}
-	self.gather(self.pass.scene.root, &batches)!;
+	self.gather(self.top, &batches, &markers)!;
 
 	List{uint} children;
-	children.init(mem, batches.len() > 0 ? batches.len() : 1);
+	children.init(mem, batches.len() + markers.len() + 1);
 	defer children.free();
 
 	foreach (&batch : batches)
@@ -1089,14 +1372,52 @@ fn int? Exporter.flatten_scene(&self)
 		int built = batch.members.len() > 1 ? self.instanced_node(batch, true)! : self.placed_node(batch.members[0])!;
 		if (built >= 0) children.push((uint)built);
 	}
+	foreach (marker : markers) children.push(self.placed_marker(marker));
 
 	if (children.len() == 0) return -1;
 
-	Node* root   = self.pass.scene.node(self.pass.scene.root);
+	Node* root   = self.pass.scene.node(self.top);
 	uint written = self.out.add_node(root == null ? "" : root.name);
+	self.write_extras(self.top, written);
 	foreach (child : children) self.out.add_child(written, child);
 	self.report.nodes++;
 	return (int)written;
+}
+
+<*
+ A node that draws nothing, written where it ended up: a marker, or a collider
+ with no mesh of its own.
+*>
+fn uint Exporter.placed_marker(&self, NodeId id)
+{
+	Node* node = self.pass.scene.node(id);
+	Vec3 position;
+	Quaternionf rotation;
+	Vec3 scale;
+	decompose(node.world, &position, &rotation, &scale);
+
+	uint written = self.out.add_node(node.name, -1, -1, position, rotation, scale);
+	self.report.nodes++;
+	self.write_extras(id, written);
+	self.write_node_physics(id, written, -1);
+	self.report.markers++;
+	return written;
+}
+
+<*
+ Whether a group's extras are already on every one of its children — the copies
+ an instanced node placed, which each carry the node's extras. Such a group says
+ nothing its batches do not, so it leaves no marker.
+*>
+fn bool Exporter.children_carry(&self, Node* node, String extras)
+{
+	foreach (child : node.children)
+	{
+		Node* each = self.pass.scene.node(child);
+		if (each == null) continue;
+		if (each.children.len() > 0 || !each.asset.is_set() || self.extras_of(child) != extras) return false;
+	}
+	return true;
 }
 
 <*
@@ -1109,7 +1430,7 @@ fn int? Exporter.flatten_scene(&self)
  into. Nothing is lost by that here — every child ends up in world space too, so
  there is no parent relationship left to preserve or to break.
 *>
-fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
+fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches, List{NodeId}* markers)
 {
 	Node* node = self.pass.scene.node(id);
 	if (node == null) return;
@@ -1122,15 +1443,17 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 
 	if (node.asset.is_set() && !node.collision_only && self.pass.assets.mesh(node.asset, node.mesh) != null)
 	{
-		// `collapsible`'s two refusals, in the walk that never consults it: here a
-		// copy *is* a batch, so refusing to share one is how a skinned or morphing
-		// copy keeps a node of its own.
-		bool solo = node.skin >= 0 || self.pass.scene.morph_weights(id).len > 0;
-		int index = solo ? -1 : batch_of(batches, node.asset, node.mesh, node.material);
+		// `collapsible`'s refusals, in the walk that never consults it: here a copy
+		// *is* a batch, so refusing to share one is how a skinned or morphing copy,
+		// or one the solver holds, keeps a node of its own.
+		bool solo = node.skin >= 0 || self.pass.scene.morph_weights(id).len > 0
+			|| self.pass.scene.physics.body_for(id) != null;
+		ExportTag tag = self.tag_of(id, node);
+		int index = solo ? -1 : batch_of(batches, node.asset, node.mesh, node.material, tag);
 		if (index < 0 && self.geometry_for(node.asset, node.mesh)! >= 0)
 		{
 			ExportBatch fresh = {
-				.asset = node.asset, .mesh = node.mesh, .material = node.material, .solo = solo
+				.asset = node.asset, .mesh = node.mesh, .material = node.material, .solo = solo, .tag = tag
 			};
 			fresh.members.init(mem, 16);
 			batches.push(fresh);
@@ -1138,8 +1461,15 @@ fn void? Exporter.gather(&self, NodeId id, List{ExportBatch}* batches)
 		}
 		if (index >= 0) batches.get_ref((usz)index).members.push(id);
 	}
+	else if (id != self.top && !node.asset.is_set() && !node.collision_only)
+	{
+		String extras = self.extras_of(id);
+		bool piece    = extras.len > 0 && !self.children_carry(node, extras);
+		bool marker   = node.children.len() == 0 && self.is_marker(id, node);
+		if (piece || marker || self.has_body(id, node)) markers.push(id);
+	}
 
-	foreach (child : node.children) self.gather(child, batches)!;
+	foreach (child : node.children) self.gather(child, batches, markers)!;
 }
 
 <*
@@ -1214,17 +1544,19 @@ fn int? Exporter.draw_node(
 	{
 		uint plain = self.out.add_node(node.name, entry, -1, position, rotation, scale);
 		self.report.nodes++;
+		self.write_extras(id, plain);
 		self.write_node_weights(id, entry, plain);
-		self.write_node_physics(id, plain, entry >= 0);
+		self.write_node_physics(id, plain, entry);
 		if (children != null) foreach (child : *children) self.out.add_child(plain, child);
 		return (int)plain;
 	}
 
 	uint wrapper = self.out.add_node(node.name, -1, -1, position, rotation, scale);
 	self.report.nodes++;
+	self.write_extras(id, wrapper);
 	// On the wrapper, which is where the placement is: a body moves the copy, and
 	// the mesh node under it deliberately has no transform of its own.
-	self.write_node_physics(id, wrapper, false);
+	self.write_node_physics(id, wrapper, -1);
 	foreach (bone : bones) self.out.add_child(wrapper, bone);
 
 	// Named after the mesh rather than after the copy, so a viewer's outline reads
@@ -1244,91 +1576,235 @@ fn int? Exporter.draw_node(
 <*
  This node's body, as `KHR_physics_rigid_bodies`.
 
- **The solver's bodies and nothing else.** What a scene *sweeps* against is
- `Node.collides`, which is on by default and true of nearly every node in nearly
- every scene — writing a collider for each of those would say the file is nothing
- but colliders, which is the opposite of what the extension is for. A body is the
- thing somebody asked for by name, through `three.physics.add` or through
- `instantiate({ physics: true })` reading it out of a file in the first place, so
- that is what comes back out.
+ **Bodies somebody asked for, and nothing else.** What a scene *sweeps* against
+ is `Node.collides`, which is on by default and true of nearly every node in
+ nearly every scene — writing a collider for each of those would say the file is
+ nothing but colliders, which is the opposite of what the extension is for. Two
+ things are asked for by name: a solver body, through `three.physics.add`, and a
+ collider the file itself stated, which `instantiate({ physics: true })` recorded
+ on the node that carries it (`Node.file_body`).
 
- The shape is measured the way `Physics.build_collider` measured it — from the
- same mesh bounds — so the file states the collider the solver actually holds
- rather than the one the caller asked for. A heightfield has no words in the
- extension and is left out; the terrain it came from is in the file as geometry.
+ **The file's collider wins**, written the way the file stated it — a mesh, a
+ hull, a box, a sphere, a capsule or a cylinder. The solver's version of the same
+ collider is lossier: it holds a mesh as its hull, and a level placed with
+ `physics: true` and nothing moving has no solver bodies at all, which is every
+ level. The motion is the solver's when it has one, because that is what the
+ body is doing now.
 
- @param mesh_written : `Whether this node carries the mesh. A hull collider says nothing about its geometry, which the parser then reads as the node's own mesh — so a node with no mesh has to name a shape instead or the file describes a collider over nothing.`
+ A solver body with no file behind it is measured the way `Physics.build_collider`
+ measured it — from the same mesh bounds — so the file states the collider the
+ solver holds. A heightfield goes out as a mesh collider over its own mesh, which
+ is the terrain's triangles, and reads back as one.
+
+ @param entry : `The mesh this node draws in the document, or -1. A collider over the drawing names it, so a node with no mesh writes only an implicit shape.`
 *>
-fn void Exporter.write_node_physics(&self, NodeId id, uint written, bool mesh_written)
+fn void Exporter.write_node_physics(&self, NodeId id, uint written, int entry)
 {
-	Scene* scene       = self.pass.scene;
-	PhysicsBody* body  = scene.physics.body_for(id);
-	if (body == null) return;
-	Node* node = scene.node(id);
+	Scene* scene = self.pass.scene;
+	Node* node   = scene.node(id);
 	if (node == null) return;
 
-	GpuMesh* shape_mesh = self.pass.assets.mesh(node.asset, node.mesh);
-	if (shape_mesh == null) return;
-	Vec3 extent = (shape_mesh.bounds.max - shape_mesh.bounds.min) * 0.5f;
+	PhysicsBody* body = scene.physics.body_for(id);
+	AssetBody* file   = self.file_body(node);
+	if (file != null && file.has_collider)
+	{
+		self.write_file_collider(node.file_body_asset, file, written, entry);
+	}
+	else if (body != null)
+	{
+		self.write_solver_collider(id, node, body, written, entry);
+	}
 
-	gltf::Collider collider = {
+	collision::Rigidbody* rigid = body == null ? null : scene.physics.rigidbody_for(id);
+	if (rigid != null && (body.kind == BodyKind.DYNAMIC || body.kind == BodyKind.KINEMATIC))
+	{
+		self.out.add_motion(
+			written,
+			{
+				.is_kinematic = body.kind == BodyKind.KINEMATIC,
+				.mass = rigid.mass,
+				.gravity_factor = rigid.gravity_factor,
+				.linear_dampening = rigid.linear_dampening,
+				.angular_dampening = rigid.angular_dampening,
+				.linear_velocity = rigid.linear_velocity,
+				.angular_velocity = rigid.angular_velocity,
+			}
+		);
+		return;
+	}
+	// A static body is a collider and nothing more — glTF says "this is a body"
+	// with `motion`, and a wall is not one. The file's motion is what it said when
+	// nothing in the solver took it over.
+	if (file == null || !file.has_motion) return;
+	self.out.add_motion(
+		written,
+		{
+			.is_kinematic = file.kinematic,
+			.mass = file.mass,
+			.gravity_factor = file.gravity_factor,
+			.linear_dampening = file.linear_damping,
+			.angular_dampening = file.angular_damping,
+			.linear_velocity = file.linear_velocity,
+			.angular_velocity = file.angular_velocity,
+		}
+	);
+}
+
+// A collider with nothing named yet: -1 is absent, and a zeroed one names index 0.
+fn gltf::Collider no_collider(bool trigger) @local
+{
+	return {
 		.shape = -1,
 		.node = -1,
 		.mesh = -1,
 		.material = -1,
 		.collision_filter = -1,
 		.base_node = -1,
-		.is_trigger = body.kind == BodyKind.TRIGGER,
+		.is_trigger = trigger,
 	};
+}
 
+<*
+ A collider as the file stated it, on the node that carries it.
+
+ A mesh collider names the node's own mesh entry — the one the reader takes
+ either way — so a node that draws nothing here cannot carry one and writes none.
+ A file's mesh of several primitives is several meshes here, each its own share
+ of the same triangles, so a mesh collider over each is the collider it was.
+
+ A hull is not shared out that way: the hull of three primitives is not three
+ hulls. So a hull goes out as the hull the import built (`AssetBody.proxy`), a
+ mesh no node draws, which is the shape the scene collided with and reads back
+ as the same hull however many round trips it makes.
+
+ The filter is not written: the solver has no layers, and the importer reports
+ rather than applies it.
+*>
+fn void Exporter.write_file_collider(&self, AssetId asset, AssetBody* file, uint written, int entry)
+{
+	gltf::Collider collider = no_collider(file.trigger);
+	switch (file.shape)
+	{
+		case MESH:
+			if (entry < 0) return;
+			collider.mesh = entry;
+		case HULL:
+			int hull = file.proxy >= 0 ? self.collision_mesh(asset, (uint)file.proxy) : entry;
+			if (hull < 0) hull = entry;
+			if (hull < 0) return;
+			collider.mesh = hull;
+			collider.convex_hull = true;
+		case BOX:
+			collider.shape = (int)self.shape_index({ .type = BOX, .size = file.size });
+		case SPHERE:
+			collider.shape = (int)self.shape_index({ .type = SPHERE, .radius = file.radius });
+		case CAPSULE:
+		case CYLINDER:
+			collider.shape = (int)self.shape_index({
+				.type = file.shape == AssetShape.CAPSULE ? gltf::ShapeType.CAPSULE : gltf::ShapeType.CYLINDER,
+				.height = file.height,
+				.radius_top = file.radius_top,
+				.radius_bottom = file.radius_bottom,
+			});
+	}
+	// One friction, because the importer keeps one: both coefficients are it.
+	if (file.has_material) collider.material = (int)self.physics_material_index(file.friction, file.friction, file.restitution);
+	self.out.add_collider(written, collider);
+	self.report.colliders++;
+}
+
+fn void Exporter.write_solver_collider(&self, NodeId id, Node* node, PhysicsBody* body, uint written, int entry)
+{
+	GpuMesh* shape_mesh = self.pass.assets.mesh(node.asset, node.mesh);
+	if (shape_mesh == null) return;
+	Vec3 extent = (shape_mesh.bounds.max - shape_mesh.bounds.min) * 0.5f;
+
+	gltf::Collider collider = no_collider(body.kind == BodyKind.TRIGGER);
 	switch (body.shape)
 	{
 		case HULL:
-			// Nothing named, plus the hull flag: the reader takes the node's own
-			// mesh, which is exactly what the solver did.
-			if (!mesh_written) return;
+			if (entry < 0) return;
+			collider.mesh = entry;
 			collider.convex_hull = true;
+		case HEIGHTFIELD:
+			// The terrain's own triangles: no shape and no hull, which the reader
+			// takes as a mesh collider over the node's mesh.
+			if (entry < 0) return;
+			collider.mesh = entry;
 		case BOX:
-			collider.shape = (int)self.out.add_shape({ .type = BOX, .size = extent * 2.0f });
+			collider.shape = (int)self.shape_index({ .type = BOX, .size = extent * 2.0f });
 		case SPHERE:
-			collider.shape = (int)self.out.add_shape({ .type = SPHERE, .radius = sphere_radius_for(extent) });
+			collider.shape = (int)self.shape_index({ .type = SPHERE, .radius = sphere_radius_for(extent) });
 		case CAPSULE:
 			collision::Capsule capsule = capsule_for(extent);
-			collider.shape = (int)self.out.add_shape({ .type = CAPSULE, .height = capsule.height,
+			collider.shape = (int)self.shape_index({ .type = CAPSULE, .height = capsule.height,
 				.radius_top = capsule.radius_top, .radius_bottom = capsule.radius_bottom });
-		case HEIGHTFIELD:
-			return;
 	}
 
-	collision::Rigidbody* rigid = scene.physics.rigidbody_for(id);
+	collision::Rigidbody* rigid = self.pass.scene.physics.rigidbody_for(id);
 	if (rigid != null)
 	{
-		collider.material = (int)self.out.add_physics_material(
-			{
-				.static_friction = rigid.material.static_friction,
-				.dynamic_friction = rigid.material.dynamic_friction,
-				.restitution = rigid.material.restitution,
-			}
+		collider.material = (int)self.physics_material_index(
+			rigid.material.static_friction, rigid.material.dynamic_friction, rigid.material.restitution
 		);
 	}
-
 	self.out.add_collider(written, collider);
+	self.report.colliders++;
+}
 
-	// A static body is a collider and nothing more — glTF says "this is a body"
-	// with `motion`, and a wall is not one.
-	if (rigid == null || body.kind == BodyKind.STATIC || body.kind == BodyKind.TRIGGER) return;
-	self.out.add_motion(
-		written,
-		{
-			.is_kinematic = body.kind == BodyKind.KINEMATIC,
-			.mass = rigid.mass,
-			.gravity_factor = rigid.gravity_factor,
-			.linear_dampening = rigid.linear_dampening,
-			.angular_dampening = rigid.angular_dampening,
-			.linear_velocity = rigid.linear_velocity,
-			.angular_velocity = rigid.angular_velocity,
-		}
-	);
+<*
+ A mesh no node draws, holding a collider's own geometry — a hull the import
+ built. Written once per `(asset, mesh)`.
+
+ @return `The document's mesh index, or -1 for one with no vertices to write.`
+*>
+fn int Exporter.collision_mesh(&self, AssetId asset, uint mesh)
+{
+	foreach (known : self.collision_meshes)
+	{
+		if (known.asset == asset && known.mesh == mesh) return (int)known.entry;
+	}
+	int geometry = self.geometry_for(asset, mesh) ?? -1;
+	if (geometry < 0) return -1;
+	ExportGeometry* streams = &self.geometry[(usz)geometry];
+	GpuMesh* shape = self.pass.assets.mesh(asset, mesh);
+	uint written = self.out.add_mesh(shape == null ? "collider" : shape.name);
+	gltf::WriteAttribute[2] attributes;
+	usz count = 0;
+	attributes[count++] = { .name = "POSITION", .accessor = (uint)streams.positions };
+	if (streams.normals >= 0) attributes[count++] = { .name = "NORMAL", .accessor = (uint)streams.normals };
+	self.out.add_primitive(written, attributes[:count], streams.indices);
+	self.collision_meshes.push({ .asset = asset, .mesh = mesh, .entry = written });
+	return (int)written;
+}
+
+// An implicit shape, written once however many colliders name it: forty barrels
+// are one box.
+fn uint Exporter.shape_index(&self, gltf::Shape shape)
+{
+	foreach (i, known : self.out.shapes)
+	{
+		if (known.type == shape.type && known.size.x == shape.size.x && known.size.y == shape.size.y
+			&& known.size.z == shape.size.z && known.radius == shape.radius
+			&& known.height == shape.height && known.radius_top == shape.radius_top
+			&& known.radius_bottom == shape.radius_bottom) return (uint)i;
+	}
+	return self.out.add_shape(shape);
+}
+
+// A physics material, written once per distinct surface.
+fn uint Exporter.physics_material_index(&self, float static_friction, float dynamic_friction, float restitution)
+{
+	foreach (i, known : self.out.physics_materials)
+	{
+		if (known.static_friction == static_friction && known.dynamic_friction == dynamic_friction
+			&& known.restitution == restitution) return (uint)i;
+	}
+	return self.out.add_physics_material({
+		.static_friction = static_friction,
+		.dynamic_friction = dynamic_friction,
+		.restitution = restitution,
+	});
 }
 
 <*
@@ -2298,7 +2774,7 @@ fn ExportBake Exporter.run_bake(&self, ExportBake key, Node* node)
 		.allocator = mem,
 	};
 	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
-	char[]? encoded = self.encode_pixels(&decoded, &mime);
+	char[]? encoded = self.encode_pixels(&decoded, ColorSpace.SRGB, &mime);
 	// An encode that failed leaves the colour standing, which is still a better
 	// file than the one grey it replaces.
 	if (catch encoded) return key;
@@ -2422,10 +2898,6 @@ fn int? Exporter.texture_for(&self, Node* node)
 		if (known.device == slot) return (int)known.texture;
 	}
 
-	char[] encoded       = { };
-	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
-	bool own             = false;
-
 	// The source-file path, and only when the slot really is the one this mesh's
 	// own glTF brought. A material's map is a different image entirely, and
 	// reaching for the mesh's source bytes for it would write the wrong picture.
@@ -2437,32 +2909,16 @@ fn int? Exporter.texture_for(&self, Node* node)
 		if (source >= 0)
 		{
 			char[]? from_file = asset.stream.get_image_data((uint)source);
-			if (try from_file)
-			{
-				encoded = from_file;
-				mime = asset.stream.gltf.images[source].mimeType;
-			}
+			if (try from_file) return self.add_device_image(slot, from_file, asset.stream.gltf.images[source].mimeType);
 		}
 	}
+	return self.device_texture_for(slot);
+}
 
-	if (encoded.len == 0)
-	{
-		char[]? made = self.encode_from_device(slot, &mime);
-		// Counted rather than dropped. A block-compressed texture with no source
-		// file behind it cannot be read back as pixels, and a glTF written
-		// without it is a material that lost its picture — which the report has
-		// to say, because the file itself cannot.
-		if (catch made)
-		{
-			self.report.skipped++;
-			return -1;
-		}
-		encoded = made;
-		own = true;
-	}
-	defer if (own) free(encoded);
-
-	uint image   = self.out.add_image("", encoded, mime);
+// One image and its texture, remembered by the device slot it stands for.
+fn int Exporter.add_device_image(&self, int slot, char[] encoded, gltf::ImageType mime)
+{
+	uint image = self.out.add_image("", encoded, mime);
 	self.declare_image(encoded, mime);
 	// No sampler: a texture that names none takes the viewer's default, which is
 	// repeat with mipmapped linear filtering — what `Assets` uploads with.
@@ -2483,16 +2939,22 @@ fn int? Exporter.texture_for(&self, Node* node)
  picture standing in the format that always worked, which is a better file than
  no texture and a better outcome than failing a whole export over a codec.
 
+ @param space : `The texture's own colourspace, which a KTX2 states: a mask stays linear.`
  @param mime : `Set to what was written, which is not always what was asked for.`
  @return `The encoded bytes, owned by the caller.`
 *>
-fn char[]? Exporter.encode_pixels(&self, image::Image* decoded, gltf::ImageType* mime)
+fn char[]? Exporter.encode_pixels(&self, image::Image* decoded, ColorSpace space, gltf::ImageType* mime)
 {
 	if (self.textures != ExportTextureFormat.PNG)
 	{
-		char[]? compressed = self.textures == ExportTextureFormat.KTX2_BC7
-			? encode_ktx2_bc7(decoded)
-			: encode_ktx2_basis(decoded);
+		char[]? compressed;
+		switch (self.textures)
+		{
+			case KTX2_BC7: compressed = encode_ktx2_bc7(decoded, space);
+			case KTX2_BASIS: compressed = encode_ktx2_basis(decoded, space);
+			case KTX2_UASTC: compressed = encode_ktx2_uastc(decoded, space);
+			case PNG: unreachable();
+		}
 		if (try compressed)
 		{
 			*mime = gltf::ImageType.IMAGE_KTX2;
@@ -2560,7 +3022,58 @@ fn char[]? Exporter.encode_from_device(&self, int slot, gltf::ImageType* mime)
 		.pixels = pixels,
 		.allocator = mem,
 	};
-	return self.encode_pixels(&decoded, mime);
+	return self.encode_pixels(&decoded, texture.format.space, mime);
+}
+
+<*
+ The bytes a device slot was loaded from, when it was loaded from anything.
+
+ Copied rather than re-encoded, which is the rule for every source image: a KTX2
+ stays the KTX2 it was, a PNG or a JPEG the file it was. Two doors lead back.
+ `three.texture(path)` keeps its path on the slot, and a file's own image is the
+ one its asset's memo maps to this slot — the reverse of the lookup
+ `load_material_texture` makes, so a layer a script built from `meshMaterial` or
+ `imageAt` copies the file's image too.
+
+ @param [out] mime : `What the bytes are.`
+ @param [out] own : `Whether the caller frees them.`
+ @return? EXPORT_HAS_NOTHING_TO_WRITE
+*>
+fn char[]? Exporter.source_bytes(&self, int slot, gltf::ImageType* mime, bool* own)
+{
+	String path = self.pass.assets.texture_source(slot);
+	if (path.len > 0)
+	{
+		char[]? loaded = file::load(mem, path);
+		if (try loaded)
+		{
+			*mime = mime_of(loaded);
+			*own = true;
+			return loaded;
+		}
+	}
+	foreach (&asset : self.pass.assets.assets)
+	{
+		if (!asset.alive || !asset.has_stream) continue;
+		foreach (memo : asset.images.memo)
+		{
+			if (memo.texture != slot) continue;
+			char[]? bytes = asset.stream.get_image_data((uint)memo.image);
+			if (catch bytes) continue;
+			*mime = asset.stream.gltf.images[memo.image].mimeType;
+			*own = false;
+			return bytes;
+		}
+	}
+	return EXPORT_HAS_NOTHING_TO_WRITE~;
+}
+
+// An image's type by its first bytes, which is how the loader read it.
+fn gltf::ImageType mime_of(char[] encoded) @local
+{
+	if (is_ktx2(encoded)) return gltf::ImageType.IMAGE_KTX2;
+	if (encoded.len >= 2 && encoded[0] == 0xff && encoded[1] == 0xd8) return gltf::ImageType.IMAGE_JPEG;
+	return gltf::ImageType.IMAGE_PNG;
 }
 
 <*
@@ -2853,11 +3366,15 @@ fn gltf::WriteTextureRef Exporter.script_layer_texture(&self, Material* source, 
 }
 
 <*
- The exported texture for a device slot, read back off the device.
+ The exported texture for a device slot: the file it was loaded from, or the
+ device's own pixels when there is no file.
 
- `texture_for`'s second source on its own, because a script's image has no first:
- a `LayeredMaterial`'s maps are `three.texture(path)` and `DataTexture` handles,
- which go straight into the shared table with no file behind them.
+ `texture_for`'s second source on its own, and the only one a script's image has:
+ a `LayeredMaterial`'s maps are `three.texture(path)`, `asset.imageAt()` and
+ `DataTexture` handles. The first two have bytes on disk or in a file, and those
+ are copied (`source_bytes`); only a generated picture is read back and encoded in
+ the format the export asked for. A block-compressed texture cannot be read back,
+ so one with no source is the only thing this drops.
 
  It shares `texture_for`'s memo rather than the layer one, and that is the point:
  the key is the device slot, which is already content-deduplicated, so a stack
@@ -2876,20 +3393,23 @@ fn int Exporter.device_texture_for(&self, int slot)
 	}
 
 	gltf::ImageType mime = gltf::ImageType.IMAGE_PNG;
-	char[]? encoded = self.encode_from_device(slot, &mime);
+	bool own = true;
+	char[]? encoded = self.source_bytes(slot, &mime, &own);
+	if (catch encoded)
+	{
+		own = true;
+		encoded = self.encode_from_device(slot, &mime);
+	}
+	// Counted rather than dropped. A block-compressed texture with no source behind
+	// it cannot be read back as pixels, and a glTF written without it is a material
+	// that lost its picture — which the report has to say, because the file cannot.
 	if (catch encoded)
 	{
 		self.report.skipped++;
 		return -1;
 	}
-	defer free(encoded);
-
-	uint image   = self.out.add_image("", encoded, mime);
-	self.declare_image(encoded, mime);
-	uint texture = self.out.add_texture(image);
-	self.images.push({ .device = slot, .texture = texture });
-	self.report.images++;
-	return (int)texture;
+	defer if (own) free(encoded);
+	return self.add_device_image(slot, encoded, mime);
 }
 
 <*
@@ -3352,11 +3872,12 @@ fn void Exporter.write_camera(&self)
  appears here at all. Getting that backwards lights the far side of everything,
  which reads as the exporter having the normals wrong.
 
- The colour and the intensity go straight across: both sides mean linear rgb and a
- scalar multiplier, so `three.lights[1].color = 0x4060ff` reloads as the same
- blue. glTF measures a directional light's intensity in lux and this renderer
- measures it in nothing at all, so the number is carried rather than converted —
- the alternative is a unit conversion with no defined input.
+ The colour goes straight across: both sides mean linear rgb, so
+ `three.lights[1].color = 0x4060ff` reloads as the same blue. **The intensity is
+ written in the importer's units**, which are Blender's Watts: the importer
+ divides a sun by pi and a point lamp by 4 pi² (`DIRECTIONAL_FROM_WATTS` and
+ `POINT_FROM_WATTS` in `js/prelude/asset.js`), so this multiplies by the same and
+ a round trip is exact. An area light is already in Watts and goes across as is.
 
  **A point light is a place rather than a heading**, so it is written as a `POINT`
  with the range in the extension's own `range` field and the position on the
@@ -3416,7 +3937,7 @@ fn void Exporter.write_light(&self)
 			name,
 			punctual ? gltf::LightType.POINT : gltf::LightType.DIRECTIONAL,
 			color: { light.color[0], light.color[1], light.color[2] },
-			intensity: light.color[3],
+			intensity: light.color[3] * (punctual ? WATTS_PER_POINT : WATTS_PER_DIRECTIONAL),
 			range: punctual ? range : 0
 		);
 		uint node = punctual

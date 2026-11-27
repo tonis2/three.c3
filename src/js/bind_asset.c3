@@ -71,6 +71,9 @@ fn void? JsRuntime.bind_asset_verbs(&self, js::Value host)
 	self.js.@bind(host, "inventory", &js_inventory, self)!;
 	self.js.@bind(host, "assetText", &js_asset_text, self)!;
 	self.js.@bind(host, "assetWriteText", &js_asset_write_text, self)!;
+	self.js.@bind(host, "assetSize", &js_asset_size, self)!;
+	self.js.@bind(host, "assetReadInto", &js_asset_read_into, self)!;
+	self.js.@bind(host, "assetWriteBytes", &js_asset_write_bytes, self)!;
 	self.js.@bind(host, "exportScene", &js_export, self)!;
 }
 
@@ -442,6 +445,94 @@ fn String? js_asset_write_text(JsRuntime* self, String asked, String text)
 		return self.js.fail("could not write %s: %s", self.blame(asked, writing), err)~;
 	}
 
+	return writing;
+}
+
+<*
+ How big a binary file may be, read or written by `three.readBytes` and
+ `three.writeBytes`. A terrain field at the largest grid is a megabyte; this is a
+ bound against a mistake, not a budget.
+*>
+const usz MAX_BYTES_FILE = 64 * 1024 * 1024;
+
+<*
+ A path as `three.readText` resolves it, or the throw that refuses it.
+
+ @return `In tmem.`
+ @return? js::THREW
+*>
+fn String? file_path(JsRuntime* self, String asked, String verb) @local
+{
+	if (asked.len == 0) return self.js.fail("%s wants a path to a file", verb)~;
+	String? opening = self.resolve_asset(asked, tmem);
+	if (catch err = opening)
+	{
+		if (err == js::MODULE_ESCAPES_ROOT)
+		{
+			return self.js.fail("%s: '%s' has more '..' than there is path above it", verb, asked)~;
+		}
+		return self.js.fail("%s: cannot resolve '%s': %s", verb, asked, err)~;
+	}
+	return opening;
+}
+
+<*
+ `assetSize(path)` — a file's size in bytes, or -1 when it is not there: the first
+ half of `three.readBytes`, which sizes the array it fills.
+
+ @return? js::THREW
+*>
+fn long? js_asset_size(JsRuntime* self, String asked)
+{
+	String opening = file_path(self, asked, "three.readBytes(path)")!;
+	if (!file::is_file(opening)) return -1;
+	long size = path::file_size((Path)opening) ?? -1;
+	if (size > (long)MAX_BYTES_FILE)
+	{
+		return self.js.fail("three.readBytes: '%s' is %d bytes, and it stops at %d", asked, size, MAX_BYTES_FILE)~;
+	}
+	return size;
+}
+
+<*
+ `assetReadInto(path, target)` — fills a `Uint8Array` the script owns, and answers
+ how many bytes it took. The second half of `three.readBytes`.
+
+ @return? js::THREW
+*>
+fn usz? js_asset_read_into(JsRuntime* self, String asked, char[] target)
+{
+	String opening = file_path(self, asked, "three.readBytes(path)")!;
+	if (target.len == 0) return 0;
+	char[]? bytes = file::load(tmem, opening);
+	if (catch err = bytes) return self.js.fail("could not read %s: %s", self.blame(asked, opening), err)~;
+	usz moved = bytes.len < target.len ? bytes.len : target.len;
+	if (moved > 0) mem::copy(target.ptr, bytes.ptr, (sz)moved);
+	return moved;
+}
+
+<*
+ `assetWriteBytes(path, bytes)` — `three.writeText`'s door for bytes: the same
+ path rules, the folder made on the way.
+
+ @return `The path written to.`
+ @return? js::THREW
+*>
+fn String? js_asset_write_bytes(JsRuntime* self, String asked, char[] bytes)
+{
+	String writing = file_path(self, asked, "three.writeBytes(path, bytes)")!;
+	if (bytes.len > MAX_BYTES_FILE)
+	{
+		return self.js.fail("three.writeBytes: %d bytes for '%s', and it stops at %d", bytes.len, asked, MAX_BYTES_FILE)~;
+	}
+	if (catch err = make_way_for(writing))
+	{
+		return self.js.fail("could not make the folder for %s: %s", self.blame(asked, writing), err)~;
+	}
+	if (catch err = file::save(writing, bytes))
+	{
+		return self.js.fail("could not write %s: %s", self.blame(asked, writing), err)~;
+	}
 	return writing;
 }
 
@@ -1266,6 +1357,7 @@ fn ExportTextureFormat export_textures(int asked) @local
 	{
 		case 1: return ExportTextureFormat.KTX2_BC7;
 		case 2: return ExportTextureFormat.KTX2_BASIS;
+		case 3: return ExportTextureFormat.KTX2_UASTC;
 		default: return ExportTextureFormat.PNG;
 	}
 }
@@ -1312,6 +1404,8 @@ struct ExportAnswer
 	uint bones;
 	uint clips;
 	uint morphed;
+	uint markers;
+	uint colliders;
 	double bytes;
 }
 
@@ -1340,9 +1434,27 @@ struct ExportAnswer
  `export_textures` names. A source file's images are copied unchanged whatever it
  says.
 
+ `root` is the subtree to write, or null for the scene; `camera` and `light` say
+ whether the scene's own go in. `extras` is flat pairs of node handle and JSON
+ text, `file_extras` flat pairs of key and JSON text, and `stand_ins` the nodes a
+ camera or light was read off — the prelude gathers all three, because a script's
+ extras live on its objects and not here.
+
  @return? js::THREW
 *>
-fn ExportAnswer? js_export(JsRuntime* self, String path, bool flatten, int bake, int textures)
+fn ExportAnswer? js_export(
+	JsRuntime* self,
+	String path,
+	bool flatten,
+	int bake,
+	int textures,
+	MaybeNode root,
+	bool camera,
+	bool light,
+	js::Value extras,
+	js::Value file_extras,
+	js::Value stand_ins
+)
 {
 	if (self.pass == null) return self.js.fail("there is no scene to export in this context")~;
 	if (path.len == 0) return self.js.fail("scene.export(path) wants a path to write a .glb to")~;
@@ -1363,11 +1475,54 @@ fn ExportAnswer? js_export(JsRuntime* self, String path, bool flatten, int bake,
 		return self.js.fail("cannot export to '%s': could not make its folder: %s", path, err)~;
 	}
 
+	ExportExtras tags;
+	tags.init(mem);
+	defer tags.free();
+	long pairs = self.js.length(extras)!;
+	for (long i = 0; i + 1 < pairs; i += 2)
+	{
+		void* data = js::data_of(self.js.get(extras, i)!, self.node_class);
+		if (!data) continue;
+		@pool()
+		{
+			// An object or nothing: `extras` is a JSON object in the file.
+			String json = self.js.text(self.js.get(extras, i + 1)!, tmem);
+			if (json.len > 0 && json[0] == '{') tags.set(unpack_id(data, NodeId), json);
+		};
+	}
+	long keys = self.js.length(file_extras)!;
+	for (long i = 0; i + 1 < keys; i += 2)
+	{
+		@pool()
+		{
+			String key  = self.js.text(self.js.get(file_extras, i)!, tmem);
+			String json = self.js.text(self.js.get(file_extras, i + 1)!, tmem);
+			if (key.len > 0 && json.len > 0) tags.add_file(key, json);
+		};
+	}
+	long held = self.js.length(stand_ins)!;
+	for (long i = 0; i < held; i++)
+	{
+		void* data = js::data_of(self.js.get(stand_ins, i)!, self.node_class);
+		if (data) tags.stand_ins.push(unpack_id(data, NodeId));
+	}
+
+	// The scene the subtree is in, which is the one being exported: a root from
+	// another scene would walk nodes this pass cannot see.
+	if (root.is_set() && root.ref.scene != self.pass.scene)
+	{
+		return self.js.fail("scene.export options.root is in another scene than the one being exported")~;
+	}
+
 	ExportReport? report = self.pass.export_scene(
 		writing,
 		flatten,
 		bake > 0 ? (uint)bake : 0,
-		export_textures(textures)
+		export_textures(textures),
+		root.is_set() ? root.ref.id : NO_NODE,
+		camera,
+		light,
+		&tags
 	);
 	if (catch err = report)
 	{
@@ -1400,6 +1555,8 @@ fn ExportAnswer? js_export(JsRuntime* self, String path, bool flatten, int bake,
 		.bones = report.bones,
 		.clips = report.clips,
 		.morphed = report.morphed,
+		.markers = report.markers,
+		.colliders = report.colliders,
 		.bytes = (double)report.bytes,
 	};
 }
@@ -1972,6 +2129,8 @@ struct AssetNodeRecord
 	// The glTF node's `extras` as JSON text, "" for none. `_build` parses it into
 	// `object.extras`.
 	String extras;
+	// Which of the asset's bodies this entry carries, or -1. See `PlacedNode`.
+	int file_body;
 }
 
 <*
@@ -2023,6 +2182,7 @@ fn js::Value? js_asset_nodes(JsRuntime* self, AssetId id, bool skeleton, bool ph
 			.collides = entry.collides,
 			.collision_only = entry.collision_only,
 			.extras = entry.extras,
+			.file_body = entry.file_body,
 		};
 		self.js.push(nodes, self.js.@object_of(record)!);
 	}
@@ -2370,7 +2530,8 @@ fn js::Value? js_inventory(JsRuntime* self)
 }
 
 <*
- `terrain(width, depth, segments, skirt, heights)` — a heightfield, as an asset.
+ `terrain(width, depth, segments, skirt, heights, centerX, centerZ, colors)` — a
+ heightfield, as an asset.
 
  `heights` is a `Float64Array` of `(segments + 1)^2` numbers, row-major in z then
  x: the prelude has to walk the caller's input to validate it anyway. A callback
@@ -2381,9 +2542,23 @@ fn js::Value? js_inventory(JsRuntime* self)
  a height array off by a row is a surface that reads at the wrong stride, which
  produces a plausible-looking diagonal ripple and nothing that says why.
 
+ `colors` is RGBA bytes, four per sample in the heights' order, or empty for a
+ terrain with no COLOR_0. The centre is where the field's middle is, in the
+ asset's own space.
+
  @return? js::THREW
 *>
-fn AssetId? js_terrain(JsRuntime* self, float width, float depth, int segments, float skirt, double[] heights)
+fn AssetId? js_terrain(
+	JsRuntime* self,
+	float width,
+	float depth,
+	int segments,
+	float skirt,
+	double[] heights,
+	float center_x,
+	float center_z,
+	char[] colors
+)
 {
 	need_device(self, "building a shape")!;
 
@@ -2400,11 +2575,19 @@ fn AssetId? js_terrain(JsRuntime* self, float width, float depth, int segments, 
 			segments, wanted, heights.len)~;
 	}
 
+	if (colors.len != 0 && colors.len != wanted * 4)
+	{
+		return self.js.fail("a %d-segment terrain wants %d colour bytes (four per sample), got %d",
+			segments, wanted * 4, colors.len)~;
+	}
+
 	@pool()
 	{
 		Heightfield field = {
 			.width = width,
 			.depth = depth,
+			.center_x = finite(center_x),
+			.center_z = finite(center_z),
 			.segments = (uint)segments,
 			.skirt = skirt > 0 ? skirt : 0,
 		};
@@ -2412,6 +2595,11 @@ fn AssetId? js_terrain(JsRuntime* self, float width, float depth, int segments, 
 		// A NaN here would spread through the normals into every neighbouring
 		// vertex and put a black hole in the middle of the ground.
 		foreach (height : heights) field.heights.push(finite((float)height));
+		field.colors.tinit((usz)(colors.len / 4) + 1);
+		for (usz i = 0; i + 3 < colors.len; i += 4)
+		{
+			field.colors.push({ colors[i] / 255.0f, colors[i + 1] / 255.0f, colors[i + 2] / 255.0f, colors[i + 3] / 255.0f });
+		}
 
 		AssetId? asset = self.pass.assets.terrain(&self.renderer.gpu, &field);
 		if (catch err = asset) return self.js.fail("could not build a terrain: %s", err)~;

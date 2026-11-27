@@ -113,6 +113,14 @@ export class Object3D {
 		// gets from `instantiate({ physics: true })` sets it.
 		this._collisionOnly = false;
 		this._blocks = true;
+		// Which of a file's colliders this object carries, and the asset it is in;
+		// -1 for none. Set by `asset.instantiate({ physics: true })`.
+		this._fileBody = -1;
+		this._fileAsset = null;
+		// 'light' or 'camera' when this object is the file node a `{ lights: true }`
+		// or `{ camera: true }` instantiation read the scene's own off. The export
+		// writes those itself, so the empty is left out rather than doubled.
+		this._standsIn = null;
 		// Something to do the moment this object is in a scene, or null — which
 		// is every object but the root of an `instantiate({ physics: true })`.
 		// A body hangs on a host node and there is no host node until an `add`.
@@ -573,6 +581,7 @@ export class Object3D {
 		if (!this._collides) h.setCollides(false);
 		if (this._collisionOnly) h.setCollisionOnly(true);
 		if (!this._blocks) h.setBlocks(false);
+		if (this._fileBody >= 0) h.setFileBody(this._fileAsset, this._fileBody);
 
 		const material = this._hostMaterial();
 		if (material >= 0) H.setMaterial(h, material);

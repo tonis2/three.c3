@@ -346,6 +346,27 @@ a fresh `levels/` is the ordinary case rather than a mistake. `scene.export` doe
 The same 4 MB `three.readText` stops at bounds this too: a file this writes has to be a file that
 reads back, and a second, larger limit would make that false.
 
+## three.writeBytes(path, bytes)
+
+A binary file written, with `three.writeText`'s path rules: relative to the first `--script`'s
+folder, absolute as it is, and a folder on the way is made. `bytes` is any typed array or an
+`ArrayBuffer`. Answers the path it wrote to. Up to 64 MB.
+
+## three.readBytes(path)
+
+A binary file, as a `Uint8Array` the caller owns, or `null` for a file that is not there — the same
+path rules and the same 64 MB as `three.writeBytes`. `three.save.readBytes` is the save-slot door;
+this one reads and writes beside the game, the way `three.readText` does.
+
+```js
+three.writeBytes('regions/r_0_0.bin', new Uint8Array([1, 2, 3]));
+const back = three.readBytes('regions/r_0_0.bin'); // Uint8Array [1, 2, 3]
+```
+
+`field.save(path)` and `three.Field.load(path)` go through this door, and `new three.Field({ center })`
+and `new three.TerrainGeometry({ center, colors })` are the other options a region's ground takes —
+see Field and TerrainGeometry in `docs/classes.md`.
+
 ## three.level
 
 A placement list over a kit — a piece and a transform per row, read with `three.readJSON` and
@@ -365,6 +386,9 @@ written with `three.writeJSON`:
 `kit` is the default asset path, in the form `three.load` takes; a row may carry its own `"asset"`
 to place a piece from another file. `piece` is a node name the way `asset.node(name)` takes it, and
 `id` is a string unique within the file — a duplicate, or a `snap.to` naming no earlier row, throws.
+`extras` is optional: an object merged over the piece's own glTF extras onto `object.extras`, a
+`null` value taking one of the piece's keys away; `three.level.save` writes back only what differs
+from the piece, so a kit that changes a tag reaches every row that did not override it.
 `position` and `rotation` are what the object's own properties read back as after placement, always
 present; `scale` defaults to `[1, 1, 1]`. `nth` is optional: a whole number from 0 that picks among nodes sharing
 `piece`'s name (`asset.node(name, { nth })`) — a scene exported from Blender repeats one name over hundreds of
@@ -381,7 +405,9 @@ it is now — the wall regrows, the storey lifts with it — while a freehand ro
 the file says either way.
 
 - `three.level.load(path, parent, options = {})` — reads the file, places every row under `parent`,
-  and returns a `Level`. `null` for a file that is not there, like `three.readJSON`.
+  and returns a `Level`. `null` for a file that is not there, like `three.readJSON`. `{ physics: true }`
+  places every piece with its kit's colliders (`asset.node(piece, { physics: true })`), so the level
+  collides and `scene.export` writes them back; rows `level.add` places later follow it.
 - `three.level.save(path, level)` — writes `level` back, each row's transform read fresh off its
   object. Answers the path it actually wrote to.
 - `three.level.create(kit)` — an empty `Level`, for an editor that starts from nothing.
@@ -401,7 +427,35 @@ placed it there in the first place, and the one an agent or a person keeps editi
 
 Write the scene to a `.glb`. Answers with `{ path, meshes, entries, materials, images,
 compressedImages, nodes, instances, batches, skipped, shaded, bakedImages, bakedColors, layers,
-bytes }`. A folder on the way that is not there yet is made, as `three.writeText` makes one.
+markers, colliders, bytes }`. A folder on the way that is not there yet is made, as
+`three.writeText` makes one.
+
+**Options** (all optional):
+
+- `root` — an object in this scene. Only its subtree is written, the root at its world transform,
+  and the report counts only it.
+- `camera: false`, `light: false` — leave the scene's camera or lights out of the file.
+- `extras` — an object written as the file's own root `extras`, which `asset.extras` reads back.
+- `flatten`, `bake`, `textures` — below.
+
+**Extras and markers.** Every object's `extras` goes into the file on its node, any JSON value, and
+`instantiate` reads it back onto `object.extras`. Copies with different extras are separate instanced
+nodes, each carrying its own. A childless empty — a spawn, an area, a placed piece's marker — is
+written as a node that draws nothing, at its placement, with or without extras; `markers` counts them.
+A group whose children all dropped out is still dropped, unless it has extras. An empty a
+`{ lights: true }` or `{ camera: true }` instantiation read the scene's light or camera off is left
+out while that light or camera is written, so a round trip does not grow a second `sun`.
+
+**Colliders.** A collider the file stated and `instantiate({ physics: true })` placed goes back as the
+file stated it — mesh, convex hull, box, sphere, capsule or cylinder, trigger and physics material —
+on the node that carries it: the drawing for a mesh or hull, the instanced node for copies (one
+collider, which every copy gets back), the node itself for a shape. A collision-only proxy is never
+a second collider. A solver body with no file behind it is written as the solver holds it, and a
+terrain the solver holds as a heightfield goes out as a mesh collider over its own mesh. Collider
+identity is part of the batch key. `colliders` counts what was written; collision filters are not.
+
+**Lights** are written in the importer's units, Blender's Watts: a sun of intensity `i` as `i·π`, a
+point light as `i·4π²`. The importer divides by the same, so a round trip is exact.
 
 `{ textures: 'ktx2' }` writes generated textures as BC7 KTX2 with a mip chain instead of PNG — the
 format `three.texture` loads seventeen times faster at a quarter of the VRAM. A texture that came
@@ -421,7 +475,13 @@ so a scene of sixty 1024x1024 images spends about a second on it rather than the
 image at a time. So it is for a file leaving the engine. `'png'` stays the default, and anything
 else throws.
 
-**Both are build steps.** BC7 encoding searches per block and saturates every core, and a single
+`{ textures: 'uastc' }` is the same `KHR_texture_basisu` at near-BC7 quality: UASTC 4x4 blocks, Zstd
+supercompressed, about four times ETC1S's size, transcoded to BC7 or ASTC at load without a decode.
+It is the one for a mask. Every compressed kind is written in the texture's own colourspace, so a
+`Field.mask` (`srgb-linear`) goes out as a linear KTX2 and reads back as data, not colour. A
+1024x1024 mask with its mip chain encodes in about 0.1 s.
+
+**BC7 and ETC1S are build steps.** BC7 encoding searches per block and saturates every core, and a single
 2048x2048 texture still takes around half a minute. A scene with twenty of them is minutes, not
 seconds. Do it when you ship a level, not when you save one.
 
@@ -478,8 +538,10 @@ the tell is nine materials all carrying the same `baseColorFactor`.
 
 Material layer stacks are the exception to that last part. A mesh loaded from a `.glb` carrying
 `CUSTOM_materials_layers` is written back with the stack it came in with; a `three.LayeredMaterial`
-built in a script is written from the description it was constructed with, images read back off the
-device. Either way the stack survives, and `layers` counts the records. The `COLOR_0` a VERTEX_COLOR
+built in a script is written from the description it was constructed with. Its images are copied
+from the files they were loaded from — `three.texture(path)` keeps the path, `asset.imageAt()` and a
+mesh's own maps the file they are in — so a KTX2 stays the KTX2 it was and a PNG the PNG; only a
+generated picture (a `DataTexture`, a `Field.mask`) is read back off the device and encoded. Either way the stack survives, and `layers` counts the records. The `COLOR_0` a VERTEX_COLOR
 mask reads goes into the file beside them. A script stack takes precedence when a mesh has both,
 because that is what the frame drew with, and changing a layer's map or animated tint after
 construction is picked up — the export reads live samplers and uniforms.

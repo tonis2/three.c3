@@ -794,6 +794,11 @@ struct SharedTexture
 	// on one slot compares, so another slot's texture coming or going is not a
 	// change to it.
 	uint installed;
+	// The file this texture was loaded from by path, or "". Owned. What an export
+	// copies instead of reading the pixels back: a KTX2 cannot be read back at all,
+	// and a PNG read back would be re-encoded. The first path in wins, which is any
+	// of them, since they all hold this picture.
+	String source;
 }
 
 <*
@@ -979,6 +984,13 @@ struct PlacedNode
 	// and the implicit shapes' proxies are the second — see `scene/collider.c3`.
 	bool collides;
 	bool collision_only;
+
+	// Which of `Asset.bodies` this entry carries into the scene, or -1 — straight
+	// into `Node.file_body`. Only with `physics: true`. A collider over the drawing
+	// is carried by what draws: the node, or each copy and primitive of a node that
+	// draws through children. A shape or a motion is carried by the node itself.
+	// A proxy carries nothing, because its owner writes the collider.
+	int file_body;
 }
 
 <*
@@ -1480,7 +1492,11 @@ fn void free_asset_memory(Gpu* gpu, Asset* asset)
 	free_nodes(asset);
 	free_physics(asset);
 	free_stream(asset);
-	if (asset.has_terrain) asset.terrain.heights.free();
+	if (asset.has_terrain)
+	{
+		asset.terrain.heights.free();
+		asset.terrain.colors.free();
+	}
 	if (asset.has_merged) asset.merged.free();
 	if (asset.extras.len > 0) asset.extras.free(mem);
 	if (asset.path.len > 0) asset.path.free(mem);
@@ -1585,6 +1601,7 @@ fn void Assets.flatten(&self, AssetId asset, List{PlacedNode}* out, bool skeleto
 					// A file with no node tree has no collider either: a collider is a
 					// node's, and there are none.
 					.collides = true,
+					.file_body = -1,
 				}
 			);
 		}
@@ -1715,6 +1732,19 @@ fn void Assets.flatten_node(
 	bool draws_itself = source.mesh_count == 1 && !instanced;
 	int here          = (int)out.len();
 
+	// Who carries the body into the scene. The drawing does, for a collider over
+	// it: a group over copies or primitives draws through its children, so they
+	// carry it and the group does not. Only the node the body belongs to — a
+	// `geometry.node` collider files the body on the geometry's node as well.
+	bool owned       = body != null && body.gltf_node == (int)index;
+	bool over_mesh   = owned && body.has_collider && (body.shape == AssetShape.MESH || body.shape == AssetShape.HULL);
+	bool by_children = owned && body.has_collider && (instanced || (over_mesh && !draws_itself && source.mesh_count > 0));
+	int carried      = owned && !by_children ? source.body : -1;
+	int copies_carry = by_children ? source.body : -1;
+	// A hull is of the whole mesh, so one primitive of each copy carries it and the
+	// export writes the hull itself; a mesh collider is the same triangles split.
+	bool one_carries = by_children && body.shape == AssetShape.HULL;
+
 	// **A skinned mesh does not inherit its own node's transform, and glTF says
 	// so**: the joint matrices are already in the skin's space, so the node the
 	// mesh hangs off is a placeholder rather than a placement. Saying that in the
@@ -1741,6 +1771,7 @@ fn void Assets.flatten_node(
 			.color = NO_TINT,
 			.skin = source.skin,
 			.collides = draws_collide,
+			.file_body = carried,
 		}
 	);
 
@@ -1760,7 +1791,7 @@ fn void Assets.flatten_node(
 		{
 			for (uint i = 0; i < source.mesh_count; i++)
 			{
-				PlacedNode child = primitive_child(loaded, source, i, here, draws_collide);
+				PlacedNode child = primitive_child(loaded, source, i, here, draws_collide, one_carries && i > 0 ? -1 : copies_carry);
 				child.position = copy.position;
 				child.rotation = copy.rotation;
 				child.scale = copy.scale;
@@ -1778,7 +1809,10 @@ fn void Assets.flatten_node(
 	}
 	else if (!draws_itself)
 	{
-		for (uint i = 0; i < source.mesh_count; i++) out.push(primitive_child(loaded, source, i, here, draws_collide));
+		for (uint i = 0; i < source.mesh_count; i++)
+		{
+			out.push(primitive_child(loaded, source, i, here, draws_collide, one_carries && i > 0 ? -1 : copies_carry));
+		}
 	}
 
 	// Re-read: `out.push` cannot move the asset pool, but the recursion below
@@ -1799,7 +1833,7 @@ fn void Assets.flatten_node(
  to each separately — which keeps a thousand instanced weeds out of the index
  rather than merely rejected a thousand times.
 *>
-fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int parent, bool collides) @local
+fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int parent, bool collides, int body) @local
 {
 	return {
 		.name = loaded.meshes[(sz)(source.first_mesh + i)].name,
@@ -1814,6 +1848,7 @@ fn PlacedNode primitive_child(Asset* loaded, AssetNode* source, uint i, int pare
 		.color = NO_TINT,
 		.skin = source.skin,
 		.collides = collides,
+		.file_body = body,
 	};
 }
 
@@ -1841,6 +1876,7 @@ fn PlacedNode collider_proxy(AssetBody* body, AssetNode* source, int mesh, int p
 		.skin = -1,
 		.collides = true,
 		.collision_only = true,
+		.file_body = -1,
 	};
 }
 
@@ -1890,6 +1926,8 @@ fn void Assets.release_texture(&self, Gpu* gpu, int index)
 		gpu.texture_table.release(gpu, (uint)index);
 		shared.texture.free(gpu);
 	}
+	if (shared.source.len > 0) shared.source.free(mem);
+	shared.source = "";
 	shared.alive = false;
 	self.revision++;
 	self.free_textures.push((uint)index);
@@ -5081,7 +5119,7 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	// family the file is in. The last is why `supports` is asked here rather
 	// than left to the upload — here there is still a decode to fall back on.
 	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, nearest);
-	if (try claimed) return claimed;
+	if (try claimed) return self.note_source(claimed, path);
 
 	// Counted with the glTF decodes rather than separately: `decodes` answers
 	// "how much decoding has this table paid for", and a script that reloads the
@@ -5091,7 +5129,31 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	defer decoded.free();
 
 	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
-	return self.claim_texture(gpu, decoded, space, mips, nearest);
+	return self.note_source(self.claim_texture(gpu, decoded, space, mips, nearest)!, path);
+}
+
+<*
+ Remember the file a slot came from, unless it already has one.
+
+ @param index : "A live slot"
+ @param path : "The file it was loaded from, copied"
+ @return "The slot, for the caller to return"
+*>
+fn int Assets.note_source(&self, int index, String path)
+{
+	SharedTexture* shared = &self.textures[index];
+	if (shared.source.len == 0) shared.source = path.copy(mem);
+	return index;
+}
+
+<*
+ @param index : "A texture slot; a dead one has no source"
+ @return "The file a texture slot was loaded from, or empty. Borrowed"
+*>
+fn String Assets.texture_source(&self, int index)
+{
+	if (!self.texture_alive(index)) return "";
+	return self.textures[index].source;
 }
 
 <*
@@ -5443,6 +5505,7 @@ fn void Assets.free(&self, Gpu* gpu)
 	foreach (&shared : self.textures)
 	{
 		if (shared.alive) shared.texture.free(gpu);
+		if (shared.source.len > 0) shared.source.free(mem);
 	}
 	self.textures.free();
 	self.free_textures.free();

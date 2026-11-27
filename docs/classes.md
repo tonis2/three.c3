@@ -1920,7 +1920,7 @@ are one asset, the same rule every other shape here follows.
 ## TerrainGeometry
 
 ```js
-new three.TerrainGeometry({ width, depth, segments, heights, skirt })
+new three.TerrainGeometry({ width, depth, segments, heights, skirt, center, colors })
 ```
 
 Ground that is a surface rather than a pile of boxes, and the only geometry here that answers questions
@@ -1931,10 +1931,25 @@ function `(x, z) => y` sampled at the grid points in world coordinates — the s
 in the scene uses, so one height function can drive the terrain, the mask and the scatter. Omit it for a
 flat field to stamp into later.
 
-It lies in the xz plane with +y up and is centred on the origin, its uv runs 0..1 across the whole field
+It lies in the xz plane with +y up and is centred on `center: [x, z]` — the origin, or the Field's own
+centre when `heights` is a centred Field, so a region's ground lands on its region with the Mesh at the
+origin and `heightAt` taking world coordinates. Its uv runs 0..1 across the whole field
 so a splat mask lines up with no transform, and its normals come from the grid rather than from the
 triangles — which is the difference between ground and steps. `skirt` is how far a wall drops around the
 border so the map edge is not a hole.
+
+`colors` paints the ground: `{ r, g, b, a }` of `three.Field`s on the terrain's own grid (a channel left
+out reads 0), or a `Uint8Array` of RGBA bytes, `(segments + 1)²` × 4. They are the mesh's `COLOR_0`, so a
+`LayeredMaterial` layer with `maskSource: 'vertexColor'` reads them through `s.vertex_mask` exactly as it
+reads a Blender-painted ground; a skirt vertex takes its edge's colour. `scene.export` writes them back as
+`COLOR_0`.
+
+```js
+const rock = new three.Field({ width: 64, segments: 64 }).fill((x, z) => (z > 10 ? 1 : 0));
+const ground = new three.TerrainGeometry({ width: 64, segments: 64, colors: { r: rock } });
+const mat = new three.LayeredMaterial({ map: grass,
+  layers: [{ name: 'rock', map: stone, maskSource: 'vertexColor', mask: 'r' }] });
+```
 
 One asset, one draw call: a 256-segment field is one `vkCmdDrawIndexed`.
 
@@ -2011,7 +2026,7 @@ and `MeshRef.split()`.
 ## Field
 
 ```js
-new three.Field({ width, depth, segments, value })
+new three.Field({ width, depth, segments, value, center })
 ```
 
 A scalar grid in world coordinates — the authoring half of TerrainGeometry, and the same object a splat
@@ -2032,6 +2047,15 @@ Everything mutates in place and returns `this`, so it chains.
 
 Every stamp takes a feather in world units with a smoothstep falloff.
 
+`center: [x, z]` puts the middle of the field there, so a region's field sits on its region and every
+stamp, `fill` and `valueAt` takes world coordinates; a TerrainGeometry built from it lands in the same
+place.
+
+`field.save(path)` writes it as a small binary file — `FLD1`, a version, the segment count, width,
+depth and centre, then the samples as float32 little-endian, row-major in z — through
+`three.writeBytes`'s door, and answers the path. `three.Field.load(path)` reads one back, or answers
+null for a file that is not there; a file that is not a field throws.
+
 `valueAt(x, z)` reads it back bilinearly before any upload, which is what lets a script place buildings
 and scatter trees on ground that does not exist on the device yet.
 
@@ -2045,10 +2069,13 @@ weight and not a colour.
 - `depth`
 - `segments`
 - `side`
+- `center`
 - `values`
 
 ### Methods
 
+- `save(path)`
+- `Field.load(path)` (static)
 - `fill(v)`
 - `add(v)`
 - `flatten(rect, y, feather)`

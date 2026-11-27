@@ -67,6 +67,9 @@ fn bool NodeId.equals(
 	NodeId other
 ) @operator(==) => self.index == other.index && self.generation == other.generation;
 
+// One number for the pair, for a map keyed by node.
+fn ulong NodeId.key(self) => (ulong)self.generation << 32 | self.index;
+
 struct Node
 {
 	String name;
@@ -312,6 +315,18 @@ struct Node
 	 On by default. Not inherited, for `collides`' reason.
 	*>
 	bool blocks;
+
+	<*
+	 The `KHR_physics_rigid_bodies` block this node was placed from — an index into
+	 that asset's `bodies` — or -1.
+
+	 Recorded at placement by `instantiate({ physics: true })`, on the node that
+	 carries the collider: the drawing for a mesh or hull, each copy of an
+	 instanced node, the node itself for a shape. It is what `scene.export` writes
+	 back, since a level with nothing moving has no solver bodies to read.
+	*>
+	AssetId file_body_asset;
+	int file_body;
 
 	// Slot bookkeeping. `generation` is bumped when the slot is reused, which is
 	// what makes a stale NodeId detectable rather than silently valid.

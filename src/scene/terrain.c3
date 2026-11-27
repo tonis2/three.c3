@@ -14,8 +14,9 @@
 
  ## The grid
 
- `(segments + 1)^2` samples over `width` x `depth`, centred on the origin, in the
- xz plane with +y up — the frame `PlaneGeometry` lands in after the rotation every
+ `(segments + 1)^2` samples over `width` x `depth`, centred on `center` (the
+ origin unless a script placed the field on its region), in the xz plane with
+ +y up — the frame `PlaneGeometry` lands in after the rotation every
  script writes. It is baked in because a terrain that could be authored on its
  side is a terrain whose `height_at` means nothing.
 
@@ -62,9 +63,12 @@ excuse TERRAIN_SIZE_INVALID, TERRAIN_HEIGHTS_WRONG_LENGTH;
 *>
 struct Heightfield
 {
-	// World extent along x and z. The field spans [-width/2, width/2].
+	// World extent along x and z. The field spans center ± width/2.
 	float width;
 	float depth;
+	// Where the middle of the field is, in the asset's own space.
+	float center_x;
+	float center_z;
 	// Cells per side. There are `segments + 1` samples per side.
 	uint segments;
 	<*
@@ -79,7 +83,18 @@ struct Heightfield
 	float skirt;
 	// `(segments + 1) * (segments + 1)` of them, row-major in z then x.
 	List{float} heights;
+	// A colour per sample, in the heights' order, linear 0..1 — the mesh's COLOR_0,
+	// which a layer with a vertex-colour mask reads. Empty for none. Owned.
+	List{Vec4} colors;
 }
+
+<*
+ The colour of a grid index, for a field that has them.
+ @require self.has_colors() : "The field has no colours"
+*>
+fn Vec4 Heightfield.color(&self, uint i, uint j) => self.colors[(sz)j * (sz)self.side() + (sz)i];
+
+fn bool Heightfield.has_colors(&self) => self.colors.len() > 0 && self.colors.len() == (sz)self.side() * (sz)self.side();
 
 fn uint Heightfield.side(&self) @inline => self.segments + 1;
 
@@ -110,9 +125,9 @@ fn float Heightfield.sample(&self, int i, int j)
  cell and the fraction is the position inside it, and computing them separately
  is how the two end up disagreeing at a cell boundary.
 *>
-fn float Heightfield.grid_x(&self, float x) @inline => (x + self.width * 0.5f) / self.width * (float)self.segments;
+fn float Heightfield.grid_x(&self, float x) @inline => (x - self.center_x + self.width * 0.5f) / self.width * (float)self.segments;
 
-fn float Heightfield.grid_z(&self, float z) @inline => (z + self.depth * 0.5f) / self.depth * (float)self.segments;
+fn float Heightfield.grid_z(&self, float z) @inline => (z - self.center_z + self.depth * 0.5f) / self.depth * (float)self.segments;
 
 fn float Heightfield.cell_x(&self) @inline => self.width / (float)self.segments;
 fn float Heightfield.cell_z(&self) @inline => self.depth / (float)self.segments;
@@ -212,8 +227,8 @@ fn collision::Aabb3 Heightfield.bounds(&self)
 		if (i == 0 || height > high) high = height;
 	}
 	return {
-		.min = { -self.width * 0.5f, low - self.skirt, -self.depth * 0.5f },
-		.max = { self.width * 0.5f, high, self.depth * 0.5f },
+		.min = { self.center_x - self.width * 0.5f, low - self.skirt, self.center_z - self.depth * 0.5f },
+		.max = { self.center_x + self.width * 0.5f, high, self.center_z + self.depth * 0.5f },
 	};
 }
 
@@ -228,12 +243,16 @@ fn collision::Aabb3 Heightfield.bounds(&self)
  The skirt is a separate ring of vertices rather than a reuse of the border row,
  because the wall's normal points outwards and the ground's points up: sharing
  them would round the edge over and light the wall as though it were ground.
+
+ The colours, when the field has them, go on as COLOR_0 one per vertex, so a
+ vertex-colour mask reads the paint where it was put.
 *>
 fn void Heightfield.build(&self, GeometryBuilder* out)
 {
 	uint side    = self.side();
-	float half_w = self.width * 0.5f;
-	float half_d = self.depth * 0.5f;
+	float half_w = self.width * 0.5f - self.center_x;
+	float half_d = self.depth * 0.5f - self.center_z;
+	bool painted = self.has_colors();
 
 	for (uint j = 0; j < side; j++)
 	{
@@ -246,6 +265,7 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 				self.grid_normal((int)i, (int)j),
 				{ u, v }
 			);
+			if (painted) out.colors.push(self.color(i, j));
 		}
 	}
 
@@ -292,9 +312,10 @@ fn void Heightfield.build(&self, GeometryBuilder* out)
 fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 {
 	uint side     = self.side();
-	float half_w  = self.width * 0.5f;
-	float half_d  = self.depth * 0.5f;
+	float half_w  = self.width * 0.5f - self.center_x;
+	float half_d  = self.depth * 0.5f - self.center_z;
 	float floor_y = self.bounds().min.y;
+	bool painted  = self.has_colors();
 
 	// edge 0: -z, normal -z, walked +x. 1: +z, normal +z, walked -x.
 	// 2: -x, normal -x, walked -z. 3: +x, normal +x, walked +z.
@@ -328,6 +349,12 @@ fn void Heightfield.build_skirt(&self, GeometryBuilder* out)
 			float v =  (float)j / (float)self.segments;
 			out.vertex({ x, y, z }, normal, { u, v });
 			out.vertex({ x, floor_y, z }, normal, { u, v });
+			// The edge's own colour, top and bottom, for the uv's reason above.
+			if (painted)
+			{
+				out.colors.push(self.color(i, j));
+				out.colors.push(self.color(i, j));
+			}
 		}
 		for (uint step = 0; step + 1 < side; step++)
 		{
@@ -370,16 +397,20 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 
 	sz wanted = (sz)field.side() * (sz)field.side();
 	if (field.heights.len() != wanted) return TERRAIN_HEIGHTS_WRONG_LENGTH~;
+	if (field.colors.len() != 0 && field.colors.len() != wanted) return TERRAIN_HEIGHTS_WRONG_LENGTH~;
 
 	@pool()
 	{
 		ulong hash = hash_octets(KEY_SEED, field.heights.entries, (usz)(field.heights.len() * float::size));
+		if (field.colors.len() > 0) hash = hash_octets(hash, field.colors.entries, (usz)(field.colors.len() * Vec4::size));
 		String key = string::tformat(
-			"terrain:%f:%f:%d:%f:%x",
+			"terrain:%f:%f:%d:%f:%f:%f:%x",
 			field.width,
 			field.depth,
 			field.segments,
 			field.skirt,
+			field.center_x,
+			field.center_z,
 			hash
 		);
 		if (try hit = self.built(key)) return hit;
@@ -395,11 +426,17 @@ fn AssetId? Assets.terrain(&self, Gpu* gpu, Heightfield* field)
 		slot.terrain = {
 			.width = field.width,
 			.depth = field.depth,
+			.center_x = field.center_x,
+			.center_z = field.center_z,
 			.segments = field.segments,
 			.skirt = field.skirt,
 		};
 		slot.terrain.heights.init(mem, (usz)wanted);
 		foreach (height : field.heights) slot.terrain.heights.push(height);
+		// Kept beside the heights, because the exporter rebuilds a terrain from this
+		// field and the paint has to go with it.
+		slot.terrain.colors.init(mem, (usz)field.colors.len() + 1);
+		foreach (color : field.colors) slot.terrain.colors.push(color);
 		slot.has_terrain = true;
 		return built;
 	};

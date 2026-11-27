@@ -801,3 +801,39 @@ fn char[]? encode_ktx2_basis(
 	basis::EncodeOptions options = { .quality = 90, .effort = 2, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
 	return basis::encode(allocator, basis::ETC1S, one[..], w, h, basis::TexType.D2, options);
 }
+
+<*
+ RGBA8 pixels to a UASTC KTX2 with a full mip chain, under `KHR_texture_basisu`.
+
+ `encode_ktx2_basis`'s sibling at the other end of the trade: UASTC 4x4 blocks,
+ Zstd supercompressed, near BC7 in quality and about four times ETC1S in size.
+ The loader transcodes it to BC7 or ASTC 4x4 without decoding, so it is the
+ portable choice that also comes back fast — and the one for a mask, whose values
+ are weights an ETC1S codebook would move.
+
+ `space` is written into the file's DFD: a linear mask says linear, and its mips
+ are averaged as numbers rather than through the sRGB curve.
+
+ @param decoded : `8-bit pixels. Narrowed to RGBA here, so RGB sources are fine.`
+ @param space : `SRGB for a colour map, LINEAR for one whose channels are numbers.`
+ @return `The whole .ktx2 file, owned by the caller.`
+*>
+fn char[]? encode_ktx2_uastc(
+	image::Image* decoded,
+	ColorSpace space = ColorSpace.SRGB,
+	Allocator allocator = mem
+) => @pool()
+{
+	uint w = decoded.width;
+	uint h = decoded.height;
+	if (w == 0 || h == 0) return UNSUPPORTED_IMAGE~;
+
+	char[] rgba = decoded.to_rgba();
+	defer free(rgba);
+
+	char[][1] one = { rgba };
+	// Effort 5 is basisu's default pack level, 2 of 0..4 — `ktx create --encode
+	// uastc` — so a file written here and one written by hand are the same file.
+	basis::EncodeOptions options = { .quality = 100, .effort = 5, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
+	return basis::encode(allocator, basis::UASTC_4X4, one[..], w, h, basis::TexType.D2, options);
+}

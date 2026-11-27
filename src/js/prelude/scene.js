@@ -479,6 +479,15 @@ export class Scene extends Object3D {
 	// was built with. The material is still a generated shader either
 	// way, so it is still counted in `shaded` — the two numbers answer
 	// different questions.
+	//
+	// Every object's `extras` go into the file on its node, and
+	// `options.extras` is the file's own (`asset.extras` reads it back).
+	// A childless empty is written as a marker — a spawn, an area, a
+	// placed piece — and `markers` counts them. `root` writes one subtree
+	// at its world transform; `camera: false` and `light: false` leave the
+	// scene's camera and lights out. A collider the file stated and
+	// `instantiate({ physics: true })` placed goes back as the file stated
+	// it; `colliders` counts what was written.
 	export(path, options) {
 		this._check();
 		if (typeof path !== 'string' || path.length === 0) {
@@ -487,6 +496,10 @@ export class Scene extends Object3D {
 		let flatten = false;
 		let bake = 0;
 		let textures = 0;
+		let root = this;
+		let camera = true;
+		let light = true;
+		const fileExtras = [];
 		if (options !== undefined && options !== null) {
 			if (typeof options !== 'object') {
 				throw new TypeError('scene.export(path, options) wants an object for its options, like { flatten: true }');
@@ -517,17 +530,53 @@ export class Scene extends Object3D {
 				// The host takes a number and not the word, so the three
 				// spellings are settled here — one place that knows the
 				// order, rather than a string parsed on the other side.
-				const formats = { png: 0, ktx2: 1, basis: 2 };
+				const formats = { png: 0, ktx2: 1, basis: 2, uastc: 3 };
 				if (!Object.prototype.hasOwnProperty.call(formats, options.textures)) {
 					throw new TypeError(
-						"scene.export options.textures is 'png', 'ktx2' or 'basis'; got " +
+						"scene.export options.textures is 'png', 'ktx2', 'basis' or 'uastc'; got " +
 							JSON.stringify(options.textures)
 					);
 				}
 				textures = formats[options.textures];
 			}
+			if (options.root !== undefined && options.root !== null) {
+				let top = options.root instanceof Object3D ? options.root : null;
+				while (top && top.parent) top = top.parent;
+				if (top !== this || options.root._h === null) {
+					throw new TypeError('scene.export options.root is an object in this scene');
+				}
+				root = options.root;
+			}
+			for (const key of ['camera', 'light']) {
+				if (options[key] !== undefined && typeof options[key] !== 'boolean') {
+					throw new TypeError(`scene.export options.${key} is true or false`);
+				}
+			}
+			camera = options.camera !== false;
+			light = options.light !== false;
+			if (options.extras !== undefined && options.extras !== null) {
+				if (typeof options.extras !== 'object' || Array.isArray(options.extras)) {
+					throw new TypeError('scene.export options.extras is an object, like { version: 3 }');
+				}
+				for (const [key, value] of Object.entries(options.extras)) {
+					if (value !== undefined) fileExtras.push(key, JSON.stringify(value));
+				}
+			}
 		}
-		return H.exportScene(path, flatten, bake, textures);
+		// Flat pairs of handle and JSON text, gathered once here: the host has no
+		// copy of a script's extras to read.
+		const extras = [];
+		const standIns = [];
+		const gather = (o) => {
+			if (o._h === null) return;
+			const e = o.extras;
+			if (e && typeof e === 'object' && !Array.isArray(e) && Object.keys(e).length) extras.push(o._h, JSON.stringify(e));
+			if ((o._standsIn === 'light' && light) || (o._standsIn === 'camera' && camera)) standIns.push(o._h);
+			for (let i = 0; i < o.children.length; i++) gather(o.children[i]);
+		};
+		gather(root);
+		return H.exportScene(path, flatten, bake, textures, root === this ? null : root._h, camera, light,
+			extras, fileExtras, standIns);
 	}
 
 	// -------------------------------------------------------------------
