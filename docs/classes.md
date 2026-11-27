@@ -290,6 +290,11 @@ This is what a leaf card, a chain-link fence and a rope want. The alpha comes fr
 under the threshold is discarded, so the quad draws as the shape painted on it, keeps writing depth,
 and needs no back-to-front sort.
 
+With MSAA (a headset's eyes, or `--quest`) the threshold becomes the fragment's sample coverage
+instead (alpha to coverage): the cut edge is smoothed the way a triangle's edge is, rather than
+cut a pixel at a time. The scene image's alpha stays opaque along it, so passthrough does not
+show through a leaf's edge.
+
 **It is not `transparent`, and the difference is the one worth knowing.** A transparent material is
 sorted, writes no depth, and casts no shadow at all — a shadow map holds one depth per texel and
 cannot record half a surface. A cut-out can, so this is the property that reaches the shadow pass: set

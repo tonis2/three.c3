@@ -42,6 +42,9 @@ const bool SURFACE_SUN_SHADOW       @spec(108) = true;
 // Per material, not per frame: off for one whose alpha test is zero, so its
 // pipeline holds no discard at all and keeps early depth (`SKIP_ALPHA_TEST`).
 const bool SURFACE_ALPHA_TEST       @spec(109) = true;
+// On for a cut-out drawn into a multisampled target: the alpha test becomes the
+// fragment's sample coverage rather than a discard (`PipelineState.coverage`).
+const bool SURFACE_ALPHA_COVERAGE   @spec(121) = false;
 // A setting: off reads a shadow with one hardware-filtered tap instead of four
 // against the receiver's plane (`SKIP_RECEIVER_PLANE`, the headset's choice).
 const bool SHADOW_RECEIVER_PLANE    @spec(110) = true;

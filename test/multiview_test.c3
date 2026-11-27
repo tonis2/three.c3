@@ -72,6 +72,23 @@ const String HISTORY = `
 	});
 `;
 
+// A white sheet filling the view, cut by its alpha test along a turned line:
+// the alpha ramps from 0 to 1 across the texture, so the cut is inside the
+// triangles, where MSAA alone does not reach.
+const String CUT = `
+	const scene = new three.Scene();
+	scene.background = 0x000000;
+	const px = new Uint8Array(64 * 4);
+	for (let x = 0; x < 64; x++) px.set([255, 255, 255, x * 4], x * 4);
+	const sheet = new three.MeshLambertMaterial({ emissive: 0xffffff, map: new three.DataTexture(px, 64, 1) });
+	sheet.alphaTest = 0.5;
+	const card = new three.Mesh(new three.PlaneGeometry(30, 30), sheet);
+	card.rotation.z = 0.5;
+	scene.add(card);
+	three.camera.target.set(0, 0, 0);
+	three.camera.orbit(0, 0, 5);
+`;
+
 // A white card turned across a black background: every pixel is one or the
 // other unless something blends the edge.
 const String CARD = `
@@ -339,6 +356,43 @@ fn void msaa_blends_the_edges_it_draws() @test
 	uint soft = blended(&smooth.shot);
 	test::@check(hard < 10, "one sample blended %d pixels", hard);
 	test::@check(soft > 100, "four samples blended only %d pixels", soft);
+}
+
+<*
+ With MSAA a cut-out's alpha test is the fragment's coverage, so its cut is
+ smoothed like a triangle's edge. One sample cuts it hard.
+*>
+fn void msaa_blends_a_cut_out_edge() @test
+{
+	Drawn plain = draw_pair(CUT, 2);
+	defer plain.shot.free();
+	Drawn smooth = draw_pair(CUT, 2, samples: 4);
+	defer smooth.shot.free();
+
+	test::@check(drawn_in(&smooth.shot, 0, W / 2) > 500 && drawn_in(&smooth.shot, W / 2, W) > 500,
+		"each eye drew the sheet");
+	uint hard = blended(&plain.shot);
+	uint soft = blended(&smooth.shot);
+	test::@check(hard < 10, "one sample blended %d pixels", hard);
+	test::@check(soft > 60, "four samples blended only %d pixels along the cut", soft);
+}
+
+<*
+ The coverage along a cut-out's edge never uncovers what is already drawn: over
+ a sky every pixel of the eye images stays opaque, which is what passthrough
+ reads.
+*>
+fn void a_cut_out_edge_keeps_the_eye_images_opaque() @test
+{
+	EyeFrames drawn = draw_eyes(CUT, samples: 4);
+	defer { drawn.eyes.free(); drawn.captured.free(); }
+	test::@check(blended(&drawn.eyes) > 60, "the cut was not smoothed in the eye images");
+	uint see_through = 0;
+	for (sz p = 3; p < drawn.eyes.pixels.len; p += 4)
+	{
+		if (drawn.eyes.pixels[p] != 255) see_through++;
+	}
+	test::@check(see_through == 0, "%d pixels of the eye images are not opaque", see_through);
 }
 
 <*

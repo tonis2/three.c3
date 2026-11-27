@@ -991,6 +991,12 @@ struct PipelineState
 	uint skip_features;
 	// Linear light for the post chain, or a headset's eye image written directly.
 	SceneTone tone;
+	// The alpha test as sample coverage rather than a discard (alpha to coverage),
+	// so a cut-out's edge is smoothed by MSAA like a triangle's. Only for an
+	// opaque material on a multisampled target. Its alpha blends with MAX: the
+	// coverage it writes along the edge never uncovers what is already drawn,
+	// which is what passthrough reads from the scene image's alpha.
+	bool coverage;
 }
 
 <*
@@ -1027,6 +1033,8 @@ fn SceneTone display_tone(ToneMap mode)
 
 // `SCENE_TONE`'s id, clear of the feature constants from `FEATURE_SPEC_ID` up.
 const uint SCENE_TONE_SPEC_ID = 120;
+// `SURFACE_ALPHA_COVERAGE`'s, from `PipelineState.coverage`.
+const uint ALPHA_COVERAGE_SPEC_ID = 121;
 
 // What a frame may leave out of the mesh shader. A mobile GPU pays in registers
 // for every branch a shader has, taken or not, so a scene without any area
@@ -1200,7 +1208,8 @@ fn bool PipelineState.equals(self, PipelineState other)
 		&& self.blend == other.blend
 		&& self.color == other.color
 		&& self.skip_features == other.skip_features
-		&& self.tone == other.tone;
+		&& self.tone == other.tone
+		&& self.coverage == other.coverage;
 }
 
 struct MeshPipeline
@@ -1472,6 +1481,8 @@ struct GraphicsPipelineDesc
 	// The rendering's samples per pixel: the target's for what draws in the
 	// scene, one for every pass with images of its own.
 	vk::SampleCountFlagBits samples;
+	// The fragment's alpha decides which of the samples it covers.
+	bool alpha_to_coverage;
 }
 
 <*
@@ -1529,7 +1540,8 @@ fn MeshPipeline? MeshPipeline.build_graphics(&self, Gpu* gpu, ShaderModule* mod,
 		.setPolygonMode(POLYGON_MODE_FILL);
 
 	vk::PipelineMultisampleStateCreateInfo multisample = vk::defaultMultisampleState()
-		.setRasterizationSamples(desc.samples);
+		.setRasterizationSamples(desc.samples)
+		.setAlphaToCoverageEnable(desc.alpha_to_coverage ? vk::TRUE : vk::FALSE);
 
 	vk::PipelineDepthStencilStateCreateInfo depth = vk::defaultDepthStencilState()
 		.setDepthTestEnable(desc.depth_test ? vk::TRUE : vk::FALSE)
@@ -1629,6 +1641,7 @@ fn vk::PipelineShaderStageCreateInfo[2] draw_stages(vk::ShaderModule module_hand
  themselves at record time.
 
  @param mod : `A module from compile_shader. Its layout is copied, not moved — the caller keeps the module and may build more pipelines from it.`
+ @require !state.coverage || (state.blend == BlendMode.NONE && target.samples != SAMPLE_COUNT_1_BIT) : "Coverage needs an opaque material and MSAA"
  @return ? NO_SCALAR_BLOCK_LAYOUT : `The shader reads tightly packed float3 streams, which is only legal with VK_EXT_scalar_block_layout. Refusing here beats rendering geometry read at the wrong stride.`
  @return ? PUSH_BLOCK_TOO_LARGE : `The device offers fewer push-constant bytes than the block needs. Cannot happen on a conformant device — 128 is the required minimum — so this is a sentence rather than a fallback.`
  @return ? SHADER_TOO_MANY_SETS : `The shader declares bindings in more than one descriptor set and this pass creates one. Not a limitation of the reflection, which reads them all.`
@@ -1649,10 +1662,10 @@ fn MeshPipeline? MeshPipeline.init(
 	defer module_handle.free(gpu.handle);
 
 	vk::PipelineShaderStageCreateInfo[2] stages = draw_stages(module_handle);
-	// Each feature constant on unless its bit is set, then the tone. A module
-	// without them ignores the entries.
-	uint[SHADER_FEATURES + 1] kept;
-	vk::SpecializationMapEntry[SHADER_FEATURES + 1] entries;
+	// Each feature constant on unless its bit is set, then the tone and the
+	// coverage. A module without them ignores the entries.
+	uint[SHADER_FEATURES + 2] kept;
+	vk::SpecializationMapEntry[SHADER_FEATURES + 2] entries;
 	foreach (i, &entry : entries[:SHADER_FEATURES])
 	{
 		kept[i] = (state.skip_features & (1u << i)) == 0 ? 1 : 0;
@@ -1661,13 +1674,16 @@ fn MeshPipeline? MeshPipeline.init(
 	kept[SHADER_FEATURES] = (uint)state.tone.ordinal;
 	entries[SHADER_FEATURES] = { .constantID = SCENE_TONE_SPEC_ID, .offset = (uint)(SHADER_FEATURES * uint::size),
 		.size = uint::size };
+	kept[SHADER_FEATURES + 1] = state.coverage ? 1 : 0;
+	entries[SHADER_FEATURES + 1] = { .constantID = ALPHA_COVERAGE_SPEC_ID,
+		.offset = (uint)((SHADER_FEATURES + 1) * uint::size), .size = uint::size };
 	vk::SpecializationInfo lights = {
 		.mapEntryCount = entries.len,
 		.pMapEntries = &entries[0],
 		.dataSize = kept.len * uint::size,
 		.pData = &kept[0],
 	};
-	if (state.skip_features != 0 || state.tone != LINEAR)
+	if (state.skip_features != 0 || state.tone != LINEAR || state.coverage)
 	{
 		stages[0].pSpecializationInfo = &lights;
 		stages[1].pSpecializationInfo = &lights;
@@ -1711,6 +1727,16 @@ fn MeshPipeline? MeshPipeline.init(
 			blend.srcAlphaBlendFactor = BLEND_FACTOR_ZERO;
 			blend.dstAlphaBlendFactor = BLEND_FACTOR_ONE;
 	}
+	if (state.coverage)
+	{
+		// The colour replaces what is there, as an opaque fragment's does; the
+		// alpha keeps the larger of the two (MAX ignores the factors).
+		blend.blendEnable = vk::TRUE;
+		blend.srcColorBlendFactor = BLEND_FACTOR_ONE;
+		blend.dstColorBlendFactor = BLEND_FACTOR_ZERO;
+		blend.colorBlendOp = BLEND_OP_ADD;
+		blend.alphaBlendOp = BLEND_OP_MAX;
+	}
 	vk::PipelineColorBlendStateCreateInfo color_blend = vk::defaultColorBlendState(
 		(vk::PipelineColorBlendAttachmentState[]) { blend }
 	);
@@ -1724,6 +1750,7 @@ fn MeshPipeline? MeshPipeline.init(
 			...GRAPHICS_PIPELINE,
 			.density_map = target.foveation.exists(),
 			.samples = target.samples,
+			.alpha_to_coverage = state.coverage,
 			.stages = stages[..],
 			.rendering = &rendering,
 			.color_blend = &color_blend,
@@ -2462,8 +2489,8 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
 
 <*
  `base` built over the same module and state with some shader features
- compiled out, or writing a headset's eye image, building it the first time it
- is asked for.
+ compiled out, writing a headset's eye image, or cutting its alpha test as
+ coverage, building it the first time it is asked for.
 
  The variant is kept alive by `base`: it holds one borrow while `base` has any,
  and gives it back when `base` is released for the last time. A pipeline this
@@ -2471,19 +2498,22 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
 
  @param [&in] base : "A pipeline `acquire` handed out"
  @param tone : "What the variant writes"
+ @param coverage : "The alpha test as sample coverage: `PipelineState.coverage`"
  @require (skip_features & ~(SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE | SKIP_POSE)) == 0 : "Unknown feature bits"
 
- @return "`base` itself when it already leaves out exactly those features and writes that tone"
+ @return "`base` itself when it already leaves out exactly those features, writes that tone and cuts that way"
 *>
 fn MeshPipeline*? PipelineCache.variant(&self, Gpu* gpu, Target* target, MeshPipeline* base, uint skip_features,
-	SceneTone tone = LINEAR)
+	SceneTone tone = LINEAR, bool coverage = false)
 {
 	CachedPipeline* entry = self.entry_for(base);
-	if (entry == null || (entry.state.skip_features == skip_features && entry.state.tone == tone)) return base;
-
+	if (entry == null) return base;
 	PipelineState state = entry.state;
+	if (state.skip_features == skip_features && state.tone == tone && state.coverage == coverage) return base;
+
 	state.skip_features = skip_features;
 	state.tone = tone;
+	state.coverage = coverage;
 	foreach (other : self.entries)
 	{
 		if (other.compiled != entry.compiled || !other.state.equals(state)) continue;

@@ -205,6 +205,9 @@ struct MeshPass
 	float tone_exposure;
 	// The sky's pipeline for this frame's tone.
 	MeshPipeline* sky_drawn;
+	// This frame's cut-outs draw their alpha test as sample coverage, because
+	// the target is multisampled (`PipelineState.coverage`).
+	bool cutout_coverage;
 	// Shadows read with one hardware-filtered tap and no receiver plane,
 	// `SKIP_RECEIVER_PLANE`. The headset's setting (`android/entry.c3`).
 	bool one_tap_shadows;
@@ -1446,6 +1449,8 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
  - A cut-out with a height map. The colour pass tests the alpha at the uv the
    parallax march found, and the depth shader at the flat one.
  - A cut-out at all, when the cut-out pipeline is not built.
+ - A cut-out drawn as coverage (`cuts_as_coverage`). The depth shader's cut is
+   all or nothing, and the colour pass's edge reaches past it.
 *>
 fn bool MeshPass.prepassed(&self, Material* material)
 {
@@ -1456,7 +1461,7 @@ fn bool MeshPass.prepassed(&self, Material* material)
 	if (material.fragment_discards) return false;
 	if (material.alpha_test > 0.0f)
 	{
-		if (!self.prepass.cutout_ready || material.stochastic) return false;
+		if (!self.prepass.cutout_ready || material.stochastic || self.cutout_coverage) return false;
 		if ((self.map_flags(material) & FLAG_HAS_HEIGHT_MAP) != 0) return false;
 	}
 	return true;
@@ -1485,7 +1490,7 @@ fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
 	}
 	vk::Format inside = FORMAT_UNDEFINED;
 	if (self.multiview) inside = self.scene_tone == LINEAR ? POST_CHAIN_FORMAT : TARGET_COLOR_FORMAT;
-	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts(), target.foveation.exists(),
+	self.prepass.ensure(gpu, target.depth_format, self.scene_has_cutouts() && !self.cutout_coverage, target.foveation.exists(),
 		target.view_mask(), inside, target.samples);
 	if (!self.prepass.live) return;
 
@@ -1735,7 +1740,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 }
 
 <*
- The pipeline a material's handle draws with.
+ The pipeline a material draws with.
 
  In an `area_reference` frame the four built-in pipelines are answered with
  their numeric-reference twins; everything else - a script's own module - is
@@ -1743,13 +1748,16 @@ fn void MeshPass.build_draw_records(&self, uint slot)
  missing one falls back rather than faulting: the flag can only be read after
  `prepare` built them.
 
+ @param material : "A live material's index"
  @param rigid : "The bucket's mesh has no skin and no morph targets, so it draws without the vertex pose"
+ @require material < self.materials.len() : "No such material"
 *>
-fn MeshPipeline* MeshPass.draw_pipeline(&self, MeshPipeline* pipeline, bool rigid = false)
+fn MeshPipeline* MeshPass.draw_pipeline(&self, uint material, bool rigid = false)
 {
+	MeshPipeline* pipeline = self.materials[material].pipeline;
 	if (!self.area_reference || !self.reference_ready)
 	{
-		foreach (lit : self.lit_pipelines) if (lit.base == pipeline) return rigid ? lit.rigid : lit.lit;
+		foreach (lit : self.lit_pipelines) if (lit.material == material) return rigid ? lit.rigid : lit.lit;
 		return pipeline;
 	}
 	if (pipeline == self.pipeline) return self.reference_pipeline;
@@ -1937,7 +1945,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		if (mesh == null || material == null) continue;
 		// Nothing for `pose_vertex` to do: no skin to blend and no target to morph by.
 		bool rigid = !mesh.has_skin && mesh.morph_targets == 0;
-		MeshPipeline* pipeline = self.draw_pipeline(material.pipeline, rigid);
+		MeshPipeline* pipeline = self.draw_pipeline(bucket.material, rigid);
 
 		if (pipeline.handle != bound)
 		{
@@ -2486,9 +2494,14 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 }
 
 // A material's pipeline and the variant of it this frame's lights draw with.
+<*
+ What one material draws with this frame. Keyed by the material, not its base
+ pipeline: every built-in material shares one base, and the alpha test and its
+ coverage are each material's own.
+*>
 struct LitPipeline
 {
-	MeshPipeline* base;
+	uint material;
 	MeshPipeline* lit;
 	// `lit` without the vertex pose (`SKIP_POSE`), for a mesh with no skin and no
 	// morph targets.
@@ -2538,18 +2551,32 @@ fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 	self.lit_pipelines.clear();
 	bool variants = !self.feature_variants_disabled;
 	self.skip_features = variants ? self.unused_features() | (self.one_tap_shadows ? SKIP_RECEIVER_PLANE : 0) : 0;
-	if (!variants && self.scene_tone == LINEAR) return;
-	foreach (&material : self.materials)
+	self.cutout_coverage = target.samples != SAMPLE_COUNT_1_BIT;
+	if (!variants && self.scene_tone == LINEAR && !self.cutout_coverage) return;
+	foreach (i, &material : self.materials)
 	{
 		if (!material.alive || material.pipeline == null) continue;
 		// The frame's features, and the alpha test where this material has none:
 		// a material that can never discard draws through a pipeline without the
 		// instruction, so it keeps early depth - see `SKIP_ALPHA_TEST`.
 		uint skip = variants ? self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST) : 0;
-		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip, self.scene_tone)!;
-		MeshPipeline* rigid = variants ? self.pipelines.variant(gpu, target, material.pipeline, skip | SKIP_POSE, self.scene_tone)! : lit;
-		if (lit != material.pipeline || rigid != material.pipeline) self.lit_pipelines.push({ material.pipeline, lit, rigid });
+		bool coverage = self.cuts_as_coverage(material);
+		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip, self.scene_tone, coverage)!;
+		MeshPipeline* rigid = variants
+			? self.pipelines.variant(gpu, target, material.pipeline, skip | SKIP_POSE, self.scene_tone, coverage)!
+			: lit;
+		if (lit != material.pipeline || rigid != material.pipeline) self.lit_pipelines.push({ (uint)i, lit, rigid });
 	}
+}
+
+<*
+ Whether this material's alpha test draws as sample coverage this frame: an
+ opaque cut-out on a multisampled target.
+*>
+fn bool MeshPass.cuts_as_coverage(&self, Material* material)
+{
+	return self.cutout_coverage && material.alpha_test > 0.0f && material.blend == BlendMode.NONE
+		&& material.pipeline != self.line_pipeline;
 }
 
 <*

@@ -1198,11 +1198,53 @@ fn void the_sun_alone_draws_without_the_light_loop() @test
 }
 
 // The feature bits the pipeline a material draws with this frame left out.
-fn uint drawn_skip(three::Renderer* renderer, three::MeshPipeline* base)
+fn uint drawn_skip(three::Renderer* renderer, uint material)
 {
-	three::MeshPipeline* drawn = renderer.pass.draw_pipeline(base);
+	three::MeshPipeline* drawn = renderer.pass.draw_pipeline(material);
 	three::CachedPipeline* entry = renderer.pass.pipelines.entry_for(drawn);
 	return entry == null ? 0 : entry.state.skip_features;
+}
+
+<*
+ Every built-in material shares one base pipeline, and the alpha test is each
+ one's own: a cut-out still cuts beside a plain material that resolved first,
+ with no prepass to cut it instead (the headset's passes).
+*>
+fn void a_cut_out_cuts_beside_a_plain_material() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	defer renderer.pass.prepass.enabled = true;
+	renderer.pass.prepass.enabled = false;
+	three::JsRuntime runtime;
+	runtime.open(&renderer.pass, renderer)!!;
+	defer runtime.close();
+	three::RunResult built = runtime.run(`
+		const scene = new three.Scene();
+		scene.background = 0x000000;
+		const plain = new three.Mesh(new three.BoxGeometry(.1, .1, .1), new three.MeshLambertMaterial());
+		plain.position.set(0, 0, -50);
+		scene.add(plain);
+		const px = new Uint8Array(64 * 4);
+		for (let x = 0; x < 64; x++) px.set([255, 255, 255, x * 4], x * 4);
+		const sheet = new three.MeshLambertMaterial({ emissive: 0xffffff, map: new three.DataTexture(px, 64, 1) });
+		sheet.alphaTest = 0.5;
+		scene.add(new three.Mesh(new three.PlaneGeometry(30, 30), sheet));
+		three.camera.target.set(0, 0, 0);
+		three.camera.orbit(0, 0, 5);
+	`);
+	defer built.free();
+	test::@check(built.ok, "the scene built: %s", built.error);
+	renderer.capture()!!.free();
+	image::Image shot = renderer.capture()!!;
+	defer shot.free();
+	uint lit = 0;
+	for (sz p = 0; p < shot.pixels.len; p += 4)
+	{
+		if (shot.pixels[p] > 128) lit++;
+	}
+	uint whole = W * H;
+	test::@check(lit > whole / 3 && lit < whole * 2 / 3, "%d of %d pixels drew: the cut-out did not cut", lit, whole);
 }
 
 // The alpha test is the material's own: compiled out of the pipeline of one whose
@@ -1222,11 +1264,11 @@ fn void only_a_material_with_an_alpha_test_keeps_its_discard() @test
 
 	material.alpha_test = 0;
 	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
-	test::@check((drawn_skip(renderer, material.pipeline) & three::SKIP_ALPHA_TEST) != 0,
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_ALPHA_TEST) != 0,
 		"a material with no alpha test still draws through a pipeline that holds the discard");
 
 	material.alpha_test = 0.5f;
 	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
-	test::@check((drawn_skip(renderer, material.pipeline) & three::SKIP_ALPHA_TEST) == 0,
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_ALPHA_TEST) == 0,
 		"a material with an alpha test lost its discard");
 }

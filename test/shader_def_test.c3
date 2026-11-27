@@ -509,8 +509,10 @@ fn void the_ported_mesh_is_lit() @test
 		"the device-wide texture array is the module's one resource");
 	test::@check(source.contains("Map base_color_map = map_at(SLOT_BASE_COLOR);"),
 		"the base colour map is reached by its row through `Map`");
-	test::@check(source.contains("if (SURFACE_ALPHA_TEST && base.a * draw.base_color.a < draw.surface.w) discard;"),
-		"and the alpha test is before the body, on the map's alpha times the material's, behind the constant that compiles it out");
+	test::@check(source.contains("float cut = base.a * draw.base_color.a;")
+		&& source.contains("else if (SURFACE_ALPHA_TEST && cut < draw.surface.w)")
+		&& source.contains("coverage = saturate((cut - draw.surface.w) / max(fwidth(cut), 0.0001) + 0.5);"),
+		"and the alpha test is before the body, on the map's alpha times the material's, behind the constant that compiles it out, as coverage under MSAA");
 	test::@check(source.contains("if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)")
 		&& source.contains("s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);"),
 		"a normal map bends the shading normal through the shared frame, not the geometric one");
@@ -568,8 +570,8 @@ fn void the_ported_mesh_is_lit() @test
 	test::@check(source.contains("float alpha = draw.base_color.a * input.color.a;")
 		&& source.contains("alpha *= input.vertex_color.a;")
 		&& source.contains("float3 color = scene_tone(shade(s), push.frame[0].camera.w);")
-		&& source.contains("return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);"),
-		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's, and 1 unless blended");
+		&& source.contains("return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : coverage);"),
+		"the alpha is the material's and the copy's - plus the attribute's under the built-in path - and never the body's, and the coverage unless blended");
 	test::@check(source.contains("fn float3 shade(Surface s)\n{\n\treturn standard(s);"),
 		"and the body that was spliced in is the one that runs");
 

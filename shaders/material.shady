@@ -66,7 +66,9 @@ Sampler2D shadow_atlas @set(0) @binding(17);
 const uint FLAG_COLORS_ARE_MASK = 1024;
 
 // Blended, so `alpha` is coverage. An opaque mesh writes 1: it covers what is
-// behind it, and passthrough reads that from the scene image's alpha.
+// behind it, and passthrough reads that from the scene image's alpha. A cut-out
+// drawn as coverage writes its share of the samples, which its pipeline takes the
+// larger of with what is there, so a leaf's edge never uncovers the room.
 const uint FLAG_BLENDED = 16384;
 
 // sRGB to linear, for the one colour that arrives from a file rather than from
@@ -952,6 +954,9 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	float4 surface = draw.surface;
 	float occlusion = 1.0;
 	float3 emissive = draw.emissive.rgb;
+	// The share of the pixel's samples an opaque fragment covers: below 1 only
+	// along a cut-out's edge, when the alpha test is coverage.
+	float coverage = 1.0;
 
 	// The flat uv and its gradients, taken before any branch. With a height map
 	// every map below reads at the marched uv with *these* gradients: the
@@ -993,7 +998,21 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		float4 base = map_texel(base_color_map, s.uv, uv_dx, uv_dy, scattered);
 		// Compiled out for a material with no alpha test: a discard the shader
 		// merely contains costs early depth on every draw - `SKIP_ALPHA_TEST`.
-		if (SURFACE_ALPHA_TEST && base.a * draw.base_color.a < draw.surface.w) discard;
+		// On a multisampled target the cut is coverage instead (alpha to
+		// coverage): the alpha sharpened to a ramp one pixel wide across the
+		// threshold, so the edge is smoothed like a triangle's and the leaf
+		// keeps its shape. A fragment that covers nothing is still discarded,
+		// so the body never shades it.
+		float cut = base.a * draw.base_color.a;
+		if (SURFACE_ALPHA_TEST && SURFACE_ALPHA_COVERAGE)
+		{
+			coverage = saturate((cut - draw.surface.w) / max(fwidth(cut), 0.0001) + 0.5);
+			if (coverage <= 0.0) discard;
+		}
+		else if (SURFACE_ALPHA_TEST && cut < draw.surface.w)
+		{
+			discard;
+		}
 		s.albedo *= base.rgb;
 
 		if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
@@ -1124,5 +1143,5 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	// Toned as it is written when this pipeline writes a headset's eye image
 	// itself; linear light for the post chain otherwise.
 	float3 color = scene_tone(shade(s), push.frame[0].camera.w);
-	return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : 1.0);
+	return float4(color, (draw.flags & FLAG_BLENDED) != 0 ? alpha : coverage);
 }
