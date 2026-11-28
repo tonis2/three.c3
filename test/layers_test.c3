@@ -1338,6 +1338,37 @@ fn void a_layer_with_no_window_declares_no_gradients() @test
 }
 
 <*
+ A multi-layer masked stack skips texture taps where a layer's weight is zero,
+ computing surface gradients once outside the branches so mip selection stays intact.
+*>
+fn void multi_layer_masked_stack_skips_zero_weight_taps() @test
+{
+	@with_js_gpu(; three::JsRuntime* run)
+	{
+		String answer = script(run, "multi-layer skip", `
+			const tex = new three.DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+			return new three.LayeredMaterial({
+				layers: [
+					{ map: tex },
+					{ map: tex, maskSource: "vertexColor", mask: "r" },
+					{ map: tex, maskSource: "vertexColor", mask: "g", uvScale: 4 },
+				],
+			}).fragment;
+		`)!!;
+		defer answer.free(mem);
+
+		test::@check(answer.contains("float2 sdx = ddx(s.uv);"), "surface gradients once: %s", answer);
+		test::@check(answer.contains("float2 sdy = ddy(s.uv);"), "surface y gradient once: %s", answer);
+		test::@check(!answer.contains("if (w0 > 0.001)"), "unmasked base layer is not guarded: %s", answer);
+		test::@check(answer.contains("if (w1 > 0.001) {"), "first masked layer guards its tap: %s", answer);
+		test::@check(answer.contains("SampleGrad(s.uv, sdx, sdy)"), "unscaled layer uses shared gradients: %s", answer);
+		test::@check(answer.contains("if (w2 > 0.001) {"), "second masked layer guards its tap: %s", answer);
+		test::@check(answer.contains("float2 gx2 = sdx * float2(4.0, 4.0);"), "scaled layer scales shared gradients inside guard: %s", answer);
+		test::@check(answer.contains("SampleGrad(s.uv * float2(4.0, 4.0), gx2, gy2)"), "scaled layer taps with scaled gradients: %s", answer);
+	};
+}
+
+<*
  `uvWindow` is a boolean and a misspelling of one is refused.
 *>
 fn void a_window_that_is_not_a_boolean_is_refused() @test

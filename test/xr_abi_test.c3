@@ -134,6 +134,21 @@ fn void passthrough_layout() @test
 		(usz)$reflect(xr::CompositionLayerBaseHeader.space).offset);
 }
 
+fn void recommended_layer_resolution_layout() @test
+{
+	test::eq(xr::TYPE_RECOMMENDED_LAYER_RESOLUTION_META, 1000254000);
+	test::eq(xr::TYPE_RECOMMENDED_LAYER_RESOLUTION_GET_INFO_META, 1000254001);
+	test::eq(xr::EXT_RECOMMENDED_LAYER_RESOLUTION_META.str_view(), "XR_META_recommended_layer_resolution");
+	test::eq(xr::RecommendedLayerResolutionMETA::size, 32);
+	test::eq(xr::RecommendedLayerResolutionGetInfoMETA::size, 32);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionMETA.next).offset, (usz)8);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionMETA.recommended_image_dimensions).offset, (usz)16);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionMETA.is_valid).offset, (usz)24);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionGetInfoMETA.next).offset, (usz)8);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionGetInfoMETA.layer).offset, (usz)16);
+	test::eq((usz)$reflect(xr::RecommendedLayerResolutionGetInfoMETA.predicted_display_time).offset, (usz)24);
+}
+
 // A wrong structure type is the same silent failure as a wrong offset.
 fn void constants() @test
 {

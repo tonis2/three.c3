@@ -1,7 +1,7 @@
 // three.c3 — Mesh: one placed copy of a geometry, and the two per-copy knobs.
 
 import { readColor } from './math.js';
-import { Object3D } from './object3d.js';
+import { Object3D, sceneOf } from './object3d.js';
 import { Material } from './material.js';
 
 const H = globalThis.__three;
@@ -163,6 +163,61 @@ export class Mesh extends Object3D {
 		const index = v === null ? 0 : v._index();
 		this._material = v;
 		if (this._h) H.setMaterial(this._h, index);
+	}
+
+	// Register fallback LOD levels for this Mesh's geometry in its scene (or the active scene).
+	setLods(levels) {
+		const ref = this._ref();
+		if (!Array.isArray(levels)) {
+			throw new TypeError('setLods(levels) wants an array of { mesh, minSize } entries');
+		}
+		if (levels.length > 4) {
+			throw new RangeError(`setLods(): at most 4 LOD levels are supported, got ${levels.length}`);
+		}
+		const owner = sceneOf(this);
+		const sid = owner !== null ? owner._sid : H.sceneActive();
+		if (typeof sid !== 'number' || !H.sceneAlive(sid)) {
+			throw new Error('setLods(): target scene is not alive');
+		}
+		const packed = [];
+		for (let i = 0; i < levels.length; i++) {
+			const entry = levels[i];
+			if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+				throw new TypeError(`setLods(): level ${i} must be { mesh, minSize }`);
+			}
+			for (const key of Object.keys(entry)) {
+				if (key !== 'mesh' && key !== 'minSize') {
+					throw new TypeError(`setLods(): level ${i} has unknown option '${key}' — expected mesh and minSize`);
+				}
+			}
+			const minSize = +entry.minSize;
+			if (!Number.isFinite(minSize) || minSize < 0) {
+				throw new RangeError(`setLods(): level ${i} minSize must be a finite number >= 0, got ${entry.minSize}`);
+			}
+			if (entry.mesh === null || entry.mesh === undefined) {
+				packed.push(null, -1, minSize);
+			} else {
+				const target = typeof entry.mesh?._ref === 'function' ? entry.mesh._ref() : entry.mesh;
+				if (!target || !target._asset || typeof target.mesh !== 'number') {
+					throw new TypeError(`setLods(): level ${i}.mesh wants a Mesh, Geometry, or asset.mesh() reference`);
+				}
+				packed.push(target._asset, target.mesh, minSize);
+			}
+		}
+		H.setMeshLods(sid, ref._asset, ref.mesh, packed);
+		return this;
+	}
+
+	// Remove any LOD chain registered for this Mesh's geometry.
+	clearLods() {
+		const ref = this._ref();
+		const owner = sceneOf(this);
+		const sid = owner !== null ? owner._sid : H.sceneActive();
+		if (typeof sid !== 'number' || !H.sceneAlive(sid)) {
+			throw new Error('clearLods(): target scene is not alive');
+		}
+		H.clearMeshLods(sid, ref._asset, ref.mesh);
+		return this;
 	}
 }
 

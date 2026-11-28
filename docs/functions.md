@@ -3535,8 +3535,25 @@ them near a second rather than near five.
 Deduplicated by the decoded image, so the same picture reached by two paths — or by a path and a `.glb` — is one
 upload, and `three.stats().textures` counts it once.
 
-`options` is `{ colorSpace, generateMipmaps, filter }` and nothing else; an unknown key throws rather than being
+`options` is `{ colorSpace, generateMipmaps, filter, layer }` and nothing else; an unknown key throws rather than being
 ignored, so a Three.js line carrying `magFilter` or `wrapS` is told so instead of quietly doing something different.
+`layer` (default `0`) selects an array layer of a multi-layer `.ktx2` (such as a packed PBR material); passing `layer > 0`
+for a PNG, JPEG or out-of-range KTX2 throws. When `scene.export()` writes a texture loaded from a multi-layer `.ktx2`,
+it extracts that single layer as a standalone `.ktx2` without re-encoding.
+
+## three.materialPack(path, options)
+
+Load a packed multi-layer `.ktx2` material whose `three.layers` metadata names each layer's colour space and channel
+layout (for example `srgb rgb=basecolor a=height; linear rgb=normal a=roughness`). Each layer is uploaded once in its
+declared colour space (BC7 on desktop, lossless ASTC 4×4 on Quest for UASTC packs).
+
+`options` accepts `{ generateMipmaps, filter }`. The returned handle holds:
+
+- `path`, `layout` (the `three.layers` string, or `null`), and `layers` (`[{ index, texture, colorSpace, channels }]`)
+- `map`, `normal`, `height`, `roughness` (the `Texture` for each named map, or `null`)
+- `heightChannel`, `roughnessChannel` (the channel name from `three.layers`, such as `'a'`)
+- `channel(name)` — returns `{ texture, layer, channel }` for any map named in `three.layers`, or `null`
+- `dispose()` — disposes all layer textures loaded by this pack
 
 ## three.SRGBColorSpace / three.LinearSRGBColorSpace / three.NoColorSpace
 

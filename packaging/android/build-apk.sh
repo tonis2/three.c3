@@ -2,11 +2,12 @@
 #
 # Builds the Quest APK: the engine as a NativeActivity, with one game inside.
 #
-#     packaging/android/build-apk.sh [game] [--install] [--run]
+#     packaging/android/build-apk.sh [game] [--fast] [--install] [--run]
 #
 # `game` is a .js file (packed as script.js) or a directory holding a main.js.
-# It defaults to examples/vr_castle.js. --install puts the APK on the headset
-# adb is connected to; --run also launches it.
+# It defaults to examples/vr_castle.js. --fast builds the engine with
+# --safe=no -O3 (no runtime contracts, full optimization). --install puts the
+# APK on the headset adb is connected to; --run also launches it.
 #
 # A game pushed to the headset beats the packed one, so a script can be changed
 # without a rebuild:
@@ -23,13 +24,15 @@ PACKAGE="dev.threec3.quest"
 API=32
 
 game="$ROOT/examples/vr_castle.js"
+fast=0
 install=0
 run=0
 for arg in "$@"; do
 	case "$arg" in
+		--fast)    fast=1 ;;
 		--install) install=1 ;;
 		--run)     install=1; run=1 ;;
-		-h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*)         game="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")" ;;
 	esac
 done
@@ -57,11 +60,18 @@ out="$ROOT/build/android"
 rm -rf "$out/apk" "$out/obj"
 mkdir -p "$out/apk/lib/arm64-v8a" "$out/apk/assets/game" "$out/obj"
 
-echo "==> engine (c3c, android-aarch64)"
-(cd "$ROOT" && c3c build quest --android-ndk "$ndk")
+if (( fast )); then
+	echo "==> engine (c3c, android-aarch64, fast: --safe=no -O3)"
+	(cd "$ROOT" && c3c build quest --android-ndk "$ndk" --safe=no -O3)
+	glue_opt="-O3"
+else
+	echo "==> engine (c3c, android-aarch64)"
+	(cd "$ROOT" && c3c build quest --android-ndk "$ndk")
+	glue_opt="-O2"
+fi
 
 echo "==> libthree.so"
-"$cc" -O2 -fPIC -c "$ndk/sources/android/native_app_glue/android_native_app_glue.c" -o "$out/obj/glue.o"
+"$cc" "$glue_opt" -fPIC -c "$ndk/sources/android/native_app_glue/android_native_app_glue.c" -o "$out/obj/glue.o"
 # --no-undefined so a missing symbol fails here rather than at dlopen on the headset.
 "$cc" -shared -o "$out/apk/lib/arm64-v8a/libthree.so" \
 	"$out/obj/glue.o" "$ROOT/build/quest.a" \

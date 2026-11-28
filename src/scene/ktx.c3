@@ -140,6 +140,127 @@ fn bool is_basis_ktx2(char[] encoded)
 }
 
 <*
+ How many array layers a KTX2 header declares (>= 1; 0 in the header means a plain 2D image).
+*>
+fn uint ktx2_layer_count(char[] encoded)
+{
+	if (!is_ktx2(encoded) || encoded.len < 80) return 0;
+	uint n = (uint)encoded[32]
+		| ((uint)encoded[33] << 8)
+		| ((uint)encoded[34] << 16)
+		| ((uint)encoded[35] << 24);
+	return n == 0 ? 1 : n;
+}
+
+<*
+ Read a UTF-8 text entry from a KTX2 file's key-value data block (such as `three.layers`)
+ without inflating any level payloads. Strips one trailing NUL byte if present.
+
+ @return ? UNSUPPORTED_IMAGE : `Not a KTX2, malformed KVD, or key not present.`
+*>
+fn String? ktx2_metadata_string(char[] encoded, String key, Allocator allocator = mem)
+{
+	if (!is_ktx2(encoded) || encoded.len < 80) return UNSUPPORTED_IMAGE~;
+	uint off = (uint)encoded[56]
+		| ((uint)encoded[57] << 8)
+		| ((uint)encoded[58] << 16)
+		| ((uint)encoded[59] << 24);
+	uint len = (uint)encoded[60]
+		| ((uint)encoded[61] << 8)
+		| ((uint)encoded[62] << 16)
+		| ((uint)encoded[63] << 24);
+	if (len == 0 || (usz)off + (usz)len > encoded.len) return UNSUPPORTED_IMAGE~;
+
+	char[] kvd = encoded[off : len];
+	usz at = 0;
+	while (at + 4 <= kvd.len)
+	{
+		uint entry_len = (uint)kvd[at]
+			| ((uint)kvd[at + 1] << 8)
+			| ((uint)kvd[at + 2] << 16)
+			| ((uint)kvd[at + 3] << 24);
+		at += 4;
+		if (entry_len == 0 || at + entry_len > kvd.len) break;
+
+		char[] entry = kvd[at : entry_len];
+		usz nul = entry.len;
+		for (usz i = 0; i < entry.len; i++)
+		{
+			if (entry[i] == 0)
+			{
+				nul = i;
+				break;
+			}
+		}
+		if (nul < entry.len && (String)entry[:nul] == key)
+		{
+			char[] val = entry[nul + 1..];
+			if (val.len > 0 && val[^1] == 0) val = val[:val.len - 1];
+			return ((String)val).copy(allocator);
+		}
+		usz padded = ((usz)entry_len + 3) & ~(usz)3;
+		at += padded;
+	}
+	return UNSUPPORTED_IMAGE~;
+}
+
+<*
+ Slice one layer out of a multi-layer KTX2 (UASTC or plain block/uncompressed format)
+ into a single-layer 2D KTX2 without re-encoding any blocks. Used by `scene.export`
+ when a material draws from one layer of a packed material `.ktx2`.
+
+ @return `Single-layer .ktx2 bytes, owned by the caller.`
+ @return ? UNSUPPORTED_IMAGE : `Not a KTX2, out-of-range layer, or unsupported supercompression.`
+*>
+fn char[]? extract_ktx2_layer(char[] encoded, uint layer, Allocator allocator = mem) => @pool()
+{
+	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
+	container::Texture? maybe = container::read(tmem, encoded);
+	if (catch maybe) return UNSUPPORTED_IMAGE~;
+	container::Texture tex = maybe;
+	if (layer >= tex.layers()) return UNSUPPORTED_IMAGE~;
+
+	container::Texture single = {
+		.vk_format = tex.vk_format,
+		.type_size = tex.type_size,
+		.width = tex.width,
+		.height = tex.height,
+		.depth = tex.depth,
+		.layer_count = 0,
+		.face_count = tex.face_count,
+		.generate_mipmaps = tex.generate_mipmaps,
+		.dfd = tex.dfd,
+		.levels = alloc::new_array(tmem, char[], tex.levels.len),
+		.allocator = tmem,
+	};
+
+	for (uint l = 0; l < tex.level_count(); l++)
+	{
+		usz img_size;
+		if (tex.vk_format == 0)
+		{
+			uint lw = tex.level_width(l);
+			uint lh = tex.level_height(l);
+			img_size = (usz)((lw + 3) / 4) * (usz)((lh + 3) / 4) * 16;
+		}
+		else
+		{
+			sz? s = tex.image_size(l);
+			if (catch s) return UNSUPPORTED_IMAGE~;
+			img_size = (usz)s;
+		}
+		usz layer_bytes = img_size * (usz)tex.face_count;
+		usz offset = (usz)layer * layer_bytes;
+		if (offset + layer_bytes > tex.levels[l].len) return UNSUPPORTED_IMAGE~;
+		single.levels[l] = tex.levels[l][offset : layer_bytes];
+	}
+
+	char[]? out = container::write(allocator, &single, { .scheme = tex.scheme });
+	if (catch out) return UNSUPPORTED_IMAGE~;
+	return out;
+}
+
+<*
  A KTX2 blob to an 8-bit RGBA image, whichever of the two kinds it is.
 
  The image owns its pixels and the caller frees it, exactly like a `png::` or
@@ -147,9 +268,10 @@ fn bool is_basis_ktx2(char[] encoded)
  from one switch and its callers stay as they were.
 
  @param encoded : `The whole file. Not modified, and not retained.`
- @return ? UNSUPPORTED_IMAGE : `Not a KTX2, or a format inside it this cannot narrow to RGBA8.`
+ @param layer : `Array layer index to decode (0 for plain 2D textures).`
+ @return ? UNSUPPORTED_IMAGE : `Not a KTX2, out-of-range layer, or a format inside it this cannot narrow to RGBA8.`
 *>
-fn image::Image? decode_ktx2(char[] encoded, Allocator allocator = mem)
+fn image::Image? decode_ktx2(char[] encoded, Allocator allocator = mem, uint layer = 0)
 {
 	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
 
@@ -157,17 +279,17 @@ fn image::Image? decode_ktx2(char[] encoded, Allocator allocator = mem)
 	// every format question the container path asks. `info` fails for anything
 	// that is not one, which is the plain path's cue rather than an error.
 	basis::Info? basis_info = basis::info(encoded);
-	if (try basis_info) return decode_ktx2_basis(encoded, basis_info, allocator);
-	return decode_ktx2_plain(encoded, allocator);
+	if (try basis_info) return decode_ktx2_basis(encoded, basis_info, allocator, layer);
+	return decode_ktx2_plain(encoded, allocator, layer);
 }
 
 <*
  ETC1S or UASTC to RGBA8, through the transcoder — fallback when the device
  samples no compressed block target for the file.
 *>
-fn image::Image? decode_ktx2_basis(char[] encoded, basis::Info info, Allocator allocator) @local
+fn image::Image? decode_ktx2_basis(char[] encoded, basis::Info info, Allocator allocator, uint layer) @local
 {
-	basis::Transcoded? out = basis::transcode(allocator, encoded, 0, 0, 0, basis::TF_RGBA32, 4);
+	basis::Transcoded? out = basis::transcode(allocator, encoded, 0, layer, 0, basis::TF_RGBA32, 4);
 	if (catch out) return UNSUPPORTED_IMAGE~;
 	return {
 		.width = out.width,
@@ -188,7 +310,7 @@ fn image::Image? decode_ktx2_basis(char[] encoded, basis::Info info, Allocator a
  left here is picking the image out of a level that may hold six faces and any
  number of layers.
 *>
-fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
+fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator, uint layer) @local
 {
 	container::Texture? maybe = container::read(allocator, encoded);
 	if (catch maybe) return UNSUPPORTED_IMAGE~;
@@ -196,9 +318,9 @@ fn image::Image? decode_ktx2_plain(char[] encoded, Allocator allocator) @local
 	defer tex.free();
 
 	// A cube or an array packs every face of every layer into one level, so the
-	// base image is the first `image_size` bytes of level 0 — which `image` is
-	// the accessor for, and it is the same call for the plain 2D case.
-	char[]? face = tex.image(0, 0, 0);
+	// base image is face 0 of `layer` at level 0 — which `image` is the accessor
+	// for, and it is the same call for the plain 2D case.
+	char[]? face = tex.image(0, layer, 0);
 	if (catch face) return UNSUPPORTED_IMAGE~;
 
 	uint width   = tex.level_width(0);
@@ -318,7 +440,7 @@ fn bool basis_needs_chain(char[] encoded)
  @param space : `What the caller wants these bytes read as. The file supplies only the family.`
  @return ? UNSUPPORTED_IMAGE : `Not a KTX2, a Basis one, or a format with no block family here.`
 *>
-fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator allocator = mem)
+fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator allocator = mem, uint layer = 0)
 {
 	if (!is_ktx2(encoded)) return UNSUPPORTED_IMAGE~;
 
@@ -342,7 +464,7 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 	defer catch alloc::free(allocator, levels.ptr);
 	for (uint i = 0; i < count; i++)
 	{
-		char[]? face = tex.image(i, 0, 0);
+		char[]? face = tex.image(i, layer, 0);
 		if (catch face) return UNSUPPORTED_IMAGE~;
 		levels[i] = face;
 	}
@@ -473,7 +595,8 @@ fn BlockImage? transcode_ktx2_blocks(
 	Allocator allocator = mem,
 	uint threads = 0,
 	bool quiet = false,
-	uint encode_threads = 0
+	uint encode_threads = 0,
+	uint layer = 0
 )
 {
 	basis::Info? maybe = basis::info(encoded);
@@ -502,9 +625,9 @@ fn BlockImage? transcode_ktx2_blocks(
 
 	if (!generated)
 	{
-		// Face 0 of layer 0, exactly as `decode_ktx2_plain` picks its image: a
-		// material's map is one picture, and a cube is `ktx_faces`' business.
-		basis::Transcoded[]? mapped = basis::transcode_levels(allocator, encoded, 0, 0, target, threads);
+		// Face 0 of `layer`, matching `decode_ktx2_plain`: a material map is one
+		// 2D image, while a cubemap's faces go through `ktx_faces`.
+		basis::Transcoded[]? mapped = basis::transcode_levels(allocator, encoded, layer, 0, target, threads);
 		if (catch mapped) return UNSUPPORTED_IMAGE~;
 		// The blocks are already the caller's allocation; only the array that
 		// listed them is this function's to give back.
@@ -523,7 +646,7 @@ fn BlockImage? transcode_ktx2_blocks(
 	// takes above — one level, rewritten rather than encoded, for a fraction of
 	// what encoding it would cost. The array that listed it is this function's to
 	// give back; the blocks are already the caller's allocation.
-	basis::Transcoded[]? base = basis::transcode_levels(allocator, encoded, 0, 0, target, threads);
+	basis::Transcoded[]? base = basis::transcode_levels(allocator, encoded, layer, 0, target, threads);
 	if (catch base) return UNSUPPORTED_IMAGE~;
 	out.levels[0] = base[0].data;
 	alloc::free(allocator, base.ptr);
@@ -531,7 +654,7 @@ fn BlockImage? transcode_ktx2_blocks(
 	mipgen::Options options = { .srgb = format.space == ColorSpace.SRGB, .renormalize = false };
 	// The base as pixels, decoded once and then carried: each generated level is
 	// filtered from the one above it, and nothing here decodes a level twice.
-	basis::Transcoded? rgba = basis::transcode(allocator, encoded, 0, 0, 0, basis::TF_RGBA32, 4);
+	basis::Transcoded? rgba = basis::transcode(allocator, encoded, 0, layer, 0, basis::TF_RGBA32, 4);
 	if (catch rgba) return UNSUPPORTED_IMAGE~;
 	char[] pixels = rgba.data;
 	defer if (pixels.len) alloc::free(allocator, pixels.ptr);

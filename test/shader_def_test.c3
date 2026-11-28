@@ -496,8 +496,17 @@ fn void the_ported_mesh_is_lit() @test
 		"the material half defines the function the geometry half declared");
 	test::@check(source.contains("bool front_facing @builtin(front_facing);"),
 		"and the fragment entry takes the rasteriser's flag as its own parameter");
-	test::@check(source.contains("s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);"),
+	test::@check(source.contains("if (MATERIAL_BUILT_IN) { s.albedo = draw.base_color.rgb * input.color.rgb; }")
+		&& source.contains("else { s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb); }"),
 		"the record's base colour and the copy's colour reach the surface");
+	test::@check(source.contains("const bool SURFACE_SPECULAR         @spec(113) = true;")
+		&& source.contains("const bool SURFACE_DEBUG_VIEW       @spec(114) = true;"),
+		"specular and debug view specialization constants are declared");
+	test::@check(source.contains("float4 color @flat;"),
+		"a material without a vertex body carries flat instance colour");
+	test::@check(source.contains("v.origin = instance.model[3].xyz;")
+		&& source.contains("output.origin = float4(v.origin, instance.normal[3].w);"),
+		"origin and volume scale come directly from the instance matrices");
 	test::@check(source.contains("if (MATERIAL_BUILT_IN && (draw.flags & FLAG_COLORS_ARE_MASK) == 0)")
 		&& source.contains("s.albedo *= input.vertex_color.rgb;"),
 		"and the built-in path folds COLOR_0 into the albedo, leaving a mask alone");
@@ -780,7 +789,7 @@ fn void the_bake_module_shades_unlit_and_places_by_uv() @test
 		"the module says it is a bake");
 	test::@check(source.contains("if (MATERIAL_BAKE) return albedo;"),
 		"the built-in look answers the body's colour and nothing else");
-	test::@check(source.contains("if (MATERIAL_BAKE) return float3(0.0);"),
+	test::@check(source.contains("if (MATERIAL_BAKE || !SURFACE_SPECULAR) return float3(0.0);"),
 		"and the reflection is off");
 	test::@check(source.contains("float2 bake_uv = v.uv;")
 		&& source.contains("output.sv_position = float4(bake_uv * 2.0 - 1.0, 0.0, 1.0);"),
@@ -855,6 +864,8 @@ fn void a_vertex_body_moves_the_vertex_in_object_space() @test
 		"and the uniforms reach it through the one fill the fragment half also uses");
 	test::@check(source.contains("output.color = v.color;") && source.contains("output.variant = v.variant;"),
 		"the colour and the row the body moved reach the fragment stage");
+	test::@check(source.contains("\tfloat4 color;\n") && !source.contains("float4 color @flat;"),
+		"a material with a vertex body keeps colour interpolated");
 
 	check_compiles(source, "a material with a vertex body");
 }
@@ -1022,27 +1033,30 @@ fn void the_ported_skin_module_is_generated() @test
 	test::@check(source.contains("struct SkinPush @pushconstant"), "the push block is the C3 struct");
 	test::@check(source.contains("Vec3* positions;") || source.contains("float3* positions;"),
 		"a pointer member is a shady pointer to the wire type: %s", source);
-	test::@check(source.contains("Instance* instances;") && source.contains("float4x4* baked;"),
-		"including pointers to structs and to matrices");
+	test::@check(source.contains("Instance* instances;") && source.contains("SkinJoint* baked;"),
+		"including pointers to structs and to pre-decomposed skin joints");
 	test::@check(source.contains("uint vertex_count;") && source.contains("uint morph_targets;"),
 		"and the scalars the dispatch is sized by");
 
 	// The structs it points at come from the one wire list every module carries.
 	test::@check(source.contains("struct SkinnedVertex @address"), "the output is the shared wire struct");
+	test::@check(source.contains("struct SkinJoint @address"), "the joint palette uses 32-byte SkinJoint");
 	test::@check(source.contains("struct MorphDelta @address"), "and so are the morph deltas");
 
 	// The port itself.
 	test::@check(source.contains("fn void skin_vertices(ComputeIn input)"), "the body survived the port");
-	test::@check(source.contains("fn float4x4 blend_joints(float4x4* palette, uint base, uint4 joints, float4 weights)"),
-		"a function can take a pointer, which the palette needs");
+	test::@check(source.contains("uint vid = input.thread.x;") && source.contains("uint iid = input.thread.y;"),
+		"2D dispatch maps thread.x to vertex and thread.y to instance");
+	test::@check(source.contains("fn BlendedPose blend_joints(SkinJoint* palette, uint base, uint4 joints, float4 weights)"),
+		"a function can take a SkinJoint pointer, which the palette needs");
 	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
-	test::@check(source.contains("(pose * float4(normal, 0.0)).xyz"),
-		"the normal is the w = 0 multiply the original's 3x3 cast spelled out");
-	test::@check(source.contains("float4x4 first = palette[base + joints.x];"),
+	test::@check(source.contains("apply_pose(pose, position, normal);"),
+		"position and normal are transformed directly by the blended quaternion pose");
+	test::@check(source.contains("SkinJoint first = palette[base + joints.x];"),
 		"the palette pointer is indexed by joint");
-	test::@check(source.contains("real = real + weight * r;"),
+	test::@check(source.contains("real = real + w * r;"),
 		"and a vector scales by a scalar on the left");
-	test::@check(source.contains("add_influence(palette[next + joints.w], then.w, pivot, real, dual, size);"),
+	test::@check(source.contains("add_joint(palette[next + joints.w], then.w, pivot, real, dual, size);"),
 		"and inout arguments, vectors and a scalar, are what the callee adds into");
 
 	check_compiles(source, "the generated skin module");
@@ -1176,9 +1190,10 @@ fn void the_ported_shadow_modules_are_generated() @test
 		"and a multiview pass takes each view's camera from its frame block");
 	test::@check(source.contains("pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);"),
 		"the pose is the shared block's, not a copy of it");
-	test::@check(source.contains("(pose * float4(position, 1.0)).xyz")
-		&& source.contains("draw.posed[iid * draw.skin_stride + vid]"),
-		"and that block carries both skinning paths, unchanged");
+	test::@check(source.contains("apply_pose(pose, position, normal);")
+		&& source.contains("draw.posed[iid * draw.skin_stride + vid]")
+		&& source.contains("const bool VERTEX_SKIN @spec(115) = true;"),
+		"and that block carries both skinning paths and the VERTEX_SKIN spec constant");
 	test::@check(source.contains("const uint POSE_LIVE = 0x80000000;"), "a constant is a constant");
 
 	check_compiles(source, "the generated shadow module");
@@ -1191,8 +1206,10 @@ fn void the_ported_shadow_modules_are_generated() @test
 	// The same vertex path, the same lines - the def handed the same text twice.
 	test::@check(cutout_source.contains("fn float4 posed_clip(uint vid, uint iid, uint view)"),
 		"the cut-out module carries the shared vertex path too");
-	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw, instance_at(push.instances, input.iid), input.vid);"),
-		"beside the uv only it carries");
+	test::@check(cutout_source.contains("output.uv = shadow_uv(push.draw, input.iid, input.vid);"),
+		"beside the uv only it carries, without a second full instance read");
+	test::@check(!cutout_source.contains("instance_at(push.instances"),
+		"shadow passes read only the instance fields they need");
 
 	// The fragment stage, the sampler, and nothing else that changed.
 	test::@check(cutout_source.contains("fn void fragmentMain(CutoutOutput input) @fragment") && cutout_source.contains("fn CutoutOutput cutoutVertexMain(VertexIn input) @vertex"),

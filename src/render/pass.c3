@@ -211,6 +211,8 @@ struct MeshPass
 	// Shadows read with one hardware-filtered tap and no receiver plane,
 	// `SKIP_RECEIVER_PLANE`. The headset's setting (`android/entry.c3`).
 	bool one_tap_shadows;
+	// Policy for auto-routing skinned buckets through compute skinning.
+	ComputeSkinMode compute_skin;
 	// For tests: every draw keeps every light feature, as before there were variants.
 	bool feature_variants_disabled;
 	Assets assets;
@@ -831,6 +833,7 @@ fn uint MeshPass.claim_slot(&self, Material material)
 	{
 		if (existing.alive) continue;
 		*existing = material;
+		if (i < self.lit_pipelines.len()) self.lit_pipelines[i] = { };
 		// After the copy, and on the stored one. `bind_table` allocates, and a table
 		// allocated on the by-value parameter would be freed with it. This is the
 		// only choke point where a material becomes live, which is why it is also
@@ -1357,7 +1360,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time,
 			self.ltc.live && !self.area_reference ? 1.0f : 0.0f },
 		.world = self.lighting.world,
-		.live_poses = (Matrix4f*)live_address,
+		.live_poses = (SkinJoint*)live_address,
 		.morph_weights = (float*)morph_address,
 		.light_view_projection = self.shadows.light_view_projection,
 		.shadow = self.shadows.params(),
@@ -1401,6 +1404,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// `vkCmdEndRendering`, so a compute-skinned bucket has to be posed here, one
 	// barrier before the first draw reads the result.
 	self.skin(gpu, cmd, slot)!;
+	self.resolve_preskinned_pipelines(gpu, target)!;
 
 	// Before the records for the same reason the dispatch is: this sizes and may
 	// reallocate the buffer a soft bucket's record points into, and writes the
@@ -1488,6 +1492,11 @@ fn bool MeshPass.prepassed(&self, Material* material)
 fn void MeshPass.plan_prepass(&self, Gpu* gpu, Target* target)
 {
 	self.prepass.draws = 0;
+	if (!self.prepass.enabled)
+	{
+		self.prepass.live = false;
+		return;
+	}
 	// A multiview target draws its prepass inside the scene's rendering: carried
 	// from a rendering of its own, Quest 3 loads the depth back wrong along the
 	// edge of each foveation ring, and EQUAL leaves a band of holes there.
@@ -1675,7 +1684,7 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 			.tangents = (Vec4*)(tangents ? mesh.tangents.address : 0),
 			.joints = (uint[<4>]*)(skinned ? mesh.joints.address : 0),
 			.weights = (Vec4*)(skinned ? mesh.weights.address : 0),
-			.palette = (Matrix4f*)(skinned ? owner.poses.address
+			.palette = (SkinJoint*)(skinned ? owner.poses.address
 				: 0), // Not on a soft bucket: a soft body's positions are this frame's
 				// deformed ones, and displacing them by a blend shape authored against
 				// the rest mesh would be two deformations fighting over one vertex.
@@ -1762,14 +1771,24 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 
  @param material : "A live material's index"
  @param rigid : "The bucket's mesh has no skin and no morph targets, so it draws without the vertex pose"
+ @param preskinned : "The bucket was compute-skinned this frame, so it draws without vertex skinning"
  @require material < self.materials.len() : "No such material"
 *>
-fn MeshPipeline* MeshPass.draw_pipeline(&self, uint material, bool rigid = false)
+fn MeshPipeline* MeshPass.draw_pipeline(&self, uint material, bool rigid = false, bool preskinned = false)
 {
 	MeshPipeline* pipeline = self.materials[material].pipeline;
 	if (!self.area_reference || !self.reference_ready)
 	{
-		foreach (lit : self.lit_pipelines) if (lit.material == material) return rigid ? lit.rigid : lit.lit;
+		if (material < self.lit_pipelines.len())
+		{
+			LitPipeline* resolved = &self.lit_pipelines[material];
+			if (resolved.lit != null)
+			{
+				if (rigid) return resolved.rigid;
+				if (preskinned && resolved.preskinned != null) return resolved.preskinned;
+				return resolved.lit;
+			}
+		}
 		return pipeline;
 	}
 	if (pipeline == self.pipeline) return self.reference_pipeline;
@@ -1835,6 +1854,8 @@ struct DrawState
 	bool depth_write;
 	bool cull_known;
 	bool depth_known;
+	vk::Buffer index_buffer;
+	vk::IndexType index_type;
 }
 
 fn void DrawState.cull_mode(&self, vk::CommandBuffer cmd, vk::CullModeFlags cull)
@@ -1853,6 +1874,15 @@ fn void DrawState.depth(&self, vk::CommandBuffer cmd, bool write, vk::CompareOp 
 	self.depth_write = write;
 	self.compare = compare;
 	self.depth_known = true;
+}
+
+fn void DrawState.index(&self, vk::CommandBuffer cmd, GpuMesh* mesh)
+{
+	vk::IndexType type = mesh.index_type();
+	if (self.index_buffer == mesh.indices.buffer && self.index_type == type) return;
+	vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, type);
+	self.index_buffer = mesh.indices.buffer;
+	self.index_type = type;
 }
 
 <*
@@ -1957,7 +1987,8 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 		if (mesh == null || material == null) continue;
 		// Nothing for `pose_vertex` to do: no skin to blend and no target to morph by.
 		bool rigid = !mesh.has_skin && mesh.morph_targets == 0;
-		MeshPipeline* pipeline = self.draw_pipeline(bucket.material, rigid);
+		bool preskinned = !rigid && i < self.posed_offsets.len() && self.posed_offsets[i] != NOT_PRESKINNED;
+		MeshPipeline* pipeline = self.draw_pipeline(bucket.material, rigid, preskinned);
 
 		if (pipeline.handle != bound)
 		{
@@ -1998,7 +2029,7 @@ fn void MeshPass.record_view(&self, vk::CommandBuffer cmd, vk::Rect2D rect,
 
 		// Index binding is independent of vertex bindings, which is why the pass can
 		// have an index buffer and no vertex input state at all.
-		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+		state.index(cmd, mesh);
 		vk::cmdDrawIndexed(cmd, mesh.index_count, bucket.visible, 0, 0, 0);
 		self.drawn_calls++;
 		self.drawn_instances += bucket.visible;
@@ -2076,7 +2107,10 @@ fn void MeshPass.record_ambient_occlusion(&self, vk::CommandBuffer cmd)
 		// Both eyes' depth in one pass; each view takes its camera from its block.
 		ao.depth_view(cmd, self.scene_rect);
 		MeshPipeline* cutout = ao.eyes_cutout_pipeline.handle != null ? &ao.eyes_cutout_pipeline : null;
-		self.record_casters(cmd, CASTERS_VISIBLE, plain: &ao.eyes_pipeline, cutout: cutout, view_cameras: true);
+		MeshPipeline* cutout_rigid = ao.eyes_rigid_cutout_pipeline.handle != null
+			? &ao.eyes_rigid_cutout_pipeline : null;
+		self.record_casters(cmd, CASTERS_VISIBLE, plain: &ao.eyes_pipeline, cutout: cutout,
+			plain_rigid: &ao.eyes_rigid_pipeline, cutout_rigid: cutout_rigid, view_cameras: true);
 		ao.end(cmd);
 		// Then each eye's layer on its own.
 		self.@each_view(; uint index, vk::Rect2D rect, Matrix4f view_projection)
@@ -2161,8 +2195,11 @@ fn uint MeshPass.record_prepass_draws(&self, vk::CommandBuffer cmd, Matrix4f vie
 		if (mesh == null || material == null) continue;
 		if (!self.prepassed(material)) continue;
 
+		bool rigid             = !mesh.has_skin && mesh.morph_targets == 0;
 		bool cutout            = material.alpha_test > 0.0f;
-		MeshPipeline* pipeline = cutout ? &self.prepass.cutout_pipeline : &self.prepass.pipeline;
+		MeshPipeline* pipeline = cutout
+			? (rigid ? &self.prepass.rigid_cutout_pipeline : &self.prepass.cutout_pipeline)
+			: (rigid ? &self.prepass.rigid_pipeline : &self.prepass.pipeline);
 
 		if (pipeline.handle != *bound)
 		{
@@ -2176,7 +2213,7 @@ fn uint MeshPass.record_prepass_draws(&self, vk::CommandBuffer cmd, Matrix4f vie
 		state.cull_mode(cmd, material.cull);
 
 		recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, view_projection,
-			view_cameras: view_cameras);
+			view_cameras: view_cameras, state: &state);
 	}
 	return recorded;
 }
@@ -2233,9 +2270,11 @@ fn uint MeshPass.point_shadow_signature(&self)
 *>
 fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 	Matrix4f projection = self.shadows.light_view_projection, Light* point = null, uint point_face = 0,
-	MeshPipeline* plain = null, MeshPipeline* cutout = null, bool view_cameras = false)
+	MeshPipeline* plain = null, MeshPipeline* cutout = null,
+	MeshPipeline* plain_rigid = null, MeshPipeline* cutout_rigid = null, bool view_cameras = false)
 {
 	vk::Pipeline bound = (vk::Pipeline)null;
+	DrawState state;
 	uint recorded = 0;
 	Frustum point_frustum;
 	if (point != null) point_frustum = frustum_of(point_shadow_matrix(*point, point_face));
@@ -2251,8 +2290,14 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		if (!self.casts_shadow(material)) continue;
 		if (which == CASTERS_VISIBLE && material.vertex.len > 0) continue;
 
-		MeshPipeline* solid = plain != null ? plain : &self.shadows.pipeline;
-		MeshPipeline* cut = plain != null ? cutout : (self.shadows.cutout_ready ? &self.shadows.cutout_pipeline : null);
+		bool rigid = !mesh.has_skin && mesh.morph_targets == 0;
+		MeshPipeline* solid = plain != null
+			? (rigid && plain_rigid != null ? plain_rigid : plain)
+			: (rigid ? &self.shadows.rigid_pipeline : &self.shadows.pipeline);
+		MeshPipeline* cut = plain != null
+			? (rigid && cutout_rigid != null ? cutout_rigid : cutout)
+			: (self.shadows.cutout_ready
+				? (rigid ? &self.shadows.rigid_cutout_pipeline : &self.shadows.cutout_pipeline) : null);
 		MeshPipeline* pipeline = cut != null && material.alpha_test > 0.0f ? cut : solid;
 
 		if (pipeline.handle != bound)
@@ -2267,29 +2312,39 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		{
 			case CASTERS_VISIBLE:
 				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, projection,
-					view_cameras: view_cameras);
+					view_cameras: view_cameras, state: &state);
 			case CASTERS_ALL:
 				if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.count, &point_frustum, point))
 				{
-					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count, projection);
+					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count, projection, state: &state);
 				}
 			case CASTERS_STATIC:
 				if (point == null || self.shadow_range_reaches(mesh, material, bucket,
 					bucket.static_first, bucket.static_count, &point_frustum, point))
 				{
 					recorded += self.draw_casters(
-						cmd, pipeline, mesh, bucket, at, bucket.static_first, bucket.static_count, projection
+						cmd, pipeline, mesh, bucket, at, bucket.static_first, bucket.static_count, projection, state: &state
 					);
 				}
 			case CASTERS_DYNAMIC:
-				if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.static_first, &point_frustum, point))
+				if (bucket.static_count == 0)
 				{
-					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first, projection);
+					if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.count, &point_frustum, point))
+					{
+						recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count, projection, state: &state);
+					}
 				}
-				if (point == null || self.shadow_range_reaches(mesh, material, bucket, tail_at,
-					bucket.count - tail_at, &point_frustum, point))
+				else
 				{
-					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at, projection);
+					if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.static_first, &point_frustum, point))
+					{
+						recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first, projection, state: &state);
+					}
+					if (point == null || self.shadow_range_reaches(mesh, material, bucket, tail_at,
+						bucket.count - tail_at, &point_frustum, point))
+					{
+						recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at, projection, state: &state);
+					}
 				}
 			default:
 				break;
@@ -2316,7 +2371,8 @@ fn uint MeshPass.draw_casters(
 	uint offset,
 	uint count,
 	Matrix4f projection,
-	bool view_cameras = false
+	bool view_cameras = false,
+	DrawState* state = null
 )
 {
 	if (count == 0) return 0;
@@ -2350,7 +2406,8 @@ fn uint MeshPass.draw_casters(
 		&push
 	);
 
-	vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+	if (state != null) { state.index(cmd, mesh); }
+	else { vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, mesh.index_type()); }
 	vk::cmdDrawIndexed(cmd, mesh.index_count, count, 0, 0, 0);
 	return 1;
 }
@@ -2388,7 +2445,7 @@ fn void MeshPass.fold_frame_key(&self, uint slot, FrameBlock* frame)
 	// the shader reads off them is whether they are there at all.
 	FrameBlock timeless = *frame;
 	timeless.lighting[2] = 0;
-	timeless.live_poses = frame.live_poses != null ? (Matrix4f*)1 : null;
+	timeless.live_poses = frame.live_poses != null ? (SkinJoint*)1 : null;
 	timeless.lights = frame.lights != null ? (Light*)1 : null;
 	timeless.morph_weights = frame.morph_weights != null ? (float*)1 : null;
 	timeless.shadow_views = frame.shadow_views != null ? (ShadowGpuView*)1 : null;
@@ -2459,19 +2516,86 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 	return address;
 }
 
-// A material's pipeline and the variant of it this frame's lights draw with.
-<*
- What one material draws with this frame. Keyed by the material, not its base
- pipeline: every built-in material shares one base, and the alpha test and its
- coverage are each material's own.
-*>
+// Cached resolved pipeline pair for one slot of `MeshPass.materials`.
+// Indexed directly by material id so `draw_pipeline` is O(1) and unchanged
+// frames skip `PipelineCache.variant` lookups.
 struct LitPipeline
 {
-	uint material;
+	MeshPipeline* base;
 	MeshPipeline* lit;
 	// `lit` without the vertex pose (`SKIP_POSE`), for a mesh with no skin and no
 	// morph targets.
 	MeshPipeline* rigid;
+	// `lit` without vertex skinning (`SKIP_VERTEX_SKIN`), built lazily for
+	// materials drawn by compute-skinned buckets.
+	MeshPipeline* preskinned;
+	uint skip;
+	SceneTone tone;
+	bool coverage;
+	bool variants;
+	bool custom_specular;
+}
+
+fn bool is_ident_char(char c) @local @inline =>
+	(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+
+// True when a fragment body assigns to `.roughness`, `.metalness`, or `.reflectance`.
+fn bool writes_surface_field(String src, String field) @local
+{
+	sz pos = 0;
+	while (pos + field.len < src.len)
+	{
+		sz? found = src[pos..].index_of(field);
+		if (catch found) return false;
+		sz at = pos + found + field.len;
+		while (at < src.len && (src[at] == ' ' || src[at] == '\t')) at++;
+		if (at < src.len && src[at] == '=' && (at + 1 >= src.len || src[at + 1] != '=')) return true;
+		if (at + 1 < src.len && src[at + 1] == '='
+			&& (src[at] == '+' || src[at] == '-' || src[at] == '*' || src[at] == '/')) return true;
+		pos += found + 1;
+	}
+	return false;
+}
+
+// True when a fragment body calls a 5- or 6-argument `standard(...)` overload
+// that overrides roughness and metalness directly.
+fn bool calls_standard_with_surface(String src) @local
+{
+	const String CALL = "standard(";
+	sz pos = 0;
+	while (pos + CALL.len <= src.len)
+	{
+		sz? found = src[pos..].index_of(CALL);
+		if (catch found) return false;
+		sz start = pos + found;
+		bool boundary = start == 0 || !is_ident_char(src[start - 1]);
+		if (boundary)
+		{
+			uint depth = 1;
+			uint commas = 0;
+			sz at = start + CALL.len;
+			while (at < src.len && depth > 0)
+			{
+				char c = src[at++];
+				if (c == '(') { depth++; }
+				else if (c == ')') { depth--; }
+				else if (c == ',' && depth == 1) { commas++; }
+			}
+			if (commas >= 4) return true;
+		}
+		pos = start + 1;
+	}
+	return false;
+}
+
+fn bool fragment_overrides_specular(String fragment) @local
+{
+	if (fragment.len == 0) return false;
+	if (fragment.contains("specular(")) return true;
+	if (calls_standard_with_surface(fragment)) return true;
+	return writes_surface_field(fragment, ".roughness")
+		|| writes_surface_field(fragment, ".metalness")
+		|| writes_surface_field(fragment, ".reflectance");
 }
 
 <*
@@ -2488,6 +2612,7 @@ fn uint MeshPass.unused_features(&self)
 	if (self.lightmap.live || (self.scene != null && self.scene.lightmap_live)) used |= SKIP_LIGHTMAPS;
 	if (self.ambient_occlusion.live) used |= SKIP_OCCLUSION;
 	if (self.shadows.live || self.lighting.lights[0].meta[1] != SHADOW_VIEW_NONE) used |= SKIP_SUN_SHADOW;
+	if (self.debug_view != DEBUG_VIEW_OFF) used |= SKIP_DEBUG_VIEW;
 	for (uint i = 0; i < self.lighting.count; i++)
 	{
 		Light* light = &self.lighting.lights[i];
@@ -2514,24 +2639,74 @@ fn uint MeshPass.unused_features(&self)
 *>
 fn void? MeshPass.resolve_lit_pipelines(&self, Gpu* gpu, Target* target)
 {
-	self.lit_pipelines.clear();
 	bool variants = !self.feature_variants_disabled;
 	self.skip_features = variants ? self.unused_features() | (self.one_tap_shadows ? SKIP_RECEIVER_PLANE : 0) : 0;
 	self.cutout_coverage = target.samples != SAMPLE_COUNT_1_BIT;
-	if (!variants && self.scene_tone == LINEAR && !self.cutout_coverage) return;
+	if (!variants && self.scene_tone == LINEAR && !self.cutout_coverage)
+	{
+		self.lit_pipelines.clear();
+		return;
+	}
+	while (self.lit_pipelines.len() < self.materials.len()) self.lit_pipelines.push({ });
 	foreach (i, &material : self.materials)
 	{
-		if (!material.alive || material.pipeline == null) continue;
-		// The frame's features, and the alpha test where this material has none:
-		// a material that can never discard draws through a pipeline without the
-		// instruction, so it keeps early depth - see `SKIP_ALPHA_TEST`.
-		uint skip = variants ? self.skip_features | (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST) : 0;
+		LitPipeline* entry = &self.lit_pipelines[i];
+		if (!material.alive || material.pipeline == null)
+		{
+			*entry = { };
+			continue;
+		}
+		if (entry.base != material.pipeline)
+		{
+			entry.custom_specular = fragment_overrides_specular(material.fragment);
+		}
+		bool has_mr = self.shades_built_in(material)
+			&& material.textures.at(MaterialBinding.METALNESS_ROUGHNESS_MAP) != NO_TEXTURE;
+		float roughness = 1.0f - material.one_minus_roughness;
+		bool skip_specular = !entry.custom_specular && !has_mr && material.metalness <= 0.0f
+			&& (material.reflectance <= 0.0f || roughness >= 0.88f);
+		// The frame's features, plus per-material alpha test and specular bits.
+		uint skip = variants
+			? self.skip_features
+				| (material.alpha_test > 0.0f ? 0 : SKIP_ALPHA_TEST)
+				| (skip_specular ? SKIP_SPECULAR : 0)
+			: 0;
 		bool coverage = self.cuts_as_coverage(material);
+		if (entry.base == material.pipeline && entry.skip == skip && entry.tone == self.scene_tone
+			&& entry.coverage == coverage && entry.variants == variants && entry.lit != null)
+		{
+			continue;
+		}
 		MeshPipeline* lit = self.pipelines.variant(gpu, target, material.pipeline, skip, self.scene_tone, coverage)!;
 		MeshPipeline* rigid = variants
 			? self.pipelines.variant(gpu, target, material.pipeline, skip | SKIP_POSE, self.scene_tone, coverage)!
 			: lit;
-		if (lit != material.pipeline || rigid != material.pipeline) self.lit_pipelines.push({ (uint)i, lit, rigid });
+		entry.base = material.pipeline;
+		entry.lit = lit;
+		entry.rigid = rigid;
+		entry.preskinned = null;
+		entry.skip = skip;
+		entry.tone = self.scene_tone;
+		entry.coverage = coverage;
+		entry.variants = variants;
+	}
+}
+
+<*
+ Builds `SKIP_VERTEX_SKIN` pipeline variants lazily for materials drawn by
+ compute-skinned buckets this frame.
+*>
+fn void? MeshPass.resolve_preskinned_pipelines(&self, Gpu* gpu, Target* target)
+{
+	if (self.feature_variants_disabled || self.lit_pipelines.len() == 0) return;
+	foreach (i, bucket : self.scene.buckets)
+	{
+		if (i >= self.posed_offsets.len() || self.posed_offsets[i] == NOT_PRESKINNED) continue;
+		if (bucket.material >= self.lit_pipelines.len()) continue;
+		LitPipeline* entry = &self.lit_pipelines[bucket.material];
+		if (entry.lit == null || entry.preskinned != null || entry.base == null) continue;
+		entry.preskinned = self.pipelines.variant(
+			gpu, target, entry.base, entry.skip | SKIP_VERTEX_SKIN, entry.tone, entry.coverage)!;
 	}
 }
 
@@ -2617,6 +2792,17 @@ fn bool? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	// Sun-only frames compile out the light loop (`SKIP_LIGHT_LOOP`), so nothing
 	// reads cluster lists; skip allocating and dispatching the compute shader.
 	if ((self.skip_features & SKIP_LIGHT_LOOP) != 0 && !self.cluster_bruteforce && !self.area_reference) return false;
+	// Cluster binning only handles non-directional local lights (meta[2] != 0).
+	bool has_local = false;
+	for (uint i = 1; i < self.lighting.count; i++)
+	{
+		if (self.lighting.lights[i].meta[2] != 0)
+		{
+			has_local = true;
+			break;
+		}
+	}
+	if (!has_local) return false;
 
 	const sz CLUSTER_COUNT = CLUSTER_X * CLUSTER_Y * CLUSTER_Z;
 	sz views = (sz)self.prepared_views.len() + 1;
@@ -2889,7 +3075,7 @@ fn void? MeshPass.reserve_draws(&self, Gpu* gpu, uint slot, sz count)
  left is the copy and the offset. They share the buffer rather than getting one
  of their own because the shader selects on one bit of `Instance.pose`, so a
  second live buffer would be a second `FrameBlock` pointer and a third case in
- `skin_matrix` buying nothing.
+ `skin_pose` buying nothing.
 
  Returns zero when nothing is live, which leaves `FrameBlock.live_poses` null —
  and no instance points at it, because `POSE_LIVE` is only set here.
@@ -2922,10 +3108,10 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 	if (needed == 0) return 0;
 
 	gpu.grow_slot_buffer(&self.pose_buffers[slot], &self.pose_capacity[slot], needed, INITIAL_INSTANCES,
-		Matrix4f::size)!;
+		SkinJoint::size)!;
 
-	Matrix4f* palette = (Matrix4f*)self.pose_buffers[slot].data();
-	uint at           = 0;
+	SkinJoint* palette = (SkinJoint*)self.pose_buffers[slot].data();
+	uint at            = 0;
 
 	foreach (&player : self.scene.players)
 	{
@@ -2935,7 +3121,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 
 		// A baked character blending several clips, posed on the CPU by
 		// `AnimationPlayer.blend_layers`: its joints arrive finished, in the mesh's
-		// space, every target's in a row — the copy and the offset are the work.
+		// space, every target's in a row — packing and offsetting are the work.
 		if (!player.live_skin)
 		{
 			sz from = 0;
@@ -2946,7 +3132,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 				Node* mesh_node = self.scene.node(target.node);
 				if (mesh_node != null && from + count <= player.palette.len())
 				{
-					for (sz j = 0; j < count; j++) palette[at + j] = player.palette[from + j];
+					for (sz j = 0; j < count; j++) palette[at + j] = pack_skin_joint(player.palette[from + j]);
 					mesh_node.pose = POSE_LIVE | at;
 					at += (uint)count;
 				}
@@ -2985,7 +3171,7 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 					// left them, which is local and visible.
 					if (bone != null) pose = to_mesh.mul(bone.world).mul(skin.inverse_bind[j]);
 				}
-				palette[at + j] = pose;
+				palette[at + j] = pack_skin_joint(pose);
 			}
 
 			// Live, and where. The top bit is what the shader selects the buffer on;
@@ -3007,15 +3193,15 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 		// live slice would pose a mesh by matrices nothing sized.
 		if (mesh_node == null || mesh_node.skin < 0) continue;
 
-		foreach (j, pose : entry.matrices) palette[at + j] = pose;
+		foreach (j, pose : entry.matrices) palette[at + j] = pack_skin_joint(pose);
 		mesh_node.pose = POSE_LIVE | at;
 		at += (uint)entry.matrices.len();
 	}
 
 	if (self.frame_key_enabled)
 	{
-		self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * Matrix4f::size));
-		self.pose_content_key = hash_bytes(KEY_SEED, palette, (usz)((sz)at * Matrix4f::size));
+		self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * SkinJoint::size));
+		self.pose_content_key = hash_bytes(KEY_SEED, palette, (usz)((sz)at * SkinJoint::size));
 	}
 	return self.pose_buffers[slot].address;
 }
@@ -3107,6 +3293,7 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 {
 	self.soft_offsets.clear();
+	if (self.scene.physics.softs.len() == 0) return 0;
 
 	// Two passes over the buckets, for `write_live_poses`' reason: these offsets
 	// are handed to draw records, so the buffer they index cannot be allowed to
@@ -3193,24 +3380,67 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
  Does nothing at all — no pipeline compiled, no buffer allocated, no command
  recorded — in a frame with no compute-routed bucket in it.
 *>
+// Maximum posed-vertex buffer footprint (32 MB) for auto-routed compute skinning.
+const sz AUTO_SKIN_BUDGET_BYTES = 32 * 1024 * 1024;
+const sz AUTO_SKIN_BUDGET_VERTS = AUTO_SKIN_BUDGET_BYTES / SkinnedVertex::size;
+
 fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 {
 	self.posed_offsets.clear();
 
+	bool auto_compute = self.compute_skin == ALWAYS
+		|| (self.compute_skin == AUTO
+			&& (self.multiview || self.shadows.live || self.point_shadows.live
+				|| self.prepass.live || self.prepass.enabled || self.ambient_occlusion.live));
+
+	if (!auto_compute)
+	{
+		bool any_preskinned = false;
+		foreach (bucket : self.scene.buckets)
+		{
+			if (bucket.preskinned)
+			{
+				any_preskinned = true;
+				break;
+			}
+		}
+		if (!any_preskinned) return;
+	}
+
 	// Sized first, so the buffer cannot move under an address already pushed.
-	// `NOT_PRESKINNED` for every bucket that is not routed here, which keeps this
-	// list parallel to `Scene.buckets` and lets `record` index it directly.
+	// `NOT_PRESKINNED` for every bucket that is not routed here, keeping this
+	// list parallel to `Scene.buckets`.
 	sz needed = 0;
 	foreach (bucket : self.scene.buckets)
 	{
-		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
-		if (!bucket.preskinned || mesh == null || !mesh.has_skin)
+		bool explicit_skin = bucket.preskinned;
+		if (!explicit_skin && !auto_compute)
 		{
 			self.posed_offsets.push(NOT_PRESKINNED);
 			continue;
 		}
+		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
+		Asset* owner = self.assets.slot(bucket.asset);
+		if (mesh == null || !mesh.has_skin || mesh.vertex_count == 0
+			|| bucket.count == 0 || bucket.count > 65535
+			|| owner == null || owner.poses.buffer == null)
+		{
+			self.posed_offsets.push(NOT_PRESKINNED);
+			continue;
+		}
+		sz verts = (sz)mesh.vertex_count * (sz)bucket.count;
+		if (!explicit_skin)
+		{
+			// Preserve vertex tangents on normal-mapped meshes unless explicitly preskinned,
+			// and keep auto-routed crowds within the 32 MB posed-vertex budget.
+			if (mesh.has_tangents || needed + verts > AUTO_SKIN_BUDGET_VERTS)
+			{
+				self.posed_offsets.push(NOT_PRESKINNED);
+				continue;
+			}
+		}
 		self.posed_offsets.push((uint)needed);
-		needed += (sz)mesh.vertex_count * (sz)bucket.count;
+		needed += verts;
 	}
 	if (needed == 0) return;
 
@@ -3234,7 +3464,7 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 		GpuMesh* mesh = self.assets.mesh(bucket.asset, bucket.mesh);
 		if (mesh == null) continue;
 		Asset* owner = self.assets.slot(bucket.asset);
-		if (owner == null) continue;
+		if (owner == null || owner.poses.buffer == null) continue;
 
 		SkinPush push = {
 			.positions = (Vec3*)mesh.positions.address,
@@ -3244,8 +3474,8 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 				.address, // Offset to this bucket's first copy, exactly as the draw path offsets
 				// it, so `iid` starts at zero in the shader either way.
 			.instances = (Instance*)(self.instance_address + (ulong)bucket.first * Instance::size),
-			.baked = (Matrix4f*)owner.poses.address,
-			.live = (Matrix4f*)self.live_address,
+			.baked = (SkinJoint*)owner.poses.address,
+			.live = (SkinJoint*)self.live_address,
 			.output = (SkinnedVertex*)(output_address
 				+ (ulong)self.posed_offsets[i]
 					* SkinnedVertex::size), // The morph happens before the blend here exactly as it does in the
@@ -3267,8 +3497,8 @@ fn void? MeshPass.skin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 			&push
 		);
 
-		uint threads = mesh.vertex_count * bucket.count;
-		vk::cmdDispatch(cmd, (threads + SKIN_WORKGROUP - 1) / SKIN_WORKGROUP, 1, 1);
+		uint groups_x = (mesh.vertex_count + SKIN_WORKGROUP - 1) / SKIN_WORKGROUP;
+		vk::cmdDispatch(cmd, groups_x, bucket.count, 1);
 	}
 
 	// Everything written above, against everything that reads it below.
@@ -4132,6 +4362,7 @@ fn void MeshPass.free_material(&self, Gpu* gpu, uint index)
 	}
 
 	self.pipelines.release(gpu, material.pipeline);
+	if (index < self.lit_pipelines.len()) self.lit_pipelines[index] = { };
 	material.free();
 	// The mirror of `note_material_claimed`, and the only place the count goes
 	// down: `dispose_material` is a *release*, and a material a node still names

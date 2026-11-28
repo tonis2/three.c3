@@ -35,6 +35,7 @@
 		android:allowBackup="false">
 
 		<meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s" />
+		<meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="1" />
 
 		<activity
 			android:name="android.app.NativeActivity"

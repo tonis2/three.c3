@@ -740,6 +740,17 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 	ShadowManager* manager = &self.shadow_manager;
 	ShadowViewSet* entries = &self.shadow_view_set;
 	manager.plan = SHADOW_PLAN_FULL; manager.sample_static = false;
+	manager.updates = 0; manager.update_texels = 0; manager.deferred = 0; manager.copied_texels = 0;
+	if (!self.shadows.live && !self.point_shadows.live && entries.active == 0)
+	{
+		// One-view ambient occlusion borrows the shadow cutout pipeline for alpha-tested cards.
+		if (self.ambient_occlusion.live && !self.multiview && !self.shadows.cutout_ready
+			&& !self.shadows.cutout_refused && self.scene_has_cutouts())
+		{
+			if (catch self.shadows.build_cutout_pipeline(gpu)) self.shadows.cutout_refused = true;
+		}
+		return;
+	}
 	uint statics = 0;
 	uint movers = 0;
 	uint cutouts = 0;

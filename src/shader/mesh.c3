@@ -28,6 +28,38 @@ declare the same resources.
 *>
 module three;
 
+// Stage interface shared by `shaders/mesh.shady` and `shaders/material.shady`.
+// `color` is flat whenever no vertex body can write it per vertex.
+const String MESH_VERTEX_OUTPUT_FLAT = `struct VertexOutput
+{
+	float3 normal;
+	float4 tangent;
+	float2 uv;
+	float3 world;
+	float4 color @flat;
+	float4 vertex_color;
+	float3 lightmap;
+	float4 origin @flat;
+	float4 sv_position @position @invariant;
+	uint variant;
+}
+`;
+
+const String MESH_VERTEX_OUTPUT_INTERPOLATED = `struct VertexOutput
+{
+	float3 normal;
+	float4 tangent;
+	float2 uv;
+	float3 world;
+	float4 color;
+	float4 vertex_color;
+	float3 lightmap;
+	float4 origin @flat;
+	float4 sv_position @position @invariant;
+	uint variant;
+}
+`;
+
 macro ShaderDef mesh_def(
 	String fragment_code = "",
 	MaterialUniform[] uniforms = {},
@@ -93,6 +125,9 @@ macro ShaderDef mesh_def(
 		// The tone a display variant writes with, which `material.shady` applies last.
 		{ .name = "tonemap", .file = ShaderFile.TONEMAP_SHADY },
 		{ .name = "scene_tone", .file = ShaderFile.SCENE_TONE_SHADY },
+		{ .name = "three.vertex_output", .source = vertex_code.len > 0
+			? MESH_VERTEX_OUTPUT_INTERPOLATED
+			: MESH_VERTEX_OUTPUT_FLAT },
 		{ .name = "three.material", .file = ShaderFile.MATERIAL_SHADY },
 		{ .name = "mesh", .file = ShaderFile.MESH_SHADY },
 	};

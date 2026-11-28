@@ -76,7 +76,9 @@ struct AmbientOcclusion
 	// The depth programs with a view mask, for a multiview target. A one-view
 	// target draws with the shadow map's own.
 	MeshPipeline eyes_pipeline;
+	MeshPipeline eyes_rigid_pipeline;
 	MeshPipeline eyes_cutout_pipeline;
+	MeshPipeline eyes_rigid_cutout_pipeline;
 	bool live;
 }
 
@@ -123,10 +125,15 @@ fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent, uint view
 	if (views > 1)
 	{
 		uint mask = (1u << views) - 1;
-		if (self.eyes_pipeline.handle == null) build_depth_pipeline(gpu, &self.eyes_pipeline, self.format, view_mask: mask)!;
+		if (self.eyes_pipeline.handle == null)
+		{
+			build_depth_pipeline(gpu, &self.eyes_pipeline, self.format, view_mask: mask,
+				rigid_pipeline: &self.eyes_rigid_pipeline)!;
+		}
 		if (cutouts && self.eyes_cutout_pipeline.handle == null)
 		{
-			build_depth_pipeline(gpu, &self.eyes_cutout_pipeline, self.format, cutout: true, view_mask: mask)!;
+			build_depth_pipeline(gpu, &self.eyes_cutout_pipeline, self.format, cutout: true, view_mask: mask,
+				rigid_pipeline: &self.eyes_rigid_cutout_pipeline)!;
 		}
 	}
 
@@ -262,6 +269,8 @@ fn void AmbientOcclusion.free(&self, Gpu* gpu)
 	if (self.linear != null) gpu.retire_memory({}, sampler: self.linear);
 	if (self.pipeline.handle != null) gpu.retire_pipeline(self.pipeline);
 	if (self.eyes_pipeline.handle != null) gpu.retire_pipeline(self.eyes_pipeline);
+	if (self.eyes_rigid_pipeline.handle != null) gpu.retire_pipeline(self.eyes_rigid_pipeline);
 	if (self.eyes_cutout_pipeline.handle != null) gpu.retire_pipeline(self.eyes_cutout_pipeline);
+	if (self.eyes_rigid_cutout_pipeline.handle != null) gpu.retire_pipeline(self.eyes_rigid_cutout_pipeline);
 	*self = { };
 }

@@ -3127,6 +3127,19 @@ fn char[]? Exporter.source_bytes(&self, int slot, gltf::ImageType* mime, bool* o
 		char[]? loaded = file::load(mem, path);
 		if (try loaded)
 		{
+			uint layer = self.pass.assets.texture_source_layer(slot);
+			if (is_ktx2(loaded) && ktx2_layer_count(loaded) > 1)
+			{
+				char[]? sliced = extract_ktx2_layer(loaded, layer, mem);
+				free(loaded);
+				if (try sliced)
+				{
+					*mime = gltf::ImageType.IMAGE_KTX2;
+					*own = true;
+					return sliced;
+				}
+				return EXPORT_HAS_NOTHING_TO_WRITE~;
+			}
 			*mime = mime_of(loaded);
 			*own = true;
 			return loaded;

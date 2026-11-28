@@ -53,6 +53,7 @@ fn void? run_xr(XrShell shell, XrHost* host, Renderer* renderer, JsRuntime* runt
 	// For the once-every-few-seconds line saying how it is going.
 	Clock report_since = clock::now();
 	XrFrameStats stats;
+	xr::Extent2Di last_recommended;
 
 	while (!host.exit_wanted)
 	{
@@ -113,6 +114,17 @@ fn void? run_xr(XrShell shell, XrHost* host, Renderer* renderer, JsRuntime* runt
 		long wait_ns;
 		if (seen)
 		{
+			if (renderer.active_profile().dynamic_resolution && host.dynamic_resolution_supported)
+			{
+				xr::Extent2Di rec;
+				if (host.recommended_resolution(frame.predicted_display_time, &rec)
+					&& (rec.width != last_recommended.width || rec.height != last_recommended.height))
+				{
+					last_recommended = rec;
+					io::printfn("xr: recommended eye resolution %dx%d (active %dx%d)",
+						rec.width, rec.height, host.eye_width, host.eye_height);
+				}
+			}
 			aim_eyes(renderer, views);
 			renderer.update_foveation(views)!;
 			draw_to_swapchain(host, renderer, &wait_ns)!;
@@ -228,9 +240,18 @@ fn void? apply_xr_render_scale(XrHost* host, Renderer* renderer) @local
 	float scale = renderer.xr_display.scale_request;
 	if (scale <= 0.0f) return;
 	renderer.xr_display.scale_request = 0.0f;
+
+	vk::Extent2D next = host.scaled_eye_extent(scale);
+	if (next.width == host.eye_width && next.height == host.eye_height && host.swapchain != null)
+	{
+		host.render_scale = scale;
+		renderer.xr_display.render_scale = scale;
+		return;
+	}
+
 	renderer.gpu.wait_idle();
 	host.rebuild_swapchain(&renderer.gpu, scale)!;
-	renderer.resize_target(host.eye_width * 2, host.eye_height)!;
+	renderer.resize_target(host.eye_width * 2, host.eye_height, device_idle: true)!;
 	renderer.xr_display.render_scale = host.render_scale;
 	renderer.xr_display.eye_width = host.eye_width;
 	renderer.xr_display.eye_height = host.eye_height;

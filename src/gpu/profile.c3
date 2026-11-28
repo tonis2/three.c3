@@ -54,6 +54,14 @@ enum XrLayerFilter : char (String name)
 	AUTO    { "auto" },
 }
 
+<* Policy for routing skinned buckets through the compute skinning pass. *>
+enum ComputeSkinMode : char (String name)
+{
+	MANUAL { "manual" },
+	AUTO   { "auto" },
+	ALWAYS { "always" },
+}
+
 <*
  Complete render policy for a run. Plain value struct with nothing to free.
  `configured` distinguishes an explicit profile from a zero-initialized struct
@@ -73,15 +81,21 @@ struct RenderProfile
 	bool depth_prepass;
 	ShadowFilter shadow_filter;
 	DirectEyesMode direct_eyes;
+	ComputeSkinMode compute_skin;
 	// Whether identical desktop frames may be skipped via `picture_key`.
 	bool frame_skip;
 	// Whether unchanged scene pixels may be preserved between submitted frames.
 	bool scene_cache;
 	// Whether per-pass GPU timestamp queries are created.
 	bool gpu_timestamps;
+	// Whether scene fragment shader invocations are counted via pipeline statistics.
+	// Off on Quest/PCVR to avoid bracketing tiled multiview passes with stats queries.
+	bool pipeline_stats;
 	// Defer allocating HDR post images, tonemap pipeline, and `target.color`
 	// until a frame actually takes the HDR chain or capture path.
 	bool lazy_post_images;
+	// Query XR_META_recommended_layer_resolution for dynamic resolution scaling.
+	bool dynamic_resolution;
 	// Request `VK_EXT_fragment_density_map` and build a foveation map when available.
 	bool foveation;
 	Foveation foveation_level;
@@ -102,7 +116,10 @@ const String[*] PROFILE_OVERRIDE_KEYS = {
 	"scene_cache",
 	"frame_skip",
 	"timestamps",
+	"pipeline_stats",
 	"lazy_post",
+	"dynamic_res",
+	"compute_skin",
 };
 
 <*
@@ -126,10 +143,13 @@ fn RenderProfile render_profile(RenderPreset preset)
 				.depth_prepass = true,
 				.shadow_filter = FOUR_TAP,
 				.direct_eyes = AUTO,
+				.compute_skin = MANUAL,
 				.frame_skip = true,
 				.scene_cache = true,
 				.gpu_timestamps = true,
+				.pipeline_stats = true,
 				.lazy_post_images = false,
+				.dynamic_resolution = false,
 				.foveation = false,
 				.foveation_level = OFF,
 			};
@@ -144,10 +164,13 @@ fn RenderProfile render_profile(RenderPreset preset)
 				.depth_prepass = false,
 				.shadow_filter = FOUR_TAP,
 				.direct_eyes = AUTO,
+				.compute_skin = AUTO,
 				.frame_skip = false,
 				.scene_cache = false,
 				.gpu_timestamps = true,
+				.pipeline_stats = false,
 				.lazy_post_images = true,
+				.dynamic_resolution = false,
 				.foveation = false,
 				.foveation_level = OFF,
 			};
@@ -162,10 +185,13 @@ fn RenderProfile render_profile(RenderPreset preset)
 				.depth_prepass = false,
 				.shadow_filter = ONE_TAP,
 				.direct_eyes = AUTO,
+				.compute_skin = AUTO,
 				.frame_skip = false,
 				.scene_cache = false,
 				.gpu_timestamps = true,
+				.pipeline_stats = false,
 				.lazy_post_images = true,
+				.dynamic_resolution = false,
 				.foveation = true,
 				.foveation_level = MEDIUM,
 			};
@@ -354,6 +380,15 @@ fn bool RenderProfile.apply_override(&self, String key, String raw_value)
 			io::eprintfn("profile: timestamps=%s is invalid (expected 0 or 1)", v);
 			return false;
 
+		case "pipeline_stats":
+			if (try on = parse_bool_override(v))
+			{
+				self.pipeline_stats = on;
+				return true;
+			}
+			io::eprintfn("profile: pipeline_stats=%s is invalid (expected 0 or 1)", v);
+			return false;
+
 		case "lazy_post":
 			if (try on = parse_bool_override(v))
 			{
@@ -361,6 +396,27 @@ fn bool RenderProfile.apply_override(&self, String key, String raw_value)
 				return true;
 			}
 			io::eprintfn("profile: lazy_post=%s is invalid (expected 0 or 1)", v);
+			return false;
+
+		case "dynamic_res":
+			if (try on = parse_bool_override(v))
+			{
+				self.dynamic_resolution = on;
+				return true;
+			}
+			io::eprintfn("profile: dynamic_res=%s is invalid (expected 0 or 1)", v);
+			return false;
+
+		case "compute_skin":
+			foreach (mode : ComputeSkinMode::values)
+			{
+				if (v == mode.name)
+				{
+					self.compute_skin = mode;
+					return true;
+				}
+			}
+			io::eprintfn("profile: compute_skin=%s is invalid (expected manual, auto, or always)", v);
 			return false;
 
 		default:
@@ -431,7 +487,7 @@ fn void RenderProfile.report(&self, Gpu* gpu, Target* target)
 {
 	bool direct = self.wants_direct_eyes(gpu, target);
 	io::printfn(
-		"profile: %s (%s) | %d view(s), %dx msaa, prepass=%s, shadow=%s, direct_eyes=%s (%s), foveation=%s, cache=%s, skip=%s, lazy_post=%s",
+		"profile: %s (%s) | %d view(s), %dx msaa, prepass=%s, shadow=%s, direct_eyes=%s (%s), compute_skin=%s, foveation=%s, cache=%s, skip=%s, lazy_post=%s, dyn_res=%s",
 		self.preset.name,
 		gpu.limits.is_tiler ? "tiler" : "desktop-gpu",
 		target.views,
@@ -440,9 +496,11 @@ fn void RenderProfile.report(&self, Gpu* gpu, Target* target)
 		self.shadow_filter.name,
 		self.direct_eyes.name,
 		direct ? "direct" : "chain",
+		self.compute_skin.name,
 		target.foveation.exists() ? target.foveation.level.name : "off",
 		self.scene_cache ? "on" : "off",
 		self.frame_skip ? "on" : "off",
-		self.lazy_post_images ? "on" : "off"
+		self.lazy_post_images ? "on" : "off",
+		self.dynamic_resolution ? "on" : "off"
 	);
 }

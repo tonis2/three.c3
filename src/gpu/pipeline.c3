@@ -292,6 +292,18 @@ struct FrameSun
 }
 
 <*
+ One joint's rigid transform plus uniform scale, pre-decomposed on the CPU.
+
+ Two `float4`s (32 bytes, 16-byte aligned), giving identical scalar and std430
+ layout on mobile tilers and halving palette bandwidth vs 4x4 matrices.
+*>
+struct SkinJoint
+{
+	float[4] rot;       // unit quaternion (x, y, z, w)
+	float[4] pos_scale; // xyz translation, w uniform scale (0 hides bone)
+}
+
+<*
  What every draw in a frame shares. One per frame in flight, written before
  recording and read through `MeshPush.frame`.
 *>
@@ -301,14 +313,14 @@ struct FrameBlock
 	// x the ambient floor, y how many of `lights` are lit this frame,
 	// z game clock seconds (`s.time` / `v.time`), w unused.
 	float[4] lighting;
-	// This frame's live joint matrices — `MeshPass.write_live_poses`. Zero in a
+	// This frame's live joint poses — `MeshPass.write_live_poses`. Zero in a
 	// frame with no live character.
 	// 
 	// Here rather than in the draw record, and that is the field's whole argument:
 	// the record is per bucket, and a single palette pointer there would split a
 	// live character away from the baked copies it shares a mesh and a material
 	// with. One buffer per frame keeps them in one draw.
-	Matrix4f* live_poses;
+	SkinJoint* live_poses;
 	<*
 	 The light's own view-projection, as `render/shadow.c3` fitted it this frame.
 
@@ -543,7 +555,7 @@ struct DrawRecord
 	// material uniforms are still spending.
 	uint[<4>]* joints;
 	Vec4* weights;
-	Matrix4f* palette;
+	SkinJoint* palette;
 	// Where the compute pass wrote this bucket's posed vertices, or zero.
 	// One copy of the mesh per instance.
 	SkinnedVertex* posed;
@@ -668,8 +680,8 @@ struct SkinPush
 	uint[<4>]* joints;
 	Vec4* weights;
 	Instance* instances; // already offset to this bucket's first
-	Matrix4f* baked; // the asset's table
-	Matrix4f* live; // this frame's live palette
+	SkinJoint* baked; // the asset's table
+	SkinJoint* live; // this frame's live palette
 	SkinnedVertex* output; // this bucket's slice
 	// The same pair the draw path carries, for the same reason: a character routed
 	// through the compute pass has to morph exactly as one left in the vertex
@@ -752,6 +764,7 @@ $assert Light::size == 80 : "Light moved off its pinned size";
 $assert Instance::size == 180 : "Instance moved off its pinned size";
 $assert SkinnedVertex::size == 24 : "SkinnedVertex moved off its pinned size";
 $assert MorphDelta::size == 24 : "MorphDelta moved off its pinned size";
+$assert SkinJoint::size == 32 : "SkinJoint moved off its pinned size";
 
 <*
  One field of the push block as this side lays it out.
@@ -1049,9 +1062,9 @@ const uint SKIP_ENVIRONMENT        = 32;
 const uint SKIP_LIGHTMAPS          = 64;
 const uint SKIP_OCCLUSION          = 128;
 const uint SKIP_SUN_SHADOW         = 256;
-// Every bit a *frame* decides. The alpha test is a material's and the receiver
-// plane a setting.
-const uint SKIP_ALL_FEATURES       = 511 | SKIP_LIGHT_LOOP;
+// Every bit a *frame* decides. The alpha test and specular are per material,
+// and the receiver plane is a setting.
+const uint SKIP_ALL_FEATURES       = 511 | SKIP_LIGHT_LOOP | SKIP_DEBUG_VIEW;
 // The alpha test, for a material whose `alpha_test` is zero and so can never
 // discard. Compiled out rather than left untaken because a fragment shader that
 // *contains* a discard loses early depth on a tiler: Adreno cannot write a
@@ -1074,10 +1087,19 @@ const uint SKIP_LIGHT_LOOP         = 2048;
 // neither. A bucket's, not a frame's, so a material has a variant with it and one
 // without (`LitPipeline`).
 const uint SKIP_POSE               = 4096;
-// The shaders' `LIGHTS_*`, `SURFACE_*`, `SHADOW_*` and `POSE_VERTICES` constants
-// are `@spec(100)` onwards, in the order of the bits above.
-const uint FEATURE_SPEC_ID = 100;
-const uint SHADER_FEATURES = 13;
+// Per-material specular: off for matte surfaces with no metallic-roughness map.
+const uint SKIP_SPECULAR           = 8192;
+// Frame-wide debug views: off whenever `three.debug.view` is off.
+const uint SKIP_DEBUG_VIEW         = 16384;
+// Per-bucket vertex skinning: off for compute-skinned draws (`FLAG_PRESKINNED`),
+// dropping dual-quaternion blend and morph VGPRs while keeping the `draw.posed` read.
+const uint SKIP_VERTEX_SKIN        = 32768;
+// The shaders' `LIGHTS_*`, `SURFACE_*`, `SHADOW_*`, `POSE_VERTICES`, and `VERTEX_SKIN`
+// constants are `@spec(100)` onwards, in the order of the bits above.
+const uint FEATURE_SPEC_ID         = 100;
+const uint POSE_VERTICES_SPEC_ID   = FEATURE_SPEC_ID + 12;
+const uint VERTEX_SKIN_SPEC_ID     = FEATURE_SPEC_ID + 15;
+const uint SHADER_FEATURES         = 16;
 
 <*
  What everything drew with before there was a choice: solid triangles, back faces
@@ -1940,12 +1962,14 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
  @param entries : `The stages the module must contain and the names it is linked under: the SHADOW_ENTRIES list alone for the depth-only path, the cut-out's pair when it carries a fragment stage. The two spellings of the cut-out vertex entry are the lists above.`
  @param depth_format : `The atlas format, chosen for both depth attachment and sampling.`
  @param samples : "The scene's, for a prepass drawn inside its rendering; one for a map of its own"
+ @param rigid : "Compile out skinning and morph pose via POSE_VERTICES = false"
  @return ? SHADER_MISSING_ENTRY_POINT : `The module is missing one of the entries it was held to.`
  @return ? PUSH_BLOCK_MISMATCH : `The module does not lay its push block out the way the mesh contract does. Reachable by editing shaders/shadow.shady and nothing else.`
 *>
 fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk::Format depth_format,
 	ShaderEntry[] entries = SHADOW_ENTRIES[..], bool dynamic_cull = false, bool density_map = false,
-	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED, vk::SampleCountFlagBits samples = SAMPLE_COUNT_1_BIT)
+	uint view_mask = 0, vk::Format color = FORMAT_UNDEFINED, vk::SampleCountFlagBits samples = SAMPLE_COUNT_1_BIT,
+	bool rigid = false)
 {
 	// The list is both the contract the module is held to and the names its
 	// stages are created under: one place, so the pipeline cannot check for one
@@ -1967,6 +1991,20 @@ fn MeshPipeline? MeshPipeline.init_shadow(&self, Gpu* gpu, ShaderModule* mod, vk
 		.setStage(SHADER_STAGE_FRAGMENT_BIT)
 		.setMod(module_handle)
 		.setName(cutout ? entries[1].name : entries[0].name), };
+
+	uint pose_off = 0;
+	vk::SpecializationMapEntry pose_entry = {
+		.constantID = POSE_VERTICES_SPEC_ID,
+		.offset = 0,
+		.size = uint::size,
+	};
+	vk::SpecializationInfo pose_spec = {
+		.mapEntryCount = 1,
+		.pMapEntries = &pose_entry,
+		.dataSize = uint::size,
+		.pData = &pose_off,
+	};
+	if (rigid) stages[0].pSpecializationInfo = &pose_spec;
 
 	// Depth alone. `setColorAttachmentFormats` is not called rather than being
 	// called with an empty slice, for the reason `init_post` leaves the depth
@@ -2467,7 +2505,7 @@ fn PushFieldLayout[] copy_contract(PushFieldLayout[] contract) @local
  @param [&in] base : "A pipeline `acquire` handed out"
  @param tone : "What the variant writes"
  @param coverage : "The alpha test as sample coverage: `PipelineState.coverage`"
- @require (skip_features & ~(SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE | SKIP_POSE)) == 0 : "Unknown feature bits"
+ @require (skip_features & ~(SKIP_ALL_FEATURES | SKIP_ALPHA_TEST | SKIP_RECEIVER_PLANE | SKIP_POSE | SKIP_SPECULAR | SKIP_VERTEX_SKIN)) == 0 : "Unknown feature bits"
 
  @return "`base` itself when it already leaves out exactly those features, writes that tone and cuts that way"
 *>

@@ -2952,7 +2952,7 @@ fn void the_texture_verbs_refuse_by_name() @test
 			const said = (fn) => { try { fn(); return ''; } catch (e) { return e.message; } };
 			return [
 				said(() => three.texture("test/fixtures/nothing_here.png")).includes('no readable file'),
-				said(() => three.texture("test/fixtures/not_an_image.png")).includes('not a PNG or a JPEG'),
+				said(() => three.texture("test/fixtures/not_an_image.png")).includes('not a PNG, JPEG or KTX2'),
 				said(() => three.texture("test/fixtures/deep.png")).includes('16-bit'),
 				said(() => three.texture(42)).includes('wants a path'),
 				said(() => new three.MeshLambertMaterial({ map: "brick.png" })).includes('wants a three.texture'),

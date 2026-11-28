@@ -94,6 +94,72 @@ struct PosedNode
 }
 
 <*
+ Packs a joint's rigid-plus-uniform-scale transform into a 32-byte `SkinJoint`.
+
+ Uses the Shepperd trace method on the unscaled orthonormal basis so quaternion
+ conventions match dual-quaternion blending in `shaders/skin_math.shady`.
+ A zero-scaled joint keeps the identity rotation and scale 0 without NaNs.
+
+ @param m : "Column-major joint transform (`world * inverse_bind`)"
+ @return "Pre-decomposed 32-byte joint for GPU upload"
+*>
+fn SkinJoint pack_skin_joint(Matrix4f m)
+{
+	Vec3 col0 = { m.m[0], m.m[1], m.m[2] };
+	float scale = col0.length();
+	float[4] rot = { 0, 0, 0, 1 };
+	if (scale > 1e-8f)
+	{
+		float inv = 1.0f / scale;
+		Vec3 cx = col0 * inv;
+		Vec3 cy = (Vec3){ m.m[4], m.m[5], m.m[6] } * inv;
+		Vec3 cz = (Vec3){ m.m[8], m.m[9], m.m[10] } * inv;
+		float t;
+		float[4] q;
+		if (cz.z < 0.0f)
+		{
+			if (cx.x > cy.y)
+			{
+				t = 1.0f + cx.x - cy.y - cz.z;
+				q = { t, cy.x + cx.y, cz.x + cx.z, cy.z - cz.y };
+			}
+			else
+			{
+				t = 1.0f - cx.x + cy.y - cz.z;
+				q = { cy.x + cx.y, t, cz.y + cy.z, cz.x - cx.z };
+			}
+		}
+		else
+		{
+			if (cx.x < -cy.y)
+			{
+				t = 1.0f - cx.x - cy.y + cz.z;
+				q = { cz.x + cx.z, cz.y + cy.z, t, cx.y - cy.x };
+			}
+			else
+			{
+				t = 1.0f + cx.x + cy.y + cz.z;
+				q = { cy.z - cz.y, cz.x - cx.z, cx.y - cy.x, t };
+			}
+		}
+		float len_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+		if (len_sq > 1e-12f)
+		{
+			float norm = 1.0f / math::sqrt(len_sq);
+			rot = { q[0] * norm, q[1] * norm, q[2] * norm, q[3] * norm };
+		}
+	}
+	else
+	{
+		scale = 0.0f;
+	}
+	return {
+		.rot = rot,
+		.pos_scale = { m.m[12], m.m[13], m.m[14], scale },
+	};
+}
+
+<*
  Bakes every clip of every skin of an asset into one device-local buffer.
 
  Called from `Assets.ensure_uploaded` the first time a skinned primitive of the
@@ -141,7 +207,11 @@ fn void? Assets.ensure_poses(&self, Gpu* gpu, AssetId id)
 
 	asset.bake_poses(poses);
 
-	asset.poses = gpu.upload_stream(poses.ptr, Matrix4f::size * (sz)total)!;
+	SkinJoint[] packed = mem::new_array(SkinJoint, (usz)total);
+	defer free(packed);
+	foreach (i, pose : poses) packed[i] = pack_skin_joint(pose);
+
+	asset.poses = gpu.upload_stream(packed.ptr, SkinJoint::size * (sz)total)!;
 	asset.pose_matrices = total;
 	measure_skinned_bounds(asset, poses);
 }
@@ -614,11 +684,12 @@ fn int? Assets.attach_skin(&self, Gpu* gpu, AssetId id, uint joints)
 	// Identity rather than zero, and built before anything is pushed, so a failed
 	// upload leaves the asset exactly as it was rather than carrying a skin whose
 	// palette is not there.
-	Matrix4f[] rest = mem::new_array(Matrix4f, (usz)joints);
+	SkinJoint[] rest = mem::new_array(SkinJoint, (usz)joints);
 	defer free(rest);
-	foreach (&entry : rest) *entry = matrix::IDENTITY4{float};
+	SkinJoint identity = { .rot = { 0, 0, 0, 1 }, .pos_scale = { 0, 0, 0, 1 } };
+	foreach (&entry : rest) *entry = identity;
 
-	vk::Memory poses = gpu.upload_stream(rest.ptr, Matrix4f::size * (sz)joints)!;
+	vk::Memory poses = gpu.upload_stream(rest.ptr, SkinJoint::size * (sz)joints)!;
 
 	AssetSkin skin;
 	skin.joints.init(mem, joints);
@@ -993,9 +1064,11 @@ fn void Scene.update_sockets(&self)
 		}
 
 		// A character blending several clips is posed from a palette composed this
-		// frame rather than from a frame of the table, and nothing about `pose`
-		// says whether it moved — so it is read every time.
-		Matrix4f* composed = self.composed_joint(socket.character, socket.skin, socket.joint);
+		// frame rather than from a frame of the table; baked crowd characters have
+		// POSE_LIVE clear and skip scanning players.
+		Matrix4f* composed = (character.pose & POSE_LIVE) != 0
+			? self.composed_joint(socket.character, socket.skin, socket.joint)
+			: null;
 
 		if (composed == null && socket.written && socket.pose == character.pose
 			&& socket.pose_next == character.pose_next && socket.pose_t == character.pose_t)

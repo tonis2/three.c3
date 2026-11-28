@@ -599,6 +599,7 @@ struct ShadowMap
 	// pass, so there is nothing to key a second one on. Compiled the first time
 	// shadows are switched on and kept until the pass is freed.
 	MeshPipeline pipeline;
+	MeshPipeline rigid_pipeline;
 	bool pipeline_ready;
 
 	<*
@@ -616,6 +617,7 @@ struct ShadowMap
 	 `alphaTest` never compiles it.
 	*>
 	MeshPipeline cutout_pipeline;
+	MeshPipeline rigid_cutout_pipeline;
 	bool cutout_ready;
 	// Set when the cut-out shader would not compile, so the diagnostic is one
 	// sentence and not one per frame. Cut-out casters then draw as whole quads,
@@ -677,7 +679,7 @@ fn void? ShadowMap.build_pipeline(&self, Gpu* gpu)
 {
 	if (self.pipeline_ready) return;
 
-	build_depth_pipeline(gpu, &self.pipeline, self.format)!;
+	build_depth_pipeline(gpu, &self.pipeline, self.format, rigid_pipeline: &self.rigid_pipeline)!;
 	self.pipeline_ready = true;
 }
 
@@ -706,7 +708,8 @@ fn void? ShadowMap.build_cutout_pipeline(&self, Gpu* gpu)
 {
 	if (self.cutout_ready) return;
 
-	build_depth_pipeline(gpu, &self.cutout_pipeline, self.format, cutout: true)!;
+	build_depth_pipeline(gpu, &self.cutout_pipeline, self.format, cutout: true,
+		rigid_pipeline: &self.rigid_cutout_pipeline)!;
 	self.cutout_ready = true;
 }
 
@@ -1050,9 +1053,17 @@ fn ShadowFit ShadowMap.report(&self)
 
 fn void ShadowMap.free(&self, Gpu* gpu)
 {
-	if (self.pipeline_ready) self.pipeline.free(gpu);
+	if (self.pipeline_ready)
+	{
+		self.pipeline.free(gpu);
+		self.rigid_pipeline.free(gpu);
+	}
 	self.pipeline_ready = false;
-	if (self.cutout_ready) self.cutout_pipeline.free(gpu);
+	if (self.cutout_ready)
+	{
+		self.cutout_pipeline.free(gpu);
+		self.rigid_cutout_pipeline.free(gpu);
+	}
 	self.cutout_ready = false;
 	self.cutout_refused = false;
 }

@@ -35,10 +35,68 @@ module three;
 
 import std::collections::list;
 import std::sort;
+import std::math;
 import std::math::vector;
 import std::math::matrix;
 import std::math::quaternion;
 import collision;
+
+<* Failures returned by `Scene.set_mesh_lods`. *>
+excuse LOD_TOO_MANY, LOD_INVALID_MESH, LOD_SKIN_MISMATCH;
+
+<* Maximum simultaneous subtree cull volumes on one scene. *>
+const sz MAX_CULL_VOLUMES = 8;
+
+<* Maximum fallback LOD tiers per mesh (excluding base LOD 0). *>
+const sz MAX_LOD_LEVELS = 4;
+
+<* Symmetric screen-height hysteresis (±8%) around LOD thresholds to prevent flicker. *>
+const float LOD_HYSTERESIS = 0.08f;
+
+<* Shape of a subtree spatial cull volume. *>
+enum CullShape : char
+{
+	NONE,
+	SPHERE,
+	CYLINDER,
+}
+
+<*
+ Subtree-scoped spatial volume that drops nodes whose world bounds leave it.
+*>
+struct CullVolume
+{
+	CullShape shape;
+	NodeId root;
+	bool local_space;
+	bool cull_shadows;
+	Vec3 center;
+	float radius;
+	float y_min;
+	float y_max;
+}
+
+<*
+ One fallback LOD tier. `mesh == NO_MESH` drops the instance (small-feature cull).
+*>
+struct LodEntry
+{
+	AssetId asset;
+	uint mesh;
+	float min_screen_h;
+}
+
+<*
+ LOD fallback chain registered for one `(key_asset, key_mesh)` pair, sorted by
+ descending `min_screen_h`.
+*>
+struct LodChain
+{
+	AssetId key_asset;
+	uint key_mesh;
+	LodEntry[MAX_LOD_LEVELS] levels;
+	uint count;
+}
 
 <*
  One instance, exactly as the GPU reads it. Mirrored in `shaders/mesh.shady`.
@@ -313,6 +371,8 @@ struct SceneStats
 	// the two lists — `Scene.shadow_culled` has why. Zero in a frame with no shadow
 	// pass, where there is no second box to be outside of.
 	uint shadow_culled_last_frame;
+	// Copies dropped by a subtree `CullVolume` over the last frame.
+	uint volume_culled_last_frame;
 
 	<*
 	 What skinning costs, reported apart from everything else.
@@ -468,6 +528,8 @@ struct SceneStats
 // scene uses more than one material. See `draw_order`.
 struct Draw @local
 {
+	AssetId asset;
+	uint mesh;
 	uint material;
 	ulong key;
 	uint slot;
@@ -603,6 +665,14 @@ struct Scene
 	// overlap by exactly the copies the light kept for its own pass.
 	uint shadow_culled;
 	uint shadow_culled_last_frame;
+	// Subtree-scoped spatial cull volumes and per-frame drop counters.
+	CullVolume[MAX_CULL_VOLUMES] cull_volumes;
+	uint cull_volume_count;
+	uint volume_culled;
+	uint volume_culled_last_frame;
+	// Per-mesh fallback LOD chains and global screen-size bias (default 1.0).
+	List {LodChain} mesh_lods;
+	float lod_bias;
 	bool started;
 
 	<*
@@ -869,10 +939,12 @@ fn Scene* Scene.init(&self)
 	self.instances.init(mem, 64);
 	self.buckets.init(mem, 16);
 	self.nav_fields.init(mem, 4);
+	self.mesh_lods.init(mem, 4);
 
 	self.id = next_scene_id++;
 	self.look = DEFAULT_LOOK;
 	self.cull = true;
+	self.lod_bias = 1.0f;
 	self.started = true;
 	self.root = self.create_slot(NO_NODE, NO_ASSET, NO_MESH, "root");
 	return self;
@@ -1040,6 +1112,21 @@ fn void Scene.free(&self)
 	// was holding stays resident for the life of the process with nothing naming
 	// it: a `scene.dispose()` that frees the graph and not the geometry.
 	if (self.started) self.remove(self.root);
+	if (self.assets != null)
+	{
+		foreach (&chain : self.mesh_lods)
+		{
+			for (uint i = 0; i < chain.count; i++)
+			{
+				LodEntry* entry = &chain.levels[i];
+				if (entry.asset.is_set() && entry.mesh != NO_MESH)
+				{
+					self.assets.release(entry.asset, entry.mesh);
+				}
+			}
+		}
+	}
+	self.mesh_lods.free();
 	self.physics.close();
 	self.drop_nav();
 	self.nav_fields.free();
@@ -1830,6 +1917,19 @@ fn void Scene.kill(&self, NodeId id)
 	// runs once per node of every removal and almost no scene has players at all.
 	if (self.players.len() > 0) self.drop_player(id);
 
+	// Release any spatial cull volume anchored on this node.
+	if (node.own_cull_volume != 0)
+	{
+		uint slot = (uint)node.own_cull_volume - 1;
+		if (slot < MAX_CULL_VOLUMES && self.cull_volumes[slot].shape != NONE)
+		{
+			self.cull_volumes[slot] = { };
+			if (self.cull_volume_count > 0) self.cull_volume_count--;
+		}
+		node.own_cull_volume = 0;
+		node.cull_volume = 0;
+	}
+
 	if (node.name.len > 0) node.name.free(mem);
 	node.name = "";
 	node.children.clear();
@@ -2213,6 +2313,265 @@ fn void Scene.touch(&self, NodeId id)
 }
 
 // ============================================================================
+// Subtree cull volumes & mesh LODs
+// ============================================================================
+
+<*
+ Attaches or updates a subtree-scoped spatial cull volume.
+
+ @param root : "Subtree root node the volume applies to"
+ @param shape : "Volume shape; NONE clears any existing volume on root"
+ @param center : "Volume center in world space, or root-local space when local_space is true"
+ @param radius : "Volume radius; must be finite and non-negative"
+ @param local_space : "Interpret center, radius and Y bounds in root's local space"
+ @param cull_shadows : "Drop culled nodes from the shadow pass as well as color"
+ @param y_min : "Lower Y slab bound for CYLINDER volumes"
+ @param y_max : "Upper Y slab bound for CYLINDER volumes"
+ @require math::is_finite(radius) && radius >= 0.0f : "Radius must be finite and non-negative"
+
+ @return "True if the volume was set or cleared; false if root is stale or all slots are full"
+*>
+fn bool Scene.set_cull_volume(
+	&self,
+	NodeId root,
+	CullShape shape,
+	Vec3 center,
+	float radius,
+	bool local_space = false,
+	bool cull_shadows = true,
+	float y_min = -1e30f,
+	float y_max = 1e30f
+)
+{
+	if (shape == NONE)
+	{
+		self.clear_cull_volume(root);
+		return self.node(root) != null;
+	}
+	Node* node = self.node(root);
+	if (node == null) return false;
+
+	uint slot = MAX_CULL_VOLUMES;
+	bool assigned = node.own_cull_volume == 0;
+	if (!assigned)
+	{
+		slot = (uint)node.own_cull_volume - 1;
+	}
+	else
+	{
+		for (uint i = 0; i < MAX_CULL_VOLUMES; i++)
+		{
+			if (self.cull_volumes[i].shape == NONE)
+			{
+				slot = i;
+				break;
+			}
+		}
+		if (slot >= MAX_CULL_VOLUMES) return false;
+		node.own_cull_volume = (char)(slot + 1);
+		self.cull_volume_count++;
+	}
+
+	self.cull_volumes[slot] = {
+		.shape = shape,
+		.root = root,
+		.local_space = local_space,
+		.cull_shadows = cull_shadows,
+		.center = center,
+		.radius = radius,
+		.y_min = y_min,
+		.y_max = y_max,
+	};
+
+	if (assigned)
+	{
+		Node* parent = self.node(node.parent);
+		self.propagate_cull_volume(root, parent != null ? parent.cull_volume : 0);
+	}
+	return true;
+}
+
+<*
+ Clears any spatial cull volume anchored on `root` and restores inherited volume state.
+
+ @param root : "Node whose anchored cull volume should be removed"
+*>
+fn void Scene.clear_cull_volume(&self, NodeId root)
+{
+	Node* node = self.node(root);
+	if (node == null || node.own_cull_volume == 0) return;
+
+	uint slot = (uint)node.own_cull_volume - 1;
+	if (slot < MAX_CULL_VOLUMES && self.cull_volumes[slot].shape != NONE)
+	{
+		self.cull_volumes[slot] = { };
+		if (self.cull_volume_count > 0) self.cull_volume_count--;
+	}
+	node.own_cull_volume = 0;
+	Node* parent = self.node(node.parent);
+	self.propagate_cull_volume(root, parent != null ? parent.cull_volume : 0);
+}
+
+<*
+ Marks a node and its subtree as exempt from any ancestor's cull volume.
+
+ @param id : "Node to toggle exemption on"
+ @param exempt : "True to opt out of ancestor cull volumes"
+*>
+fn void Scene.set_cull_exempt(&self, NodeId id, bool exempt)
+{
+	Node* node = self.node(id);
+	if (node == null || node.cull_exempt == exempt) return;
+	node.cull_exempt = exempt;
+	Node* parent = self.node(node.parent);
+	self.propagate_cull_volume(id, parent != null ? parent.cull_volume : 0);
+}
+
+<*
+ Carries resolved cull-volume slot indices down a subtree without dirtying matrices.
+
+ @param id : "Subtree root to update"
+ @param parent_volume : "Resolved cull volume slot + 1 inherited from the parent, or 0"
+*>
+fn void Scene.propagate_cull_volume(&self, NodeId id, char parent_volume)
+{
+	Node* node = self.node(id);
+	if (node == null) return;
+
+	char resolved = node.cull_exempt ? 0 : (node.own_cull_volume != 0 ? node.own_cull_volume : parent_volume);
+	node.cull_volume = resolved;
+
+	sz count = node.children.len();
+	for (sz i = 0; i < count; i++)
+	{
+		self.propagate_cull_volume(self.nodes[id.index].children[i], resolved);
+	}
+}
+
+<*
+ Sets the global screen-height multiplier applied to mesh LOD selection.
+
+ @param bias : "Positive finite multiplier (>1 keeps finer LODs further away)"
+ @require math::is_finite(bias) && bias > 0.0f : "LOD bias must be positive and finite"
+*>
+fn void Scene.set_lod_bias(&self, float bias)
+{
+	self.lod_bias = bias;
+}
+
+<*
+ Registers fallback LOD tiers for one `(base_asset, base_mesh)` pair.
+ Retains every target LOD mesh and releases any replaced chain symmetrically.
+ Skinned target meshes must belong to `base_asset` so they share its pose table.
+
+ @param [&inout] assets : "Asset table holding base and LOD meshes"
+ @param base_asset : "Asset handle of the base (LOD 0) mesh"
+ @param base_mesh : "Mesh index of the base (LOD 0) mesh"
+ @param [in] levels : "Fallback tiers; mesh == NO_MESH small-feature-culls the instance"
+ @require base_asset.is_set() && base_mesh != NO_MESH : "Base mesh must be set"
+
+ @return? LOD_TOO_MANY, LOD_INVALID_MESH, LOD_SKIN_MISMATCH
+*>
+fn void? Scene.set_mesh_lods(&self, Assets* assets, AssetId base_asset, uint base_mesh, LodEntry[] levels)
+{
+	if (levels.len == 0)
+	{
+		self.clear_mesh_lods(assets, base_asset, base_mesh);
+		return;
+	}
+	if (levels.len > MAX_LOD_LEVELS) return LOD_TOO_MANY~;
+	if (assets.mesh(base_asset, base_mesh) == null) return LOD_INVALID_MESH~;
+
+	LodChain chain = {
+		.key_asset = base_asset,
+		.key_mesh = base_mesh,
+		.count = (uint)levels.len,
+	};
+
+	foreach (i, entry : levels)
+	{
+		if (!math::is_finite(entry.min_screen_h) || entry.min_screen_h < 0.0f) return LOD_INVALID_MESH~;
+		if (entry.mesh == NO_MESH)
+		{
+			chain.levels[i] = { .asset = NO_ASSET, .mesh = NO_MESH, .min_screen_h = entry.min_screen_h };
+			continue;
+		}
+		GpuMesh* target = assets.mesh(entry.asset, entry.mesh);
+		if (target == null) return LOD_INVALID_MESH~;
+		if (target.has_skin && entry.asset != base_asset) return LOD_SKIN_MISMATCH~;
+		chain.levels[i] = entry;
+	}
+
+	// Keep tiers sorted by descending screen-height threshold (finest fallback first).
+	for (uint i = 1; i < chain.count; i++)
+	{
+		LodEntry key = chain.levels[i];
+		uint j = i;
+		while (j > 0 && chain.levels[j - 1].min_screen_h < key.min_screen_h)
+		{
+			chain.levels[j] = chain.levels[j - 1];
+			j--;
+		}
+		chain.levels[j] = key;
+	}
+
+	// Retain new entries before releasing old ones so shared assets never dip to zero.
+	for (uint i = 0; i < chain.count; i++)
+	{
+		LodEntry* entry = &chain.levels[i];
+		if (entry.asset.is_set() && entry.mesh != NO_MESH) assets.retain(entry.asset, entry.mesh);
+	}
+
+	LodChain* existing = find_lod_chain(self.mesh_lods.array_view(), base_asset, base_mesh);
+	if (existing != null)
+	{
+		for (uint i = 0; i < existing.count; i++)
+		{
+			LodEntry* old = &existing.levels[i];
+			if (old.asset.is_set() && old.mesh != NO_MESH) assets.release(old.asset, old.mesh);
+		}
+		*existing = chain;
+	}
+	else
+	{
+		self.mesh_lods.push(chain);
+	}
+
+	foreach (&node : self.nodes)
+	{
+		if (node.alive && node.asset == base_asset && node.mesh == base_mesh) node.last_lod = 0;
+	}
+}
+
+<*
+ Removes any LOD chain registered for `(base_asset, base_mesh)` and releases its
+ retained target meshes.
+
+ @param [&inout] assets : "Asset table holding the retained LOD meshes"
+ @param base_asset : "Asset handle of the base mesh"
+ @param base_mesh : "Mesh index of the base mesh"
+ @require base_asset.is_set() && base_mesh != NO_MESH : "Base mesh must be set"
+*>
+fn void Scene.clear_mesh_lods(&self, Assets* assets, AssetId base_asset, uint base_mesh)
+{
+	foreach (idx, &existing : self.mesh_lods)
+	{
+		if (existing.key_asset != base_asset || existing.key_mesh != base_mesh) continue;
+		for (uint i = 0; i < existing.count; i++)
+		{
+			LodEntry* old = &existing.levels[i];
+			if (old.asset.is_set() && old.mesh != NO_MESH) assets.release(old.asset, old.mesh);
+		}
+		self.mesh_lods.remove_at(idx);
+		foreach (&node : self.nodes)
+		{
+			if (node.alive && node.asset == base_asset && node.mesh == base_mesh) node.last_lod = 0;
+		}
+		return;
+	}
+}
+
+// ============================================================================
 // World matrices
 // ============================================================================
 
@@ -2234,11 +2593,18 @@ fn void Scene.update_world_matrices(&self)
 	// has to hold for this line to be safe.
 	if (self.matrices_current) return;
 	if (!self.root.is_set()) return;
-	self.update_branch(self.root, matrix::IDENTITY4{float}, true, false);
+	self.update_branch(self.root, matrix::IDENTITY4{float}, true, false, 0);
 	self.matrices_current = true;
 }
 
-fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent_visible, bool parent_changed)
+fn void Scene.update_branch(
+	&self,
+	NodeId id,
+	Matrix4f parent_world,
+	bool parent_visible,
+	bool parent_changed,
+	char parent_volume = 0
+)
 {
 	Node* node = self.node(id);
 	if (node == null) return;
@@ -2275,6 +2641,8 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	}
 
 	node.world_visible = parent_visible && node.visible;
+	char volume = node.cull_exempt ? 0 : (node.own_cull_volume != 0 ? node.own_cull_volume : parent_volume);
+	node.cull_volume = volume;
 
 	// Copied out before recursing: the children list is walked by index because
 	// `self.node` inside the recursion may not reallocate, but reading through a
@@ -2286,7 +2654,7 @@ fn void Scene.update_branch(&self, NodeId id, Matrix4f parent_world, bool parent
 	for (sz i = 0; i < count; i++)
 	{
 		NodeId child = self.nodes[id.index].children[i];
-		self.update_branch(child, world, visible, changed);
+		self.update_branch(child, world, visible, changed, volume);
 	}
 }
 
@@ -2326,14 +2694,16 @@ fn void Scene.update_subtree_matrices(&self, NodeId id)
 	Matrix4f world = matrix::IDENTITY4{float};
 	bool visible   = true;
 	bool changed   = false;
+	char volume    = 0;
 	for (usz i = depth; i > 0; i--)
 	{
 		Node* above = self.node(chain[i - 1]);
 		changed     = changed || above.dirty;
 		world       = changed ? world * above.local_matrix() : above.world;
 		visible     = visible && above.visible;
+		volume      = above.cull_exempt ? 0 : (above.own_cull_volume != 0 ? above.own_cull_volume : volume);
 	}
-	self.update_branch(id, world, visible, changed);
+	self.update_branch(id, world, visible, changed, volume);
 }
 
 // ============================================================================
@@ -2563,6 +2933,80 @@ fn bool same_linear_part(Matrix4f a, Matrix4f b) @local
 *>
 alias InstanceReserve = fn Instance*(void* context, sz count);
 
+struct ResolvedCullVolume @local
+{
+	CullShape shape;
+	bool cull_shadows;
+	Vec3 center;
+	float radius_sq;
+	float y_min;
+	float y_max;
+}
+
+fn bool cull_volume_contains(ResolvedCullVolume* vol, collision::Aabb3 box) @local @inline
+{
+	switch (vol.shape)
+	{
+		case NONE:
+			return true;
+		case SPHERE:
+			float dx = math::clamp(vol.center.x, box.min.x, box.max.x) - vol.center.x;
+			float dy = math::clamp(vol.center.y, box.min.y, box.max.y) - vol.center.y;
+			float dz = math::clamp(vol.center.z, box.min.z, box.max.z) - vol.center.z;
+			return dx * dx + dy * dy + dz * dz <= vol.radius_sq;
+		case CYLINDER:
+			if (vol.y_min <= vol.y_max && (box.max.y < vol.y_min || box.min.y > vol.y_max)) return false;
+			float dx = math::clamp(vol.center.x, box.min.x, box.max.x) - vol.center.x;
+			float dz = math::clamp(vol.center.z, box.min.z, box.max.z) - vol.center.z;
+			return dx * dx + dz * dz <= vol.radius_sq;
+	}
+}
+
+// Extracts |P[1][1]| from a column-major view-projection matrix, invariant to
+// off-axis XR projection shifts. Returns 0 for orthographic or degenerate matrices.
+fn float projection_y_scale(Matrix4f vp) @local
+{
+	Vec3 r1 = { vp.m[1], vp.m[5], vp.m[9] };
+	Vec3 r3 = { vp.m[3], vp.m[7], vp.m[11] };
+	float r3_len = r3.length();
+	if (r3_len < 1e-6f) return 0.0f;
+	return r1.cross(r3).length() / r3_len;
+}
+
+fn LodChain* find_lod_chain(LodChain[] chains, AssetId asset, uint mesh) @local
+{
+	foreach (&chain : chains)
+	{
+		if (chain.key_asset.index == asset.index && chain.key_mesh == mesh
+			&& chain.key_asset.generation == asset.generation)
+		{
+			return chain;
+		}
+	}
+	return null;
+}
+
+fn uint select_lod(LodChain* chain, float screen_h, uint current) @local
+{
+	uint cur    = current <= chain.count ? current : 0;
+	uint chosen = 0;
+	for (uint k = 0; k < chain.count; k++)
+	{
+		float threshold = chain.levels[k].min_screen_h;
+		// ±8% hysteresis around each tier boundary prevents head-bob flicker.
+		float cutoff = cur <= k ? threshold * (1.0f - LOD_HYSTERESIS) : threshold * (1.0f + LOD_HYSTERESIS);
+		if (screen_h < cutoff)
+		{
+			chosen = k + 1;
+		}
+		else
+		{
+			break;
+		}
+	}
+	return chosen;
+}
+
 <*
  Brings the world matrices up to date and rebuilds the draw list for a camera.
 
@@ -2590,7 +3034,8 @@ fn void Scene.update(
 	void* reserve_context = null,
 	bool shadow_all = false,
 	Matrix4f[] extra_view_projections = { },
-	bool[] casting = { }
+	bool[] casting = { },
+	float proj_y = 0.0f
 )
 {
 	self.update_world_matrices();
@@ -2604,6 +3049,7 @@ fn void Scene.update(
 	// transparent draw is ordered by it whether or not anything was culled.
 	Frustum light;
 	if (light_view_projection != null) light = frustum_of(*light_view_projection);
+	float use_proj_y = proj_y > 0.0f ? proj_y : projection_y_scale(view_projection);
 	@pool()
 	{
 		Frustum[] extra_frustums = alloc::new_array(tmem, Frustum, (sz)extra_view_projections.len);
@@ -2620,7 +3066,8 @@ fn void Scene.update(
 			reserve_context,
 			shadow_all,
 			extra_frustums,
-			casting
+			casting,
+			use_proj_y
 		);
 	};
 	// Promoted here rather than inside `build_draw_list`, because this call is what
@@ -2630,6 +3077,7 @@ fn void Scene.update(
 	// stopped being consulted.
 	self.culled_last_frame = self.culled;
 	self.shadow_culled_last_frame = self.shadow_culled;
+	self.volume_culled_last_frame = self.volume_culled;
 }
 
 // ----------------------------------------------------------------------------
@@ -2702,7 +3150,8 @@ fn void Scene.build_draw_list(
 	void* reserve_context = null,
 	bool shadow_all = false,
 	Frustum[] extra_frustums = { },
-	bool[] casting = { }
+	bool[] casting = { },
+	float proj_y = 0.0f
 )
 {
 	self.draws.clear();
@@ -2710,6 +3159,51 @@ fn void Scene.build_draw_list(
 	self.buckets.clear();
 	self.culled = 0;
 	self.shadow_culled = 0;
+	self.volume_culled = 0;
+
+	// Pre-resolve active subtree cull volumes to world space once per frame.
+	ResolvedCullVolume[MAX_CULL_VOLUMES] resolved;
+	bool check_volumes = !counts_only && self.cull_volume_count > 0;
+	if (check_volumes)
+	{
+		for (sz i = 0; i < MAX_CULL_VOLUMES; i++)
+		{
+			CullVolume* src = &self.cull_volumes[i];
+			if (src.shape == NONE) continue;
+			Vec3 center  = src.center;
+			float radius = src.radius;
+			float y_min  = src.y_min;
+			float y_max  = src.y_max;
+			if (src.local_space)
+			{
+				Node* root = self.node(src.root);
+				if (root == null) continue;
+				center = transform_point(root.world, src.center);
+				Vec3 col_x = { root.world.m[0], root.world.m[1], root.world.m[2] };
+				Vec3 col_y = { root.world.m[4], root.world.m[5], root.world.m[6] };
+				Vec3 col_z = { root.world.m[8], root.world.m[9], root.world.m[10] };
+				float sx     = col_x.length();
+				float sy     = col_y.length();
+				float sz_len = col_z.length();
+				float scale_r = src.shape == CYLINDER
+					? math::max(sx, sz_len)
+					: math::max(sx, math::max(sy, sz_len));
+				radius = src.radius * scale_r;
+				if (y_min > -1e29f) y_min = transform_point(root.world, { src.center.x, y_min, src.center.z }).y;
+				if (y_max < 1e29f) y_max = transform_point(root.world, { src.center.x, y_max, src.center.z }).y;
+				if (src.y_min <= src.y_max && y_min > y_max) @swap(y_min, y_max);
+			}
+			resolved[i] = {
+				.shape = src.shape,
+				.cull_shadows = src.cull_shadows,
+				.center = center,
+				.radius_sq = radius * radius,
+				.y_min = y_min,
+				.y_max = y_max,
+			};
+		}
+	}
+	bool check_lods = self.mesh_lods.len() > 0 && !counts_only && near != null && proj_y > 0.0f;
 
 	foreach (slot, &node : self.nodes)
 	{
@@ -2739,6 +3233,13 @@ fn void Scene.build_draw_list(
 		NodeId id      = { (uint)slot, node.generation };
 		SoftMesh* soft = self.physics.soft_for(id);
 
+		AssetId draw_asset = node.asset;
+		uint draw_mesh     = node.mesh;
+		GpuMesh* draw_gpu  = mesh;
+		bool has_volume    = check_volumes && node.cull_volume != 0;
+		LodChain* lod_chain = (check_lods && soft == null)
+			? find_lod_chain(self.mesh_lods.array_view(), node.asset, node.mesh) : null;
+
 		// The world box has two readers and neither wants it unconditionally: the
 		// frustum test wants it when culling is on, and a transparent draw wants its
 		// centre for the depth sort whether culling is on or not. Computed once for
@@ -2757,7 +3258,8 @@ fn void Scene.build_draw_list(
 		// cost nothing: with no frustum and no light there is no box to compute and
 		// no test to run.
 		bool visible = true;
-		if (frustum != null || extra_frustums.len > 0 || light != null || shadow_all || sorted)
+		if (frustum != null || extra_frustums.len > 0 || light != null || shadow_all || sorted
+			|| has_volume || lod_chain != null)
 		{
 			// A skinned node is measured by the poses it can reach, not by the pose
 			// it was authored in. The bake unioned every joint matrix of every frame
@@ -2788,15 +3290,41 @@ fn void Scene.build_draw_list(
 				local = local.grow(margins[node.material]);
 			}
 			collision::Aabb3 box = local.transform_matrix(node.world);
-			visible = frustum == null || frustum.contains(box);
-			if (!visible)
+
+			// Subtree cull volume runs before frustum and shadow fallback so out-of-range
+			// regions drop from both passes without entering the sort or instance copy.
+			bool volume_rejected = false;
+			if (has_volume)
 			{
-				foreach (extra : extra_frustums)
+				ResolvedCullVolume* vol = &resolved[node.cull_volume - 1];
+				if (vol.shape != NONE && !cull_volume_contains(vol, box))
 				{
-					if (extra.contains(box))
+					self.volume_culled++;
+					if (vol.cull_shadows)
 					{
-						visible = true;
-						break;
+						self.culled++;
+						continue;
+					}
+					volume_rejected = true;
+				}
+			}
+
+			if (volume_rejected)
+			{
+				visible = false;
+			}
+			else
+			{
+				visible = frustum == null || frustum.contains(box);
+				if (!visible)
+				{
+					foreach (extra : extra_frustums)
+					{
+						if (extra.contains(box))
+						{
+							visible = true;
+							break;
+						}
 					}
 				}
 			}
@@ -2824,17 +3352,52 @@ fn void Scene.build_draw_list(
 			// no camera position anywhere in it. Opaque draws read it too, nearest
 			// first inside a bucket - see the comparator.
 			if (near != null) depth = near.normal.dot(box.center()) + near.distance;
+
+			// Pick mesh LOD by projected screen height fraction with ±8% hysteresis.
+			if (lod_chain != null)
+			{
+				float r_world  = 0.5f * (box.max - box.min).length();
+				float denom    = depth > 1e-4f ? depth : 1e-4f;
+				float screen_h = (r_world * proj_y * self.lod_bias) / denom;
+				uint chosen    = select_lod(lod_chain, screen_h, (uint)node.last_lod);
+				node.last_lod  = (char)chosen;
+				if (chosen > 0)
+				{
+					LodEntry* entry = &lod_chain.levels[chosen - 1];
+					if (entry.mesh == NO_MESH)
+					{
+						if (visible)
+						{
+							self.culled++;
+						}
+						else if (light != null)
+						{
+							self.shadow_culled++;
+						}
+						continue;
+					}
+					GpuMesh* candidate = assets.mesh(entry.asset, entry.mesh);
+					if (candidate != null && candidate.uploaded)
+					{
+						draw_asset = entry.asset;
+						draw_mesh  = entry.mesh;
+						draw_gpu   = candidate;
+					}
+				}
+			}
 		}
 
 		self.draws.push(
 			{
+				.asset = draw_asset,
+				.mesh = draw_mesh,
 				.material = node.material,
-				.key = bucket_key(node.asset.index, node.mesh),
+				.key = bucket_key(draw_asset.index, draw_mesh),
 				.slot = (uint)slot,
 				.order = draw_order(node.material, is_transparent),
 				.depth = depth,
 				.visible = visible,
-				.preskinned = node.preskinned && node.skin >= 0,
+				.preskinned = node.preskinned && node.skin >= 0 && draw_gpu.has_skin,
 				.is_static = node.static_caster,
 				.soft = soft != null,
 			}
@@ -2951,13 +3514,12 @@ fn void Scene.build_draw_list(
 			open_material = draw.material;
 			open_preskinned = draw.preskinned;
 			open_soft = draw.soft;
-			// Read off the node rather than unpacked from the key, which only carries
-			// the slot index. Every node in a bucket names the same live asset, so
-			// any of them supplies the generation.
+			// Read off the draw (which may have selected an LOD mesh) rather than unpacked
+			// from the key, which only carries the slot index.
 			self.buckets.push(
 				{
-					.asset = node.asset,
-					.mesh = node.mesh,
+					.asset = draw.asset,
+					.mesh = draw.mesh,
 					.material = draw.material,
 					.first = placed,
 					.count = 0,
@@ -3120,6 +3682,7 @@ fn SceneStats Scene.stats(&self, Assets* assets)
 		.texture_slot_capacity = assets.texture_slot_capacity(),
 		.culled_last_frame = self.culled_last_frame,
 		.shadow_culled_last_frame = self.shadow_culled_last_frame,
+		.volume_culled_last_frame = self.volume_culled_last_frame,
 		// Copied out rather than recounted: they are what the sweeps since the last
 		// tick actually did, and nothing this call does adds to them.
 		.sweep = self.sweep,

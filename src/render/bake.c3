@@ -335,7 +335,7 @@ fn void? MaterialBaker.record(&self, MeshPipeline* pipeline, Material* material,
 		};
 		push_mesh_constants(cmd, pipeline, push, material, table_address);
 
-		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+		vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, mesh.index_type());
 		// One copy. A batch's thousand placements are one answer by construction —
 		// that is what `Exporter.bake_key` decided before this was called.
 		vk::cmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);

@@ -61,7 +61,8 @@ import image::jpeg;
 import collision;
 
 excuse
-	ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE, TEXTURE_UNREADABLE, TEXTURE_FORMAT_UNKNOWN, TEXTURE_BIT_DEPTH;
+	ASSET_HAS_NO_MESHES, UNSUPPORTED_IMAGE, TEXTURE_UNREADABLE, TEXTURE_FORMAT_UNKNOWN, TEXTURE_BIT_DEPTH,
+	TEXTURE_LAYER_OUT_OF_RANGE;
 
 <*
  A handle to a loaded asset: which slot, and which occupant of it.
@@ -295,6 +296,8 @@ struct GpuMesh
 	vk::Memory indices;
 	uint vertex_count;
 	uint index_count;
+	// True when `indices` holds `ushort` values instead of `uint`.
+	bool short_indices;
 	bool has_normals;
 	bool has_uvs;
 	bool has_colors;
@@ -393,6 +396,13 @@ struct GpuMesh
 	int gltf_mesh;
 	int gltf_primitive;
 }
+
+<*
+ Vulkan index format matching this mesh's uploaded index buffer.
+
+ @return "INDEX_TYPE_UINT16 when indices were narrowed, otherwise INDEX_TYPE_UINT32"
+*>
+fn vk::IndexType GpuMesh.index_type(&self) => self.short_indices ? INDEX_TYPE_UINT16 : INDEX_TYPE_UINT32;
 
 <*
  One copy placed by `EXT_mesh_gpu_instancing`: where it sits relative to the node
@@ -790,6 +800,8 @@ struct SharedTexture
 	// and a PNG read back would be re-encoded. The first path in wins, which is any
 	// of them, since they all hold this picture.
 	String source;
+	// Array layer inside `source` when loaded from a multi-layer `.ktx2` (0 otherwise).
+	uint source_layer;
 }
 
 <*
@@ -1282,7 +1294,7 @@ fn usz Assets.pose_bytes(&self)
 	foreach (&asset : self.assets)
 	{
 		if (!asset.alive) continue;
-		total += (usz)asset.pose_matrices * Matrix4f::size;
+		total += (usz)asset.pose_matrices * SkinJoint::size;
 	}
 	return total;
 }
@@ -1919,6 +1931,7 @@ fn void Assets.release_texture(&self, Gpu* gpu, int index)
 	}
 	if (shared.source.len > 0) shared.source.free(mem);
 	shared.source = "";
+	shared.source_layer = 0;
 	shared.alive = false;
 	self.revision++;
 	self.free_textures.push((uint)index);
@@ -3845,6 +3858,10 @@ fn bool read_primitive_streams(gltf::GltfStream* stream, gltf::Primitive primiti
 	};
 	read_weights(stream, primitive, &out.weights);
 	normalize_weights(&out.weights);
+	if (out.joints.len() == out.weights.len() && out.joints.len() > 0)
+	{
+		sort_influences(out.joints.array_view(), out.weights.array_view());
+	}
 
 	read_indices(stream, primitive, &out.indices);
 	if (out.indices.len() == 0)
@@ -3984,6 +4001,33 @@ fn void normalize_weights(List{Vec4}* weights)
 		{
 			*w = { 1, 0, 0, 0 };
 		}
+	}
+}
+
+<*
+ Sorts each vertex's four `(joint, weight)` influences descending by weight
+ (`w.x >= w.y >= w.z >= w.w`) in place.
+
+ Guarantees `joints.x` is the dominant influence for dual-quaternion pivoting
+ and lets skinning shaders exit early on the first zero weight.
+
+ @param [inout] joints : "Per-vertex joint indices, four per vertex"
+ @param [inout] weights : "Per-vertex joint weights, four per vertex"
+ @require joints.len == weights.len : "Joint and weight stream lengths must match"
+*>
+fn void sort_influences(uint[4][] joints, Vec4[] weights)
+{
+	foreach (i, w : weights)
+	{
+		uint[4] j = joints[i];
+		// 4-element sorting network (5 compare-swaps), preserving order on ties.
+		if (w[0] < w[1]) { float tw = w[0]; w[0] = w[1]; w[1] = tw; uint tj = j[0]; j[0] = j[1]; j[1] = tj; }
+		if (w[2] < w[3]) { float tw = w[2]; w[2] = w[3]; w[3] = tw; uint tj = j[2]; j[2] = j[3]; j[3] = tj; }
+		if (w[0] < w[2]) { float tw = w[0]; w[0] = w[2]; w[2] = tw; uint tj = j[0]; j[0] = j[2]; j[2] = tj; }
+		if (w[1] < w[3]) { float tw = w[1]; w[1] = w[3]; w[3] = tw; uint tj = j[1]; j[1] = j[3]; j[3] = tj; }
+		if (w[1] < w[2]) { float tw = w[1]; w[1] = w[2]; w[2] = tw; uint tj = j[1]; j[1] = j[2]; j[2] = tj; }
+		weights[i] = w;
+		joints[i] = j;
 	}
 }
 
@@ -5051,14 +5095,29 @@ fn image::Image? decode_by_signature(char[] encoded)
  @return ? TEXTURE_UNREADABLE : `Nothing at that path, or it could not be read.`
  @return ? TEXTURE_FORMAT_UNKNOWN : `Not a PNG, a JPEG or a KTX2, by its first bytes.`
  @return ? TEXTURE_BIT_DEPTH : `A 16-bit PNG. It decodes; it cannot be narrowed to RGBA8 here.`
+ @return ? TEXTURE_LAYER_OUT_OF_RANGE : `Requested array layer is not present in this file.`
 *>
-fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space = ColorSpace.SRGB, bool mips = true, bool nearest = false)
+fn int? Assets.load_texture_file(
+	&self,
+	Gpu* gpu,
+	String path,
+	ColorSpace space = ColorSpace.SRGB,
+	bool mips = true,
+	bool nearest = false,
+	uint layer = 0
+)
 {
 	if (!file::is_file(path)) return TEXTURE_UNREADABLE~;
 
 	char[]? encoded = file::load(mem, path);
 	if (catch encoded) return TEXTURE_UNREADABLE~;
 	defer free(encoded);
+
+	bool ktx = is_ktx2(encoded);
+	if (layer > 0)
+	{
+		if (!ktx || layer >= ktx2_layer_count(encoded)) return TEXTURE_LAYER_OUT_OF_RANGE~;
+	}
 
 	// Blocks first, and only for a file that actually holds them. Everything
 	// about this is a fast path rather than a different feature: the same
@@ -5070,31 +5129,36 @@ fn int? Assets.load_texture_file(&self, Gpu* gpu, String path, ColorSpace space 
 	// contents are Basis or uncompressed, or a device that cannot sample the
 	// family the file is in. The last is why `supports` is asked here rather
 	// than left to the upload — here there is still a decode to fall back on.
-	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, nearest);
-	if (try claimed) return self.note_source(claimed, path);
+	int? claimed = self.claim_blocks_if_possible(gpu, encoded, space, mips, nearest, layer: layer);
+	if (try claimed) return self.note_source(claimed, path, layer);
 
 	// Counted with the glTF decodes rather than separately: `decodes` answers
 	// "how much decoding has this table paid for", and a script that reloads the
 	// same PNG in a loop is exactly the case that number exists to expose.
 	self.decodes++;
-	image::Image decoded = decode_by_signature(encoded)!;
+	image::Image decoded = ktx ? decode_ktx2(encoded, mem, layer)! : decode_by_signature(encoded)!;
 	defer decoded.free();
 
 	if (decoded.bit_depth == 16) return TEXTURE_BIT_DEPTH~;
-	return self.note_source(self.claim_texture(gpu, decoded, space, mips, nearest)!, path);
+	return self.note_source(self.claim_texture(gpu, decoded, space, mips, nearest)!, path, layer);
 }
 
 <*
- Remember the file a slot came from, unless it already has one.
+ Remember the file (and KTX2 array layer) a slot came from, unless it already has one.
 
  @param index : "A live slot"
  @param path : "The file it was loaded from, copied"
+ @param layer : "Array layer index for multi-layer .ktx2 files (0 otherwise)"
  @return "The slot, for the caller to return"
 *>
-fn int Assets.note_source(&self, int index, String path)
+fn int Assets.note_source(&self, int index, String path, uint layer = 0)
 {
 	SharedTexture* shared = &self.textures[index];
-	if (shared.source.len == 0) shared.source = path.copy(mem);
+	if (shared.source.len == 0)
+	{
+		shared.source = path.copy(mem);
+		shared.source_layer = layer;
+	}
 	return index;
 }
 
@@ -5106,6 +5170,16 @@ fn String Assets.texture_source(&self, int index)
 {
 	if (!self.texture_alive(index)) return "";
 	return self.textures[index].source;
+}
+
+<*
+ @param index : "A texture slot; a dead one reports 0"
+ @return "The KTX2 array layer this slot was loaded from, or 0."
+*>
+fn uint Assets.texture_source_layer(&self, int index)
+{
+	if (!self.texture_alive(index)) return 0;
+	return self.textures[index].source_layer;
 }
 
 <*
@@ -5144,7 +5218,8 @@ fn int? Assets.claim_blocks_if_possible(
 	bool mips,
 	bool nearest,
 	AssetImages* images = null,
-	int image_index = -1
+	int image_index = -1,
+	uint layer = 0
 )
 {
 	// A caller that asked for no chain is obeyed by decoding, because a block
@@ -5165,15 +5240,15 @@ fn int? Assets.claim_blocks_if_possible(
 		// cores at load rather than one at a time as the meshes are uploaded.
 		// The space is written on rather than compared, because the blocks are
 		// the same bytes either way — see `PreBlocks`.
-		if (!take_pretranscoded(images, image_index, &blocks))
+		if (layer != 0 || !take_pretranscoded(images, image_index, &blocks))
 		{
-			blocks = transcode_ktx2_blocks(encoded, target)!;
+			blocks = transcode_ktx2_blocks(encoded, target, layer: layer)!;
 		}
 		blocks.format = target;
 	}
 	else
 	{
-		blocks = decode_ktx2_blocks(encoded, space)!;
+		blocks = decode_ktx2_blocks(encoded, space, layer: layer)!;
 	}
 	defer blocks.free();
 
@@ -5345,7 +5420,9 @@ fn AssetId? Assets.load_triangle(&self, Gpu* gpu)
 
 	mesh.positions = gpu.upload_stream(&positions, Vec3::size * 3)!;
 	mesh.normals = gpu.upload_stream(&normals, Vec3::size * 3)!;
-	mesh.indices = gpu.upload_indices(&indices, uint::size * 3)!;
+	ushort[3] short_indices = { 0, 1, 2 };
+	mesh.indices = gpu.upload_indices(&short_indices, ushort::size * 3)!;
+	mesh.short_indices = true;
 	mesh.build_bvh(positions[..], indices[..]);
 
 	asset.bounds = mesh.bounds;
@@ -5398,6 +5475,7 @@ fn void GpuMesh.release_device(&self, Gpu* gpu)
 	}
 	self.positions = { };
 	self.indices = { };
+	self.short_indices = false;
 	self.normals = { };
 	self.uvs = { };
 	self.lightmap_uvs = { };

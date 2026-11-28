@@ -30,13 +30,13 @@
  covers the blit and the readback — deliberately, since "what did this frame
  cost me" should not hide a present that costs more than the draw.
 
- Every mark is written every frame, including ones bounding a phase that
- recorded nothing. A query the GPU never wrote has no result, and the whole set
- then reads back `VK_NOT_READY` — so skipping the shadow mark on an unshadowed
- frame would report no timings at all rather than a zero for that phase. The
- timer keeps which marks a frame recorded, and a frame missing one gives no
- reading at all, so a mark left out of `record_scene` shows as a frame that was
- never measured rather than as a wrong phase.
+ Every phase is accounted for every frame — either stamped via `mark` or
+ explicitly omitted via `skip` when it recorded no commands. `collect` reads
+ only the contiguous runs of marks that were actually written (avoiding
+ `VK_NOT_READY` on skipped queries) and assigns skipped phases 0 ms. The timer
+ still requires every mark to be either stamped or skipped before arming the
+ slot, so a phase accidentally left out of `record_scene` gives no reading
+ rather than misattributing time.
 
  ## A mark the driver did not write
 
@@ -166,26 +166,37 @@ struct FrameTimer
 	// ending, or ends twice, cannot leave a stale run to be read as a fresh one.
 	bool[MAX_FRAMES_IN_FLIGHT] armed;
 	FrameTiming timing;
-	// Which marks slot `i`'s frame recorded, one bit per `FrameMark`. `end` arms
-	// the slot only when all of them were.
+	// Which marks slot `i`'s frame accounted for, one bit per `FrameMark`. `end`
+	// arms the slot only when all of them were.
 	ushort[MAX_FRAMES_IN_FLIGHT] recorded;
+	// Which marks slot `i` actually wrote into `pool` (subset of `recorded`).
+	// Empty phases skipped via `skip` stay 0 here and report 0 ms without a GPU
+	// timestamp query.
+	ushort[MAX_FRAMES_IN_FLIGHT] written;
 	// Marks the driver did not write, over the timer's life — see the header.
 	ulong unwritten;
 
 	// One pipeline statistics query per slot, wrapping the scene rendering.
-	// Null when the device does not offer `pipelineStatisticsQuery`, and then
-	// `fragments` stays 0.
+	// Null when disabled (e.g. on mobile tilers) or when the device does not
+	// offer `pipelineStatisticsQuery`, and then `fragments` stays 0.
 	vk::QueryPool stats_pool;
 	// Fragment shader invocations of the last scene pass — see `scene_begin`.
 	ulong fragments;
 }
 
-fn FrameTimer? FrameTimer.init(&self, Gpu* gpu)
+<*
+ Creates the timestamp query pool, and optionally the scene pipeline-statistics pool.
+
+ @param gpu : "Device owning the query pools"
+ @param pipeline_stats : "Count scene fragment shader invocations when supported"
+ @require gpu != null : "Device must exist"
+*>
+fn FrameTimer? FrameTimer.init(&self, Gpu* gpu, bool pipeline_stats = false)
 {
 	*self = { };
 	defer catch self.free(gpu);
 
-	if (gpu.limits.pipeline_statistics)
+	if (pipeline_stats && gpu.limits.pipeline_statistics)
 	{
 		self.stats_pool = vk::queryPoolCreateInfo().setQueryType(QUERY_TYPE_PIPELINE_STATISTICS)
 			.setPipelineStatistics(QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)
@@ -217,6 +228,22 @@ fn void FrameTimer.free(&self, Gpu* gpu)
 		if (self.stats_pool != null) vk::destroyQueryPool(gpu.handle, self.stats_pool, null);
 	}
 	*self = { };
+}
+
+<*
+ Destroys the pipeline statistics query pool while keeping timestamp queries active.
+
+ @param gpu : "Device owning the pool"
+ @require gpu != null : "Device must exist"
+*>
+fn void FrameTimer.disable_stats(&self, Gpu* gpu)
+{
+	if (gpu.handle != null && self.stats_pool != null)
+	{
+		vk::destroyQueryPool(gpu.handle, self.stats_pool, null);
+	}
+	self.stats_pool = (vk::QueryPool)null;
+	self.fragments = 0;
 }
 
 <*
@@ -258,24 +285,46 @@ fn void? FrameTimer.collect(&self, Gpu* gpu, uint slot)
 
 	if (self.pool == null) return;
 
+	ushort written = self.written[slot];
 	ulong[FRAME_MARKS] stamps;
-	vk::getQueryPoolResults(
-		gpu.handle,
-		self.pool,
-		slot * FRAME_MARKS,
-		FRAME_MARKS,
-		(sz)@sizeof(stamps),
-		&stamps,
-		(vk::DeviceSize)@sizeof(stamps[0]),
-		QUERY_RESULT_64_BIT
-	)!;
+	// Read only the contiguous ranges actually written so skipped empty phases
+	// never touch an unwritten query slot.
+	uint at = 0;
+	while (at < FRAME_MARKS)
+	{
+		if ((written & (ushort)(1 << at)) == 0)
+		{
+			at++;
+			continue;
+		}
+		uint stop = at + 1;
+		while (stop < FRAME_MARKS && (written & (ushort)(1 << stop)) != 0) stop++;
+		uint count = stop - at;
+		vk::getQueryPoolResults(
+			gpu.handle,
+			self.pool,
+			slot * FRAME_MARKS + at,
+			count,
+			(sz)count * (sz)@sizeof(stamps[0]),
+			&stamps[at],
+			(vk::DeviceSize)@sizeof(stamps[0]),
+			QUERY_RESULT_64_BIT
+		)!;
+		at = stop;
+	}
 
 	if (stamps[FrameMark.END.ordinal] <= stamps[FrameMark.BEGIN.ordinal]) return;
 
-	// A mark outside [previous mark, END] was not written — see the header.
+	// Skipped phases take the previous mark (0 ms); any written mark outside
+	// [previous mark, END] was not written by the driver — see the header.
 	ulong end = stamps[FrameMark.END.ordinal];
 	for (uint i = FrameMark.BEGIN.ordinal + 1; i < FrameMark.END.ordinal; i++)
 	{
+		if ((written & (ushort)(1 << i)) == 0)
+		{
+			stamps[i] = stamps[i - 1];
+			continue;
+		}
 		if (stamps[i] >= stamps[i - 1] && stamps[i] <= end) continue;
 		stamps[i] = stamps[i - 1];
 		self.unwritten++;
@@ -309,6 +358,7 @@ fn void? FrameTimer.begin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 
 	self.collect(gpu, slot)!;
 	self.recorded[slot] = 1 << FrameMark.BEGIN.ordinal;
+	self.written[slot] = 1 << FrameMark.BEGIN.ordinal;
 
 	if (self.stats_pool != null) vk::resetQueryPool(gpu.handle, self.stats_pool, slot, 1);
 	if (self.pool == null) return;
@@ -320,16 +370,27 @@ fn void? FrameTimer.begin(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot)
 <*
  Closes a phase, at `ALL_COMMANDS` so everything recorded since the previous
  mark has finished before the stamp is taken.
-
- Every mark between `BEGIN` and `END` goes through here, and every one must be
- recorded on every frame — see the header.
 *>
 fn void FrameTimer.mark(&self, vk::CommandBuffer cmd, uint slot, FrameMark at)
 {
-	self.recorded[slot] |= (ushort)(1 << at.ordinal);
+	ushort bit = (ushort)(1 << at.ordinal);
+	self.recorded[slot] |= bit;
+	self.written[slot] |= bit;
 	if (self.pool == null) return;
 
 	vk::cmdWriteTimestamp2(cmd, PIPELINE_STAGE_2_ALL_COMMANDS_BIT, self.pool, slot * FRAME_MARKS + at.ordinal);
+}
+
+<*
+ Accounts for an empty phase without emitting a GPU timestamp write.
+
+ @param slot : "Frame slot being recorded"
+ @param at : "Phase mark whose commands were skipped"
+ @require slot < MAX_FRAMES_IN_FLIGHT : "Frame slot out of range"
+*>
+fn void FrameTimer.skip(&self, uint slot, FrameMark at)
+{
+	self.recorded[slot] |= (ushort)(1 << at.ordinal);
 }
 
 <*

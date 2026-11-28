@@ -16,6 +16,7 @@ import vk;
 import std::math;
 
 const uint FOVEATION_TEXEL = 32;
+const float[4] DEFAULT_LENS_CENTERS = { 0.5f, 0.5f, 0.5f, 0.5f };
 
 enum Foveation : char (String name)
 {
@@ -38,19 +39,21 @@ struct FoveationMap
 fn bool FoveationMap.exists(&self) => self.image.exists();
 
 <*
- Creates the map for a rendering of `target`'s size, at `level`, with both lens
- centres in the middle of their views until the headset says where they are.
+ Creates the map for a rendering of `target`'s size, at `level`, around `centers`
+ (defaulting to the middle of each eye until the headset reports its FOV).
 
  @param views : "1 for both eyes side by side in one layer, 2 for a multiview target's layer each"
+ @param centers : "Each eye's lens centre across its half of the target, u v u v"
 *>
-fn void? FoveationMap.init(&self, Gpu* gpu, vk::Extent2D target, uint views, Foveation level)
+fn void? FoveationMap.init(&self, Gpu* gpu, vk::Extent2D target, uint views, Foveation level,
+	float[4] centers = { 0.5f, 0.5f, 0.5f, 0.5f })
 {
 	self.extent = { (target.width + FOVEATION_TEXEL - 1) / FOVEATION_TEXEL,
 		(target.height + FOVEATION_TEXEL - 1) / FOVEATION_TEXEL };
 	self.image = gpu.create_layered_image(FORMAT_R8G8_UNORM, self.extent, views,
 		IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | IMAGE_USAGE_TRANSFER_DST_BIT)!;
 	defer catch self.image.destroy(gpu);
-	self.fill(gpu, target, level, { 0.5f, 0.5f, 0.5f, 0.5f })!;
+	self.fill(gpu, target, level, centers)!;
 }
 
 <*

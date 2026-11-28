@@ -104,6 +104,9 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "setTransform", &js_set_transform, self)!;
 	self.js.@method(node, "setQuaternion", &js_set_quaternion, self)!;
 	self.js.@method(node, "setVisible", &js_set_visible, self)!;
+	self.js.@method(node, "setCullVolume", &js_set_cull_volume, self)!;
+	self.js.@method(node, "clearCullVolume", &js_clear_cull_volume, self)!;
+	self.js.@method(node, "setCullExempt", &js_set_cull_exempt, self)!;
 	self.js.@method(node, "setStatic", &js_set_static, self)!;
 	self.js.@method(node, "setCollides", &js_set_collides, self)!;
 	self.js.@method(node, "setCollisionOnly", &js_set_collision_only, self)!;
@@ -129,6 +132,7 @@ fn void? JsRuntime.bind_node_methods(&self)
 	self.js.@method(node, "stopAnimation", &js_stop_animation, self)!;
 	self.js.@method(node, "animationState", &js_animation_state, self)!;
 	self.js.@method(node, "blendAnimation", &js_blend_animation, self)!;
+	self.js.@method(node, "setAnimationLod", &js_set_animation_lod, self)!;
 }
 
 <*
@@ -146,6 +150,10 @@ fn void? JsRuntime.bind_scene_verbs(&self, js::Value host)
 	self.js.@bind(host, "disposeInactive", &js_dispose_inactive, self)!;
 	self.js.@bind(host, "add", &js_add, self)!;
 	self.js.@bind(host, "meshMorphs", &js_mesh_morphs, self)!;
+	self.js.@bind(host, "lodBiasGet", &js_lod_bias_get, self)!;
+	self.js.@bind(host, "lodBiasSet", &js_lod_bias_set, self)!;
+	self.js.@bind(host, "setMeshLods", &js_set_mesh_lods, self)!;
+	self.js.@bind(host, "clearMeshLods", &js_clear_mesh_lods, self)!;
 
 	// Picking
 	self.js.@bind(host, "pick", &js_pick, self)!;
@@ -871,6 +879,13 @@ fn void js_bind_skin(JsRuntime* self, NodeRef ref, Opt {float} skin, bool comput
 // `node.stopAnimation()` — hold the pose. See `Scene.stop`.
 fn bool js_stop_animation(JsRuntime* self, NodeRef ref) => ref.scene.stop(ref.id);
 
+// `node.setAnimationLod(interval, snap)` — throttle updates and snap baked frames.
+fn bool js_set_animation_lod(JsRuntime* self, NodeRef ref, float interval, bool snap)
+{
+	float clamped = interval > 0.0f ? interval : 0.0f;
+	return ref.scene.set_animation_lod(ref.id, clamped, snap);
+}
+
 <*
  `node.blendAnimation(fade, speed, name, weight, offset, ...)` — hold several clips
  at once.
@@ -969,6 +984,167 @@ fn js::Value? js_animation_state(JsRuntime* self, NodeRef ref)
 
 // `node.setVisible(on)`.
 fn void js_set_visible(JsRuntime* self, NodeRef ref, bool on) => ref.scene.set_visible(ref.id, on);
+
+<*
+ `node.setCullVolume(shape, cx, cy, cz, radius, localSpace, cullShadows, yMin, yMax)` —
+ clip this node's subtree to a sphere (1) or cylinder (2).
+
+ @return? js::THREW
+*>
+fn void? js_set_cull_volume(
+	JsRuntime* self,
+	NodeRef ref,
+	int shape,
+	Vec3 center,
+	float radius,
+	bool local_space,
+	bool cull_shadows,
+	float y_min,
+	float y_max
+)
+{
+	CullShape kind;
+	switch (shape)
+	{
+		case 0:
+			kind = NONE;
+		case 1:
+			kind = SPHERE;
+		case 2:
+			kind = CYLINDER;
+		default:
+			return self.js.fail("setCullVolume(): unknown shape ordinal %d", shape)~;
+	}
+	if (!math::is_finite(radius) || radius < 0.0f)
+	{
+		return self.js.fail("setCullVolume(): radius must be a non-negative finite number")~;
+	}
+	if (!math::is_finite(center.x) || !math::is_finite(center.y) || !math::is_finite(center.z)
+		|| !math::is_finite(y_min) || !math::is_finite(y_max))
+	{
+		return self.js.fail("setCullVolume(): center and Y bounds must be finite numbers")~;
+	}
+	if (!ref.scene.set_cull_volume(ref.id, kind, center, radius, local_space, cull_shadows, y_min, y_max))
+	{
+		return self.js.fail("setCullVolume(): at most %d cull volumes may be active in one scene", MAX_CULL_VOLUMES)~;
+	}
+}
+
+// `node.clearCullVolume()` — remove any cull volume anchored on this node.
+fn void js_clear_cull_volume(JsRuntime* self, NodeRef ref) => ref.scene.clear_cull_volume(ref.id);
+
+// `node.setCullExempt(exempt)` — opt this subtree out of any ancestor cull volume.
+fn void js_set_cull_exempt(JsRuntime* self, NodeRef ref, bool exempt) => ref.scene.set_cull_exempt(ref.id, exempt);
+
+<*
+ `lodBiasGet(sceneId)` — global LOD screen-size multiplier for one scene.
+
+ @return? js::THREW
+*>
+fn double? js_lod_bias_get(JsRuntime* self, uint id)
+{
+	Scene* scene = scene_named(self, id)!;
+	return (double)scene.lod_bias;
+}
+
+<*
+ `lodBiasSet(sceneId, bias)` — sets the global LOD screen-size multiplier.
+
+ @return? js::THREW
+*>
+fn void? js_lod_bias_set(JsRuntime* self, uint id, double bias)
+{
+	Scene* scene = scene_named(self, id)!;
+	if (!math::is_finite(bias) || bias <= 0.0)
+	{
+		return self.js.fail("scene.lodBias wants a positive finite number, got %s", bias)~;
+	}
+	scene.set_lod_bias((float)bias);
+}
+
+<*
+ `setMeshLods(sceneId, baseAsset, baseMesh, entries)` — registers up to
+ `MAX_LOD_LEVELS` fallback tiers for `(baseAsset, baseMesh)`. `entries` is flat
+ `[assetOrNull, meshIndex, minSize, ...]`.
+
+ @return? js::THREW
+*>
+fn void? js_set_mesh_lods(JsRuntime* self, uint scene_id, AssetId base_asset, int base_mesh, js::Value entries)
+{
+	Scene* scene = scene_named(self, scene_id)!;
+	if (base_mesh < 0 || self.pass.assets.mesh(base_asset, (uint)base_mesh) == null)
+	{
+		return self.js.fail("setLods(): base mesh %d does not exist in asset %d", base_mesh, base_asset.index)~;
+	}
+
+	long length = self.js.length(entries)!;
+	if (length < 0 || length % 3 != 0)
+	{
+		return self.js.fail("setLods(): expected flat [asset, mesh, minSize] triples")~;
+	}
+	usz count = (usz)(length / 3);
+	if (count > MAX_LOD_LEVELS)
+	{
+		return self.js.fail("setLods(): at most %d LOD levels are supported, got %d", MAX_LOD_LEVELS, count)~;
+	}
+
+	LodEntry[MAX_LOD_LEVELS] levels;
+	for (usz i = 0; i < count; i++)
+	{
+		js::Value asset_val = self.js.get(entries, (long)(i * 3))!;
+		double mesh_num     = self.js.get_number(entries, (long)(i * 3 + 1))!;
+		double min_size     = self.js.get_number(entries, (long)(i * 3 + 2))!;
+		if (!math::is_finite(min_size) || min_size < 0.0)
+		{
+			return self.js.fail("setLods(): level %d minSize must be a finite number >= 0", i)~;
+		}
+		if (asset_val.is_nullish())
+		{
+			levels[i] = { .asset = NO_ASSET, .mesh = NO_MESH, .min_screen_h = (float)min_size };
+			continue;
+		}
+		void* data = js::data_of(asset_val, self.asset_class);
+		if (data == null)
+		{
+			return self.js.fail("setLods(): level %d mesh must be a Mesh, Geometry, MeshRef, or null", i)~;
+		}
+		AssetId lod_asset = unpack_id(data, AssetId);
+		if (self.pass.assets.slot(lod_asset) == null)
+		{
+			return self.js.fail("setLods(): level %d asset is no longer loaded", i)~;
+		}
+		if (!math::is_finite(mesh_num) || mesh_num < 0.0)
+		{
+			return self.js.fail("setLods(): level %d has an invalid mesh index", i)~;
+		}
+		levels[i] = { .asset = lod_asset, .mesh = (uint)mesh_num, .min_screen_h = (float)min_size };
+	}
+
+	if (catch err = scene.set_mesh_lods(&self.pass.assets, base_asset, (uint)base_mesh, levels[:count]))
+	{
+		if (err == LOD_SKIN_MISMATCH)
+		{
+			return self.js.fail("setLods(): a skinned LOD mesh must belong to the same asset as the base mesh")~;
+		}
+		if (err == LOD_TOO_MANY)
+		{
+			return self.js.fail("setLods(): at most %d LOD levels are supported", MAX_LOD_LEVELS)~;
+		}
+		return self.js.fail("setLods(): invalid LOD mesh reference (%s)", err)~;
+	}
+}
+
+<*
+ `clearMeshLods(sceneId, baseAsset, baseMesh)` — removes any LOD chain for one mesh.
+
+ @return? js::THREW
+*>
+fn void? js_clear_mesh_lods(JsRuntime* self, uint scene_id, AssetId base_asset, int base_mesh)
+{
+	Scene* scene = scene_named(self, scene_id)!;
+	if (base_mesh < 0) return;
+	scene.clear_mesh_lods(&self.pass.assets, base_asset, (uint)base_mesh);
+}
 
 <*
  `node.setCollides(on)` — whether this node is collision geometry.
@@ -1258,6 +1434,12 @@ struct FrameStatsAnswer
 	uint culled_last_frame;
 	// The light's cull beside the camera's — §18.2. Zero with shadows off.
 	uint shadow_culled;
+	// Copies dropped by subtree cull volumes over the last frame.
+	uint volume_culled;
+	// What the last colour pass actually drew (post-cull, post-LOD, all views).
+	uint drawn_calls;
+	uint drawn_instances;
+	double drawn_triangles;
 	// What skinning costs, apart from everything else — see `SceneStats`.
 	uint skinned_draws;
 	uint skinned_instances;
@@ -1367,6 +1549,10 @@ fn FrameStatsAnswer? js_stats(JsRuntime* self, Opt {int} id)
 		.materials = (uint)stats.materials,
 		.culled_last_frame = (uint)stats.culled_last_frame,
 		.shadow_culled = (uint)stats.shadow_culled_last_frame,
+		.volume_culled = (uint)stats.volume_culled_last_frame,
+		.drawn_calls = self.pass != null ? self.pass.drawn_calls : 0,
+		.drawn_instances = self.pass != null ? self.pass.drawn_instances : 0,
+		.drawn_triangles = self.pass != null ? (double)self.pass.drawn_triangles : 0.0,
 		.skinned_draws = (uint)stats.skinned_draws,
 		.skinned_instances = (uint)stats.skinned_instances,
 		.preskinned_instances = (uint)stats.preskinned_instances,

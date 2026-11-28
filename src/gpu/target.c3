@@ -132,7 +132,8 @@ fn vk::ImageView Target.depth_layer(&self, uint view) => self.views > 1 ? self.d
  @require samples >= 1 : "At least one sample"
 *>
 fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1, uint samples = 1,
-	bool lazy_color = false, Foveation foveation_level = Foveation.MEDIUM)
+	bool lazy_color = false, Foveation foveation_level = Foveation.MEDIUM,
+	float[4] foveation_centers = { 0.5f, 0.5f, 0.5f, 0.5f })
 {
 	self.extent = { .width = width, .height = height };
 	self.views = views > 1 && gpu.limits.multiview ? views : 1;
@@ -159,16 +160,22 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 		color = gpu.create_image_2d(self.color_format, self.extent,
 			IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
 	}
-	// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
-	// this image to every pass so a body can read `p.depth`.
-	// One layer per view; TRANSFER_SRC so the eyes can be copied side by side
-	// for a script's post pass.
-	LayeredImage depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
-		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT,
-		IMAGE_ASPECT_DEPTH_BIT)!;
-	defer catch depth.destroy(gpu);
 
 	self.samples = msaa_samples(gpu, samples);
+	// SAMPLED as well as ATTACHMENT, and unconditionally when allocated: the post
+	// chain binds this image to every pass so a body can read `p.depth`.
+	// Direct-to-eyes MSAA draws into `msaa_depth` and never resolves single-sample
+	// depth, so defer allocating `self.depth` until entering the HDR chain.
+	bool lazy_depth = lazy_color && self.samples != SAMPLE_COUNT_1_BIT && self.views > 1;
+	LayeredImage depth;
+	defer catch depth.destroy(gpu);
+	if (!lazy_depth)
+	{
+		depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
+			IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT,
+			IMAGE_ASPECT_DEPTH_BIT)!;
+	}
+
 	LayeredImage msaa_color;
 	LayeredImage msaa_depth;
 	LayeredImage msaa_display;
@@ -193,7 +200,10 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 		}
 	}
 	FoveationMap foveation;
-	if (gpu.limits.fragment_density_map) foveation.init(gpu, self.view_extent, self.views, foveation_level)!;
+	if (gpu.limits.fragment_density_map)
+	{
+		foveation.init(gpu, self.view_extent, self.views, foveation_level, foveation_centers)!;
+	}
 
 	self.msaa_color = msaa_color;
 	self.msaa_depth = msaa_depth;
@@ -221,6 +231,25 @@ fn void? Target.ensure_color(&self, Gpu* gpu)
 	self.color = color.image;
 	self.color_view = color.view;
 	self.color_memory = color.memory;
+}
+
+<*
+ Allocates `self.depth` and its per-view layer views on demand when a direct-to-eyes
+ MSAA target leaves the direct route for the HDR post chain or capture.
+
+ @param gpu : "Device allocating the depth image"
+ @require gpu != null : "Device must exist"
+*>
+fn void? Target.ensure_depth(&self, Gpu* gpu)
+{
+	if (self.depth != null) return;
+	LayeredImage depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
+		IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_SAMPLED_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT,
+		IMAGE_ASPECT_DEPTH_BIT)!;
+	self.depth = depth.whole.image;
+	self.depth_view = depth.whole.view;
+	self.depth_memory = depth.whole.memory;
+	self.depth_layers = depth.layers;
 }
 
 <*
@@ -687,6 +716,8 @@ fn void Target.begin_render(
  @param view : `A view of image, and the attachment's format follows the image's, not the target's.`
  @param format : "The image's format, which MSAA samples are drawn in"
  @require self.samples == SAMPLE_COUNT_1_BIT || !keep_depth : "MSAA depth is not kept between renderings"
+ @require self.samples != SAMPLE_COUNT_1_BIT || self.depth != null : "Single-sample target requires depth"
+ @require !store_depth || self.depth != null : "Storing depth requires an allocated depth image"
  @require self.samples == SAMPLE_COUNT_1_BIT || format == POST_CHAIN_FORMAT || (format == TARGET_COLOR_FORMAT && self.msaa_display.exists())
 	: "MSAA samples come in the scene's float format, or the display's on a multiview target"
 *>
@@ -708,17 +739,22 @@ fn void Target.begin_render_to(
 	bool msaa                           = self.samples != SAMPLE_COUNT_1_BIT;
 	LayeredImage* samples               = format == TARGET_COLOR_FORMAT ? &self.msaa_display : &self.msaa_color;
 	vk::ImageMemoryBarrier2[4] barriers;
-	barriers[0] = color_attachment_barrier(image);
-	barriers[1] = keep_depth ? depth_keep_barrier(self.depth) : depth_discard_barrier(self.depth);
+	uint barrier_count = 0;
+	barriers[barrier_count++] = color_attachment_barrier(image);
 	if (msaa)
 	{
-		// The depth buffer is opened even when nothing resolves into it, because
-		// the post chain closes it from the attachment layout either way.
-		barriers[1] = depth_resolve_barrier(self.depth);
-		barriers[2] = color_attachment_barrier(samples.whole.image);
-		barriers[3] = depth_discard_barrier(self.msaa_depth.whole.image);
+		if (store_depth && self.depth != null)
+		{
+			barriers[barrier_count++] = depth_resolve_barrier(self.depth);
+		}
+		barriers[barrier_count++] = color_attachment_barrier(samples.whole.image);
+		barriers[barrier_count++] = depth_discard_barrier(self.msaa_depth.whole.image);
 	}
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[:msaa ? 4 : 2]));
+	else
+	{
+		barriers[barrier_count++] = keep_depth ? depth_keep_barrier(self.depth) : depth_discard_barrier(self.depth);
+	}
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers(barriers[:barrier_count]));
 
 	vk::RenderingAttachmentInfo color_attachment = vk::renderingAttachmentInfo().setImageView(view)
 		.setImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
@@ -726,12 +762,13 @@ fn void Target.begin_render_to(
 		.setStoreOp(ATTACHMENT_STORE_OP_STORE)
 		.setClearValue({ .color = { .float32 = clear_linear } });
 
-	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo().setImageView(self.depth_view)
+	vk::RenderingAttachmentInfo depth_attachment = vk::renderingAttachmentInfo()
+		.setImageView(msaa ? self.msaa_depth.whole.view : self.depth_view)
 		.setImageLayout(IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 		.setLoadOp(keep_depth ? ATTACHMENT_LOAD_OP_LOAD : ATTACHMENT_LOAD_OP_CLEAR)
 		// Not written back when nothing reads it after the scene: on a tiled GPU
 		// that is a whole depth image of memory traffic saved.
-		.setStoreOp(store_depth ? ATTACHMENT_STORE_OP_STORE : ATTACHMENT_STORE_OP_DONT_CARE)
+		.setStoreOp(msaa || !store_depth ? ATTACHMENT_STORE_OP_DONT_CARE : ATTACHMENT_STORE_OP_STORE)
 		.setClearValue({ .depthStencil = { 1.0, 0 } });
 
 	if (msaa)
@@ -741,11 +778,9 @@ fn void Target.begin_render_to(
 			.setResolveMode(RESOLVE_MODE_AVERAGE_BIT)
 			.setResolveImageView(view)
 			.setResolveImageLayout(IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-		depth_attachment = depth_attachment.setImageView(self.msaa_depth.whole.view)
-			.setStoreOp(ATTACHMENT_STORE_OP_DONT_CARE);
 		// The first sample's depth, which is a surface that is there; an average
 		// across a silhouette would not be.
-		if (store_depth)
+		if (store_depth && self.depth_view != null)
 		{
 			depth_attachment = depth_attachment.setResolveMode(RESOLVE_MODE_SAMPLE_ZERO_BIT)
 				.setResolveImageView(self.depth_view)
@@ -977,11 +1012,7 @@ fn void Target.close(&self, vk::CommandBuffer cmd)
 // ============================================================================
 
 <*
- What the offscreen frame costs, in bytes.
-
- Colour and depth, both at the target's extent and neither of them optional: this
- is what a process holds before a single mesh is loaded. At 1080p it is about
- 17 MB, and it is the floor under every other number in `stats()`.
+ What the offscreen frame costs, in bytes (zero for lazy attachments not yet allocated).
 *>
 fn usz Target.bytes(&self) => (usz)(self.color_memory.size + self.depth_memory.size);
 

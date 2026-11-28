@@ -212,7 +212,7 @@ fn bool debug_view(float3 position, float3 normal, out float3 answer)
 	// apart, and black where the feature was left out.
 	if (mode > 2.5)
 	{
-		uint stripe = (uint)(fract(position.x * 0.5) * 10.0);
+		uint stripe = (uint)(fract(position.x * 0.5) * 11.0);
 		bool kept = SURFACE_SUN_SHADOW;
 		if (stripe == 0u) kept = LIGHTS_AREA;
 		else if (stripe == 1u) { kept = LIGHTS_SPOT; }
@@ -223,6 +223,7 @@ fn bool debug_view(float3 position, float3 normal, out float3 answer)
 		else if (stripe == 6u) { kept = SURFACE_LIGHTMAPS; }
 		else if (stripe == 7u) { kept = SURFACE_OCCLUSION; }
 		else if (stripe == 9u) { kept = LIGHTS_LOOP; }
+		else if (stripe == 10u) { kept = SURFACE_SPECULAR; }
 		answer = float3(kept ? 0.6 + 0.4 * float(stripe % 2u) : 0.0);
 		return true;
 	}
@@ -531,16 +532,12 @@ fn float3 lambert(Surface s, float3 normal, float occlusion)
 	// and nothing else.
 	if (MATERIAL_BAKE) return float3(1.0);
 
-	LightTerms direct = shade_lights(
+	float3 direct = shade_diffuse(
 		push.frame,
 		s.screen_position,
 		s.position,
 		normal,
 		s.receiver_normal,
-		s.albedo,
-		s.roughness,
-		s.metalness,
-		s.reflectance,
 		s.shadow,
 		s.lightmapped
 	);
@@ -557,7 +554,7 @@ fn float3 lambert(Surface s, float3 normal, float occlusion)
 	float ambient = push.frame[0].lighting.x;
 	float visibility = occlusion * s.crevice * screen_occlusion(s.screen_position);
 	return ambient * visibility
-		+ (1.0 - ambient) * (direct.diffuse + baked)
+		+ (1.0 - ambient) * (direct + baked)
 		+ push.frame[0].world.rgb * visibility;
 }
 
@@ -578,7 +575,7 @@ fn float3 specular(Surface s)
 	// A highlight is a fact about where the camera is, and a baked texture is
 	// looked at from everywhere. The lightmap bake keeps the highlight live,
 	// exactly as the original did: it bakes diffuse only.
-	if (MATERIAL_BAKE) return float3(0.0);
+	if (MATERIAL_BAKE || !SURFACE_SPECULAR) return float3(0.0);
 	LightTerms direct = shade_lights(
 		push.frame,
 		s.screen_position,
@@ -909,7 +906,8 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	DrawRecord* draw = push.draw;
 
 	Surface s;
-	s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb);
+	if (MATERIAL_BUILT_IN) { s.albedo = draw.base_color.rgb * input.color.rgb; }
+	else { s.albedo = draw.base_color.rgb * srgb_to_linear(input.color.rgb); }
 	// **The built-in look applies glTF's COLOR_0 itself**, as `mesh.slang`'s own
 	// fragment stage does: a tint on the base colour unless the file painted the
 	// attribute as a layer weight, which is what `FLAG_COLORS_ARE_MASK` says.
@@ -975,10 +973,10 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	float2 uv_dx = ddx(s.uv);
 	float2 uv_dy = ddy(s.uv);
 	// Not in either bake: a baked image is looked at from everywhere.
-	bool relief = !MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE
+	bool relief = MATERIAL_BUILT_IN && !MATERIAL_BAKE && !MATERIAL_LIGHTMAP_BAKE
 		&& (draw.flags & FLAG_HAS_HEIGHT_MAP) != 0 && (draw.flags & FLAG_HAS_UVS) != 0;
 	float relief_height = 0.5;
-	if (relief)
+	if (MATERIAL_BUILT_IN && relief)
 	{
 		Map height_map = map_at(SLOT_HEIGHT);
 		s.uv = parallax_occlusion_uv(s, height_map, flat_uv, uv_dx, uv_dy, draw.relief.x, (uint)draw.relief.y, relief_height);
@@ -1025,45 +1023,48 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 		}
 		s.albedo *= base.rgb;
 
-		if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
+		if (MATERIAL_BUILT_IN)
 		{
-			Map normal_map = map_at(SLOT_NORMAL);
-			float3 texel = map_texel(normal_map, s.uv, uv_dx, uv_dy, scattered).rgb;
-			// The frame from the flat uv: the marched one's derivatives would
-			// tear it at every step.
-			if (s.tangent.w != 0.0) s.normal = mapped_normal_tangent(geometric, s.tangent, texel);
-			else s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);
-		}
+			if ((draw.flags & FLAG_HAS_NORMAL_MAP) != 0)
+			{
+				Map normal_map = map_at(SLOT_NORMAL);
+				float3 texel = map_texel(normal_map, s.uv, uv_dx, uv_dy, scattered).rgb;
+				// The frame from the flat uv: the marched one's derivatives would
+				// tear it at every step.
+				if (s.tangent.w != 0.0) s.normal = mapped_normal_tangent(geometric, s.tangent, texel);
+				else s.normal = mapped_normal_frame(geometric, s.position, flat_uv, texel, (draw.flags & FLAG_UV_V_DOWN) != 0);
+			}
 
-		// glTF's channels: green is roughness, blue is metalness. **Multiplied
-		// into the material's own two rather than replacing them**, so a file's
-		// factors and its map compose. This renderer's default metalness is 0,
-		// so a map on a material nobody set `metalness` on is multiplied away;
-		// `material.metalness = 1` is what lets the map's blue speak.
-		if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
-		{
-			Map metalness_roughness_map = map_at(SLOT_METALNESS_ROUGHNESS);
-			float2 pair = map_texel(metalness_roughness_map, s.uv, uv_dx, uv_dy, scattered).gb;
-			surface.x *= pair.x;
-			surface.y *= pair.y;
-		}
+			// glTF's channels: green is roughness, blue is metalness. **Multiplied
+			// into the material's own two rather than replacing them**, so a file's
+			// factors and its map compose. This renderer's default metalness is 0,
+			// so a map on a material nobody set `metalness` on is multiplied away;
+			// `material.metalness = 1` is what lets the map's blue speak.
+			if ((draw.flags & FLAG_HAS_METALNESS_ROUGHNESS_MAP) != 0)
+			{
+				Map metalness_roughness_map = map_at(SLOT_METALNESS_ROUGHNESS);
+				float2 pair = map_texel(metalness_roughness_map, s.uv, uv_dx, uv_dy, scattered).gb;
+				surface.x *= pair.x;
+				surface.y *= pair.y;
+			}
 
-		if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
-		{
-			Map occlusion_map = map_at(SLOT_OCCLUSION);
-			occlusion = map_texel(occlusion_map, s.uv, uv_dx, uv_dy, scattered).r;
-		}
+			if ((draw.flags & FLAG_HAS_OCCLUSION_MAP) != 0)
+			{
+				Map occlusion_map = map_at(SLOT_OCCLUSION);
+				occlusion = map_texel(occlusion_map, s.uv, uv_dx, uv_dy, scattered).r;
+			}
 
-		// The map multiplies the factor, which is glTF's rule and the same one
-		// the metallic-roughness pair follows: a material with a map and no
-		// `emissive` colour set glows black, because the factor it is
-		// multiplied by is zero. The map is uploaded `SRGB` like the base colour
-		// map, so the sampler hands back linear already; decoding it again here
-		// squared every glow down to a fraction of what Blender shows.
-		if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
-		{
-			Map emissive_map = map_at(SLOT_EMISSIVE);
-			emissive *= map_texel(emissive_map, s.uv, uv_dx, uv_dy, scattered).rgb;
+			// The map multiplies the factor, which is glTF's rule and the same one
+			// the metallic-roughness pair follows: a material with a map and no
+			// `emissive` colour set glows black, because the factor it is
+			// multiplied by is zero. The map is uploaded `SRGB` like the base colour
+			// map, so the sampler hands back linear already; decoding it again here
+			// squared every glow down to a fraction of what Blender shows.
+			if ((draw.flags & FLAG_HAS_EMISSIVE_MAP) != 0)
+			{
+				Map emissive_map = map_at(SLOT_EMISSIVE);
+				emissive *= map_texel(emissive_map, s.uv, uv_dx, uv_dy, scattered).rgb;
+			}
 		}
 	}
 
@@ -1088,7 +1089,7 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 	s.shadow = shadow_factor(s.position, geometric);
 	// The relief shading itself, toward the sun only: light zero is the one
 	// `s.shadow` is the visibility of.
-	if (relief && draw.relief.z > 0.0 && push.frame[0].lighting.y > 0.0)
+	if (MATERIAL_BUILT_IN && relief && draw.relief.z > 0.0 && push.frame[0].lighting.y > 0.0)
 	{
 		Light sun = frame_sun(push.frame);
 		if (sun.meta.z == LIGHT_DIRECTIONAL)
@@ -1103,8 +1104,12 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 			s.shadow *= lerp(1.0, lit, saturate(draw.relief.z));
 		}
 	}
-	float3 face_normal = normalize(cross(ddx(s.position), ddy(s.position)));
-	s.receiver_normal = dot(face_normal, geometric) < 0.0 ? -face_normal : face_normal;
+	s.receiver_normal = geometric;
+	if (MATERIAL_LIGHTMAP_BAKE || SURFACE_LIGHTMAPS || (LIGHTS_LOOP && LIGHTS_LOCAL_SHADOWS))
+	{
+		float3 face_normal = normalize(cross(ddx(s.position), ddy(s.position)));
+		s.receiver_normal = dot(face_normal, geometric) < 0.0 ? -face_normal : face_normal;
+	}
 	// The occlusion map folds into the crevice rather than into a field of its
 	// own: both answer "how much of the sky this point sees", `standard`
 	// multiplies the same three terms by it, and the direct light is untouched
@@ -1147,8 +1152,11 @@ fn float4 mesh_fragment(VertexOutput input, bool front_facing)
 
 	// Before `shade`, so a debug view of a scene whose bodies are expensive is
 	// still one render - and so a body that cannot compile is still diagnosable.
-	float3 view;
-	if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
+	if (SURFACE_DEBUG_VIEW)
+	{
+		float3 view;
+		if (debug_view(s.position, s.normal, view)) return float4(view, 1.0);
+	}
 
 	// Toned as it is written when this pipeline writes a headset's eye image
 	// itself; linear light for the post chain otherwise.

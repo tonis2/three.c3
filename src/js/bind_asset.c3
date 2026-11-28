@@ -37,6 +37,7 @@ fn void? JsRuntime.bind_asset_verbs(&self, js::Value host)
 	self.js.@bind(host, "loadAsync", &js_load_async, self)!;
 	self.js.@bind(host, "dropLoads", &js_drop_loads, self)!;
 	self.js.@bind(host, "texture", &js_texture, self)!;
+	self.js.@bind(host, "ktx2Meta", &js_ktx2_meta, self)!;
 	self.js.@bind(host, "dataTexture", &js_data_texture, self)!;
 	self.js.@bind(host, "textureDispose", &js_texture_dispose, self)!;
 	self.js.@bind(host, "textureRead", &js_texture_read, self)!;
@@ -643,7 +644,7 @@ fn void JsRuntime.release_script_textures(&self)
 }
 
 <*
- `texture(path, space, mips, nearest)` — decode a PNG or JPEG and upload it.
+ `texture(path, space, mips, nearest, layer)` — decode a PNG, JPEG or KTX2 and upload it.
 
  The path goes through `resolve_asset`, the same door `three.load` uses.
 
@@ -655,10 +656,20 @@ fn void JsRuntime.release_script_textures(&self)
 
  @return? js::THREW
 *>
-fn js::Value? js_texture(JsRuntime* self, String path, int space, Opt {bool} mips, Opt {bool} nearest)
+fn js::Value? js_texture(
+	JsRuntime* self,
+	String path,
+	int space,
+	Opt {bool} mips,
+	Opt {bool} nearest,
+	Opt {int} layer
+)
 {
 	need_device(self, "three.texture")!;
-	if (path.len == 0) return self.js.fail("three.texture(path) wants a path to a .png or .jpg")~;
+	if (path.len == 0) return self.js.fail("three.texture(path) wants a path to a .png, .jpg or .ktx2")~;
+
+	int want_layer = layer.or(0);
+	if (want_layer < 0) return self.js.fail("three.texture: layer must be a non-negative integer, got %d", want_layer)~;
 
 	String? opening = self.resolve_asset(path, tmem);
 	if (catch err = opening)
@@ -676,11 +687,61 @@ fn js::Value? js_texture(JsRuntime* self, String path, int space, Opt {bool} mip
 		opening,
 		color_space_of(space),
 		mips.or(true),
-		nearest.or(false)
+		nearest.or(false),
+		(uint)want_layer
 	);
 	if (catch err = index) return self.js.fail("%s", self.texture_failure(err, path, opening))~;
 
 	return self.texture_handle(index, self.pass.assets.texture_at(index));
+}
+
+<*
+ `ktx2Meta(path)` — read array layer count and `three.layers` metadata from a `.ktx2` header.
+
+ @return? js::THREW
+*>
+fn js::Value? js_ktx2_meta(JsRuntime* self, String path)
+{
+	if (path.len == 0) return self.js.fail("three.materialPack(path) wants a path to a .ktx2")~;
+
+	String? opening = self.resolve_asset(path, tmem);
+	if (catch err = opening)
+	{
+		if (err == js::MODULE_ESCAPES_ROOT)
+		{
+			return self.js.fail("cannot load '%s': it has more '..' than there is path above it",
+				path)~;
+		}
+		return self.js.fail("cannot load '%s': %s", path, err)~;
+	}
+
+	if (!file::is_file(opening))
+	{
+		return self.js.fail("%s", self.texture_failure(TEXTURE_UNREADABLE, path, opening))~;
+	}
+	char[]? encoded = file::load(tmem, opening);
+	if (catch encoded)
+	{
+		return self.js.fail("%s", self.texture_failure(TEXTURE_UNREADABLE, path, opening))~;
+	}
+	if (!is_ktx2(encoded))
+	{
+		return self.js.fail("%s is not a KTX2 file — three.materialPack expects a .ktx2",
+			self.blame(path, opening))~;
+	}
+
+	js::Value obj = self.js.object()!;
+	self.js.set(obj, "layers", js::integer((int)ktx2_layer_count(encoded)))!;
+	String? desc = ktx2_metadata_string(encoded, "three.layers", tmem);
+	if (try desc)
+	{
+		self.js.set(obj, "threeLayers", self.js.string(desc)!)!;
+	}
+	else
+	{
+		self.js.set(obj, "threeLayers", js::NULL)!;
+	}
+	return obj;
 }
 
 <*
@@ -810,12 +871,17 @@ fn String JsRuntime.texture_failure(&self, fault err, String path, String openin
 			return string::tformat("there is no readable file at %s", self.blame(path, opening));
 		case TEXTURE_FORMAT_UNKNOWN:
 			return string::tformat(
-				"%s is not a PNG or a JPEG — those are the two three.texture reads, and the check is on the "
-					"file's own first bytes rather than its name",
+				"%s is not a PNG, JPEG or KTX2 — those are the formats three.texture reads, and the check is on "
+					"the file's own first bytes rather than its name",
 				self.blame(path, opening)
 			);
 		case TEXTURE_BIT_DEPTH:
 			return string::tformat("%s is a 16-bit PNG; save it as 8-bit and it will load", self.blame(path, opening));
+		case TEXTURE_LAYER_OUT_OF_RANGE:
+			return string::tformat(
+				"%s does not have that array layer — only multi-layer .ktx2 textures carry layer > 0",
+				self.blame(path, opening)
+			);
 		default:
 			return string::tformat("could not load %s: %s", self.blame(path, opening), err);
 	}
@@ -1960,6 +2026,10 @@ fn MergeAnswer? js_merge(JsRuntime* self, js::Value assets, uint[] meshes, float
 						named)~;
 				case NOTHING_TO_MERGE:
 					return self.js.fail("three.merge(...) wants at least one mesh")~;
+				case MESH_TEXTURES_DIFFER:
+					return self.js.fail("%s carries a different base colour texture from the earlier meshes in this "
+						"merge — a merged mesh is one draw call with one texture, so group meshes by texture first",
+						named)~;
 				case TOO_MANY_MERGE_MESHES:
 					return self.js.fail("that merges %d meshes, more than the %d this refuses as a mistake rather than a "
 						"kit — a wide scatter of identical instances wants to stay instanced",

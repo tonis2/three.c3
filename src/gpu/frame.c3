@@ -419,12 +419,17 @@ fn void Renderer.apply_profile(&self, RenderProfile profile)
 	self.profile = profile;
 	self.pass.prepass.enabled = profile.depth_prepass;
 	self.pass.one_tap_shadows = profile.shadow_filter == ShadowFilter.ONE_TAP;
+	self.pass.compute_skin = profile.compute_skin;
 	self.scene_cache_disabled = !profile.scene_cache;
 	self.headset_density = profile.headset_density;
 	self.eyes_through_chain = profile.direct_eyes == DirectEyesMode.NEVER;
 	if (!profile.gpu_timestamps)
 	{
 		self.timer.free(&self.gpu);
+	}
+	else if (!profile.pipeline_stats)
+	{
+		self.timer.disable_stats(&self.gpu);
 	}
 }
 
@@ -481,7 +486,7 @@ fn Renderer? Renderer.init(
 		}
 	}
 	self.frames.init(&self.gpu, image_count)!;
-	if (self.profile.gpu_timestamps) self.timer.init(&self.gpu)!;
+	if (self.profile.gpu_timestamps) self.timer.init(&self.gpu, pipeline_stats: self.profile.pipeline_stats)!;
 	// Direct-to-eyes XR profiles defer HDR scene/tonemap allocation until a script
 	// post pass, overlay UI, or capture actually enters the HDR chain.
 	if (!self.profile.lazy_post_images)
@@ -530,9 +535,11 @@ fn Renderer? Renderer.init(
  @param width : `Device pixels. Nothing about the window is consulted.`
  @param views : "Views the target draws in one multiview pass; 0 keeps what it has"
  @param samples : "Samples per pixel for the scene; 0 keeps what it has"
+ @param device_idle : "True when the caller already idled the GPU (skips a redundant waitIdle)"
  @require width > 0 && height > 0
 *>
-fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0, uint samples = 0)
+fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0, uint samples = 0,
+	bool device_idle = false)
 {
 	if (views == 0) views = self.target.views;
 	if (samples == 0) samples = (uint)self.target.samples;
@@ -546,10 +553,11 @@ fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0, 
 	bool lazy_color = self.profile.lazy_post_images && !self.windowed && views > 1;
 	Foveation fov_level = self.target.foveation.exists() ? self.target.foveation.level
 		: (self.profile.foveation ? self.profile.foveation_level : Foveation.MEDIUM);
+	float[4] fov_centers = self.target.foveation.exists() ? self.target.foveation.centers : DEFAULT_LENS_CENTERS;
 	Target next;
-	next.init(&self.gpu, width, height, views, samples, lazy_color, fov_level)!;
+	next.init(&self.gpu, width, height, views, samples, lazy_color, fov_level, fov_centers)!;
 
-	self.gpu.handle.waitIdle();
+	if (!device_idle) self.gpu.handle.waitIdle();
 	self.target.free(&self.gpu);
 	self.target = next;
 	self.ui.resize(&self.target);
@@ -661,12 +669,13 @@ fn bool Renderer.can_direct_eyes(&self, bool output_eyes, bool interface_over)
 
 <*
  Ensures all attachments and pipelines required by the HDR chain route exist.
- On lazy XR targets this allocates `target.color`, `msaa_color`, and post images
- only on the first frame that actually leaves `DIRECT_EYES`.
+ On lazy XR targets this allocates `target.color`, `target.depth`, `msaa_color`,
+ and post images only on the first frame that actually leaves `DIRECT_EYES`.
 *>
 fn void? Renderer.ensure_hdr_targets(&self, bool needs_target_color)
 {
 	if (needs_target_color) self.target.ensure_color(&self.gpu)!;
+	self.target.ensure_depth(&self.gpu)!;
 	if (self.target.samples != SAMPLE_COUNT_1_BIT) self.target.ensure_msaa_color(&self.gpu)!;
 	self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
 	self.post.ensure_tonemap(&self.gpu, &self.target)!;
@@ -726,12 +735,18 @@ fn void Renderer.record_direct_eyes(&self, vk::CommandBuffer cmd, uint slot,
 	self.scene_cache.invalidate();
 	self.scene_cache_pixels += (ulong)self.target.extent.width * (ulong)self.target.extent.height;
 
+	bool has_shadow = self.pass.prepared && (self.pass.shadows.live || self.pass.point_shadows.live);
 	self.pass.record_shadow(cmd);
-	self.timer.mark(cmd, slot, FrameMark.SHADOW);
+	if (has_shadow) { self.timer.mark(cmd, slot, FrameMark.SHADOW); }
+	else { self.timer.skip(slot, FrameMark.SHADOW); }
+
+	bool has_ao = self.pass.prepared && self.pass.ambient_occlusion.live;
 	self.pass.record_ambient_occlusion(cmd);
-	self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
+	if (has_ao) { self.timer.mark(cmd, slot, FrameMark.OCCLUSION); }
+	else { self.timer.skip(slot, FrameMark.OCCLUSION); }
+
 	// Multiview prepass (if enabled) runs inside the scene rendering below.
-	self.timer.mark(cmd, slot, FrameMark.PREPASS);
+	self.timer.skip(slot, FrameMark.PREPASS);
 
 	self.timer.scene_begin(cmd, slot);
 	self.target.begin_render_to(cmd, output, output_view, clear, store_depth: false, format: TARGET_COLOR_FORMAT);
@@ -743,7 +758,7 @@ fn void Renderer.record_direct_eyes(&self, vk::CommandBuffer cmd, uint slot,
 	vk::cmdEndRendering(cmd);
 	self.timer.scene_end(cmd, slot);
 	self.timer.mark(cmd, slot, FrameMark.SCENE);
-	self.timer.mark(cmd, slot, FrameMark.POST);
+	self.timer.skip(slot, FrameMark.POST);
 }
 
 <*
@@ -775,6 +790,7 @@ fn bool? Renderer.record_hdr_frame(&self, vk::CommandBuffer cmd, uint slot,
 		: self.pass.record_depth_prepass(cmd, &self.target, cache_partial, posted);
 	self.timer.mark(cmd, slot, FrameMark.PREPASS);
 
+	bool hdr_store_depth = true;
 	self.timer.scene_begin(cmd, slot);
 	switch (route)
 	{
@@ -789,9 +805,9 @@ fn bool? Renderer.record_hdr_frame(&self, vk::CommandBuffer cmd, uint slot,
 		case HDR_FULL:
 			if (posted)
 			{
-				bool store_depth = !self.scene_cache_disabled || self.post.reads_depth();
+				hdr_store_depth = !self.scene_cache_disabled || self.post.reads_depth();
 				GpuImage* scene = self.post.scene_target();
-				self.target.begin_render_to(cmd, scene.image, scene.view, clear, prepassed, store_depth);
+				self.target.begin_render_to(cmd, scene.image, scene.view, clear, prepassed, hdr_store_depth);
 			}
 			else
 			{
@@ -818,6 +834,24 @@ fn bool? Renderer.record_hdr_frame(&self, vk::CommandBuffer cmd, uint slot,
 	bool direct = direct_tonemap && posted;
 	if (posted)
 	{
+		// `PostPass.record_chain` always transitions `target.depth` out of
+		// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`; when MSAA skipped resolving depth,
+		// put it in that layout first without an `ALL_COMMANDS` stall.
+		if (self.target.samples != SAMPLE_COUNT_1_BIT && !hdr_store_depth)
+		{
+			vk::ImageMemoryBarrier2 prep = {
+				...IMAGE_BARRIER,
+				.image = self.target.depth,
+				.srcStageMask = CHAIN_READERS,
+				.srcAccessMask = (vk::AccessFlags2)0,
+				.dstStageMask = PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+				.dstAccessMask = ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				.oldLayout = IMAGE_LAYOUT_UNDEFINED,
+				.newLayout = IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+				.subresourceRange = DEPTH_LEVEL,
+			};
+			vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ prep }));
+		}
 		self.post.record_chain(
 			cmd,
 			&self.target,

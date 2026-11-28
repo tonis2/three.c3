@@ -49,22 +49,39 @@ struct VertexOutput
 //
 // Split out of the entry points because there are two of them: the depth-only
 // one and the cut-out one, which needs a uv beside the position. Both have to
-// pose a vertex identically.
+// pose a vertex identically. Reads only the `Instance` fields this pass uses
+// (`model`, plus pose/morph when `POSE_VERTICES` is enabled), skipping
+// `normal`, `color` and `lightmap`.
 fn float4 posed_clip(uint vid, uint iid, uint view)
 {
 	DrawRecord* draw = push.draw;
-	InstanceData instance = instance_at(push.instances, iid);
+	float4x4 model = push.instances[iid].model;
 
 	float3 position = draw.positions[vid];
 
-	// A shadow has to be cast by the face the character is wearing, so the same
-	// pose the draw path computes runs here - `shaders/skinning.shady` is that
-	// text, used by both. `normal` and `tangent` are discards: this pass has
-	// neither, and the shared function writes both.
-	float3 unused_normal = float3(0.0, 1.0, 0.0);
-	float3 unused_tangent = float3(1.0, 0.0, 0.0);
-	float3 unused_local;
-	pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);
+	if (POSE_VERTICES)
+	{
+		float4 zero = float4(0.0);
+		float4x4 empty = float4x4(zero, zero, zero, zero);
+		InstanceData instance;
+		instance.model = model;
+		instance.normal = empty;
+		instance.color = zero;
+		instance.variant = 0u;
+		instance.pose = push.instances[iid].pose;
+		instance.pose_next = push.instances[iid].pose_next;
+		instance.pose_t = push.instances[iid].pose_t;
+		instance.morph = push.instances[iid].morph;
+		instance.lightmap = zero;
+		// A shadow has to be cast by the face the character is wearing, so the same
+		// pose the draw path computes runs here - `shaders/skinning.shady` is that
+		// text, used by both. `normal` and `tangent` are discards: this pass has
+		// neither, and the shared function writes both.
+		float3 unused_normal = float3(0.0, 1.0, 0.0);
+		float3 unused_tangent = float3(1.0, 0.0, 0.0);
+		float3 unused_local;
+		pose_vertex(draw, instance, vid, iid, position, unused_normal, unused_tangent, unused_local);
+	}
 
 	// Model first, light second - the same order the main pass uses with the
 	// camera, and the only order that makes sense: a joint matrix is in the
@@ -74,7 +91,7 @@ fn float4 posed_clip(uint vid, uint iid, uint view)
 	// own camera from its frame block - the blocks sit one after another.
 	float4x4 projection = push.projection;
 	if (push.view_cameras != 0u) projection = push.frame[view].view_projection;
-	return projection * (instance.model * float4(position, 1.0));
+	return projection * (model * float4(position, 1.0));
 }
 
 fn VertexOutput vertexMain(VertexIn input) @vertex

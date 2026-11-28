@@ -14,7 +14,7 @@ const H = globalThis.__three;
 //
 // By the `_isScene` marker rather than `instanceof Scene`, for the reason the
 // check inside `add` uses it: the class lives in a module that extends this one.
-function sceneOf(object) {
+export function sceneOf(object) {
 	for (let up = object; up; up = up.parent) {
 		if (up._isScene === true) return up;
 	}
@@ -23,8 +23,11 @@ function sceneOf(object) {
 
 const PLAY_OPTIONS = ['loop', 'speed', 'time', 'fade', 'sync'];
 const BLEND_OPTIONS = ['fade', 'sync', 'speed'];
+const ANIMATION_LOD_OPTIONS = ['interval', 'snap'];
 const FOOT_IK_OPTIONS = ['pelvis', 'legs', 'reach', 'tilt', 'smooth', 'ankle', 'weight'];
 const FOOT_IK_LEG_KEYS = ['upper', 'lower', 'foot'];
+const CULL_VOLUME_OPTIONS = ['shape', 'center', 'radius', 'space', 'shadows', 'yMin', 'yMax'];
+const CULL_SHAPES = { sphere: 1, cylinder: 2 };
 
 // What `character.footIk()` answers with: the rig's two dials and its end. Writes
 // cross to the host only when the value changes, so setting `weight` every frame
@@ -104,6 +107,9 @@ export class Object3D {
 		this.parent = null;
 		this._name = '';
 		this._visible = true;
+		// Cached subtree cull volume and opt-out flag, replayed in `_materialize`.
+		this._cullVolume = null;
+		this._cullExempt = false;
 		// Whether this object is collision geometry — see the accessor. On by
 		// default, because the surprising answer is a wall walked through
 		// rather than a pickup that blocks.
@@ -271,6 +277,100 @@ export class Object3D {
 		if (this._h !== null) this._h.setCollisionOnly(this._collisionOnly);
 	}
 
+	// Opt this object and its descendants out of any ancestor's cull volume.
+	get cullExempt() { return this._cullExempt; }
+	set cullExempt(v) {
+		this._cullExempt = !!v;
+		if (this._h !== null) this._h.setCullExempt(this._cullExempt);
+	}
+
+	// Clip this object's subtree to a world- or local-space sphere or cylinder.
+	// Siblings outside this subtree (such as VR hands or menus) are untouched.
+	setCullVolume(options) {
+		if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+			throw new TypeError(
+				'setCullVolume(options) wants { shape, center, radius, space, shadows, yMin, yMax } — '
+				+ 'call clearCullVolume() to remove it'
+			);
+		}
+		for (const key of Object.keys(options)) {
+			if (!CULL_VOLUME_OPTIONS.includes(key)) {
+				throw new TypeError(
+					`setCullVolume(): '${key}' is not an option — takes: ${CULL_VOLUME_OPTIONS.join(', ')}`
+				);
+			}
+		}
+		const shapeName = options.shape ?? 'sphere';
+		const shape = CULL_SHAPES[shapeName];
+		if (!shape) {
+			throw new TypeError(
+				`setCullVolume(): shape must be 'cylinder' or 'sphere', got ${JSON.stringify(options.shape)}`
+			);
+		}
+		let center;
+		if (options.center === undefined || options.center === null) {
+			center = [0, 0, 0];
+		} else if (Array.isArray(options.center)) {
+			if (options.center.length === 2) {
+				center = [+options.center[0], 0, +options.center[1]];
+			} else if (options.center.length === 3) {
+				center = [+options.center[0], +options.center[1], +options.center[2]];
+			} else {
+				throw new TypeError('setCullVolume(): center wants [x, y, z], [x, z], or a Vector3');
+			}
+		} else if (typeof options.center === 'object' && 'x' in options.center) {
+			center = [
+				+options.center.x,
+				options.center.y === undefined ? 0 : +options.center.y,
+				options.center.z === undefined ? 0 : +options.center.z,
+			];
+		} else {
+			throw new TypeError('setCullVolume(): center wants [x, y, z], [x, z], or a Vector3');
+		}
+		if (!center.every(Number.isFinite)) {
+			throw new TypeError('setCullVolume(): center components must be finite numbers');
+		}
+		const radius = +options.radius;
+		if (!Number.isFinite(radius) || radius < 0) {
+			throw new RangeError(`setCullVolume(): radius must be a non-negative finite number, got ${options.radius}`);
+		}
+		const space = options.space ?? 'world';
+		if (space !== 'world' && space !== 'local') {
+			throw new TypeError(`setCullVolume(): space must be 'world' or 'local', got ${JSON.stringify(space)}`);
+		}
+		if (options.shadows !== undefined && typeof options.shadows !== 'boolean') {
+			throw new TypeError('setCullVolume(): shadows must be true or false');
+		}
+		const cullShadows = options.shadows ?? true;
+		const yMin = options.yMin === undefined || options.yMin === null ? -1e30 : +options.yMin;
+		const yMax = options.yMax === undefined || options.yMax === null ? 1e30 : +options.yMax;
+		if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+			throw new TypeError('setCullVolume(): yMin and yMax must be finite numbers');
+		}
+		this._cullVolume = {
+			shape,
+			center,
+			radius,
+			localSpace: space === 'local',
+			cullShadows,
+			yMin,
+			yMax,
+		};
+		if (this._h !== null) {
+			this._h.setCullVolume(
+				shape, center[0], center[1], center[2], radius, space === 'local', cullShadows, yMin, yMax
+			);
+		}
+		return this;
+	}
+
+	// Remove any spatial cull volume anchored on this object.
+	clearCullVolume() {
+		this._cullVolume = null;
+		if (this._h !== null) this._h.clearCullVolume();
+		return this;
+	}
+
 	// What this object draws, or null for a group. Overridden by Mesh.
 	_ref() { return null; }
 
@@ -384,6 +484,22 @@ export class Object3D {
 	stop() {
 		if (!this._clips) this._requireClips('stop()');
 		if (this._h !== null) this._h.stopAnimation();
+		return this;
+	}
+
+	// Throttles animation updates (`interval` seconds between pose updates, 0 for
+	// every frame) and optionally snaps baked playback to the nearest frame
+	// (`snap: true`, setting `pose_t = 0` to halve GPU joint reads).
+	setAnimationLod(options = {}) {
+		this._checkAnimationOptions(options, ANIMATION_LOD_OPTIONS, 'setAnimationLod()');
+		const { interval = 0, snap = false } = options || {};
+		this._requireClips('setAnimationLod()');
+		finite(interval, 'interval', 'setAnimationLod');
+		if (interval < 0) {
+			throw new RangeError(`setAnimationLod(): interval must be >= 0, not ${interval}`);
+		}
+		this._bindAnimation();
+		if (!this._h.setAnimationLod(+interval, !!snap)) this._gone('setAnimationLod()');
 		return this;
 	}
 
@@ -578,6 +694,13 @@ export class Object3D {
 		h.owner = this;
 		this._flush();
 		if (!this._visible) h.setVisible(false);
+		if (this._cullExempt) h.setCullExempt(true);
+		if (this._cullVolume !== null) {
+			const v = this._cullVolume;
+			h.setCullVolume(
+				v.shape, v.center[0], v.center[1], v.center[2], v.radius, v.localSpace, v.cullShadows, v.yMin, v.yMax
+			);
+		}
 		if (!this._collides) h.setCollides(false);
 		if (this._collisionOnly) h.setCollisionOnly(true);
 		if (!this._blocks) h.setBlocks(false);

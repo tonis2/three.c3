@@ -47,6 +47,8 @@ topic. It is an Object3D, so moving it moves everything.
 - `collides` — on the root, which draws nothing; set it on the meshes
 - `collisionOnly` — the same: a root draws nothing and is queried by nothing
 - `blocks` — the same: set it on the meshes
+- `cullExempt` — true opts this subtree out of any ancestor's cull volume
+- `lodBias` — multiplier on projected screen-size LOD selection, default 1
 
 ### Methods
 
@@ -63,6 +65,10 @@ topic. It is an Object3D, so moving it moves everything.
 - `raycast(origin, direction)`
 - `getWorldPosition()`
 - `boundingBox()`
+- `setCullVolume(options)` — anchor a sphere or cylinder cull volume on this scene
+- `clearCullVolume()` — remove the cull volume anchored on this scene
+- `setLods(baseMesh, levels)` — register projected-size LOD levels for a mesh in this scene
+- `clearLods(baseMesh)` — clear LOD levels for a mesh in this scene
 - `boundsInParent()`
 - `align(axis, edge, at)`
 - `snapTo(other, side, axes)` — this piece on one side of that one, touching, or on a marker name
@@ -73,6 +79,7 @@ topic. It is an Object3D, so moving it moves everything.
   `asset.instantiate()` returned
 - `blend(weights, { fade, sync, speed })` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod({ interval, snap })` — throws, for the same reason
 - `socket(bone)` — throws: a Scene has no bones
 - `footIk(options)` — throws: a Scene has no legs
 - `toJSON()`
@@ -143,6 +150,7 @@ material is one draw call.
 - `animation` — the playhead, or null — see Group
 - `morphs` — how many morph targets the geometry has, 0 for most
 - `weights` — per copy, free: how much of each morph target this one wears
+- `cullExempt` — true opts this node and its subtree out of any ancestor's cull volume
 
 ### Methods
 
@@ -161,8 +169,13 @@ material is one draw call.
 - `play(name, opts)`
 - `blend(weights, opts)`
 - `stop()`
+- `setAnimationLod({ interval, snap })` — throttle pose updates and snap baked frames
 - `socket(bone)`
 - `footIk(options)` — feet on the ground; `{ skeleton: true }` characters only. See Foot IK
+- `setCullVolume(options)` — anchor a sphere or cylinder cull volume on this subtree
+- `clearCullVolume()` — remove any cull volume anchored on this node
+- `setLods(levels)` — register projected-size LOD levels for this mesh's geometry
+- `clearLods()` — remove LOD levels registered for this mesh's geometry
 - `toJSON()`
 
 ## MorphTargets
@@ -1124,6 +1137,9 @@ objects — the stack belongs to the character, and `animation.layers` reads it 
 - A baked character playing one clip reads its baked table, interpolated between frames, and costs one
   instance's worth of numbers; while it blends several it is posed on the CPU from the clips' own
   curves, and goes back to the table when the blend is over.
+- `setAnimationLod({ interval, snap })` throttles distant crowd characters: `interval` sets the minimum
+  seconds between pose updates (staggered across characters, `0` updates every frame), and `snap: true`
+  rounds baked playback to the nearest frame (`pose_t = 0`) to halve GPU joint reads.
 
 ```js
 const k = (speed - 1.0) / (1.9 - 1.0);
@@ -1147,6 +1163,7 @@ if (hero.animation.name === 'land' && !hero.animation.playing) hero.play('idle',
 - `blocks` — the same: set it on the meshes, not on the Group — `traverse` does
 - `animations` — clip names, from `asset.instantiate()`
 - `animation` — the playhead, `{ name, time, duration, speed, loop, playing }`, or null
+- `cullExempt` — true opts this subtree out of any ancestor's cull volume
 
 ### Methods
 
@@ -1165,8 +1182,11 @@ if (hero.animation.name === 'land' && !hero.animation.playing) hero.play('idle',
 - `play(name, opts)`
 - `blend(weights, opts)`
 - `stop()`
+- `setAnimationLod({ interval, snap })` — throttle pose updates and snap baked frames
 - `socket(bone)`
 - `footIk(options)` — feet on the ground; `{ skeleton: true }` characters only. See Foot IK
+- `setCullVolume(options)` — anchor a sphere or cylinder cull volume on this subtree
+- `clearCullVolume()` — remove any cull volume anchored on this group
 - `toJSON()`
 
 ## Box3
@@ -1233,6 +1253,8 @@ reference that outlives its asset throws rather than answering with the size the
 ### Methods
 
 - `split()` — cut this mesh into its connected components, one geometry per piece
+- `setLods(levels, scene)` — register projected-size LOD levels for this mesh
+- `clearLods(scene)` — clear LOD levels registered for this mesh
 - `toJSON()`
 - `toString()`
 
@@ -2486,6 +2508,7 @@ scene. Needs a GPU device.
 - `animations` — always empty
 - `animation` — always null
 - `morphs, weights` — inherited from Mesh; a plane has no morph targets
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -2509,8 +2532,11 @@ scene. Needs a GPU device.
 - `play(name, opts)` — throws: a panel carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a panel has no bones
 - `footIk(options)` — throws: a panel has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
+- `setLods(levels), clearLods()` — inherited from Mesh
 - `toJSON()`
 
 ## Cooldown
@@ -2756,6 +2782,7 @@ the times it is inside a wall.
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -2774,8 +2801,11 @@ the times it is inside a wall.
 - `play(name, opts)` — throws: a helper carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
 - `footIk(options)` — throws: a helper has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
+- `setLods(levels), clearLods()` — inherited from Mesh
 - `toJSON()`
 
 ## BoxHelper
@@ -2816,6 +2846,7 @@ moving it.
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -2835,8 +2866,11 @@ moving it.
 - `play(name, opts)` — throws: a helper carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
 - `footIk(options)` — throws: a helper has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
+- `setLods(levels), clearLods()` — inherited from Mesh
 - `toJSON()`
 
 ## AxesHelper
@@ -2869,6 +2903,7 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `collides` — already false in effect: a helper is in no query
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `blocks` — meaningless here, for the same reason
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -2887,8 +2922,10 @@ Remember that a helper parented to a piece is inside that piece's box: align fir
 - `play(name, opts)` — throws: a helper carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
 - `footIk(options)` — throws: a helper has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
 - `toJSON()`
 
 ## GridHelper
@@ -2927,6 +2964,7 @@ live. Divisions are capped at 256.
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -2945,8 +2983,11 @@ live. Divisions are capped at 256.
 - `play(name, opts)` — throws: a helper carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
 - `footIk(options)` — throws: a helper has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
+- `setLods(levels), clearLods()` — inherited from Mesh
 - `toJSON()`
 
 ## WireframeHelper
@@ -2990,6 +3031,7 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `collisionOnly` — meaningless here: a helper is drawn and never queried
 - `blocks` — meaningless here, for the same reason
 - `morphs, weights` — inherited from Mesh; a helper's geometry has no morph targets
+- `cullExempt` — inherited from Object3D
 
 ### Methods
 
@@ -3008,6 +3050,9 @@ Each shared edge is drawn once. A Group has no triangles of its own: traverse it
 - `play(name, opts)` — throws: a helper carries no clips
 - `blend(weights, opts)` — throws, for the same reason
 - `stop()` — throws, for the same reason
+- `setAnimationLod(opts)` — throws, for the same reason
 - `socket(bone)` — throws: a helper has no bones
 - `footIk(options)` — throws: a helper has no legs
+- `setCullVolume(options), clearCullVolume()` — inherited from Object3D
+- `setLods(levels), clearLods()` — inherited from Mesh
 - `toJSON()`

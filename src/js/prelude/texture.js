@@ -51,9 +51,9 @@ const FILTERS = new Map([
 // `{ wrapS: THREE.RepeatWrapping }` and is quietly given repeat wrapping
 // anyway has no way to find that out, and a missing option would look like
 // the wrong asset rather than an unsupported one.
-export function uploadOptions(options, what) {
+export function uploadOptions(options, what, allowLayer = false) {
 	if (options === null || options === undefined) {
-		return { space: SRGBColorSpace, code: 0, mips: true, nearest: false };
+		return { space: SRGBColorSpace, code: 0, mips: true, nearest: false, layer: 0 };
 	}
 	if (typeof options !== 'object') {
 		throw new TypeError(
@@ -62,13 +62,15 @@ export function uploadOptions(options, what) {
 	}
 
 	for (const key of Object.keys(options)) {
-		if (key !== 'colorSpace' && key !== 'generateMipmaps' && key !== 'filter') {
+		if (key !== 'colorSpace' && key !== 'generateMipmaps' && key !== 'filter'
+			&& !(allowLayer && key === 'layer')) {
 			throw new TypeError(
-				`${what} has no option called '${key}' — it takes colorSpace, generateMipmaps and filter`);
+				`${what} has no option called '${key}' — it takes colorSpace, generateMipmaps, filter`
+				+ (allowLayer ? ' and layer' : ''));
 		}
 	}
 
-	const { colorSpace = SRGBColorSpace, generateMipmaps = true, filter = LinearFilter } = options;
+	const { colorSpace = SRGBColorSpace, generateMipmaps = true, filter = LinearFilter, layer = 0 } = options;
 	if (!SPACES.has(colorSpace)) {
 		throw new TypeError(
 			`colorSpace '${colorSpace}' is not one this reads — use three.SRGBColorSpace for a colour map `
@@ -82,8 +84,11 @@ export function uploadOptions(options, what) {
 			`filter '${filter}' is not one this reads — use three.NearestFilter for pixel art and `
 			+ 'shader-indexed tables, or three.LinearFilter (the default) for a picture');
 	}
+	if (!Number.isInteger(layer) || layer < 0) {
+		throw new RangeError(`layer wants a non-negative integer, got ${layer}`);
+	}
 
-	return { space: colorSpace, code: SPACES.get(colorSpace), mips: generateMipmaps, nearest: FILTERS.get(filter) };
+	return { space: colorSpace, code: SPACES.get(colorSpace), mips: generateMipmaps, nearest: FILTERS.get(filter), layer };
 }
 
 // An image on the device, and the handle a script holds it by.

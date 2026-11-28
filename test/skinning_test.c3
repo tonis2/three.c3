@@ -1381,19 +1381,10 @@ fn void a_script_can_pose_a_bone() @test
 // ============================================================================
 
 <*
- `stats()` tells the truth about what skinning cost.
+ `stats()` reports what skinning cost in baked pose memory and draw counts.
 
- `plan.md` §3/S3 asked for this before any of the code existed, and asked for it
- pointing the other way: it assumed a live palette and warned that reporting a
- skinned bucket like an instanced one would hide a per-frame upload. This design
- has no per-frame upload for a baked character, so the hidden cost is now the
- pose memory — uploaded once, held for the life of the asset, and invisible in
- every other number `stats()` reports.
-
- **The check is that they are not zero and not nonsense**, because the failure
- this guards is a number that is wrong rather than a picture that is: an agent
- reading `poseBytes: 0` off a scene of rigged characters would conclude that
- rigging is free and build the level that proves otherwise.
+ Baked pose tables are uploaded once per asset as 32-byte `SkinJoint` entries
+ and shared across every copy in the scene.
 *>
 fn void stats_reports_what_skinning_cost() @test
 {
@@ -1419,13 +1410,12 @@ fn void stats_reports_what_skinning_cost() @test
 			stats.preskinned_instances
 		);
 
-		// Exactly what the bake allocated: two skins' worth of rest pose plus two
-		// clips, shared by all six copies rather than counted per copy.
+		// Exactly what the bake allocated: rest pose plus two clips, shared by all six copies.
 		three::Asset* asset = renderer.pass.assets.slot(id);
 		if (asset == null) return;
 		test::@check(
-			stats.pose_bytes == (usz)asset.pose_matrices * Matrix4f::size,
-			"poseBytes is %d and the bake allocated %d matrices",
+			stats.pose_bytes == (usz)asset.pose_matrices * three::SkinJoint::size,
+			"poseBytes is %d and the bake allocated %d joints",
 			stats.pose_bytes, asset.pose_matrices
 		);
 		test::@check(stats.pose_bytes > 0, "and it is not zero, which is the number that would mislead");
@@ -2470,5 +2460,345 @@ fn void a_palette_does_not_outlive_its_node() @test
 			"and the frame swept it, %d left",
 			renderer.pass.scene.palettes.len()
 		);
+	};
+}
+
+// ============================================================================
+// Packed SkinJoint, weight sorting, auto compute skinning, animation LOD
+// ============================================================================
+
+fn Vec3 qrot_cpu(float[4] q, Vec3 v) @local
+{
+	Vec3 qv = { q[0], q[1], q[2] };
+	return v + qv.cross(qv.cross(v) + v * q[3]) * 2.0f;
+}
+
+fn Vec3 apply_joint_cpu(three::SkinJoint j, Vec3 p) @local
+{
+	return qrot_cpu(j.rot, p) * j.pos_scale[3] + (Vec3){ j.pos_scale[0], j.pos_scale[1], j.pos_scale[2] };
+}
+
+fn void check_joint_matches_matrix(Matrix4f m, String label) @local
+{
+	three::SkinJoint packed = three::pack_skin_joint(m);
+	float qlen = math::sqrt(
+		packed.rot[0] * packed.rot[0] + packed.rot[1] * packed.rot[1]
+		+ packed.rot[2] * packed.rot[2] + packed.rot[3] * packed.rot[3]);
+	test::@check(near(qlen, 1.0f), "%s: packed rotation is unit length, got %f", label, qlen);
+
+	Vec3[3] samples = { { 1.0f, 0.0f, 0.0f }, { 0.2f, 2.0f, -0.5f }, { -1.3f, 0.7f, 2.4f } };
+	foreach (p : samples)
+	{
+		Vec3 want = apply(m, p);
+		Vec3 got = apply_joint_cpu(packed, p);
+		test::@check(
+			near(got.x, want.x) && near(got.y, want.y) && near(got.z, want.z),
+			"%s: (%f,%f,%f) -> (%f,%f,%f), expected (%f,%f,%f)",
+			label, p.x, p.y, p.z, got.x, got.y, got.z, want.x, want.y, want.z
+		);
+	}
+}
+
+<*
+ `pack_skin_joint` round-trips identity, rotations across all four Shepperd trace
+ branches, translation, uniform scale, and zero scale without NaNs.
+*>
+fn void pack_skin_joint_round_trips() @test
+{
+	check_joint_matches_matrix(matrix::IDENTITY4{float}, "identity");
+	check_joint_matches_matrix(matrix::IDENTITY4{float}.translate({ 3.0f, -2.0f, 5.0f }), "translation");
+	check_joint_matches_matrix(matrix::IDENTITY4{float}.rotate_z((float)math::HALF_PI), "rot_z_90");
+	check_joint_matches_matrix(matrix::IDENTITY4{float}.rotate_x((float)math::PI), "rot_x_180");
+	check_joint_matches_matrix(matrix::IDENTITY4{float}.rotate_y((float)math::PI), "rot_y_180");
+	check_joint_matches_matrix(matrix::IDENTITY4{float}.rotate_z((float)math::PI), "rot_z_180");
+
+	// The exact Bend joint matrix at t = 1: tip (0.2, 2, 0) -> (-1, 1.2, 0).
+	Matrix4f bend = matrix::IDENTITY4{float}.translate({ 0, 1, 0 })
+		.mul(matrix::IDENTITY4{float}.rotate_z((float)math::HALF_PI))
+		.mul(matrix::IDENTITY4{float}.translate({ 0, -1, 0 }));
+	check_joint_matches_matrix(bend, "bend");
+
+	Matrix4f scaled_rt = matrix::IDENTITY4{float}.translate({ 1.0f, 2.0f, -3.0f })
+		.mul(matrix::IDENTITY4{float}.rotate_x(0.7f).rotate_y(-1.1f).rotate_z(2.2f))
+		.scale({ 2.5f, 2.5f, 2.5f });
+	check_joint_matches_matrix(scaled_rt, "scaled_rt");
+
+	// Zero-scaled hidden bone: identity rotation, scale 0, translation preserved, no NaNs.
+	Matrix4f collapsed = matrix::IDENTITY4{float}.translate({ 4.0f, 5.0f, 6.0f }).scale({ 0.0f, 0.0f, 0.0f });
+	three::SkinJoint zero = three::pack_skin_joint(collapsed);
+	test::@check(zero.pos_scale[3] == 0.0f, "zero-scaled bone has scale 0, got %f", zero.pos_scale[3]);
+	test::@check(
+		near(zero.rot[0], 0.0f) && near(zero.rot[1], 0.0f) && near(zero.rot[2], 0.0f) && near(zero.rot[3], 1.0f),
+		"zero-scaled bone keeps identity rotation"
+	);
+	test::@check(
+		near(zero.pos_scale[0], 4.0f) && near(zero.pos_scale[1], 5.0f) && near(zero.pos_scale[2], 6.0f),
+		"zero-scaled bone keeps translation"
+	);
+	Vec3 collapsed_pt = apply_joint_cpu(zero, { 1.0f, 2.0f, 3.0f });
+	test::@check(
+		near(collapsed_pt.x, 4.0f) && near(collapsed_pt.y, 5.0f) && near(collapsed_pt.z, 6.0f),
+		"zero-scaled bone collapses vertices to its translation"
+	);
+}
+
+<*
+ Descending influence sort keeps `(joint, weight)` paired with `w.x >= w.y >= w.z >= w.w`,
+ and 1-bone and 2-bone compute skinning with zero-weight early-out land where the math says.
+*>
+fn void descending_weight_sort_and_early_out_parity() @test
+{
+	uint[4][3] joints = {
+		{ 10, 20, 30, 40 },
+		{ 1, 2, 3, 4 },
+		{ 5, 6, 7, 8 },
+	};
+	Vec4[3] weights = {
+		{ 0.1f, 0.4f, 0.2f, 0.3f },
+		{ 0.0f, 0.0f, 1.0f, 0.0f },
+		{ 0.0f, 0.5f, 0.0f, 0.5f },
+	};
+	three::sort_influences(joints[..], weights[..]);
+
+	// Vertex 0: 4 non-zero weights sorted descending.
+	test::@check(
+		joints[0][0] == 20 && joints[0][1] == 40 && joints[0][2] == 30 && joints[0][3] == 10,
+		"4-bone joints reordered with weights: [%d,%d,%d,%d]",
+		joints[0][0], joints[0][1], joints[0][2], joints[0][3]
+	);
+	test::@check(
+		near(weights[0][0], 0.4f) && near(weights[0][1], 0.3f) && near(weights[0][2], 0.2f) && near(weights[0][3], 0.1f),
+		"4-bone weights descending"
+	);
+	// Vertex 1: 1-bone vertex moves active joint to slot 0 so `weights.y == 0` early-outs.
+	test::@check(joints[1][0] == 3 && near(weights[1][0], 1.0f) && weights[1][1] == 0.0f,
+		"1-bone vertex puts dominant joint in slot 0");
+	// Vertex 2: 2-bone vertex packs both active joints into slots 0 and 1, ties keep order.
+	test::@check(
+		joints[2][0] == 6 && joints[2][1] == 8
+			&& near(weights[2][0], 0.5f) && near(weights[2][1], 0.5f)
+			&& weights[2][2] == 0.0f && weights[2][3] == 0.0f,
+		"2-bone vertex packs active joints first"
+	);
+
+	// GPU readback: a 3-vertex mesh with 1-bone (slot 0), 2-bone (slots 0..1), and
+	// 1-bone-in-slot-2 (sorted before upload) posed through compute skinning.
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+
+	three::GeometryBuilder shape;
+	shape.init();
+	defer shape.free();
+	shape.positions.push({ 0.0f, 0.0f, 0.0f });
+	shape.positions.push({ 0.5f, 1.0f, 0.0f });
+	shape.positions.push({ 0.0f, 2.0f, 0.0f });
+	shape.normals.push({ 0, 0, 1 });
+	shape.normals.push({ 0, 0, 1 });
+	shape.normals.push({ 0, 0, 1 });
+	shape.joints.push({ 0, 1, 0, 0 });
+	shape.weights.push({ 1.0f, 0.0f, 0.0f, 0.0f });
+	shape.joints.push({ 0, 1, 0, 0 });
+	shape.weights.push({ 0.0f, 0.5f, 0.5f, 0.0f }); // unsorted 2-bone (joint 1 at 0.5, joint 0 at 0.5)
+	shape.joints.push({ 0, 0, 1, 0 });
+	shape.weights.push({ 0.0f, 0.0f, 1.0f, 0.0f }); // unsorted 1-bone (joint 1 at 1.0)
+	three::sort_influences(shape.joints.array_view(), shape.weights.array_view());
+	shape.triangle(0, 1, 2);
+
+	three::AssetId id = renderer.pass.assets.upload_built(&renderer.gpu, "test:sort:early_out", "early_out", &shape)!!;
+	renderer.pass.assets.attach_skin(&renderer.gpu, id, 2)!!;
+	three::NodeId node = renderer.pass.scene.add_mesh(id, 0, renderer.pass.scene.root, "early_out");
+	renderer.pass.scene.set_skin(node, 0);
+	renderer.pass.scene.node(node).preskinned = true;
+
+	// Joint 0 = identity, joint 1 = translate(+2, 0, 0).
+	Matrix4f[2] palette = {
+		matrix::IDENTITY4{float},
+		matrix::IDENTITY4{float}.translate({ 2.0f, 0.0f, 0.0f }),
+	};
+	renderer.pass.scene.set_palette(node, palette[..]);
+	renderer.pass.frame_camera();
+
+	const sz CAPACITY = 16;
+	sz capacity_bytes = CAPACITY * three::SkinnedVertex::size;
+	char[] zeros = alloc::new_array(mem, char, capacity_bytes);
+	mem::clear(zeros.ptr, capacity_bytes);
+	defer alloc::free(mem, zeros);
+	for (uint i = 0; i < three::MAX_FRAMES_IN_FLIGHT; i++)
+	{
+		if (renderer.pass.posed_buffers[i].buffer != null) renderer.pass.posed_buffers[i].free();
+		renderer.pass.posed_buffers[i] = vk::new_buffer(
+			&renderer.gpu.allocator,
+			usage: vk::BufferUsageFlagBits.BUFFER_USAGE_STORAGE_BUFFER_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+				| vk::BufferUsageFlagBits.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			properties: vk::MemoryPropertyFlagBits.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			data: zeros.ptr,
+			data_size: capacity_bytes
+		)!!;
+		renderer.pass.posed_capacity[i] = CAPACITY;
+	}
+
+	uint slot = renderer.frames.slot;
+	renderer.capture()!!.free();
+
+	PosedRegion region = posed_region(renderer);
+	test::@check(region.bytes == 3 * three::SkinnedVertex::size, "posed 3 vertices, got %d bytes", region.bytes);
+	if (region.bytes < 3 * three::SkinnedVertex::size) return;
+	char[] posed = device::read_device_bytes(renderer, &renderer.pass.posed_buffers[slot], region.bytes);
+	defer alloc::free(mem, posed);
+
+	// Vertex 0: 100% joint 0 -> (0, 0, 0)
+	// Vertex 1: 50% joint 0 + 50% joint 1 -> (1.5, 1, 0)
+	// Vertex 2: 100% joint 1 -> (2, 2, 0)
+	float[3] want_x = { 0.0f, 1.5f, 2.0f };
+	for (sz v = 0; v < 3; v++)
+	{
+		sz off = v * three::SkinnedVertex::size;
+		float gx = *(float*)&posed[off];
+		float gy = *(float*)&posed[off + 4];
+		test::@check(
+			near(gx, want_x[v]) && near(gy, (float)v),
+			"vertex %d landed at (%f, %f), expected (%f, %f)",
+			v, gx, gy, want_x[v], (float)v
+		);
+	}
+}
+
+<*
+ `ComputeSkinMode.AUTO` routes a shadowed skinned crowd to compute skinning in
+ one draw call without splitting buckets, and binds the `SKIP_VERTEX_SKIN` variant.
+*>
+fn void auto_compute_skin_routes_shadowed_crowd_in_one_draw() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::ComputeSkinMode was_mode = renderer.pass.compute_skin;
+		bool was_shadows = renderer.pass.shadows.settings.enabled;
+		bool was_prepass = renderer.pass.prepass.enabled;
+		defer
+		{
+			renderer.pass.compute_skin = was_mode;
+			renderer.pass.shadows.settings.enabled = was_shadows;
+			renderer.pass.prepass.enabled = was_prepass;
+		}
+
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		const uint COPIES = 12;
+		for (uint i = 0; i < COPIES; i++)
+		{
+			three::NodeId copy = renderer.pass.scene.instantiate(id);
+			three::Node* node = renderer.pass.scene.node(copy);
+			if (node != null)
+			{
+				node.position = { (float)i * 2.0f, 0, 0 };
+				renderer.pass.scene.mark_moved(copy);
+			}
+			renderer.pass.scene.play(copy, "Bend", loop: true, speed: 1.0f, time: (float)i / (float)COPIES);
+		}
+		renderer.pass.frame_camera();
+
+		// Single-pass (shadows off, prepass off, single view): AUTO stays on vertex skinning.
+		renderer.pass.compute_skin = AUTO;
+		renderer.pass.shadows.settings.enabled = false;
+		renderer.pass.prepass.enabled = false;
+		renderer.capture()!!.free();
+		test::@check(posed_region(renderer).bytes == 0,
+			"AUTO skips compute skinning for single-pass flat frames");
+
+		// Multi-pass (shadows on): AUTO routes the crowd to compute without splitting buckets.
+		renderer.pass.shadows.settings.enabled = true;
+		renderer.capture()!!.free();
+		test::@check(renderer.pass.skin_pipeline.ready, "AUTO built the compute skin pipeline");
+		test::@check(posed_region(renderer).bytes > 0, "AUTO compute-skinned the shadowed crowd");
+		three::SceneStats stats = renderer.pass.stats();
+		test::@check(stats.draw_calls == 2,
+			"auto-preskinned crowd stays 2 draw calls (no split), got %d", stats.draw_calls);
+
+		// Verify the preskinned bucket's material resolved a `SKIP_VERTEX_SKIN` pipeline variant.
+		bool checked_variant = false;
+		foreach (i, bucket : renderer.pass.scene.buckets)
+		{
+			if (i >= renderer.pass.posed_offsets.len() || renderer.pass.posed_offsets[i] == three::NOT_PRESKINNED) continue;
+			three::MeshPipeline* pipe = renderer.pass.draw_pipeline(bucket.material, rigid: false, preskinned: true);
+			three::CachedPipeline* entry = renderer.pass.pipelines.entry_for(pipe);
+			test::@check(entry != null && (entry.state.skip_features & three::SKIP_VERTEX_SKIN) != 0,
+				"preskinned bucket binds a SKIP_VERTEX_SKIN pipeline variant");
+			checked_variant = true;
+		}
+		test::@check(checked_variant, "at least one preskinned bucket was checked for SKIP_VERTEX_SKIN");
+
+		// Verify RenderProfile defaults and tune override for compute_skin.
+		three::RenderProfile desk = three::render_profile(DESKTOP);
+		three::RenderProfile pcvr = three::render_profile(PCVR);
+		three::RenderProfile quest = three::render_profile(QUEST);
+		test::@check(desk.compute_skin == MANUAL && pcvr.compute_skin == AUTO && quest.compute_skin == AUTO,
+			"profile defaults set MANUAL on desktop and AUTO on PCVR/Quest");
+		test::@check(desk.apply_tune("compute_skin=always") && desk.compute_skin == ALWAYS,
+			"compute_skin=always tune override applies");
+		test::@check(!desk.apply_tune("compute_skin=bogus") && desk.compute_skin == ALWAYS,
+			"invalid compute_skin tune override rejected");
+	};
+}
+
+<*
+ `Scene.set_animation_lod` throttles pose updates with crowd staggering and snaps
+ baked playback to the nearest frame (`pose_t == 0`).
+*>
+fn void animation_lod_throttles_and_snaps_frames() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Scene* scene = renderer.pass.scene;
+		three::AssetId id = renderer.pass.assets.load(&renderer.gpu, FIXTURE)!!;
+		three::NodeId root = scene.instantiate(id);
+		three::NodeId character = node_at(scene, root, "Character");
+
+		// Start halfway between frames 15 and 16: normal playback interpolates (`pose_t ~= 0.5`).
+		scene.play(root, "Bend", loop: true, speed: 1.0f, time: 0.5f + 0.5f / 30.0f);
+		test::@check(scene.node(character).pose_t > 0.4f, "without snap_frame pose_t interpolates");
+
+		// Enabling snap_frame snaps immediately to the nearest frame with `pose_t == 0`.
+		test::@check(scene.set_animation_lod(root, 0.1f, true), "set_animation_lod accepted the player");
+		three::Node* node = scene.node(character);
+		test::@check(node.pose_t == 0.0f && node.pose_next == node.pose,
+			"snap_frame sets pose_t=0 and pose_next=pose, got t=%f", node.pose_t);
+
+		// Advance past any initial stagger tick to synchronize onto a fresh 0.1 s interval.
+		scene.step_animations(0.1f);
+		uint held_pose = scene.node(character).pose;
+		test::@check(scene.node(character).pose_t == 0.0f, "snap_frame holds pose_t=0 after stepping");
+
+		// Sub-interval steps accumulate without updating the pose.
+		scene.step_animations(0.03f);
+		scene.step_animations(0.03f);
+		test::@check(scene.node(character).pose == held_pose,
+			"pose stays held while accumulated dt (0.06s) < update_interval (0.1s)");
+
+		// Crossing 0.1s applies the full accumulated dt and advances the pose cleanly.
+		scene.step_animations(0.05f);
+		test::@check(scene.node(character).pose != held_pose,
+			"pose advances once accumulated dt crosses update_interval");
+		test::@check(scene.node(character).pose_t == 0.0f && scene.node(character).pose_next == scene.node(character).pose,
+			"snapped update keeps pose_t=0");
+	};
+
+	// Crowd staggering + JS `setAnimationLod` API.
+	@with_js(; three::JsRuntime* run)
+	{
+		three::RunResult result = run.run(`
+			const scene = new three.Scene();
+			const asset = await three.load('test/fixtures/skinned.glb');
+			const actor = asset.instantiate();
+			scene.add(actor);
+			actor.play('Bend', { loop: true, time: 0.5 + 0.5 / 30 });
+			actor.setAnimationLod({ interval: 0.1, snap: true });
+			let badThrew = false;
+			try { actor.setAnimationLod({ interval: -0.1 }); } catch (e) { badThrew = e instanceof RangeError; }
+			return { badThrew, ok: true };
+		`);
+		defer result.free();
+		test::@check(result.ok, "JS setAnimationLod ran: %s", result.error);
+		test::@check(result.value == `{"badThrew":true,"ok":true}`,
+			"JS setAnimationLod validated negative interval, got '%s'", result.value);
 	};
 }

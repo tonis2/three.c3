@@ -94,9 +94,8 @@ struct Node
 	// `move_capsule` subtracts it from the current one to ride a moving floor.
 	Vec3 prev_world;
 	bool had_world;
-	// The inverse transpose of `world`. Only the upper 3x3 means anything; the
-	// rest is identity padding so the GPU record is two `float4x4` and needs no
-	// packing rules of its own. See `normal_matrix`.
+	// Inverse transpose of `world`'s linear part in the upper 3x3, with the
+	// volume scale (`|det|^(1/3)`) packed in `m[15]` for `Surface.scale`.
 	Matrix4f normal;
 
 	// What this node draws. `mesh` indexes that asset's `meshes`; a group
@@ -254,6 +253,15 @@ struct Node
 	bool visible;
 	bool world_visible;
 	bool dirty;
+
+	// Resolved cull volume slot + 1 inherited down the hierarchy, or 0 for none.
+	char cull_volume;
+	// Cull volume slot + 1 anchored on this node itself, or 0 for none.
+	char own_cull_volume;
+	// Opt this node and its subtree out of any ancestor cull volume.
+	bool cull_exempt;
+	// Last selected LOD tier (0 = base mesh, 1..MAX_LOD_LEVELS = chain entry) for hysteresis.
+	char last_lod;
 
 	<*
 	 Whether this node is collision geometry.
@@ -472,6 +480,7 @@ fn Matrix4f normal_matrix(Matrix4f world)
 	Matrix3f inverse_transpose = adjugate.transpose();
 	inverse_transpose = inverse_transpose * (1.0f / det);
 
+	float volume_scale = math::pow(math::abs(det), 1.0f / 3.0f);
 	float[<9>] n = inverse_transpose.m;
 	return {
 		.m = {
@@ -490,7 +499,8 @@ fn Matrix4f normal_matrix(Matrix4f world)
 			0,
 			0,
 			0,
-			1,
+			// Volume scale |det(linear)|^(1/3), read by shaders/mesh.shady as Surface.scale.
+			volume_scale,
 		}
 	};
 }

@@ -2388,8 +2388,93 @@ export const three = {
 		if (typeof path !== 'string' || path.length === 0) {
 			throw new TypeError('three.texture(path) wants a path to a .png, .jpg or .ktx2');
 		}
-		const chosen = uploadOptions(options, 'three.texture(path, options)');
-		return new Texture(H.texture(path, chosen.code, chosen.mips, chosen.nearest), path, chosen.space);
+		const chosen = uploadOptions(options, 'three.texture(path, options)', true);
+		return new Texture(H.texture(path, chosen.code, chosen.mips, chosen.nearest, chosen.layer), path, chosen.space);
+	},
+
+	// Load a packed multi-layer .ktx2 material whose `three.layers` metadata names
+	// each layer's colour space and channel layout (for example:
+	// `srgb rgb=basecolor a=height; linear rgb=normal a=roughness`).
+	//
+	// Each layer is uploaded once in its declared colour space (BC7 on desktop,
+	// lossless ASTC 4x4 on Quest for UASTC packs). The returned handle exposes
+	// `map`, `normal`, `height`, `roughness`, `heightChannel`, `roughnessChannel`,
+	// `layers`, `channel(name)` and `dispose()`.
+	materialPack(path, options = null) {
+		if (typeof path !== 'string' || path.length === 0) {
+			throw new TypeError('three.materialPack(path) wants a path to a .ktx2');
+		}
+		if (options !== null && options !== undefined && typeof options !== 'object') {
+			throw new TypeError('three.materialPack(path, options) wants an options object like { filter }');
+		}
+		const baseOpts = {};
+		if (options) {
+			for (const key of Object.keys(options)) {
+				if (key !== 'generateMipmaps' && key !== 'filter') {
+					throw new TypeError(`three.materialPack has no option called '${key}' — it takes generateMipmaps and filter`);
+				}
+				baseOpts[key] = options[key];
+			}
+		}
+
+		const meta = H.ktx2Meta(path);
+		const parsed = [];
+		if (typeof meta.threeLayers === 'string' && meta.threeLayers.trim().length > 0) {
+			for (const rawPart of meta.threeLayers.split(';')) {
+				const part = rawPart.trim();
+				if (!part) continue;
+				let space = null;
+				const channels = {};
+				for (const word of part.split(/\s+/)) {
+					const eq = word.indexOf('=');
+					if (eq < 0) {
+						if (word === 'srgb') space = SRGBColorSpace;
+						else if (word === 'linear') space = LinearSRGBColorSpace;
+					} else {
+						const ch = word.slice(0, eq);
+						const name = word.slice(eq + 1);
+						if (ch && name) channels[ch] = name;
+					}
+				}
+				parsed.push({ space, channels });
+			}
+		}
+
+		const count = Math.max(1, meta.layers | 0);
+		const layers = [];
+		const byName = new Map();
+		for (let i = 0; i < count; i++) {
+			const spec = parsed[i] ?? { space: null, channels: {} };
+			const colorSpace = spec.space ?? (i === 0 ? SRGBColorSpace : LinearSRGBColorSpace);
+			const texture = this.texture(path, { ...baseOpts, layer: i, colorSpace });
+			const entry = { index: i, texture, colorSpace, channels: spec.channels };
+			layers.push(entry);
+			for (const [ch, name] of Object.entries(spec.channels)) {
+				if (!byName.has(name)) byName.set(name, { texture, layer: i, channel: ch });
+			}
+		}
+
+		const base = byName.get('basecolor') ?? { texture: layers[0].texture, layer: 0, channel: 'rgb' };
+		const norm = byName.get('normal') ?? null;
+		const hgt = byName.get('height') ?? null;
+		const rgh = byName.get('roughness') ?? null;
+		return {
+			path,
+			layout: meta.threeLayers ?? null,
+			layers,
+			map: base.texture,
+			normal: norm ? norm.texture : null,
+			height: hgt ? hgt.texture : null,
+			heightChannel: hgt ? hgt.channel : null,
+			roughness: rgh ? rgh.texture : null,
+			roughnessChannel: rgh ? rgh.channel : null,
+			channel(name) {
+				return byName.get(String(name)) ?? null;
+			},
+			dispose() {
+				for (const l of layers) l.texture.dispose();
+			},
+		};
 	},
 
 	// A text file, as a string. The third thing that lives beside the game's

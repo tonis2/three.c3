@@ -42,6 +42,9 @@ const uint POSE_MASK = 0x7fffffff;
 // (`SKIP_POSE`), which then carries none of the morph loop or the joint blend.
 // The registers a vertex is given are set by its longest path, taken or not.
 const bool POSE_VERTICES @spec(112) = true;
+// Off in the pipeline a compute-skinned bucket draws with (`SKIP_VERTEX_SKIN`),
+// dropping dual-quaternion blend and morph VGPRs while keeping the `draw.posed` read.
+const bool VERTEX_SKIN @spec(115) = true;
 
 // One copy's `Instance`, read a field at a time. A plain struct rather than
 // the wire one: Adreno reads a whole scalar-layout struct as if it were std430,
@@ -75,10 +78,10 @@ fn InstanceData instance_at(Instance* instances, uint i)
 	return data;
 }
 
-// The four influences of one vertex, blended into the matrix that poses it.
-fn float4x4 skin_matrix(DrawRecord* draw, InstanceData instance, uint vid)
+// The four influences of one vertex, blended into the rigid transform that poses it.
+fn BlendedPose skin_pose(DrawRecord* draw, InstanceData instance, uint vid)
 {
-	float4x4* palette = draw.palette;
+	SkinJoint* palette = draw.palette;
 	if ((instance.pose & POSE_LIVE) != 0) palette = push.frame[0].live_poses;
 	uint base = instance.pose & POSE_MASK;
 
@@ -87,10 +90,8 @@ fn float4x4 skin_matrix(DrawRecord* draw, InstanceData instance, uint vid)
 
 	// One palette per vertex, whatever the character is doing. A blend of clips
 	// is composed on the CPU into the live palette (`AnimationPlayer.blend_layers`)
-	// rather than mixed here, where a mix of two joint matrices is not a rigid
-	// pose and a third clip would be a third fetch. What is left is the two baked
-	// frames either side of the clip's time — uniform across an instance, so a
-	// scalar branch.
+	// rather than mixed here. What is left is the two baked frames either side of
+	// the clip's time — uniform across an instance, so a scalar branch.
 	if (instance.pose_t > 0.0)
 	{
 		return blend_frames(palette, base, instance.pose_next & POSE_MASK, instance.pose_t, joints, weights);
@@ -140,30 +141,36 @@ fn void pose_vertex(DrawRecord* draw, InstanceData instance, uint vid, uint iid,
 		local = position;
 		return;
 	}
-	apply_morph(draw, instance, vid, position, normal);
-	local = position;
+	if (VERTEX_SKIN)
+	{
+		apply_morph(draw, instance, vid, position, normal);
+		local = position;
 
-	// The two ways a vertex gets posed, in the same order and with the same
-	// exclusivity the draw path states: one flag or the other, never both. An `if`
-	// rather than a ternary, because a ternary lets the compiler evaluate both
-	// sides and load through the null pointer it was meant to avoid.
-	if ((draw.flags & FLAG_HAS_SKIN) != 0)
-	{
-		float4x4 pose = skin_matrix(draw, instance, vid);
-		position = (pose * float4(position, 1.0)).xyz;
-		// w = 0 so the matrix's translation cancels: a normal is a direction, and
-		// the original's `(float3x3)` cast was this sentence.
-		normal = (pose * float4(normal, 0.0)).xyz;
-		// A tangent is a direction too. Whatever the caller read it as - zero when the
-		// bucket carries none - it leaves posed the way the normal does.
-		tangent = (pose * float4(tangent, 0.0)).xyz;
+		// Exclusive skinning paths: vertex DQ blend or compute-preskinned read.
+		if ((draw.flags & FLAG_HAS_SKIN) != 0)
+		{
+			BlendedPose pose = skin_pose(draw, instance, vid);
+			apply_pose(pose, position, normal);
+			if ((draw.flags & FLAG_HAS_TANGENTS) != 0)
+			{
+				tangent = pose.scale * qrot(pose.rot, tangent);
+			}
+		}
+		else if ((draw.flags & FLAG_PRESKINNED) != 0)
+		{
+			position = draw.posed[iid * draw.skin_stride + vid].position;
+			normal = draw.posed[iid * draw.skin_stride + vid].normal;
+		}
 	}
-	else if ((draw.flags & FLAG_PRESKINNED) != 0)
+	else
 	{
-		// The compute pass already did the blend, once per vertex per frame rather
-		// than once per vertex per draw. It wrote one copy of the mesh per
-		// instance, so the index carries the instance as well as the vertex.
-		position = draw.posed[iid * draw.skin_stride + vid].position;
-		normal = draw.posed[iid * draw.skin_stride + vid].normal;
+		// Compute-skinned pipeline (`SKIP_VERTEX_SKIN`): morph and skin already ran
+		// in compute, so only the posed read remains.
+		local = position;
+		if ((draw.flags & FLAG_PRESKINNED) != 0)
+		{
+			position = draw.posed[iid * draw.skin_stride + vid].position;
+			normal = draw.posed[iid * draw.skin_stride + vid].normal;
+		}
 	}
 }

@@ -422,6 +422,58 @@ export class MeshRef {
 		});
 	}
 
+	// Register fallback LOD levels for this mesh in the given (or active) scene:
+	// `ref.setLods([{ mesh: lod1, minSize: 0.15 }, { mesh: null, minSize: 0.02 }])`.
+	setLods(levels, scene = null) {
+		if (!Array.isArray(levels)) {
+			throw new TypeError('meshRef.setLods(levels) wants an array of { mesh, minSize } entries');
+		}
+		if (levels.length > 4) {
+			throw new RangeError(`meshRef.setLods(): at most 4 LOD levels are supported, got ${levels.length}`);
+		}
+		const sid = scene !== null && scene !== undefined ? scene._sid : H.sceneActive();
+		if (typeof sid !== 'number' || !H.sceneAlive(sid)) {
+			throw new Error('meshRef.setLods(): target scene is not alive');
+		}
+		const packed = [];
+		for (let i = 0; i < levels.length; i++) {
+			const entry = levels[i];
+			if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+				throw new TypeError(`meshRef.setLods(): level ${i} must be { mesh, minSize }`);
+			}
+			for (const key of Object.keys(entry)) {
+				if (key !== 'mesh' && key !== 'minSize') {
+					throw new TypeError(`meshRef.setLods(): level ${i} has unknown option '${key}' — expected mesh and minSize`);
+				}
+			}
+			const minSize = +entry.minSize;
+			if (!Number.isFinite(minSize) || minSize < 0) {
+				throw new RangeError(`meshRef.setLods(): level ${i} minSize must be a finite number >= 0, got ${entry.minSize}`);
+			}
+			if (entry.mesh === null || entry.mesh === undefined) {
+				packed.push(null, -1, minSize);
+			} else {
+				const ref = typeof entry.mesh?._ref === 'function' ? entry.mesh._ref() : entry.mesh;
+				if (!ref || !ref._asset || typeof ref.mesh !== 'number') {
+					throw new TypeError(`meshRef.setLods(): level ${i}.mesh wants a Mesh, Geometry, or asset.mesh() reference`);
+				}
+				packed.push(ref._asset, ref.mesh, minSize);
+			}
+		}
+		H.setMeshLods(sid, this._asset, this.mesh, packed);
+		return this;
+	}
+
+	// Clear any LOD chain registered for this mesh in the given (or active) scene.
+	clearLods(scene = null) {
+		const sid = scene !== null && scene !== undefined ? scene._sid : H.sceneActive();
+		if (typeof sid !== 'number' || !H.sceneAlive(sid)) {
+			throw new Error('meshRef.clearLods(): target scene is not alive');
+		}
+		H.clearMeshLods(sid, this._asset, this.mesh);
+		return this;
+	}
+
 	toJSON() { return { name: this.name, mesh: this.mesh }; }
 	toString() { return `MeshRef(${this.name})`; }
 }

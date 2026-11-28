@@ -397,6 +397,62 @@ fn void a_tinted_input_bakes_its_colour_into_the_merged_vertex_stream() @test
 	};
 }
 
+<*
+ Merging inputs whose own `GpuMesh.base_color` differs (such as a low-poly tree's
+ bark and foliage) bakes each input's linear base colour into `COLOR_0` and sets
+ the merged mesh's `base_color` to white so every part keeps its exact colour.
+*>
+fn void differing_source_base_colors_bake_into_vertex_colors() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		three::Assets* assets = &renderer.pass.assets;
+
+		three::GeometryBuilder a;
+		a.init();
+		defer a.free();
+		quad(&a, -1.0);
+		three::AssetId asset_a = built_from(renderer, "<merge basecol a>", &a);
+		assets.mesh(asset_a, 0).base_color = { 0.4f, 0.2f, 0.1f, 1.0f };
+
+		three::GeometryBuilder b;
+		b.init();
+		defer b.free();
+		quad(&b, 1.0);
+		three::AssetId asset_b = built_from(renderer, "<merge basecol b>", &b);
+		assets.mesh(asset_b, 0).base_color = { 0.1f, 0.5f, 0.2f, 1.0f };
+
+		three::MergeInput[2] inputs = {
+			{ .asset = asset_a, .mesh = 0, .matrix = matrix::IDENTITY4{float}, .color = WHITE },
+			{ .asset = asset_b, .mesh = 0, .matrix = matrix::IDENTITY4{float}, .color = WHITE },
+		};
+		uint failed_at = 0;
+		three::AssetId merged = assets.merge(&renderer.gpu, inputs[..], &failed_at)!!;
+		three::GpuMesh* mesh = assets.mesh(merged, 0);
+		test::@check(mesh != null && mesh.has_colors, "differing base colors must produce a COLOR_0 stream");
+		test::@check(
+			math::abs(mesh.base_color[0] - 1.0f) < 1e-5f && math::abs(mesh.base_color[1] - 1.0f) < 1e-5f
+				&& math::abs(mesh.base_color[2] - 1.0f) < 1e-5f,
+			"merged base_color must be white when source base_colors are baked"
+		);
+
+		three::GeometryBuilder read;
+		read.init();
+		defer read.free();
+		test::@check(assets.read_geometry(merged, 0, &read), "read merged base_color geometry");
+		test::@check(
+			math::abs(read.colors[0].x - 0.4f) < 1e-5f && math::abs(read.colors[0].y - 0.2f) < 1e-5f
+				&& math::abs(read.colors[0].z - 0.1f) < 1e-5f,
+			"quad a baked its brown base_color"
+		);
+		test::@check(
+			math::abs(read.colors[4].x - 0.1f) < 1e-5f && math::abs(read.colors[4].y - 0.5f) < 1e-5f
+				&& math::abs(read.colors[4].z - 0.2f) < 1e-5f,
+			"quad b baked its green base_color"
+		);
+	};
+}
+
 // ============================================================================
 // JavaScript level — three.merge, the two spellings and the refusals
 // ============================================================================

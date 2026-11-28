@@ -989,7 +989,34 @@ fn void? GpuMesh.upload_streams(&self, Gpu* gpu, GeometryBuilder* geometry)
 		self.joints = gpu.upload_stream(geometry.joints.entries, uint[4]::size * vertices)!;
 		self.weights = gpu.upload_stream(geometry.weights.entries, Vec4::size * vertices)!;
 	}
-	self.indices = gpu.upload_indices(geometry.indices.entries, uint::size * geometry.indices.len())!;
+	uint[] indices = geometry.indices.array_view();
+	bool fits_short = self.vertex_count <= 65535;
+	if (fits_short)
+	{
+		foreach (idx : indices)
+		{
+			if (idx > 65535)
+			{
+				fits_short = false;
+				break;
+			}
+		}
+	}
+	if (fits_short)
+	{
+		@pool()
+		{
+			ushort[] narrowed = alloc::new_array(tmem, ushort, indices.len);
+			foreach (i, idx : indices) narrowed[i] = (ushort)idx;
+			self.indices = gpu.upload_indices(narrowed.ptr, ushort::size * narrowed.len)!;
+		};
+		self.short_indices = true;
+	}
+	else
+	{
+		self.indices = gpu.upload_indices(indices.ptr, uint::size * indices.len)!;
+		self.short_indices = false;
+	}
 }
 
 <*

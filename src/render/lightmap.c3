@@ -1511,7 +1511,7 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			ulong table = material != null && self.table_address != 0
 				? self.table_address + (ulong)material.table_offset : 0;
 			push_mesh_constants(cmd, selected, push, material, table);
-			vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, INDEX_TYPE_UINT32);
+			vk::cmdBindIndexBuffer(cmd, mesh.indices.buffer, 0, mesh.index_type());
 			vk::cmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);
 		}
 

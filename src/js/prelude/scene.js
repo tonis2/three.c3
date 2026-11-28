@@ -612,6 +612,41 @@ export class Scene extends Object3D {
 		return this._intersection(H.pick(+x, +y));
 	}
 
+	// Global screen-size multiplier for mesh LOD selection (>1 keeps finer LODs
+	// further away; <1 drops to coarser LODs sooner). Default 1.
+	get lodBias() {
+		this._check();
+		return H.lodBiasGet(this._sid);
+	}
+
+	set lodBias(v) {
+		this._check();
+		const bias = +v;
+		if (!Number.isFinite(bias) || bias <= 0) {
+			throw new RangeError(`scene.lodBias wants a positive finite number, got ${v}`);
+		}
+		H.lodBiasSet(this._sid, bias);
+	}
+
+	// Register up to 4 fallback LOD tiers for a base Mesh, Geometry, or MeshRef:
+	// `scene.setLods(baseMesh, [{ mesh: lod1, minSize: 0.15 }, { mesh: null, minSize: 0.02 }])`.
+	// `mesh: null` small-feature-culls instances smaller than `minSize`.
+	setLods(baseMesh, levels) {
+		this._check();
+		const ref = resolveLodRef(baseMesh, 'scene.setLods(baseMesh, levels)');
+		const packed = packLodLevels(levels, 'scene.setLods()');
+		H.setMeshLods(this._sid, ref._asset, ref.mesh, packed);
+		return this;
+	}
+
+	// Remove any LOD chain registered for `baseMesh` in this scene.
+	clearLods(baseMesh) {
+		this._check();
+		const ref = resolveLodRef(baseMesh, 'scene.clearLods(baseMesh)');
+		H.clearMeshLods(this._sid, ref._asset, ref.mesh);
+		return this;
+	}
+
 	// A host hit becomes the object the script is holding: the node's handle
 	// carries it as `owner`.
 	//
@@ -628,6 +663,46 @@ export class Scene extends Object3D {
 			object: raw.node?.owner ?? null,
 		};
 	}
+}
+
+function resolveLodRef(target, where) {
+	const ref = typeof target?._ref === 'function' ? target._ref() : target;
+	if (!ref || !ref._asset || typeof ref.mesh !== 'number') {
+		throw new TypeError(`${where} wants a Mesh, Geometry, or asset.mesh() reference`);
+	}
+	return ref;
+}
+
+function packLodLevels(levels, where) {
+	if (!Array.isArray(levels)) {
+		throw new TypeError(`${where} wants an array of { mesh, minSize } entries`);
+	}
+	if (levels.length > 4) {
+		throw new RangeError(`${where}: at most 4 LOD levels are supported, got ${levels.length}`);
+	}
+	const packed = [];
+	for (let i = 0; i < levels.length; i++) {
+		const entry = levels[i];
+		if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+			throw new TypeError(`${where}: level ${i} must be { mesh, minSize }`);
+		}
+		for (const key of Object.keys(entry)) {
+			if (key !== 'mesh' && key !== 'minSize') {
+				throw new TypeError(`${where}: level ${i} has unknown option '${key}' — expected mesh and minSize`);
+			}
+		}
+		const minSize = +entry.minSize;
+		if (!Number.isFinite(minSize) || minSize < 0) {
+			throw new RangeError(`${where}: level ${i} minSize must be a finite number >= 0, got ${entry.minSize}`);
+		}
+		if (entry.mesh === null || entry.mesh === undefined) {
+			packed.push(null, -1, minSize);
+		} else {
+			const ref = resolveLodRef(entry.mesh, `${where}: level ${i}.mesh`);
+			packed.push(ref._asset, ref.mesh, minSize);
+		}
+	}
+	return packed;
 }
 
 // -----------------------------------------------------------------------

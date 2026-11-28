@@ -1620,3 +1620,130 @@ fn void unclaimed_pre_transcodes_are_given_back() @test
 		test::@check(assets.slot(id) == null, "the handle still names a live asset");
 	};
 }
+
+fn char[] solid_rgba(uint size, char r, char g, char b, char a) @local
+{
+	char[] px = mem::new_array(char, (sz)size * size * 4);
+	for (sz i = 0; i < px.len; i += 4)
+	{
+		px[i + 0] = r;
+		px[i + 1] = g;
+		px[i + 2] = b;
+		px[i + 3] = a;
+	}
+	return px;
+}
+
+fn char[] packed_material_uastc_blob() @local
+{
+	char[] layer0 = solid_rgba(SIZE, 0xe8, 0x30, 0x20, 0x80);
+	char[] layer1 = solid_rgba(SIZE, 0x80, 0x80, 0xf8, 0xe0);
+	defer free(layer0);
+	defer free(layer1);
+
+	char[][2] imgs = { layer0, layer1 };
+	mipgen::Options[2] mips = {
+		{ .srgb = true, .renormalize = false },
+		{ .srgb = false, .renormalize = true },
+	};
+	String desc = "srgb rgb=basecolor a=height; linear rgb=normal a=roughness";
+	char[] desc_nul = mem::new_array(char, desc.len + 1);
+	defer free(desc_nul);
+	desc_nul[:desc.len] = desc[..];
+	desc_nul[desc.len] = 0;
+
+	container::KvPair[1] kv = {
+		{ .key = "three.layers", .value = desc_nul },
+	};
+
+	return basis::encode(mem, basis::UASTC_4X4, imgs[..], SIZE, SIZE, basis::TexType.ARRAY, {
+		.quality = 100,
+		.effort = 2,
+		.srgb = false,
+		.mipmaps = true,
+		.image_mips = mips[..],
+		.kv = kv[..],
+	})!!;
+}
+
+fn void packed_ktx2_layers_metadata_and_extract_round_trip() @test
+{
+	char[] blob = packed_material_uastc_blob();
+	defer free(blob);
+
+	test::@check(three::ktx2_layer_count(blob) == 2, "expected 2 layers, got %d", three::ktx2_layer_count(blob));
+	String meta = three::ktx2_metadata_string(blob, "three.layers", mem)!!;
+	defer meta.free(mem);
+	test::@check(meta == "srgb rgb=basecolor a=height; linear rgb=normal a=roughness",
+		"unexpected three.layers metadata: %s", meta);
+
+	image::Image img0 = three::decode_ktx2(blob, mem, 0)!!;
+	defer img0.free();
+	image::Image img1 = three::decode_ktx2(blob, mem, 1)!!;
+	defer img1.free();
+
+	test::@check(img0.pixels[0] > 0xc0 && img0.pixels[2] < 0x40, "layer 0 should be red");
+	test::@check(img1.pixels[2] > 0xd0 && img1.pixels[0] > 0x60 && img1.pixels[0] < 0xa0, "layer 1 should be flat blue normal");
+
+	// Extract layer 1 as a standalone single-layer KTX2 (what scene.export uses).
+	char[] sliced = three::extract_ktx2_layer(blob, 1, mem)!!;
+	defer free(sliced);
+	test::@check(three::ktx2_layer_count(sliced) == 1, "extracted layer should report 1 layer");
+	image::Image img1_sliced = three::decode_ktx2(sliced, mem, 0)!!;
+	defer img1_sliced.free();
+	test::@check(img1_sliced.pixels[2] > 0xd0 && img1_sliced.pixels[3] > 0xc0,
+		"extracted layer 1 lost normal/roughness channels");
+}
+
+fn void js_material_pack_loads_layers_and_exports_cleanly() @test
+{
+	@with_pass(; three::Renderer* renderer)
+	{
+		char[] blob = packed_material_uastc_blob();
+		defer free(blob);
+
+		String ktx_path = "build/ktx_pack_test.ktx2";
+		String glb_path = "build/ktx_pack_roundtrip.glb";
+		file::save(ktx_path, blob)!!;
+		defer (void)file::delete(ktx_path);
+		defer (void)file::delete(glb_path);
+
+		three::JsRuntime runtime;
+		runtime.open(&renderer.pass, renderer)!!;
+		defer runtime.close();
+
+		three::RunResult res = runtime.run(`
+			const pack = three.materialPack('build/ktx_pack_test.ktx2');
+			if (pack.layers.length !== 2) throw new Error('expected 2 layers');
+			if (pack.map.colorSpace !== three.SRGBColorSpace) throw new Error('layer 0 must be sRGB');
+			if (pack.normal.colorSpace !== three.LinearSRGBColorSpace) throw new Error('layer 1 must be linear');
+			if (pack.height !== pack.map || pack.heightChannel !== 'a') throw new Error('height slot wrong');
+			if (pack.roughness !== pack.normal || pack.roughnessChannel !== 'a') throw new Error('roughness slot wrong');
+			if (pack.channel('normal').layer !== 1) throw new Error('channel(normal) wrong');
+
+			let threw = false;
+			try { three.texture('build/ktx_pack_test.ktx2', { layer: 2 }); } catch { threw = true; }
+			if (!threw) throw new Error('out-of-range layer did not throw');
+
+			const scene = new three.Scene();
+			const mat = new three.LayeredMaterial({
+				name: 'packed_test',
+				map: pack.map,
+				normal: pack.normal,
+				layers: [{ name: 'top', map: pack.map, normal: pack.normal, maskSource: 'vertexColor', mask: 'r' }],
+			});
+			const mesh = new three.Mesh(new three.BoxGeometry(1, 1, 1), mat);
+			scene.add(mesh);
+			const report = scene.export('build/ktx_pack_roundtrip.glb');
+			if (report.images !== 2) throw new Error('expected 2 exported single-layer images, got ' + report.images);
+
+			const loaded = three.load('build/ktx_pack_roundtrip.glb');
+			if (loaded.images !== 2) throw new Error('round-trip glb image count mismatch: ' + loaded.images);
+			const inst = loaded.instantiate(undefined, { materials: true });
+			if (!inst) throw new Error('round-trip instantiate failed');
+			pack.dispose();
+		`);
+		defer res.free();
+		test::@check(res.ok, "JS materialPack test failed: %s", res.error);
+	};
+}

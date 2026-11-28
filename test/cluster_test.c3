@@ -1146,12 +1146,16 @@ fn void the_frame_names_the_features_it_does_not_use() @test
 	pass.lighting.lights[3].meta = { 4, 7, 2, 0 };
 	pass.lighting.lights[4].meta = { 5, three::SHADOW_VIEW_NONE, 0, 0 };
 	pass.lighting.lights[5].meta = { 6, three::SHADOW_VIEW_NONE, 3, three::LIGHT_BAKED };
-	uint surface = three::SKIP_ENVIRONMENT | three::SKIP_LIGHTMAPS | three::SKIP_OCCLUSION;
+	uint surface = three::SKIP_ENVIRONMENT | three::SKIP_LIGHTMAPS | three::SKIP_OCCLUSION | three::SKIP_DEBUG_VIEW;
 	test::@check(pass.unused_features() == surface,
 		"a spot, a shadowed rectangle, a second sun and a baked disk left %x unused", pass.unused_features());
 
 	pass.ambient_occlusion.live = true;
 	test::@check(pass.unused_features() == (surface & ~three::SKIP_OCCLUSION), "occlusion did not count");
+
+	pass.debug_view = three::DEBUG_VIEW_SHADOW;
+	test::@check(pass.unused_features() == (surface & ~(three::SKIP_OCCLUSION | three::SKIP_DEBUG_VIEW)),
+		"debug view did not count");
 }
 
 // A variant without the unused features draws the picture the full shader does.
@@ -1271,4 +1275,126 @@ fn void only_a_material_with_an_alpha_test_keeps_its_discard() @test
 	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
 	test::@check((drawn_skip(renderer, 0) & three::SKIP_ALPHA_TEST) == 0,
 		"a material with an alpha test lost its discard");
+}
+
+fn void only_a_material_that_can_reflect_keeps_specular() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	renderer.capture()!!.free();
+
+	three::Material* material = renderer.pass.material(0);
+	float was_rough = material.one_minus_roughness;
+	float was_metal = material.metalness;
+	float was_refl = material.reflectance;
+	defer
+	{
+		material.one_minus_roughness = was_rough;
+		material.metalness = was_metal;
+		material.reflectance = was_refl;
+	}
+
+	material.one_minus_roughness = 0.0f;
+	material.metalness = 0.0f;
+	material.reflectance = 0.0f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) != 0,
+		"a default matte material skips specular");
+
+	material.one_minus_roughness = 0.5f;
+	material.reflectance = 0.5f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) == 0,
+		"a glossy dielectric keeps specular");
+
+	material.one_minus_roughness = 0.20f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) == 0,
+		"a satin dielectric (roughness 0.80) keeps specular");
+
+	material.one_minus_roughness = 0.10f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) != 0,
+		"a matte dielectric (roughness 0.90) skips specular");
+
+	material.one_minus_roughness = 0.05f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) != 0,
+		"a very rough dielectric skips specular");
+
+	material.metalness = 0.5f;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_SPECULAR) == 0,
+		"a metallic material keeps specular");
+
+	uint spec_mat = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target,
+		"fn float3 shade(Surface s) { return specular(s); }",
+		{}
+	)!!;
+	defer (void)renderer.pass.dispose_material(&renderer.gpu, spec_mat);
+	uint matte_mat = renderer.pass.create_material(
+		&renderer.gpu, &renderer.target,
+		"fn float3 shade(Surface s) { return s.albedo * lambert(s, s.normal); }",
+		{}
+	)!!;
+	defer (void)renderer.pass.dispose_material(&renderer.gpu, matte_mat);
+
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, spec_mat) & three::SKIP_SPECULAR) == 0,
+		"a custom fragment calling specular() keeps specular");
+	test::@check((drawn_skip(renderer, matte_mat) & three::SKIP_SPECULAR) != 0,
+		"a custom lambert-only fragment skips specular");
+}
+
+fn void debug_view_toggles_skip_debug_view() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+	scene(renderer);
+	uint was = renderer.pass.debug_view;
+	defer renderer.pass.debug_view = was;
+
+	renderer.pass.debug_view = three::DEBUG_VIEW_OFF;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_DEBUG_VIEW) != 0,
+		"normal frames compile out debug_view");
+
+	renderer.pass.debug_view = three::DEBUG_VIEW_SHADOW;
+	renderer.pass.resolve_lit_pipelines(&renderer.gpu, &renderer.target)!!;
+	test::@check((drawn_skip(renderer, 0) & three::SKIP_DEBUG_VIEW) == 0,
+		"enabling a debug view keeps debug_view live");
+}
+
+fn void meshes_use_16_bit_indices_up_to_65535_vertices() @test
+{
+	three::Renderer* renderer = device::borrow(W, H);
+	defer device::release();
+
+	three::AssetId tri = renderer.pass.assets.load_triangle(&renderer.gpu)!!;
+	three::GpuMesh* tri_mesh = renderer.pass.assets.mesh(tri, 0);
+	test::@check(tri_mesh != null && tri_mesh.short_indices && tri_mesh.index_type() == INDEX_TYPE_UINT16,
+		"load_triangle uploads 16-bit indices");
+
+	three::AssetId plane = renderer.pass.assets.primitive(&renderer.gpu, three::plane_shape(2, 2))!!;
+	three::GpuMesh* plane_mesh = renderer.pass.assets.mesh(plane, 0);
+	test::@check(plane_mesh != null && plane_mesh.short_indices && plane_mesh.index_type() == INDEX_TYPE_UINT16,
+		"small primitive uploads 16-bit indices");
+
+	three::GeometryBuilder large;
+	large.init();
+	defer large.free();
+	for (uint i = 0; i < 65536; i++)
+	{
+		large.positions.push({ (float)(i & 255), (float)(i >> 8), 0 });
+	}
+	large.indices.push(0);
+	large.indices.push(65535);
+	three::AssetId big = renderer.pass.assets.upload_built(
+		&renderer.gpu, "<test:large-indices>", "large", &large, lines: true
+	)!!;
+	three::GpuMesh* big_mesh = renderer.pass.assets.mesh(big, 0);
+	test::@check(big_mesh != null && !big_mesh.short_indices && big_mesh.index_type() == INDEX_TYPE_UINT32,
+		"a mesh over 65535 vertices keeps 32-bit indices");
 }

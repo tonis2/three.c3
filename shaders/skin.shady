@@ -1,25 +1,10 @@
-// three.c3 compute skinning, ported to shady for the ShaderDef generator
-// (`src/shader/skin.c3`).
+// Compute skinning pass (`src/shader/skin.c3`).
 //
-// The push block comes from the C3 `SkinPush`, the output struct and the morph
-// deltas from `abi.c3`'s wire list - the two things only C3 knows. The constants
-// and the functions the entry point calls are here, and so is the entry point.
-// The port is nearly line for line - `mul(M, v)` is `M * v`, and the normal keeps its w = 0 so the
-// translation in the matrix's last column cancels, which is what the original's
-// `(float3x3)` cast was for.
-//
-// Everything the original says about the shape still holds:
-//
-//  - the output stays in the character's own space, so two passes with
-//    different notions of where the character is can share it;
-//  - the tail guard is a write past the end of the output buffer rather than a
-//    wasted lane, so it returns;
-//  - the morph displacement happens here and before the blend, because a
-//    displacement applied afterwards would move a vertex the joints already
-//    moved.
+// Dispatched in 2D (`thread.x = vertex`, `thread.y = instance`) so every lane
+// in a workgroup shares one instance's pose, eliminating integer division and
+// keeping instance fetches wave-uniform. Morph displacement runs before the
+// dual-quaternion blend, matching `shaders/skinning.shady`.
 
-// The dual-quaternion `blend_joints`, shared with the draw and shadow passes so
-// the compute pose and the draw that consumes it never drift apart.
 import "skin_math.shady";
 
 struct ComputeIn
@@ -31,25 +16,19 @@ const uint FLAG_HAS_NORMALS = 1;
 const uint POSE_LIVE = 0x80000000;
 const uint POSE_MASK = 0x7fffffff;
 
-// One vertex of one instance, by dispatch thread. The index is the flattened
-// pair rather than a `(vertex, instance)` one, so a workgroup's threads read
-// neighbouring vertices of the same instance.
 fn void skin_vertices(ComputeIn input)
 {
-	uint index = input.thread.x;
-	uint total = push.vertex_count * push.instance_count;
-	if (index >= total) return;
+	uint vid = input.thread.x;
+	uint iid = input.thread.y;
+	if (vid >= push.vertex_count || iid >= push.instance_count) return;
+	uint index = iid * push.vertex_count + vid;
 
-	uint iid = index / push.vertex_count;
-	uint vid = index - iid * push.vertex_count;
-
-	// Fields rather than a copy of the whole `Instance`, which Adreno misreads.
+	// Read individual fields rather than copying the whole `Instance`, which Adreno misreads.
 	uint packed_pose = push.instances[iid].pose;
 	uint morph = push.instances[iid].morph;
 
-	// An `if` rather than a ternary choice, the same as the draw path: one of
-	// these two pointers is null on any given dispatch.
-	float4x4* palette = push.baked;
+	// An `if` rather than a ternary choice: one of these pointers may be null.
+	SkinJoint* palette = push.baked;
 	if ((packed_pose & POSE_LIVE) != 0) palette = push.live;
 	uint base = packed_pose & POSE_MASK;
 
@@ -57,8 +36,7 @@ fn void skin_vertices(ComputeIn input)
 	float3 normal = float3(0.0, 1.0, 0.0);
 	if ((push.flags & FLAG_HAS_NORMALS) != 0) normal = push.normals[vid];
 
-	// Before the blend, exactly as the draw path does it and for the reason its
-	// `apply_morph` gives: a blend shape is authored against the rest mesh.
+	// Morph before skinning: blend shapes are authored against the rest mesh.
 	if (push.morph_targets != 0 && morph != 0)
 	{
 		uint morph_base = morph - 1;
@@ -76,17 +54,21 @@ fn void skin_vertices(ComputeIn input)
 	float4 weights = push.weights[vid];
 
 	float pose_t = push.instances[iid].pose_t;
-	float4x4 pose = pose_t > 0.0
-		? blend_frames(palette, base, push.instances[iid].pose_next & POSE_MASK, pose_t, joints, weights)
-		: blend_joints(palette, base, joints, weights);
+	BlendedPose pose;
+	if (pose_t > 0.0)
+	{
+		pose = blend_frames(palette, base, push.instances[iid].pose_next & POSE_MASK, pose_t, joints, weights);
+	}
+	else
+	{
+		pose = blend_joints(palette, base, joints, weights);
+	}
 
-	push.output[index].position = (pose * float4(position, 1.0)).xyz;
-	push.output[index].normal = (pose * float4(normal, 0.0)).xyz;
+	apply_pose(pose, position, normal);
+	push.output[index].position = position;
+	push.output[index].normal = normal;
 }
 
-// One invocation skins one vertex, and the tail is the last workgroup's
-// remainder - the body returns for a vertex past the end, because the dispatch
-// is rounded up to whole workgroups by definition.
 fn void computeMain(ComputeIn input) @compute @threads(64, 1, 1)
 {
 	skin_vertices(input);

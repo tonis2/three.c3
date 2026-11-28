@@ -88,7 +88,7 @@ import std::math;
 import std::math::vector;
 import std::math::matrix;
 
-excuse NOTHING_TO_MERGE, MESH_CANNOT_BE_MERGED, TOO_MANY_MERGE_MESHES;
+excuse NOTHING_TO_MERGE, MESH_CANNOT_BE_MERGED, TOO_MANY_MERGE_MESHES, MESH_TEXTURES_DIFFER;
 
 <*
  Beyond this many meshes a merge is a mistake rather than a kit: a subtree this
@@ -118,6 +118,15 @@ struct MergeInput
 	float[4] color;
 }
 
+fn bool colors_equal(float[4] a, float[4] b) @local
+{
+	for (usz channel = 0; channel < 4; channel++)
+	{
+		if (math::abs(a[channel] - b[channel]) > 1e-6f) return false;
+	}
+	return true;
+}
+
 <*
  Whether `color` is white — the identity for both the srgb decode and the
  multiply — within the precision a JavaScript double survives being written as
@@ -125,11 +134,7 @@ struct MergeInput
 *>
 fn bool color_is_white(float[4] color) @local
 {
-	for (usz channel = 0; channel < 4; channel++)
-	{
-		if (math::abs(color[channel] - 1.0f) > 1e-6f) return false;
-	}
-	return true;
+	return colors_equal(color, { 1, 1, 1, 1 });
 }
 
 <*
@@ -178,6 +183,7 @@ fn String merge_key(MergeInput[] inputs, Allocator allocator) @local
  @return ? TOO_MANY_MERGE_MESHES : `More than MAX_MERGE_MESHES inputs.`
  @return ? MESH_CANNOT_BE_MERGED : `inputs[*failed_at] names an unknown asset or mesh index, or one with no triangles to read — a line mesh, or a mesh whose geometry could not be read back at all.`
  @return ? MESH_HAS_LAYERS : `inputs[*failed_at] carries a CUSTOM_materials_layers stack, which a merged mesh cannot inherit — the same refusal Assets.split_mesh makes and for the same reason.`
+ @return ? MESH_TEXTURES_DIFFER : `inputs[*failed_at] carries a different base colour texture from inputs[0].`
 *>
 fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 {
@@ -190,18 +196,39 @@ fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 		String key = merge_key(inputs, tmem);
 		if (try hit = self.built(key)) return hit;
 
-		// Whether the merged mesh needs a COLOR_0 stream at all — see the
-		// header. Decided across every input up front, rather than per input
-		// as they are read, so a plain wall read before a tinted door does not
-		// leave the door's tint with nowhere to land: `GeometryBuilder`'s
-		// streams are optional by *length*, and a colour written for input 4
-		// alone would leave `geometry.colors` shorter than `geometry.positions`
-		// and silently drop the whole attribute, tint included.
+		// Inspect every input's GpuMesh up front so base colour and texture are
+		// preserved across the merge. When every input shares one `base_color`,
+		// it stays on the merged `GpuMesh` and untinted merges still need no
+		// `COLOR_0` stream. When inputs differ in `base_color` (e.g. a low-poly
+		// kit tree's bark and foliage), each input's linear `base_color` is
+		// folded into `COLOR_0` alongside its `mesh.color` tint and the merged
+		// mesh carries white. Inputs with differing base colour textures cannot
+		// share one draw call and are refused.
 		bool needs_colors = false;
-		foreach (input : inputs)
+		bool same_base_color = true;
+		float[4] first_base_color = { 1, 1, 1, 1 };
+		int common_texture = -1;
+		bool any_uv_v_down = false;
+		foreach (i, input : inputs)
 		{
-			if (!color_is_white(input.color)) { needs_colors = true; break; }
+			self.ensure_uploaded(input.asset, input.mesh);
+			GpuMesh* source = self.mesh(input.asset, input.mesh);
+			if (source == null) { *failed_at = (uint)i; return MESH_CANNOT_BE_MERGED~; }
+			if (source.layers.present) { *failed_at = (uint)i; return MESH_HAS_LAYERS~; }
+			if (i == 0)
+			{
+				first_base_color = source.base_color;
+				common_texture = source.texture;
+			}
+			else
+			{
+				if (source.texture != common_texture) { *failed_at = (uint)i; return MESH_TEXTURES_DIFFER~; }
+				if (!colors_equal(source.base_color, first_base_color)) same_base_color = false;
+			}
+			if (source.uv_v_down) any_uv_v_down = true;
+			if (!color_is_white(input.color)) needs_colors = true;
 		}
+		if (!same_base_color) needs_colors = true;
 
 		GeometryBuilder geometry;
 		geometry.init();
@@ -209,10 +236,8 @@ fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 
 		foreach (i, input : inputs)
 		{
-			self.ensure_uploaded(input.asset, input.mesh);
 			GpuMesh* source = self.mesh(input.asset, input.mesh);
 			if (source == null) { *failed_at = (uint)i; return MESH_CANNOT_BE_MERGED~; }
-			if (source.layers.present) { *failed_at = (uint)i; return MESH_HAS_LAYERS~; }
 
 			GeometryBuilder piece;
 			piece.init();
@@ -244,6 +269,10 @@ fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 			Matrix4f nmat = normal_matrix(input.matrix);
 			bool flip     = linear_determinant(input.matrix) < 0;
 			float[4] tint = srgb_to_linear_rgb(input.color);
+			if (!same_base_color)
+			{
+				for (usz k = 0; k < 4; k++) tint[k] *= source.base_color[k];
+			}
 
 			for (usz v = 0; v < vertices; v++)
 			{
@@ -296,6 +325,18 @@ fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 		slot.merged.colors.add_all(&geometry.colors);
 		slot.merged.indices.add_all(&geometry.indices);
 		slot.has_merged = true;
+
+		GpuMesh* merged_mesh = self.mesh(built, 0);
+		if (merged_mesh != null)
+		{
+			merged_mesh.base_color = same_base_color ? first_base_color : (float[4]){ 1, 1, 1, 1 };
+			merged_mesh.uv_v_down = any_uv_v_down;
+			if (common_texture >= 0)
+			{
+				self.retain_texture(common_texture);
+				merged_mesh.texture = common_texture;
+			}
+		}
 
 		return built;
 	};

@@ -38,35 +38,8 @@ struct VertexIn
 // Fields that are the same for every view keep reading `push.frame[0]`.
 private uint frame_view;
 
-// The interpolated surface frame, and the world position a shadow lookup needs.
-// In the fragment half's order, because the fragment half's parameter is this
-// struct: one declaration, so the two stages cannot disagree about the wire.
-struct VertexOutput
-{
-	float3 normal;
-	// xyz the world-space direction of +u, w the handedness; zero on a mesh that
-	// carries no TANGENT stream, which `FLAG_HAS_TANGENTS` is the test for.
-	float4 tangent;
-	float2 uv;
-	float3 world;
-	float4 color;
-	float4 vertex_color;
-	float3 lightmap;
-	// xyz this copy's world origin, w its scale (`Surface.scale`). Flat because
-	// both are one value for the copy, and one slot because the scale fills the
-	// lane the origin left free.
-	float4 origin @flat;
-	// Invariant here and in the depth prepass, so the two land on the same depth
-	// to the bit and the scene's EQUAL test passes. Without it Adreno rounds the
-	// two differently once the prepass reads each eye's camera from memory.
-	float4 sv_position @position @invariant;
-
-	// This copy's variant, the row a material's uniform tables are indexed by.
-	// Carried unclamped: which row is in range is a fact about the material's
-	// table, and the material half is where the table is. An integer varying, so
-	// it is Flat on both sides - there is no interpolating one.
-	uint variant;
-}
+// `VertexOutput` is emitted by `mesh_def` ahead of `material.shady` so `color`
+// is `@flat` when the material has no vertex body and interpolated when it does.
 
 // The material half, which this file does not contain: the def splices its text
 // in ahead of this one, so a module is one whole program even though its two
@@ -167,7 +140,7 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	v.local = local;
 	// Read off the model matrix, before `displace`, so a body that moves the
 	// vertex still knows where the copy it belongs to stands.
-	v.origin = (instance.model * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+	v.origin = instance.model[3].xyz;
 	v.time = push.frame[0].lighting.z;
 	// The same seam `mesh_fragment` fills `Surface.uniforms` through, so a
 	// vertex body and a fragment body read one storage with one spelling.
@@ -188,7 +161,10 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	// bake rasterised in, and so the only one that indexes the tile. Kept before
 	// `displace`, because a body may rewrite `v.uv`.
 	float2 lightmap_uv = float2(0.0, 0.0);
-	if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];
+	if (SURFACE_LIGHTMAPS || MATERIAL_LIGHTMAP_BAKE)
+	{
+		if (draw.lightmap_uvs) lightmap_uv = draw.lightmap_uvs[input.vid];
+	}
 
 	// Model first, camera second, and the normal by the instance's normal
 	// matrix rather than by the model: a non-uniform scale on a copy would
@@ -221,24 +197,27 @@ fn void mesh_vertex(VertexIn input, out VertexOutput output)
 	// surface and follows it under any scale, where a normal is the thing that
 	// has to stay perpendicular to it. Left unnormalised - interpolation is
 	// linear and the fragment stage normalises once after it.
-	output.tangent = float4((instance.model * float4(tangent, 0.0)).xyz, tangent_sign);
+	output.tangent = float4(0.0, 0.0, 0.0, 1.0);
+	if ((draw.flags & FLAG_HAS_TANGENTS) != 0)
+	{
+		output.tangent = float4((instance.model * float4(tangent, 0.0)).xyz, tangent_sign);
+	}
 	output.color = v.color;
+	if (MATERIAL_BUILT_IN) output.color = float4(srgb_to_linear(v.color.rgb), v.color.a);
 	output.vertex_color = v.vertex_color;
 	output.variant = v.variant;
-	// Straight from the gather and not recomputed: a body may write `v.origin`,
-	// and a value that could be changed in the vertex stage and silently was not
-	// in the fragment one is a disagreement worth not having. The scale is the
-	// cube root of the model's volume scale: exact under a uniform scale, the
-	// geometric mean of the three under a non-uniform one.
-	float3 axis_x = (instance.model * float4(1.0, 0.0, 0.0, 0.0)).xyz;
-	float3 axis_y = (instance.model * float4(0.0, 1.0, 0.0, 0.0)).xyz;
-	float3 axis_z = (instance.model * float4(0.0, 0.0, 1.0, 0.0)).xyz;
-	output.origin = float4(v.origin, pow(abs(dot(axis_x, cross(axis_y, axis_z))), 1.0 / 3.0));
+	// Straight from the gather and not recomputed: a body may write `v.origin`.
+	// The copy's volume-scale cube root is carried in `instance.normal[3].w`.
+	output.origin = float4(v.origin, instance.normal[3].w);
 
-	output.lightmap = float3(
-		instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
-		instance.lightmap.z > 0.0 ? 1.0 : 0.0
-	);
+	output.lightmap = float3(0.0, 0.0, 0.0);
+	if (SURFACE_LIGHTMAPS || MATERIAL_LIGHTMAP_BAKE)
+	{
+		output.lightmap = float3(
+			instance.lightmap.xy + lightmap_uv * instance.lightmap.zw,
+			instance.lightmap.z > 0.0 ? 1.0 : 0.0
+		);
+	}
 
 	// Clamped against this table's own length and not against the material's row
 	// count: one channel indexes two tables that have no reason to be the same

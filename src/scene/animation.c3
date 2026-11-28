@@ -342,6 +342,13 @@ struct AnimationLayer
 	// Cycles on from the player's shared `phase`, or negative for a layer on its
 	// own clock.
 	float offset;
+	// Cached lookups for `clip` (invalidated on zero-init or clip change).
+	bool targets_cached;
+	int targets_clip;
+	bool has_node_targets;
+	bool segment_cached;
+	int segment_clip;
+	int baked_segment;
 }
 
 <*
@@ -440,6 +447,17 @@ struct AnimationPlayer
 	*>
 	bool live_skin;
 
+	// True when the active single clip drives at least one live scene node in `targets`.
+	bool has_node_targets;
+
+	// Animation LOD: minimum seconds between pose updates (0 updates every frame),
+	// accumulated real elapsed time since the last update, threshold for the next
+	// tick (staggered on set so crowds update evenly), and baked-frame snapping.
+	float update_interval;
+	float accum_dt;
+	float next_update;
+	bool snap_frame;
+
 	<*
 	 Room for one WEIGHTS sample, which is as wide as the mesh has morph targets.
 
@@ -509,6 +527,16 @@ fn void AnimationPlayer.free(&self)
 fn void AnimationPlayer.advance(&self, Scene* scene, Assets* assets, float dt)
 {
 	if (!self.active()) return;
+
+	if (self.update_interval > 0.0f && dt > 0.0f)
+	{
+		self.accum_dt += dt;
+		float threshold = self.next_update > 0.0f ? self.next_update : self.update_interval;
+		if (self.accum_dt < threshold) return;
+		dt = self.accum_dt;
+		self.accum_dt = 0.0f;
+		self.next_update = self.update_interval;
+	}
 
 	Asset* owner = assets.slot(self.asset);
 	if (owner == null)
@@ -824,6 +852,67 @@ fn float step_time(AnimationClip* clip, float time, float speed, bool loop, floa
 	return time;
 }
 
+fn bool AnimationPlayer.layer_has_targets(&self, AnimationLayer* layer, Asset* owner)
+{
+	if (layer.clip < 0 || layer.clip >= owner.clips.len()) return false;
+	if (layer.targets_cached && layer.targets_clip == layer.clip)
+	{
+		self.has_node_targets = layer.has_node_targets;
+		return layer.has_node_targets;
+	}
+	AnimationClip* clip = &owner.clips[layer.clip];
+	bool hit = false;
+	foreach (&channel : clip.channels)
+	{
+		if (channel.node < self.targets.len() && self.targets[channel.node].is_set())
+		{
+			hit = true;
+			break;
+		}
+	}
+	if (clip.loaded)
+	{
+		layer.targets_cached = true;
+		layer.targets_clip = layer.clip;
+		layer.has_node_targets = hit;
+	}
+	self.has_node_targets = hit;
+	return hit;
+}
+
+fn BakedPose* AnimationPlayer.layer_segment(&self, AnimationLayer* layer, Asset* owner, uint skin)
+{
+	if (layer.clip < 0 || layer.clip >= owner.clips.len()) return null;
+	if (self.skinned.len() > 0 && skin == self.skinned[0].skin)
+	{
+		if (layer.segment_cached && layer.segment_clip == layer.clip)
+		{
+			if (layer.baked_segment >= 0 && layer.baked_segment < owner.baked.len())
+			{
+				return &owner.baked[layer.baked_segment];
+			}
+			return null;
+		}
+		int found = -1;
+		foreach (i, &seg : owner.baked)
+		{
+			if (seg.skin == skin && seg.clip == (uint)layer.clip)
+			{
+				found = (int)i;
+				break;
+			}
+		}
+		if (owner.baked.len() > 0)
+		{
+			layer.segment_cached = true;
+			layer.segment_clip = layer.clip;
+			layer.baked_segment = found;
+		}
+		return found >= 0 ? &owner.baked[found] : null;
+	}
+	return owner.segment(skin, (uint)layer.clip);
+}
+
 <*
  The stack written into the nodes, and into the skin.
 
@@ -838,7 +927,10 @@ fn void AnimationPlayer.pose(&self, Scene* scene, Asset* owner)
 	if (self.layer_count == 1 && only.weight >= 1.0f && only.clip >= 0 && only.clip < owner.clips.len()
 		&& !self.composes(&owner.clips[only.clip]))
 	{
-		self.write_clip(scene, &owner.clips[only.clip], only.time);
+		if (self.layer_has_targets(only, owner))
+		{
+			self.write_clip(scene, &owner.clips[only.clip], only.time);
+		}
 		self.composed = false;
 	}
 	else
@@ -886,6 +978,8 @@ fn bool AnimationPlayer.forget_clip(&self, Scene* scene, Asset* owner, uint clip
 		else if (layer.clip > (int)clip)
 		{
 			layer.clip--;
+			layer.targets_cached = false;
+			layer.segment_cached = false;
 		}
 	}
 	if (!dropped) return false;
@@ -1124,24 +1218,40 @@ fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner)
 		if (node == null) continue;
 		node.pose_next = 0;
 		node.pose_t = 0;
-		if (self.composed) continue;
+		if (self.composed)
+		{
+			// Mark POSE_LIVE immediately so sockets see composed palettes before the GPU upload.
+			node.pose |= POSE_LIVE;
+			continue;
+		}
 
-		BakedPose* segment = owner.segment(target.skin, (uint)layer.clip);
+		BakedPose* segment = self.layer_segment(layer, owner, target.skin);
 		if (segment == null) continue;
 
 		float position = (layer.time - clip.start) * segment.fps;
 		if (position < 0) position = 0;
-		int frame = (int)math::floor(position);
-		float between = position - (float)frame;
-		// Within a hair of a frame is that frame: four fetches a vertex rather than
-		// eight for a difference no pixel shows, and a clip that ends exactly on its
-		// last key lands on it rather than a ten-thousandth short.
-		if (between > 0.9999f) { frame++; between = 0; }
-		if (between < 0.0001f) between = 0;
-		// The last frame has no next: a one-shot held at its end, or a loop on its
-		// seam, which `plan_segments` made the same pose as the first.
 		int last = (int)segment.frame_count - 1;
-		if (frame >= last) { frame = last; between = 0; }
+		int frame;
+		float between;
+		if (self.snap_frame)
+		{
+			frame = (int)math::floor(position + 0.5f);
+			if (frame > last) frame = last;
+			between = 0;
+		}
+		else
+		{
+			frame = (int)math::floor(position);
+			between = position - (float)frame;
+			// Within a hair of a frame is that frame: four fetches a vertex rather than
+			// eight for a difference no pixel shows, and a clip that ends exactly on its
+			// last key lands on it rather than a ten-thousandth short.
+			if (between > 0.9999f) { frame++; between = 0; }
+			if (between < 0.0001f) between = 0;
+			// The last frame has no next: a one-shot held at its end, or a loop on its
+			// seam, which `plan_segments` made the same pose as the first.
+			if (frame >= last) { frame = last; between = 0; }
+		}
 
 		node.pose = segment.frame_at(frame);
 		node.pose_next = between > 0 ? segment.frame_at(frame + 1) : node.pose;
@@ -1290,4 +1400,49 @@ fn double clip_loop_time(AnimationClip* clip, double time)
 	double t = time - clip.start;
 	t = t - math::floor(t / clip.duration) * clip.duration;
 	return t + clip.start;
+}
+
+uint animation_lod_stagger @local;
+
+<*
+ Sets animation LOD throttling and baked-frame snapping on a character's player.
+
+ Staggers the first throttled update across 16 phase slots so a crowd configured
+ together spreads pose updates evenly across frames without adding fake clock time.
+
+ @param id : "Root node of an instantiated character"
+ @param update_interval : "Minimum seconds between pose updates (0 updates every frame)"
+ @param snap_frame : "Snap baked poses to the nearest frame (`pose_t = 0`) to halve joint reads"
+ @require update_interval >= 0.0f : "Update interval must not be negative"
+
+ @return "True if the node has an animation player"
+*>
+fn bool Scene.set_animation_lod(&self, NodeId id, float update_interval, bool snap_frame)
+{
+	AnimationPlayer* player = self.player(id);
+	if (player == null) return false;
+
+	player.update_interval = update_interval;
+	player.snap_frame = snap_frame;
+	player.accum_dt = 0.0f;
+	if (update_interval > 0.0f)
+	{
+		uint slot = animation_lod_stagger++ & 15;
+		player.next_update = update_interval * ((float)(16 - slot) / 16.0f);
+	}
+	else
+	{
+		player.next_update = 0.0f;
+	}
+
+	if (player.layer_count > 0 && self.assets != null)
+	{
+		Asset* owner = self.assets.slot(player.asset);
+		if (owner != null)
+		{
+			player.key_pose(self, owner);
+			self.update_sockets();
+		}
+	}
+	return true;
 }

@@ -189,6 +189,7 @@ fn void append_shader_abi(DString* out)
 {
 	append_shady_struct(out, UvVariant, "", WIRE_HOME);
 	append_shady_struct(out, SkinnedVertex, "@address", WIRE_HOME);
+	append_shady_struct(out, SkinJoint, "@address", WIRE_HOME);
 	append_shady_struct(out, MorphDelta, "@address", WIRE_HOME);
 	append_shady_struct(out, Light, "@address", WIRE_HOME);
 	append_shady_struct(out, ShadowGpuView, "@address", WIRE_HOME);

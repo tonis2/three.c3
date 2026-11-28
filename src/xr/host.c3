@@ -80,6 +80,8 @@ struct XrHost
 	bool passthrough_running;
 	// How the compositor filters the eye layer; none is bilinear.
 	xr::CompositionLayerSettingsFlagsFB layer_filter;
+	// XR_META_recommended_layer_resolution is enabled and loaded.
+	bool dynamic_resolution_supported;
 	XrInput input;
 }
 
@@ -118,7 +120,8 @@ fn void? XrHost.open(&self, XrPlatformInit platform, RenderProfile profile)
 	bool filter = layer_filter && (xr::has_extension(xr::FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME) ?? false);
 	bool auto_filter = filter && (layer_filter & AUTO_LAYER_FILTER)
 		&& (xr::has_extension(xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME) ?? false);
-	ZString[7] extensions;
+	bool dynamic_resolution = xr::has_extension(xr::EXT_RECOMMENDED_LAYER_RESOLUTION_META) ?? false;
+	ZString[8] extensions;
 	uint enabled = 0;
 	extensions[enabled++] = "XR_KHR_vulkan_enable";
 	$if env::ANDROID:
@@ -129,6 +132,7 @@ fn void? XrHost.open(&self, XrPlatformInit platform, RenderProfile profile)
 	if (passthrough) extensions[enabled++] = xr::FB_PASSTHROUGH_EXTENSION_NAME;
 	if (filter) extensions[enabled++] = xr::FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
 	if (auto_filter) extensions[enabled++] = xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME;
+	if (dynamic_resolution) extensions[enabled++] = xr::EXT_RECOMMENDED_LAYER_RESOLUTION_META;
 	if (filter)
 	{
 		self.layer_filter = auto_filter ? layer_filter : layer_filter & ~AUTO_LAYER_FILTER;
@@ -162,7 +166,10 @@ fn void? XrHost.open(&self, XrPlatformInit platform, RenderProfile profile)
 	};
 	xr::check(xr::cmd.create_instance(&info, &self.instance), "xrCreateInstance")!;
 	xr::load_instance(self.instance)!;
-	xr::load_extensions(self.instance, refresh_rate, performance, passthrough);
+	xr::load_extensions(self.instance, refresh_rate, performance, passthrough, dynamic_resolution);
+	self.dynamic_resolution_supported = dynamic_resolution
+		&& xr::cmd.get_recommended_layer_resolution_meta != null;
+	if (self.dynamic_resolution_supported) io::printn("xr: dynamic resolution supported");
 	xr::set_result_names(self.instance);
 
 	xr::InstanceProperties props = { .type = xr::TYPE_INSTANCE_PROPERTIES };
@@ -186,8 +193,9 @@ fn void? XrHost.open(&self, XrPlatformInit platform, RenderProfile profile)
 	self.recommended_eye_width = views[0].recommended_image_rect_width;
 	self.recommended_eye_height = views[0].recommended_image_rect_height;
 	self.render_scale = render_scale;
-	self.eye_width = max(4u, (uint)((float)self.recommended_eye_width * render_scale) & ~3u);
-	self.eye_height = max(4u, (uint)((float)self.recommended_eye_height * render_scale) & ~3u);
+	vk::Extent2D scaled = self.scaled_eye_extent(render_scale);
+	self.eye_width = scaled.width;
+	self.eye_height = scaled.height;
 	io::printfn("xr: eye %dx%d recommended, rendering %dx%d (scale %.2f)",
 		self.recommended_eye_width, self.recommended_eye_height, self.eye_width, self.eye_height, render_scale);
 
@@ -394,6 +402,68 @@ fn void XrHost.destroy_swapchain(&self)
 }
 
 <*
+ Single-eye pixel dimensions for `render_scale`, rounded down to a multiple of 4.
+
+ @param render_scale : "Fraction of the runtime's recommended single-eye size"
+ @require render_scale > 0 : "Scale must be positive"
+ @return "Rounded single-eye extent"
+*>
+fn vk::Extent2D XrHost.scaled_eye_extent(&self, float render_scale)
+{
+	return {
+		.width = max(4u, (uint)((float)self.recommended_eye_width * render_scale) & ~3u),
+		.height = max(4u, (uint)((float)self.recommended_eye_height * render_scale) & ~3u),
+	};
+}
+
+<*
+ Queries the runtime's recommended per-eye render dimensions for the next frame
+ via `XR_META_recommended_layer_resolution`.
+
+ @param predicted_display_time : "Predicted display time from xrWaitFrame"
+ @param [&out] out : "Receives the recommended dimensions when valid"
+ @return "True when the extension is active and the runtime returned valid dimensions"
+*>
+fn bool XrHost.recommended_resolution(&self, xr::Time predicted_display_time, xr::Extent2Di* out)
+{
+	*out = {};
+	if (!self.dynamic_resolution_supported || self.session == null || self.swapchain == null) return false;
+	xr::CompositionLayerProjectionView[2] eyes;
+	foreach (i, &eye : eyes)
+	{
+		*eye = {
+			.type = xr::TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
+			.pose = { .orientation = { .w = 1.0f } },
+			.sub_image = {
+				.swapchain = self.swapchain,
+				.image_rect = {
+					.offset = { self.layers > 1 ? 0 : (int)(i * self.eye_width), 0 },
+					.extent = { (int)self.eye_width, (int)self.eye_height },
+				},
+				.image_array_index = self.layers > 1 ? (uint)i : 0,
+			},
+		};
+	}
+	xr::CompositionLayerProjection layer = {
+		.type = xr::TYPE_COMPOSITION_LAYER_PROJECTION,
+		.space = self.space,
+		.view_count = 2,
+		.views = &eyes[0],
+	};
+	xr::RecommendedLayerResolutionGetInfoMETA info = {
+		.type = xr::TYPE_RECOMMENDED_LAYER_RESOLUTION_GET_INFO_META,
+		.layer = (xr::CompositionLayerBaseHeader*)&layer,
+		.predicted_display_time = predicted_display_time,
+	};
+	xr::RecommendedLayerResolutionMETA res = { .type = xr::TYPE_RECOMMENDED_LAYER_RESOLUTION_META };
+	if (xr::cmd.get_recommended_layer_resolution_meta(self.session, &info, &res) < 0) return false;
+	if (res.is_valid == 0) return false;
+	if (res.recommended_image_dimensions.width <= 0 || res.recommended_image_dimensions.height <= 0) return false;
+	*out = res.recommended_image_dimensions;
+	return true;
+}
+
+<*
  Rebuilds the XR swapchain at a new `render_scale` (between frames, after `gpu.wait_idle()`).
 
  @require render_scale >= 0.4f && render_scale <= 1.5f : "Scale out of range"
@@ -401,13 +471,12 @@ fn void XrHost.destroy_swapchain(&self)
 *>
 fn void? XrHost.rebuild_swapchain(&self, Gpu* gpu, float render_scale)
 {
-	uint next_w = max(4u, (uint)((float)self.recommended_eye_width * render_scale) & ~3u);
-	uint next_h = max(4u, (uint)((float)self.recommended_eye_height * render_scale) & ~3u);
+	vk::Extent2D next = self.scaled_eye_extent(render_scale);
 	self.render_scale = render_scale;
-	if (next_w == self.eye_width && next_h == self.eye_height && self.swapchain != null) return;
+	if (next.width == self.eye_width && next.height == self.eye_height && self.swapchain != null) return;
 	self.destroy_swapchain();
-	self.eye_width = next_w;
-	self.eye_height = next_h;
+	self.eye_width = next.width;
+	self.eye_height = next.height;
 	self.create_swapchain(gpu, self.layers)!;
 }
 

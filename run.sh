@@ -99,7 +99,7 @@ run_desktop_mode() {
 	exec "$THREE_BIN" "${mode_flags[@]}" --script "$entry" "${args[@]}"
 }
 
-TUNE_KEYS=(profile msaa xr_scale xr_filter direct_eyes prepass shadow_filter foveation scene_cache frame_skip timestamps lazy_post)
+TUNE_KEYS=(profile msaa xr_scale xr_filter direct_eyes prepass shadow_filter foveation scene_cache frame_skip timestamps lazy_post pipeline_stats dynamic_res compute_skin)
 
 quest_tune() {
 	[[ $# -ge 1 ]] || usage 2
@@ -130,13 +130,20 @@ case "${1:-}" in
 		shift
 		[[ $# -ge 1 ]] || usage 2
 		game="$1"; shift
-		action="${1:---run}"
+		qargs=()
+		action="--run"
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+				--push|--build|--install|--run) action="$1"; shift ;;
+				--fast) qargs+=(--fast); shift ;;
+				*) echo "run.sh: unknown quest action '$1' (expected --build, --install, --run, --push, or --fast)" >&2; exit 2 ;;
+			esac
+		done
 		case "$action" in
 			--push)    exec "$ROOT/packaging/android/quest.sh" push "$game" ;;
-			--build)   exec "$ROOT/packaging/android/build-apk.sh" "$game" ;;
-			--install) exec "$ROOT/packaging/android/build-apk.sh" "$game" --install ;;
-			--run)     exec "$ROOT/packaging/android/build-apk.sh" "$game" --run ;;
-			*)         echo "run.sh: unknown quest action '$action' (expected --build, --install, --run, or --push)" >&2; exit 2 ;;
+			--build)   exec "$ROOT/packaging/android/build-apk.sh" "$game" "${qargs[@]}" ;;
+			--install) exec "$ROOT/packaging/android/build-apk.sh" "$game" --install "${qargs[@]}" ;;
+			--run)     exec "$ROOT/packaging/android/build-apk.sh" "$game" --run "${qargs[@]}" ;;
 		esac
 		;;
 	quest-tune)  shift; quest_tune "$@" ;;

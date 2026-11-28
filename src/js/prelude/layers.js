@@ -756,14 +756,36 @@ function emit(base, layers, prelude = '') {
 	}
 	if (shared) body.push(`    float4 mask = ${read('layer_mask', mask_uv)};`);
 
+	// When a stack has two or more masked textured layers (terrain splat maps,
+	// multi-biome blends), most pixels have zero weight on most layers. Guarding
+	// each masked textured layer on `w > 0.001` with explicit surface gradients
+	// computed once outside the branches skips its texture fetches on zero-weight
+	// quads without breaking mip selection. Single-layer stacks stay on plain
+	// `Sample` with no extra derivatives.
+	const layerActive = (l) => (
+		l.animated || l.map !== null || l.tint.some(c => c !== 1)
+		|| l.normal !== null
+		|| l.emissive !== null || l.emissiveFactor.some(c => c !== 0)
+		|| surfaces(l)
+	);
+	const layerMasked = (l) => l.vertexMask || l.maskTexture !== null || l.channel !== null || l.animated;
+	const layerHasTaps = (l) => (
+		l.map !== null || l.normal !== null || l.emissive !== null
+		|| l.metallicRoughness !== null || (l.height !== null && l.depth !== 0)
+	);
+	const skippableCount = layers.filter(l => layerActive(l) && layerMasked(l) && layerHasTaps(l)).length;
+	const skipZeroWeight = skippableCount >= 2;
+	const needSurfaceGrad = skipZeroWeight
+		&& layers.some(l => layerActive(l) && layerMasked(l) && layerHasTaps(l) && !l.uvWindow);
+	if (needSurfaceGrad) {
+		body.push(`    float2 sdx = ddx(${surface});`);
+		body.push(`    float2 sdy = ddy(${surface});`);
+	}
+
 	for (const layer of layers) {
 		const i = layer.at;
 		let uv = layerUv(layer, surface);
-		// One tap of one of this layer's images. A windowed layer samples with the
-		// unwrapped gradients and every other layer samples the ordinary way, so
-		// nothing already written changes shape.
 		const grad = layer.uvWindow;
-		const tap = (name, at) => read(name, at, grad ? [`gx${i}`, `gy${i}`] : undefined);
 		body.push('');
 		body.push(`    // ${layer.label}${layer.blend === 'mix' ? '' : `, ${layer.blend}`}`);
 
@@ -796,6 +818,12 @@ function emit(base, layers, prelude = '') {
 			body.push(`    // nothing to apply — no map, tint, normal, emissive or surface`);
 			continue;
 		}
+
+		const skip = skipZeroWeight && layerMasked(layer) && layerHasTaps(layer);
+		const [su, sv] = layer.uvScale;
+		const scaledGrad = skip && !grad && (su !== 1 || sv !== 1);
+		const grads = grad || scaledGrad ? [`gx${i}`, `gy${i}`] : (skip ? ['sdx', 'sdy'] : undefined);
+		const tap = (name, at) => read(name, at, grads);
 
 		// The gradients a window samples with, declared once for the layer and
 		// before anything reads them. Nothing is emitted for a layer that has no
@@ -842,6 +870,15 @@ function emit(base, layers, prelude = '') {
 		}
 
 		body.push(`    float w${i} = ${w};`);
+		const indent = skip ? '        ' : '    ';
+		if (skip) {
+			body.push(`    if (w${i} > 0.001) {`);
+			if (scaledGrad) {
+				const scale = `float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`;
+				body.push(`${indent}float2 gx${i} = sdx * ${scale};`);
+				body.push(`${indent}float2 gy${i} = sdy * ${scale};`);
+			}
+		}
 
 		// This layer's own relief, on top of whatever the base already shifted.
 		// Local to the layer: it moves this layer's map, normal, emissive and
@@ -852,17 +889,16 @@ function emit(base, layers, prelude = '') {
 			const name = `layer${i}_height`;
 			textures[name] = layer.height;
 			layer.samplers.height = name;
-			body.push(`    float2 uv${i} = ${uv};`);
+			body.push(`${indent}float2 uv${i} = ${uv};`);
 			// The surface's own shift, in this layer's uv. A layer that tiles four
 			// times crosses four times as much of its image for the same metre of
 			// relief, which is the whole of the conversion — and a `frac` does not
 			// change it, so a windowed layer takes the same line.
-			const [su, sv] = layer.uvScale;
 			const shift = su !== 1 || sv !== 1
 				? `pshift * float2(${num(su, 'uvScale[0]')}, ${num(sv, 'uvScale[1]')})`
 				: 'pshift';
 			body.push(
-				`    uv${i} = parallax_step(uv${i}, ${shift}, `
+				`${indent}uv${i} = parallax_step(uv${i}, ${shift}, `
 				+ `${tap(name, `uv${i}`)}.r, ${num(layer.depth, `${layer.label}: bump`)});`
 			);
 			uv = `uv${i}`;
@@ -883,8 +919,8 @@ function emit(base, layers, prelude = '') {
 				layer.samplers.map = name;
 				parts.push(`${tap(name, uv)}.rgb`);
 			}
-			body.push(`    float3 b${i} = ${parts.join(' * ')};`);
-			body.push(`    c = lerp(c, ${BLEND[layer.blend](`c`, `b${i}`)}, w${i});`);
+			body.push(`${indent}float3 b${i} = ${parts.join(' * ')};`);
+			body.push(`${indent}c = lerp(c, ${BLEND[layer.blend](`c`, `b${i}`)}, w${i});`);
 		}
 
 		if (layer.normal !== null) {
@@ -895,7 +931,7 @@ function emit(base, layers, prelude = '') {
 			// averaged after decoding drift off the unit sphere and have to be
 			// renormalized per layer; mixing what was sampled costs one lerp and
 			// leaves exactly one decode at the bottom.
-			body.push(`    nt = lerp(nt, ${tap(name, uv)}.rgb, w${i});`);
+			body.push(`${indent}nt = lerp(nt, ${tap(name, uv)}.rgb, w${i});`);
 		}
 		if (layer.emissive !== null || layer.emissiveFactor.some(c => c !== 0)) {
 			const emissive = [];
@@ -908,7 +944,7 @@ function emit(base, layers, prelude = '') {
 				layer.samplers.emissive = name;
 				emissive.push(`${tap(name, uv)}.rgb`);
 			}
-			body.push(`    e = lerp(e, ${emissive.join(' * ')}, w${i});`);
+			body.push(`${indent}e = lerp(e, ${emissive.join(' * ')}, w${i});`);
 		}
 
 		// The second chain: roughness and metalness, mixed by the same weight and
@@ -926,7 +962,7 @@ function emit(base, layers, prelude = '') {
 				layer.samplers.metallicRoughness = name;
 				// glTF's packing, unchanged: green is roughness and blue is metalness,
 				// and red is the occlusion channel this renderer has no term for.
-				body.push(`    float2 mr${i} = ${tap(name, uv)}.gb;`);
+				body.push(`${indent}float2 mr${i} = ${tap(name, uv)}.gb;`);
 			}
 			const pair = [
 				['rough', 'roughness', layer.roughness, `mr${i}.x`],
@@ -942,10 +978,12 @@ function emit(base, layers, prelude = '') {
 				}
 				if (layer.metallicRoughness !== null) parts.push(sampled);
 				if (parts.length === 0) continue;
-				body.push(`    float ${into}${i} = ${parts.join(' * ')};`);
-				body.push(`    ${into} = lerp(${into}, ${BLEND[layer.blend](into, `${into}${i}`)}, w${i});`);
+				body.push(`${indent}float ${into}${i} = ${parts.join(' * ')};`);
+				body.push(`${indent}${into} = lerp(${into}, ${BLEND[layer.blend](into, `${into}${i}`)}, w${i});`);
 			}
 		}
+
+		if (skip) body.push('    }');
 	}
 
 	body.push('');

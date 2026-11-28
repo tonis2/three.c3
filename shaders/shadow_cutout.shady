@@ -39,13 +39,13 @@ const uint SLOT_BASE_COLOR = 0;
 // variant table. The `uv_transform` is deliberately not applied here - it
 // belongs to the fragment stage, which is where the draw path applies it - so
 // the cut-out and the surface sample the same texel.
-fn float2 shadow_uv(DrawRecord* draw, InstanceData instance, uint vid)
+fn float2 shadow_uv(DrawRecord* draw, uint iid, uint vid)
 {
 	float2 uv = float2(0.0, 0.0);
 	if ((draw.flags & FLAG_HAS_UVS) != 0) uv = draw.uvs[vid];
 	if (draw.uv_variant_count != 0)
 	{
-		uint variant = min(instance.variant, draw.uv_variant_count - 1);
+		uint variant = min(push.instances[iid].variant, draw.uv_variant_count - 1);
 		uv = variant_uv(uv, draw.uv_variants[variant]);
 	}
 	return uv;
@@ -103,7 +103,7 @@ fn CutoutOutput cutoutVertexMain(VertexIn input) @vertex
 {
 	CutoutOutput output;
 	output.sv_position = posed_clip(input.vid, input.iid, input.view);
-	output.uv = shadow_uv(push.draw, instance_at(push.instances, input.iid), input.vid);
+	output.uv = shadow_uv(push.draw, input.iid, input.vid);
 	return output;
 }
 
