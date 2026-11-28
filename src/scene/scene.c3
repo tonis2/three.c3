@@ -1726,76 +1726,34 @@ fn NodeId Scene.create_slot(&self, NodeId parent, AssetId asset, uint mesh, Stri
 
 	Node* node = &self.nodes[index];
 
-	// Everything but `children`: the child list is reused rather than freed and
-	// rebuilt. The generation is not reused either — it comes from
-	// `next_node_generation`, so a recycled slot gets a number no live node
-	// anywhere has, which is what makes a handle from another scene fail rather
-	// than resolve.
+	// Zero the whole slot while reusing its `children` list storage so newly
+	// added fields (like `had_world`/`prev_world`) can never stay stale on recycle.
 	uint generation = next_node_generation++;
-	node.children.clear();
-
-	node.name = name.len > 0 ? name.copy(mem) : "";
-	node.position = { 0, 0, 0 };
-	node.rotation = NO_ROTATION;
-	node.scale = { 1, 1, 1 };
-	node.parent = parent;
-	node.world = matrix::IDENTITY4{float};
-	node.normal = matrix::IDENTITY4{float};
-	node.asset = asset;
-	node.mesh = mesh;
-	// Reset for `material`'s reason: a recycled slot that kept its world box would
-	// report the *previous* occupant's mesh, at the previous occupant's transform,
-	// to the camera and to the shadow fit. `node.dirty` below gets there first for
-	// any node that is in the tree, because the walk clears this — so what this
-	// line is really for is the slot that is not: `Scene.bounds` reads the node
-	// *pool* rather than the tree, so a slot `update_branch` never reaches would
-	// answer with a stranger's box instead of with its own identity transform.
-	// And not slid from either: the fit is the stranger's mesh.
-	node.world_box_current = false;
-	node.world_box_fitted = false;
-	// Reset like everything else here, and for a sharper reason: this slot may have
-	// belonged to a node with a `ShaderMaterial`, and a new node inheriting it
-	// would draw with a stranger's shader.
-	node.material = DEFAULT_MATERIAL;
-	// White and row zero: the identity for both channels, so a node that never
-	// touches them draws exactly as it did before they existed. Reset here for
-	// `material`'s reason.
-	node.color = { 1, 1, 1, 1 };
-	node.variant = 0;
-	// Unskinned until somebody says otherwise, and reset for `material`'s reason: a
-	// recycled slot that kept a skin would pose a new node's mesh by a stranger's
-	// skeleton, reading joint matrices out of an asset it does not name.
-	node.skin = -1;
-	node.pose = 0;
-	node.pose_next = 0;
-	node.pose_t = 0;
-	node.morph = 0;
-	node.preskinned = false;
-	// Dynamic until a script says otherwise, and reset for `material`'s reason: a
-	// recycled slot that stayed static would put a new node into a shadow map
-	// nothing is going to rebuild.
-	node.static_caster = false;
-	// Reset for `material`'s reason: a recycled slot that kept a tile would read a
-	// stranger's rectangle out of the lightmap atlas.
-	node.lightmap = { 0, 0, 0, 0 };
-	node.lightmap_dirty = false;
-	node.lightmap_seed = false;
-	// Reset for `material`'s reason: a stranger's collider would go into the file.
-	node.file_body_asset = NO_ASSET;
-	node.file_body = -1;
-	node.visible = true;
-	node.world_visible = true;
-	// Reset for `material`'s reason: a recycled slot that stayed non-colliding
-	// would put a new node into the scene that nothing can sweep against.
-	node.collides = true;
-	// And the other way round: a recycled slot that stayed collision-only would
-	// be a mesh that never draws, which reads as a failed upload.
-	node.collision_only = false;
-	// A recycled slot that stayed non-blocking would be a wall walked through.
-	node.blocks = true;
-	node.dirty = true;
-	node.generation = generation;
-	node.alive = true;
+	List{NodeId} children = node.children;
+	children.clear();
+	*node = {
+		.name            = name.len > 0 ? name.copy(mem) : "",
+		.rotation        = NO_ROTATION,
+		.scale           = { 1, 1, 1 },
+		.parent          = parent,
+		.children        = children,
+		.world           = matrix::IDENTITY4{float},
+		.normal          = matrix::IDENTITY4{float},
+		.asset           = asset,
+		.mesh            = mesh,
+		.material        = DEFAULT_MATERIAL,
+		.color           = { 1, 1, 1, 1 },
+		.skin            = -1,
+		.file_body_asset = NO_ASSET,
+		.file_body       = -1,
+		.visible         = true,
+		.world_visible   = true,
+		.collides        = true,
+		.blocks          = true,
+		.dirty           = true,
+		.generation      = generation,
+		.alive           = true,
+	};
 
 	// One of the two halves of `Asset.refs` — see `attach_assets`. Counted after
 	// the slot is fully written, so a table that somehow reads back into the scene
@@ -1824,10 +1782,11 @@ fn void Scene.remove(&self, NodeId id)
 
 	if (id == self.root)
 	{
-		// Copy first: killing a child mutates `children` under the iteration.
-		NodeId[] children = node.children.to_tarray();
-		foreach (child : children) self.kill(child);
-		node.children.clear();
+		for (sz i = 0; i < node.children.len(); i++)
+		{
+			self.kill(self.nodes[id.index].children[i]);
+		}
+		self.nodes[id.index].children.clear();
 		return;
 	}
 
@@ -1852,11 +1811,11 @@ fn void Scene.kill(&self, NodeId id)
 	Node* node = self.node(id);
 	if (node == null) return;
 
-	NodeId[] children = node.children.to_tarray();
-	foreach (child : children) self.kill(child);
+	for (sz i = 0; i < self.nodes[id.index].children.len(); i++)
+	{
+		self.kill(self.nodes[id.index].children[i]);
+	}
 
-	// Re-resolved: `to_tarray` allocated, and the recursion above touched the pool
-	// through `self`.
 	node = self.node(id);
 	if (node == null) return;
 
@@ -2595,10 +2554,9 @@ fn bool same_linear_part(Matrix4f a, Matrix4f b) @local
  count and the pass that owns the buffer.
 
  Answering null means "put them in `Scene.instances`", which is what a caller with
- no device does and what a growth that failed falls back to. `plan.md` §19.5 is
- the entry: the list was written in full and then `mem::copy`ed into the mapped
- buffer, 635 KB a frame on the reference village, to produce bytes nothing else
- ever read.
+ no device does and what a growth that failed falls back to. Writing directly into
+ the mapped buffer avoids copying the full list every frame (635 KB a frame on the
+ reference village).
 
  @param count : `Exactly how many copies are about to be written. Never zero — an empty draw list returns before this is asked.`
  @return `Where to write them, or null to use the list instead.`
@@ -2637,8 +2595,6 @@ fn void Scene.update(
 {
 	self.update_world_matrices();
 	Frustum frustum = frustum_of(view_projection);
-	Frustum[] extra_frustums = alloc::new_array(tmem, Frustum, (sz)extra_view_projections.len);
-	foreach (i, projection : extra_view_projections) extra_frustums[i] = frustum_of(projection);
 	// Two frustums, and `cull` gates only the camera's. A script turning culling
 	// off is asking for its own draws not to be dropped; it is not asking the
 	// shadow pass to rasterise the far side of the level, and a light box smaller
@@ -2648,20 +2604,25 @@ fn void Scene.update(
 	// transparent draw is ordered by it whether or not anything was culled.
 	Frustum light;
 	if (light_view_projection != null) light = frustum_of(*light_view_projection);
-	self.build_draw_list(
-		assets,
-		self.cull ? &frustum : null,
-		transparent,
-		&frustum.planes[4],
-		margins,
-		light_view_projection != null ? &light : null,
-		false,
-		reserve,
-		reserve_context,
-		shadow_all,
-		extra_frustums,
-		casting
-	);
+	@pool()
+	{
+		Frustum[] extra_frustums = alloc::new_array(tmem, Frustum, (sz)extra_view_projections.len);
+		foreach (i, projection : extra_view_projections) extra_frustums[i] = frustum_of(projection);
+		self.build_draw_list(
+			assets,
+			self.cull ? &frustum : null,
+			transparent,
+			&frustum.planes[4],
+			margins,
+			light_view_projection != null ? &light : null,
+			false,
+			reserve,
+			reserve_context,
+			shadow_all,
+			extra_frustums,
+			casting
+		);
+	};
 	// Promoted here rather than inside `build_draw_list`, because this call is what
 	// "a frame happened" means and the other caller is a query. Assigned
 	// unconditionally: with `cull` off nothing was dropped and zero is the honest
@@ -3274,10 +3235,6 @@ fn collision::Aabb3 Scene.subtree_bounds(&self, Assets* assets, NodeId root, boo
 
 <*
  One node's contribution to `subtree_bounds`, then its children's.
-
- Copies the child list before recursing for `Scene.kill`'s reason: the walk
- reaches the node pool through `self`, and a `Node*` held across it is a pointer
- into a list that may have moved.
 *>
 fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* total, bool* found)
 {
@@ -3296,6 +3253,5 @@ fn void Scene.grow_bounds(&self, Assets* assets, NodeId id, collision::Aabb3* to
 		}
 	}
 
-	NodeId[] children = node.children.to_tarray();
-	foreach (child : children) self.grow_bounds(assets, child, total, found);
+	foreach (child : node.children) self.grow_bounds(assets, child, total, found);
 }

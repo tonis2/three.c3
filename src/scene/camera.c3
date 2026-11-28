@@ -551,7 +551,7 @@ struct ViewSphere
  the eye. `ShadowMap.fit` keys the cached static map on the fit, so a camera that
  only turned rebuilt every static caster in the scene — 39 draw calls over 4,800
  instances, 0.27 ms against a 0.10 ms steady pass, reported as a stutter while
- dragging the view and none while walking. `plan.md` §19.5 is the measurement.
+ dragging the view and none while walking.
 
  Two things had to go, and only one of them is the box. The radius is a function
  of the field of view, the aspect, the two depths and the orbit distance, so no

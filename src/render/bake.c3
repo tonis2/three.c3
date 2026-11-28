@@ -189,6 +189,7 @@ fn MaterialBaker? MeshPass.open_baker(&self, uint size)
 	if (gpu == null) return BAKE_NEEDS_A_DEVICE~;
 
 	MaterialBaker baker = { .pass = self, .gpu = gpu, .size = size };
+	defer catch baker.free();
 	baker.target.init(gpu, size, size)!;
 	baker.frame = gpu.create_dynamic(FrameBlock::size)!;
 	baker.instance = gpu.create_dynamic(Instance::size)!;
@@ -434,9 +435,9 @@ fn bool MaterialBaker.bake(&self, BakeRequest request, char[] out)
 	{
 		if (self.table_capacity < (sz)material.table.len)
 		{
-			if (self.table.buffer != null) self.table.free();
 			vk::Memory? grown = self.gpu.create_dynamic((sz)material.table.len);
 			if (catch grown) return false;
+			if (self.table.buffer != null) self.table.free();
 			self.table = grown;
 			self.table_capacity = (sz)material.table.len;
 		}
@@ -479,58 +480,57 @@ fn void MaterialBaker.dilate(&self, char[] texels)
 	sz count  = (sz)size * (sz)size;
 	if (self.spread.len < count) return;
 
-	// Zero is written, `uint::max` is "nothing has reached here yet". A written
-	// texel never moves, because nothing can be closer to it than itself.
 	for (sz i = 0; i < count; i++)
 	{
 		self.spread[i] = texels[i * 4 + 3] >= 128 ? 0 : uint::max;
 	}
+	chamfer_dilate(texels, size, 4, 3, self.spread);
+}
 
+<*
+ Two-pass chamfer sweep over a square image whose `spread` array is already
+ seeded with `0` for covered texels and `uint::max` for empty ones.
+ Copies the first `color_bytes` of each `texel_bytes`-wide texel without
+ touching its alpha channel.
+*>
+fn void chamfer_dilate(char[] texels, uint size, sz texel_bytes, sz color_bytes, uint[] spread)
+{
 	for (uint y = 0; y < size; y++)
 	{
 		for (uint x = 0; x < size; x++)
 		{
-			self.reach(texels, x, y, x - 1, y);
-			self.reach(texels, x, y, x, y - 1);
-			self.reach(texels, x, y, x - 1, y - 1);
-			self.reach(texels, x, y, x + 1, y - 1);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x, y, x - 1, y);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x, y, x, y - 1);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x, y, x - 1, y - 1);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x, y, x + 1, y - 1);
 		}
 	}
 	for (uint y = size; y > 0; y--)
 	{
 		for (uint x = size; x > 0; x--)
 		{
-			self.reach(texels, x - 1, y - 1, x, y - 1);
-			self.reach(texels, x - 1, y - 1, x - 1, y);
-			self.reach(texels, x - 1, y - 1, x, y);
-			self.reach(texels, x - 1, y - 1, x - 2, y);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x - 1, y - 1, x, y - 1);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x - 1, y - 1, x - 1, y);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x - 1, y - 1, x, y);
+			chamfer_reach(texels, size, texel_bytes, color_bytes, spread, x - 1, y - 1, x - 2, y);
 		}
 	}
 }
 
-<*
- One step of the sweep: take `from`'s colour if it stands closer to a written
- texel than anything that has reached `to` so far.
-
- The coordinates are unsigned and the neighbours are written as `x - 1`, so a
- step off the left or top edge wraps to a very large number rather than going
- negative — which the bounds check catches either way. Written that way because
- the alternative is signed coordinates everywhere and a cast at every index.
-*>
-fn void MaterialBaker.reach(&self, char[] texels, uint x, uint y, uint fx, uint fy)
+fn void chamfer_reach(char[] texels, uint size, sz texel_bytes, sz color_bytes, uint[] spread,
+	uint x, uint y, uint fx, uint fy) @local
 {
-	uint size = self.size;
 	if (x >= size || y >= size || fx >= size || fy >= size) return;
 
 	sz to   = (sz)y * (sz)size + (sz)x;
 	sz from = (sz)fy * (sz)size + (sz)fx;
-	if (self.spread[from] == uint::max) return;
+	if (spread[from] == uint::max) return;
 
-	uint reached = self.spread[from] + 1;
-	if (reached >= self.spread[to]) return;
+	uint reached = spread[from] + 1;
+	if (reached >= spread[to]) return;
 
-	self.spread[to] = reached;
-	texels[to * 4] = texels[from * 4];
-	texels[to * 4 + 1] = texels[from * 4 + 1];
-	texels[to * 4 + 2] = texels[from * 4 + 2];
+	spread[to] = reached;
+	sz dst = to * texel_bytes;
+	sz src = from * texel_bytes;
+	texels[dst : color_bytes] = texels[src : color_bytes];
 }

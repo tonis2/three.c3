@@ -204,6 +204,9 @@ fn void Renderer.free_panels(&self)
 {
 	while (self.panels.len() > 0) self.free_panel(self.panels[^1]);
 	self.panels.free();
+	// `List.free` leaves `allocator` set; clear it so a reused `Renderer`
+	// re-initialises against the current allocator.
+	self.panels = {};
 }
 
 <*

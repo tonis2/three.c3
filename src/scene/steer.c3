@@ -172,7 +172,7 @@ fn Vec3 separation_of(AgentGrid* grid, float[] positions, int count, int agent, 
 			Vec3 away  = here - (Vec3) { positions[other * 3], positions[other * 3 + 1], positions[other * 3 + 2] };
 			float d_sq = away.length_sq();
 			if (d_sq >= r_sq) continue;
-			push += taper(away, d_sq, radius);
+			push += taper(away, d_sq, radius, agent);
 			counted++;
 		}
 		return push;
@@ -185,15 +185,15 @@ fn Vec3 separation_of(AgentGrid* grid, float[] positions, int count, int agent, 
 		math::clamp((int)math::floor(here.z / grid.cell) - grid.origin.z, 0, grid.dims.z - 1),
 	};
 
-	for (int dz = -reach; dz <= reach && counted < STEER_MAX_NEIGHBOURS; dz++)
+	for OUTER: (int dz = -reach; dz <= reach; dz++)
 	{
 		int z = centre.z + dz;
 		if (z < 0 || z >= grid.dims.z) continue;
-		for (int dy = -reach; dy <= reach && counted < STEER_MAX_NEIGHBOURS; dy++)
+		for (int dy = -reach; dy <= reach; dy++)
 		{
 			int y = centre.y + dy;
 			if (y < 0 || y >= grid.dims.y) continue;
-			for (int dx = -reach; dx <= reach && counted < STEER_MAX_NEIGHBOURS; dx++)
+			for (int dx = -reach; dx <= reach; dx++)
 			{
 				int x = centre.x + dx;
 				if (x < 0 || x >= grid.dims.x) continue;
@@ -210,9 +210,9 @@ fn Vec3 separation_of(AgentGrid* grid, float[] positions, int count, int agent, 
 					};
 					float d_sq = away.length_sq();
 					if (d_sq >= r_sq) continue;
-					push += taper(away, d_sq, radius);
+					push += taper(away, d_sq, radius, agent);
 					counted++;
-					if (counted >= STEER_MAX_NEIGHBOURS) break;
+					if (counted >= STEER_MAX_NEIGHBOURS) break OUTER;
 				}
 			}
 		}
@@ -221,7 +221,7 @@ fn Vec3 separation_of(AgentGrid* grid, float[] positions, int count, int agent, 
 	return push;
 }
 
-fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
+fn Vec3 taper(Vec3 away, float distance_sq, float radius, int agent) @local
 {
 	float distance = math::sqrt(distance_sq);
 	if (distance < 1e-5f)
@@ -230,7 +230,8 @@ fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
 		// are. Any direction resolves it and none is more correct, so the
 		// agent's index decides — a fixed direction would leave the pair pushing
 		// the same way for ever and never separating.
-		return { 0, 0, 0 };
+		float angle = (float)agent * 2.3999632f;
+		return { math::cos(angle), 0.0f, math::sin(angle) };
 	}
 	return (away / distance) * ((radius - distance) / radius);
 }
@@ -243,7 +244,7 @@ fn Vec3 taper(Vec3 away, float distance_sq, float radius) @local
  @param nav : `The baked mesh the field belongs to, or null for goal-seeking only.`
  @param field : `A solved flow field over that mesh, or empty.`
 *>
-fn void steer_agents(float[] positions, float[] out, NavMesh* nav, float[] field, SteerOptions options)
+fn void steer_agents(float[] positions, float[] out, NavMesh* nav, float[] field, SteerOptions options) => @pool()
 {
 	int count = (int)math::min(positions.len / 3, out.len / 3);
 	if (count <= 0) return;

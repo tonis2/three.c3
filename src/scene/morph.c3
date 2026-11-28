@@ -114,6 +114,18 @@ fn bool Scene.set_morph_weights(&self, NodeId id, float[] values)
 
 	if (entry == null)
 	{
+		bool nonzero = false;
+		foreach (i, value : values)
+		{
+			if (i >= targets) break;
+			if (value != 0)
+			{
+				nonzero = true;
+				break;
+			}
+		}
+		if (!nonzero) return true;
+
 		MorphWeights fresh = { .node = id };
 		fresh.weights.init(mem, targets);
 		for (uint i = 0; i < targets; i++) fresh.weights.push(0);
@@ -127,16 +139,8 @@ fn bool Scene.set_morph_weights(&self, NodeId id, float[] values)
 		entry.weights[i] = value;
 	}
 
-	bool driven = false;
-	foreach (weight : entry.weights)
-	{
-		if (weight != 0)
-		{
-			driven = true;
-			break;
-		}
-	}
-	if (!driven) self.clear_morph_weights(id);
+	foreach (weight : entry.weights) if (weight != 0) return true;
+	self.clear_morph_weights(id);
 	return true;
 }
 

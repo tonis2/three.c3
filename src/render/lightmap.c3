@@ -66,7 +66,7 @@
 
  ## Persistence
 
- `MeshPass.save_lightmap` writes version 7 of the atlas and its tile table beside
+ `MeshPass.save_lightmap` writes the atlas and its tile table beside
  the assets as `LIGHTMAP_MAGIC`: a header, one record per tile naming the
  receiver by node
  name, mesh index and copy index, and the tiles' texels packed one after another
@@ -540,7 +540,9 @@ fn void MeshPass.update_lightmap(&self, Gpu* gpu)
 		signatures.tinit();
 		foreach (&tile : map.tiles)
 		{
+			if (tile.node >= self.scene.nodes.len()) continue;
 			Node* node = &self.scene.nodes[tile.node];
+			if (!node.alive || node.generation != tile.generation) continue;
 			LightmapMaterialKey key = {
 				.material = node.material,
 				.asset = node.asset.index,
@@ -947,68 +949,20 @@ fn bool lightmap_pack(LightmapTile[] tiles, uint side) @local
 }
 
 <*
- Fills the texels no triangle covered, inside one tile.
-
- The two-pass chamfer sweep `render/bake.c3` explains, over an RGBA16F rectangle
- of a larger image. It only ever *copies* a texel's colour, so it does not decode
- the halves; the alpha is what says which texels were written, and it is left
- exactly where the rasteriser put it.
+ Fills the texels no triangle covered inside one packed RGBA16F tile.
 *>
-fn void lightmap_dilate(char[] texels, uint stride, LightmapTile tile, uint[] spread) @local
+fn void lightmap_dilate(char[] texels, uint size, uint[] spread) @local
 {
-	uint size = tile.size;
 	sz count = (sz)size * (sz)size;
 	if (spread.len < count) return;
 
-	for (uint y = 0; y < size; y++)
+	for (sz i = 0; i < count; i++)
 	{
-		for (uint x = 0; x < size; x++)
-		{
-			sz at = ((sz)(tile.y + y) * (sz)stride + (sz)(tile.x + x)) * (sz)LIGHTMAP_TEXEL_BYTES;
-			bool written = texels[at + 6] != 0 || texels[at + 7] != 0;
-			spread[(sz)y * (sz)size + (sz)x] = written ? 0 : uint::max;
-		}
+		sz at = i * (sz)LIGHTMAP_TEXEL_BYTES;
+		bool written = texels[at + 6] != 0 || texels[at + 7] != 0;
+		spread[i] = written ? 0 : uint::max;
 	}
-	for (uint y = 0; y < size; y++)
-	{
-		for (uint x = 0; x < size; x++)
-		{
-			lightmap_reach(texels, stride, tile, spread, x, y, x - 1, y);
-			lightmap_reach(texels, stride, tile, spread, x, y, x, y - 1);
-			lightmap_reach(texels, stride, tile, spread, x, y, x - 1, y - 1);
-			lightmap_reach(texels, stride, tile, spread, x, y, x + 1, y - 1);
-		}
-	}
-	for (uint y = size; y > 0; y--)
-	{
-		for (uint x = size; x > 0; x--)
-		{
-			lightmap_reach(texels, stride, tile, spread, x - 1, y - 1, x, y - 1);
-			lightmap_reach(texels, stride, tile, spread, x - 1, y - 1, x - 1, y);
-			lightmap_reach(texels, stride, tile, spread, x - 1, y - 1, x, y);
-			lightmap_reach(texels, stride, tile, spread, x - 1, y - 1, x - 2, y);
-		}
-	}
-}
-
-// One step of the sweep. The coordinates are tile-local and unsigned, so a step
-// off an edge wraps to a very large number and the bounds test catches it either
-// way — `MaterialBaker.reach`'s arrangement exactly.
-fn void lightmap_reach(char[] texels, uint stride, LightmapTile tile, uint[] spread,
-	uint x, uint y, uint fx, uint fy) @local
-{
-	uint size = tile.size;
-	if (x >= size || y >= size || fx >= size || fy >= size) return;
-	sz to = (sz)y * (sz)size + (sz)x;
-	sz from = (sz)fy * (sz)size + (sz)fx;
-	if (spread[from] == uint::max) return;
-	uint reached = spread[from] + 1;
-	if (reached >= spread[to]) return;
-	spread[to] = reached;
-
-	sz dst = ((sz)(tile.y + y) * (sz)stride + (sz)(tile.x + x)) * (sz)LIGHTMAP_TEXEL_BYTES;
-	sz src = ((sz)(tile.y + fy) * (sz)stride + (sz)(tile.x + fx)) * (sz)LIGHTMAP_TEXEL_BYTES;
-	for (sz i = 0; i < 6; i++) texels[dst + i] = texels[src + i];
+	chamfer_dilate(texels, size, (sz)LIGHTMAP_TEXEL_BYTES, 6, spread);
 }
 
 <*
@@ -1498,36 +1452,34 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			.setColorAttachments({ colour });
 		vk::cmdBeginRendering(cmd, &rendering);
 
-		vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
-		gpu.texture_table.bind(cmd, pipeline.layout);
-
-		self.push_lightmap_samplers(cmd, pipeline);
-
 		// A tile the rendering loaded rather than cleared holds the last bake, margin
 		// and all, and the sweep below reads the alpha to decide which texels a
 		// triangle covered. Cleared here, whole rectangle, so it reads the same as a
 		// tile in a fresh atlas.
 		if (!whole)
 		{
-			vk::ClearAttachment blank = {
-				.aspectMask = IMAGE_ASPECT_COLOR_BIT,
-				.colorAttachment = 0,
-				.clearValue = { .color = { .float32 = { 0, 0, 0, 0 } } },
-			};
-			vk::ClearRect[] blanks = mem::new_array(vk::ClearRect, tiles.len);
-			defer mem::free(blanks);
-			foreach (i, tile : tiles)
+			@pool()
 			{
-				blanks[i] = {
-					.rect = { .offset = { (int)tile.x, (int)tile.y },
-						.extent = { tile.size, tile.size } },
-					.baseArrayLayer = 0,
-					.layerCount = 1,
+				vk::ClearAttachment blank = {
+					.aspectMask = IMAGE_ASPECT_COLOR_BIT,
+					.colorAttachment = 0,
+					.clearValue = { .color = { .float32 = { 0, 0, 0, 0 } } },
 				};
-			}
-			vk::cmdClearAttachments(cmd, 1, &blank, (uint)blanks.len, blanks.ptr);
+				vk::ClearRect[] blanks = alloc::new_array(tmem, vk::ClearRect, tiles.len);
+				foreach (i, tile : tiles)
+				{
+					blanks[i] = {
+						.rect = { .offset = { (int)tile.x, (int)tile.y },
+							.extent = { tile.size, tile.size } },
+						.baseArrayLayer = 0,
+						.layerCount = 1,
+					};
+				}
+				vk::cmdClearAttachments(cmd, 1, &blank, (uint)blanks.len, blanks.ptr);
+			};
 		}
 
+		MeshPipeline* bound = null;
 		foreach (i, tile : tiles)
 		{
 			Node* node = &self.scene.nodes[tile.node];
@@ -1543,9 +1495,13 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 			set_viewport_rect(cmd, rect, false);
 
 			MeshPipeline* selected = tile_pipelines[i];
-			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, selected.handle);
-			gpu.texture_table.bind(cmd, selected.layout);
-			self.push_lightmap_samplers(cmd, selected);
+			if (selected != bound)
+			{
+				vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, selected.handle);
+				gpu.texture_table.bind(cmd, selected.layout);
+				self.push_lightmap_samplers(cmd, selected);
+				bound = selected;
+			}
 			MeshPush push = {
 				.frame = (FrameBlock*)map.frame.address,
 				.instances = (Instance*)(map.instances.address + (ulong)i * Instance::size),
@@ -1581,15 +1537,16 @@ fn void? MeshPass.record_lightmap(&self, Gpu* gpu, LightmapTile[] tiles, uint si
 	char[] texels = ((char*)map.staging.data())[:packed];
 	uint widest = 0;
 	foreach (tile : tiles) if (tile.size > widest) widest = tile.size;
-	uint[] spread = mem::new_array(uint, (sz)widest * (sz)widest);
-	defer mem::free(spread);
-	foreach (i, tile : tiles)
+	@pool()
 	{
-		sz at = (sz)regions[i].bufferOffset;
-		sz bytes = (sz)tile.size * (sz)tile.size * (sz)LIGHTMAP_TEXEL_BYTES;
-		// Tile-local: packed, the rectangle is the whole of its own little image.
-		lightmap_dilate(texels[at:bytes], tile.size, { .x = 0, .y = 0, .size = tile.size }, spread);
-	}
+		uint[] spread = alloc::new_array(tmem, uint, (sz)widest * (sz)widest);
+		foreach (i, tile : tiles)
+		{
+			sz at = (sz)regions[i].bufferOffset;
+			sz bytes = (sz)tile.size * (sz)tile.size * (sz)LIGHTMAP_TEXEL_BYTES;
+			lightmap_dilate(texels[at:bytes], tile.size, spread);
+		}
+	};
 
 	gpu.handle.@single_time_command(queue: gpu.graphics ; vk::CommandBuffer cmd)
 	{
@@ -1831,7 +1788,9 @@ fn LightmapFileResult? MeshPass.save_lightmap(&self, String path)
 		LightmapFileTile* out = (LightmapFileTile*)&file[LightmapHeader::size];
 		foreach (i, tile : tiles)
 		{
+			if (tile.node >= self.scene.nodes.len()) return LIGHTMAP_NO_ATLAS~;
 			Node* node = &self.scene.nodes[tile.node];
+			if (!node.alive || node.generation != tile.generation) return LIGHTMAP_NO_ATLAS~;
 			LightmapIdentity who = named[tile.node];
 			out[i] = {
 				.name = who.name,
@@ -1911,16 +1870,33 @@ fn LightmapFileResult? MeshPass.load_lightmap(&self, String path)
 	if (header.version != LIGHTMAP_FILE_VERSION) return LIGHTMAP_BAD_FILE~;
 	if (header.format != (uint)LIGHTMAP_FORMAT) return LIGHTMAP_BAD_FILE~;
 	if (header.tiles == 0 || header.side == 0) return LIGHTMAP_BAD_FILE~;
+	if ((ulong)header.tiles > (ulong)(file.len - LightmapHeader::size) / LightmapFileTile::size)
+	{
+		return LIGHTMAP_BAD_FILE~;
+	}
 	usz records = (usz)header.tiles * LightmapFileTile::size;
+	if ((ulong)header.texel_bytes != (ulong)(file.len - LightmapHeader::size - records))
+	{
+		return LIGHTMAP_BAD_FILE~;
+	}
 	usz total = LightmapHeader::size + records + (usz)header.texel_bytes;
-	if (file.len != total) return LIGHTMAP_BAD_FILE~;
 	if (hash_bytes(KEY_SEED, &file[LightmapHeader::size], total - LightmapHeader::size) != header.hash)
 	{
 		return LIGHTMAP_BAD_FILE~;
 	}
+	LightmapFileTile* saved = (LightmapFileTile*)&file[LightmapHeader::size];
+	ulong expected_texels = 0;
+	for (uint j = 0; j < header.tiles; j++)
+	{
+		uint s = saved[j].size;
+		if (s <= 2 * LIGHTMAP_TILE_PAD) return LIGHTMAP_BAD_FILE~;
+		if ((ulong)saved[j].x + (ulong)s > (ulong)header.side) return LIGHTMAP_BAD_FILE~;
+		if ((ulong)saved[j].y + (ulong)s > (ulong)header.side) return LIGHTMAP_BAD_FILE~;
+		expected_texels += (ulong)s * (ulong)s * (ulong)LIGHTMAP_TEXEL_BYTES;
+	}
+	if (expected_texels != (ulong)header.texel_bytes) return LIGHTMAP_BAD_FILE~;
 	if (header.signature != self.baked_light_signature()) return LIGHTMAP_STALE~;
 
-	LightmapFileTile* saved = (LightmapFileTile*)&file[LightmapHeader::size];
 	Lightmap* map = &self.lightmap;
 	uint dirty = 0;
 

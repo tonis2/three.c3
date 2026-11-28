@@ -23,6 +23,7 @@ module three;
 
 import std::collections::list;
 import std::io::file;
+import std::math;
 import fastjs::js;
 import fastjs::js::opt;
 
@@ -256,7 +257,10 @@ fn Compute*? runtime_compute(JsRuntime* self) @local
 fn BufferHandle? js_compute_create_buffer(JsRuntime* self, double size_number, char[] data)
 {
 	Compute* compute = runtime_compute(self)!;
-	if (size_number <= 0) return self.js.fail("three.compute.buffer(size) wants a positive size in bytes")~;
+	if (!math::is_finite(size_number) || size_number <= 0)
+	{
+		return self.js.fail("three.compute.buffer(size) wants a positive size in bytes")~;
+	}
 	usz size = (usz)size_number;
 
 	uint index = storage_slot_for(self);
@@ -285,7 +289,16 @@ fn BufferHandle? js_compute_create_buffer(JsRuntime* self, double size_number, c
 		// Zeroes, as a script expects of a buffer it has not written: the memory
 		// may be a freed buffer's, and a kernel that accumulates into it would add to
 		// that buffer's numbers. Recorded, so it costs nothing until the next submit.
-		if (upload.len == 0) compute.clear(buffer);
+		if (upload.len == 0)
+		{
+			if (catch compute.clear(buffer))
+			{
+				buffer.free();
+				alloc::free(mem, buffer);
+				slot.live = false;
+				return self.js.fail("three.compute.buffer could not clear the new buffer")~;
+			}
+		}
 
 		slot.buffer = buffer;
 		slot.live   = true;
@@ -465,12 +478,22 @@ fn uint[<3>] js_compute_kernel_threads(JsRuntime* self, KernelRef ref)
 
  @return? js::THREW
 *>
-fn js::Value? js_compute_spirv(JsRuntime* self, String asked)
+fn js::Value? js_compute_spirv(JsRuntime* self, String asked) => @pool()
 {
 	if (asked.len == 0) return self.js.fail("three.compute.spirv(path) wants the module's path")~;
 
-	char[]? bytes = file::load(tmem, asked);
-	if (catch err = bytes) return self.js.fail("could not read %s: %s", asked, err)~;
+	String? opening = self.resolve_asset(asked, tmem);
+	if (catch err = opening)
+	{
+		if (err == js::MODULE_ESCAPES_ROOT)
+		{
+			return self.js.fail("cannot read '%s': it has more '..' than there is path above it", asked)~;
+		}
+		return self.js.fail("cannot read '%s': %s", asked, err)~;
+	}
+
+	char[]? bytes = file::load(tmem, opening);
+	if (catch err = bytes) return self.js.fail("could not read %s: %s", self.blame(asked, opening), err)~;
 	if (bytes.len < 4 || *(uint*)bytes.ptr != SPIRV_MAGIC)
 	{
 		return self.js.fail("%s is not a SPIR-V module - three.compute.spirv reads modules, and a shading source "
@@ -741,7 +764,7 @@ fn void? js_compute_fill(JsRuntime* self, StorageRef ref, double offset_number, 
 *>
 fn void? js_compute_barrier(JsRuntime* self)
 {
-	runtime_compute(self)!.barrier();
+	if (catch runtime_compute(self)!.barrier()) return self.js.fail("the compute barrier could not be recorded")~;
 }
 
 <*

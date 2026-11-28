@@ -651,7 +651,7 @@ fn void build_cylinder(GeometryBuilder* out, Primitive shape) @local
 	uint rows           = shape.v;
 
 	float half  = height * 0.5f;
-	float slope = (radius_bottom - radius_top) / height;
+	float slope = height > 1e-8f ? (radius_bottom - radius_top) / height : 0.0f;
 	uint first  = (uint)out.positions.len();
 
 	for (uint iy = 0; iy <= rows; iy++)

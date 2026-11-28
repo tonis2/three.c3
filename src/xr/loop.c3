@@ -111,19 +111,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 	xr::Time first_time = 0;
 	// For the once-every-few-seconds line saying how it is going.
 	Clock report_since = clock::now();
-	uint frames_drawn;
-	long busy_ns;
-	long waited_ns;
-	FrameTiming gpu_sum;
-	// How the cpu number splits, for the second report line: the script's spans,
-	// the engine's own work, and the runtime's pacing wait, which "cpu" leaves out.
-	long script_ns;
-	long solver_ns;
-	long engine_ns;
-	long paced_ns;
-	ulong drawn_calls;
-	ulong drawn_instances;
-	ulong drawn_triangles;
+	XrFrameStats stats;
 
 	while (app.destroy_requested == 0 && !host.exit_wanted)
 	{
@@ -146,7 +134,7 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 		xr::check(xr::cmd.wait_frame(host.session, &wait_info, &frame), "xrWaitFrame")!;
 		xr::FrameBeginInfo begin_info = { .type = xr::TYPE_FRAME_BEGIN_INFO };
 		xr::check(xr::cmd.begin_frame(host.session, &begin_info), "xrBeginFrame")!;
-		paced_ns += (long)pacing.to_now();
+		stats.paced_ns += (long)pacing.to_now();
 
 		Clock busy = clock::now();
 		if (first_time == 0) first_time = frame.predicted_display_time;
@@ -189,9 +177,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 			drawn = true;
 		}
 		runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
-		script_ns += runtime.frame_spend.script_ns();
-		solver_ns += runtime.frame_spend.solver_ns;
-		engine_ns += runtime.frame_spend.host_ns;
+		stats.script_ns += runtime.frame_spend.script_ns();
+		stats.solver_ns += runtime.frame_spend.solver_ns;
+		stats.engine_ns += runtime.frame_spend.host_ns;
 
 		end_frame(host, &frame, &views, drawn)!;
 		print_frame_output(runtime, &said);
@@ -199,54 +187,57 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 
 		if (drawn)
 		{
-			frames_drawn++;
+			stats.frames_drawn++;
 			FrameTiming gpu = renderer.timing();
-			gpu_sum.total += gpu.total;
-			gpu_sum.prepare += gpu.prepare;
-			gpu_sum.shadow += gpu.shadow;
-			gpu_sum.occlusion += gpu.occlusion;
-			gpu_sum.prepass += gpu.prepass;
-			gpu_sum.scene += gpu.scene;
-			gpu_sum.post += gpu.post;
-			gpu_sum.present += gpu.present;
-			drawn_calls += renderer.pass.drawn_calls;
-			drawn_instances += renderer.pass.drawn_instances;
-			drawn_triangles += renderer.pass.drawn_triangles;
+			stats.gpu_sum.total += gpu.total;
+			stats.gpu_sum.prepare += gpu.prepare;
+			stats.gpu_sum.shadow += gpu.shadow;
+			stats.gpu_sum.occlusion += gpu.occlusion;
+			stats.gpu_sum.prepass += gpu.prepass;
+			stats.gpu_sum.scene += gpu.scene;
+			stats.gpu_sum.post += gpu.post;
+			stats.gpu_sum.present += gpu.present;
+			stats.drawn_calls += renderer.pass.drawn_calls;
+			stats.drawn_instances += renderer.pass.drawn_instances;
+			stats.drawn_triangles += renderer.pass.drawn_triangles;
 		}
-		busy_ns += (long)busy.to_now() - wait_ns;
-		waited_ns += wait_ns;
+		stats.busy_ns += (long)busy.to_now() - wait_ns;
+		stats.waited_ns += wait_ns;
 		long since_ns = (long)report_since.to_now();
 		if (since_ns >= 5_000_000_000)
 		{
 			double seconds = (double)since_ns / 1e9;
-			double n = frames_drawn > 0 ? (double)frames_drawn : 1.0;
+			double n = stats.frames_drawn > 0 ? (double)stats.frames_drawn : 1.0;
 			io::printfn("xr: %.1f fps, cpu %.2f ms, fence wait %.2f ms, gpu %.2f ms (prepare %.2f, shadow %.2f, ao %.2f, prepass %.2f, scene %.2f, post %.2f, present %.2f), hands L:%s R:%s",
-				frames_drawn / seconds, (double)busy_ns / 1e6 / n, (double)waited_ns / 1e6 / n,
-				gpu_sum.total / n, gpu_sum.prepare / n, gpu_sum.shadow / n, gpu_sum.occlusion / n,
-				gpu_sum.prepass / n, gpu_sum.scene / n, gpu_sum.post / n, gpu_sum.present / n,
+				stats.frames_drawn / seconds, (double)stats.busy_ns / 1e6 / n, (double)stats.waited_ns / 1e6 / n,
+				stats.gpu_sum.total / n, stats.gpu_sum.prepare / n, stats.gpu_sum.shadow / n, stats.gpu_sum.occlusion / n,
+				stats.gpu_sum.prepass / n, stats.gpu_sum.scene / n, stats.gpu_sum.post / n, stats.gpu_sum.present / n,
 				hand_word(&runtime.hands, Hand.LEFT), hand_word(&runtime.hands, Hand.RIGHT));
 			// The engine part also holds xrWaitSwapchainImage and the submit; the
 			// pacing wait is xrWaitFrame and xrBeginFrame, outside "cpu" above.
 			io::printfn("xr: cpu split: js %.2f ms (solver %.2f), engine %.2f ms, paced %.2f ms; drawn %.0f calls, %.0f copies, %.0fk triangles",
-				(double)script_ns / 1e6 / n, (double)solver_ns / 1e6 / n, (double)engine_ns / 1e6 / n, (double)paced_ns / 1e6 / n,
-				(double)drawn_calls / n, (double)drawn_instances / n, (double)drawn_triangles / 1e3 / n);
+				(double)stats.script_ns / 1e6 / n, (double)stats.solver_ns / 1e6 / n, (double)stats.engine_ns / 1e6 / n, (double)stats.paced_ns / 1e6 / n,
+				(double)stats.drawn_calls / n, (double)stats.drawn_instances / n, (double)stats.drawn_triangles / 1e3 / n);
 			report_since = clock::now();
-			frames_drawn = 0;
-			busy_ns = 0;
-			waited_ns = 0;
-			gpu_sum = {};
-			script_ns = 0;
-			solver_ns = 0;
-			engine_ns = 0;
-			paced_ns = 0;
-			drawn_calls = 0;
-			drawn_instances = 0;
-			drawn_triangles = 0;
+			stats = {};
 		}
 	}
 }
 
-// The head as the point between the two eyes, turned the way the left one is.
+struct XrFrameStats @local
+{
+	uint frames_drawn;
+	long busy_ns;
+	long waited_ns;
+	FrameTiming gpu_sum;
+	long script_ns;
+	long solver_ns;
+	long engine_ns;
+	long paced_ns;
+	ulong drawn_calls;
+	ulong drawn_instances;
+	ulong drawn_triangles;
+}
 fn HandPose between_eyes(xr::View[2] views) @local
 {
 	xr::Posef l = views[0].pose;

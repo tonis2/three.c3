@@ -91,17 +91,13 @@ fn uint MaterialUniform.row_count(self) => max(self.rows, 1u);
 const uint MATERIAL_UNIFORM_BUDGET = 104;
 
 <*
- The generated pointer a spilled uniform table hangs off, and the struct it
- points at.
+ The generated pointer a spilled uniform table hangs off.
 
- A name rather than a binding index, because it is a *field of the push block*
- and reflection resolves it there — `shader/reflect.c3` follows exactly this one
- pointer and nothing else, which keeps `FrameBlock`, `Instance` and `Draw` out of
- the field list. Tagged apart from the uniforms, so a script may still call one
- `material_table`.
+ A name rather than a binding index, because it is a field of the push block
+ and reflection resolves it there. Tagged apart from the uniforms, so a script
+ may still call one `material_table`.
 *>
 const String MATERIAL_TABLE_FIELD = "material_table";
-const String MATERIAL_TABLE_TYPE  = "MaterialTable";
 
 <*
  How large a spilled uniform table may be.
@@ -235,13 +231,7 @@ fn void material_note(String message) @local
 }
 
 <*
- What the uniforms cost in the push block.
-
- `sum(components) * 4`, with no alignment arithmetic: the compile passes
- `-force-glsl-scalar-layout`, under which a float3 is twelve bytes at four-byte
- alignment and every field here is a multiple of four. The offsets are still not
- computed anywhere — reflection reads them back off the module that will run,
- which is the only version of them that cannot be wrong.
+ What the uniforms cost in the push block under scalar layout (`sum(components * rows) * 4`).
 *>
 fn uint material_uniform_bytes(MaterialUniform[] uniforms)
 {
@@ -277,10 +267,10 @@ fn uint material_rows(MaterialUniform[] uniforms)
  by, and the budget last because "these seventeen floats do not fit" is only
  useful once each of them is known to be a real uniform.
 
- @return ? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return ? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is one the generated module already uses, is a keyword, is repeated, or is not 1 to 4 floats wide.`
- @return ? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
- @return ? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
+ @return? MATERIAL_BODY_EMPTY : `The fragment body is empty or only whitespace.`
+ @return? MATERIAL_NAME_INVALID : `A uniform or texture name is not an identifier, is a keyword, is repeated, or is not 1 to 4 floats wide.`
+ @return? MATERIAL_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than the mesh contract leaves.`
+ @return? MATERIAL_TOO_MANY_TEXTURES : `More samplers than MATERIAL_TEXTURE_LIMIT.`
 *>
 fn void? validate_material(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures, String vertex = "")
 {
@@ -296,55 +286,22 @@ fn void? validate_material(String fragment, MaterialUniform[] uniforms, Material
 			return MATERIAL_BODY_EMPTY~;
 		}
 
-		foreach (i, uniform : uniforms)
+		String uniform_note = uniform_problem(MATERIAL_BODY_NAME, uniforms);
+		if (uniform_note.len > 0)
 		{
-			if (!is_identifier(uniform.name))
-			{
-				material_note(
-					string::tformat(
-						"material: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
-						uniform.name
-					)
-				);
-				return MATERIAL_NAME_INVALID~;
-			}
+			material_note(uniform_note);
+			return MATERIAL_NAME_INVALID~;
+		}
 
-			// A uniform is a field of `Uniforms`, read as `s.uniforms.name`, so the
-			// only names it cannot take are the language's own words.
-			if (shady::is_keyword(uniform.name))
-			{
-				material_note(string::tformat("material: uniform name '%s' is a shady keyword", uniform.name));
-				return MATERIAL_NAME_INVALID~;
-			}
-
-			foreach (j, earlier : uniforms)
-			{
-				if (j >= i) break;
-				if (earlier.name != uniform.name) continue;
-				material_note(string::tformat("material: uniform '%s' is declared twice", uniform.name));
-				return MATERIAL_NAME_INVALID~;
-			}
-
-			if (uniform.components < 1 || uniform.components > 4)
-			{
-				material_note(
-					string::tformat(
-						"material: uniform '%s' is %d floats wide; a uniform is 1 to 4",
-						uniform.name,
-						uniform.components
-					)
-				);
-				return MATERIAL_NAME_INVALID~;
-			}
-
-			// One table, not a bag of arrays — see `MaterialUniform`. Checked
-			// against the first column that has more than one row rather than
-			// against the maximum, so the message can name both of them.
+		// One table, not a bag of arrays: every multi-row column must share the same row count.
+		foreach (uniform : uniforms)
+		{
 			uint rows = uniform.row_count();
+			if (rows == 1) continue;
 			foreach (other : uniforms)
 			{
 				uint other_rows = other.row_count();
-				if (other_rows == 1 || rows == 1 || other_rows == rows) continue;
+				if (other_rows == 1 || other_rows == rows) continue;
 				material_note(
 					string::tformat(
 						"material: '%s' has %d rows and '%s' has %d; every array in one material is a column of the same table and they must agree",

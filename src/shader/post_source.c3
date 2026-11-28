@@ -112,20 +112,8 @@ fn void post_note(String message) @local
 	post_message_len = shader_note_into(post_message[..], message);
 }
 
-<*
- What the uniforms cost in the push block.
-
- `sum(components) * 4`, with no alignment arithmetic: the compile passes
- `-force-glsl-scalar-layout` and every field here is a multiple of four. The
- offsets are still never computed — reflection reads them back off the module
- that will run.
-*>
-fn uint post_uniform_bytes(MaterialUniform[] uniforms)
-{
-	uint total = 0;
-	foreach (uniform : uniforms) total += uniform.components * 4;
-	return total;
-}
+<* What the uniforms cost in the push block under scalar layout. *>
+fn uint post_uniform_bytes(MaterialUniform[] uniforms) => material_uniform_bytes(uniforms);
 
 <*
  Every name the post template declares at the top level, plus the two the def
@@ -154,13 +142,13 @@ fn String[] post_template_names(PostKind kind = PostKind.FRAGMENT) @local
  and its argument: "these thirty floats do not fit" is only useful once each of
  them is known to be a real uniform.
 
- @return ? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
- @return ? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is one the generated module already uses, is a keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
- @return ? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
- @return ? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
- @return ? POST_COMPUTE_BODY : `A compute body that is not whole functions with a @compute entry point among them.`
- @return ? POST_IMAGE_INVALID : `An image whose name is not an identifier or is taken, whose format is not a storage format, or whose size is half given.`
- @return ? POST_TOO_MANY_IMAGES : `More images than POST_IMAGE_LIMIT.`
+ @return? POST_BODY_EMPTY : `The fragment body is empty or only whitespace.`
+ @return? POST_NAME_INVALID : `A uniform or texture name is not an identifier, is a keyword, is repeated, is not 1 to 4 floats wide, or asked for more than one row.`
+ @return? POST_TOO_MANY_UNIFORMS : `The uniforms want more of the push block than info leaves.`
+ @return? POST_TOO_MANY_TEXTURES : `More samplers than POST_TEXTURE_LIMIT.`
+ @return? POST_COMPUTE_BODY : `A compute body that is not whole functions with a @compute entry point among them.`
+ @return? POST_IMAGE_INVALID : `An image whose name is not an identifier or is taken, whose format is not a storage format, or whose size is half given.`
+ @return? POST_TOO_MANY_IMAGES : `More images than POST_IMAGE_LIMIT.`
 *>
 fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialTexture[] textures,
 	PostKind kind = PostKind.FRAGMENT, PostImageDecl[] images = {})
@@ -192,55 +180,15 @@ fn void? validate_post(String fragment, MaterialUniform[] uniforms, MaterialText
 			}
 		}
 
-		foreach (i, uniform : uniforms)
+		String uniform_note = uniform_problem(POST_BODY_NAME, uniforms);
+		if (uniform_note.len > 0)
 		{
-			if (!is_identifier(uniform.name))
-			{
-				post_note(
-					string::tformat(
-						"post: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
-						uniform.name
-					)
-				);
-				return POST_NAME_INVALID~;
-			}
-
-			// A uniform is a field of `Uniforms`, read as `p.uniforms.name`, so
-			// `time`, `info` and `color` are all free; only the language's own
-			// words are not.
-			if (shady::is_keyword(uniform.name))
-			{
-				post_note(string::tformat("post: uniform name '%s' is a shady keyword", uniform.name));
-				return POST_NAME_INVALID~;
-			}
-
-			foreach (j, earlier : uniforms)
-			{
-				if (j >= i) break;
-				if (earlier.name != uniform.name) continue;
-				post_note(string::tformat("post: uniform '%s' is declared twice", uniform.name));
-				return POST_NAME_INVALID~;
-			}
-
-			if (uniform.components < 1 || uniform.components > 4)
-			{
-				post_note(
-					string::tformat(
-						"post: uniform '%s' is %d floats wide; a uniform is 1 to 4",
-						uniform.name,
-						uniform.components
-					)
-				);
-				return POST_NAME_INVALID~;
-			}
-
-			// The one rule a material has that this inverts. A material's arrays
-			// are a table indexed by `Surface.variant`, the per-instance row
-			// selector — and a post pass draws one triangle over the whole frame,
-			// so there is no instance for a row to belong to and the generated
-			// module has no row bound to clamp against. Refused with the reason
-			// rather than silently flattened, because a caller asking for four
-			// rows believes it can index them.
+			post_note(uniform_note);
+			return POST_NAME_INVALID~;
+		}
+		foreach (uniform : uniforms)
+		{
+			// Post passes draw a single full-screen pass with no instances to index rows.
 			if (uniform.row_count() > 1)
 			{
 				post_note(
@@ -313,17 +261,16 @@ fn String post_image_problem(PostImageDecl image, sz index, PostImageDecl[] imag
 	{
 		return string::tformat("post: image name '%s' is not an identifier this module can declare", image.name);
 	}
-	foreach (name : template)
+	if (array::contains(template, image.name))
 	{
-		if (name == image.name) return string::tformat("post: image name '%s' is one the post template already declares", image.name);
+		return string::tformat("post: image name '%s' is one the post template already declares", image.name);
 	}
 	foreach (texture : textures)
 	{
 		if (texture.name == image.name) return string::tformat("post: '%s' is declared as both a texture and an image", image.name);
 	}
-	foreach (j, earlier : images)
+	foreach (earlier : images[:index])
 	{
-		if (j >= index) break;
 		if (earlier.name == image.name) return string::tformat("post: image '%s' is declared twice", image.name);
 	}
 	if (catch storage_format_named(image.format))

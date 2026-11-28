@@ -116,7 +116,7 @@ export class Material {
 	//
 	// What it gives back is the pipeline. A material an agent compiled holds a
 	// `VkPipeline` for the life of the process otherwise, and an agent
-	// iterating on a shader compiles a new one every run — `plan.md` §1.
+	// iterating on a shader compiles a new one every run.
 	//
 	// Disposing twice does nothing, so a cleanup path may run more than once.
 	// The two built-in materials cannot be disposed at all: `mesh.material =
@@ -161,11 +161,10 @@ export class Material {
 	//
 	// **Both are read-only, and that is a property of this device rather than
 	// a design preference.** Metal bakes blending into the compiled pipeline
-	// state, so the Vulkan driver here reports every dynamic colour-blend
-	// feature as false (`plan.md` §10 has the probe). Changing this would mean
-	// building another pipeline, which needs the device, the target and the
-	// assembled shader source read back out of a cache — all to save a script
-	// the one line that builds the material it meant.
+	// state, so Vulkan drivers there report dynamic colour-blend features as
+	// false. Changing this would mean building another pipeline, which needs
+	// the device, the target and the assembled shader source read back out of a
+	// cache — all to save a script the one line that builds the material it meant.
 	get transparent() { return this._blending !== NoBlending; }
 
 	set transparent(v) { throw new TypeError(BLENDING_IS_BAKED); }
@@ -213,10 +212,9 @@ export class Material {
 	// colour — which is what makes gold look like gold rather than like white
 	// plastic.
 	//
-	// **With nothing to reflect, a metal is dark.** There is no environment map
-	// here, so a fully metallic surface is its highlights and the ambient floor
-	// and nothing else. That is the honest answer rather than a broken one, and
-	// the sky in `plan.md` §4 is what changes it.
+	// **With nothing to reflect, a metal is dark.** Without `scene.environment`,
+	// a fully metallic surface shows only its direct highlights and the ambient
+	// floor.
 	get metalness() { return H.getSurface(this._index()).metalness; }
 
 	set metalness(v) { this._surface('metalness', v); }
@@ -228,12 +226,10 @@ export class Material {
 	// for on anything that should look wet, polished or glazed; 1 is about the
 	// most any dielectric reflects. A metal ignores it.
 	//
-	// **A name Three.js does not have**, and deliberately — `plan.md` §4's
-	// half-match rule. Three.js's nearest is `specularIntensity`, which
-	// defaults to 1: every material there has a highlight and every material
-	// here starts without one, because every scene in this project was
-	// authored against a renderer that had no specular term at all and turning
-	// one on for all of them would relight all of them.
+	// **A name Three.js does not have**, and deliberately: Three.js's nearest
+	// is `specularIntensity`, which defaults to 1. Every material here starts
+	// without a highlight so scenes authored against Lambert shading keep their
+	// look unless they opt in.
 	get reflectance() { return H.getSurface(this._index()).reflectance; }
 
 	set reflectance(v) { this._surface('reflectance', v); }

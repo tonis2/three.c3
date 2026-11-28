@@ -167,6 +167,50 @@ fn String texture_problem(String prefix, MaterialTexture[] textures, String[] ta
 }
 
 <*
+ Checks uniform names, uniqueness, and component widths shared by materials and
+ post passes.
+
+ @param [in] prefix : `"material" or "post": what the sentence calls the thing being built.`
+ @param [in] uniforms : `The declared uniforms.`
+ @return `The empty string when valid, or the refusal sentence in tmem.`
+*>
+fn String uniform_problem(String prefix, MaterialUniform[] uniforms)
+{
+	foreach (i, uniform : uniforms)
+	{
+		if (!is_identifier(uniform.name))
+		{
+			return string::tformat(
+				"%s: uniform name '%s' is not an identifier; a name must match [A-Za-z_][A-Za-z0-9_]*",
+				prefix,
+				uniform.name
+			);
+		}
+		if (shady::is_keyword(uniform.name))
+		{
+			return string::tformat("%s: uniform name '%s' is a shady keyword", prefix, uniform.name);
+		}
+		foreach (earlier : uniforms[:i])
+		{
+			if (earlier.name == uniform.name)
+			{
+				return string::tformat("%s: uniform '%s' is declared twice", prefix, uniform.name);
+			}
+		}
+		if (uniform.components < 1 || uniform.components > 4)
+		{
+			return string::tformat(
+				"%s: uniform '%s' is %d floats wide; a uniform is 1 to 4",
+				prefix,
+				uniform.name,
+				uniform.components
+			);
+		}
+	}
+	return "";
+}
+
+<*
  Copy a refusal sentence into a fixed buffer, cut to fit.
 
  A fixed buffer because the caller reads it on the failure path, where there is no

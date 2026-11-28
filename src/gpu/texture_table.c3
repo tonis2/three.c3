@@ -104,6 +104,8 @@ fn void? TextureTable.init(&self, Gpu* gpu)
 	uint capacity = gpu.limits.texture_table_size();
 	if (capacity == 0) return;
 
+	defer catch self.free(gpu);
+
 	vk::DescriptorBindingFlags[1] flags = {
 		DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
 			| DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT,
@@ -261,9 +263,7 @@ fn void TextureTable.bind(&self, vk::CommandBuffer cmd, vk::PipelineLayout layou
 
 fn void TextureTable.free(&self, Gpu* gpu)
 {
-	if (!self.ready) return;
-	// The set goes with the pool; there is no per-set free and nothing asks for one.
-	vk::destroyDescriptorPool(gpu.handle, self.pool, null);
-	self.layout.free(gpu.handle);
+	if (self.pool != null) vk::destroyDescriptorPool(gpu.handle, self.pool, null);
+	if (self.layout != null) self.layout.free(gpu.handle);
 	*self = { };
 }

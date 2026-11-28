@@ -11,20 +11,20 @@ module three @feat(ANDROID);
 import std::io;
 import xr;
 
-enum XrAct : char (String key)
+enum XrAct : char (String key, CInt kind)
 {
-	GRIP { "grip_pose" },
-	AIM { "aim_pose" },
-	TRIGGER { "trigger" },
-	SQUEEZE { "squeeze" },
-	STICK { "thumbstick" },
-	STICK_CLICK { "thumbstick_click" },
+	GRIP { "grip_pose", xr::ACTION_TYPE_POSE_INPUT },
+	AIM { "aim_pose", xr::ACTION_TYPE_POSE_INPUT },
+	TRIGGER { "trigger", xr::ACTION_TYPE_FLOAT_INPUT },
+	SQUEEZE { "squeeze", xr::ACTION_TYPE_FLOAT_INPUT },
+	STICK { "thumbstick", xr::ACTION_TYPE_VECTOR2F_INPUT },
+	STICK_CLICK { "thumbstick_click", xr::ACTION_TYPE_BOOLEAN_INPUT },
 	// A on the right hand, X on the left.
-	PRIMARY { "primary" },
+	PRIMARY { "primary", xr::ACTION_TYPE_BOOLEAN_INPUT },
 	// B on the right hand, Y on the left.
-	SECONDARY { "secondary" },
-	MENU { "menu" },
-	HAPTIC { "haptic" },
+	SECONDARY { "secondary", xr::ACTION_TYPE_BOOLEAN_INPUT },
+	MENU { "menu", xr::ACTION_TYPE_BOOLEAN_INPUT },
+	HAPTIC { "haptic", xr::ACTION_TYPE_VIBRATION_OUTPUT },
 }
 
 struct XrBinding
@@ -114,7 +114,7 @@ fn void? XrInput.open(&self, xr::Instance instance, xr::Session session)
 	{
 		xr::ActionCreateInfo info = {
 			.type = xr::TYPE_ACTION_CREATE_INFO,
-			.action_type = action_type(act),
+			.action_type = act.kind,
 			.count_subaction_paths = 2,
 			.subaction_paths = &self.hands[0],
 		};
@@ -142,28 +142,6 @@ fn void? XrInput.open(&self, xr::Instance instance, xr::Session session)
 	}
 	self.ready = true;
 	io::printn("xr: controllers ready");
-}
-
-fn CInt action_type(XrAct act) @local
-{
-	switch (act)
-	{
-		case GRIP:
-		case AIM:
-			return xr::ACTION_TYPE_POSE_INPUT;
-		case TRIGGER:
-		case SQUEEZE:
-			return xr::ACTION_TYPE_FLOAT_INPUT;
-		case STICK:
-			return xr::ACTION_TYPE_VECTOR2F_INPUT;
-		case STICK_CLICK:
-		case PRIMARY:
-		case SECONDARY:
-		case MENU:
-			return xr::ACTION_TYPE_BOOLEAN_INPUT;
-		case HAPTIC:
-			return xr::ACTION_TYPE_VIBRATION_OUTPUT;
-	}
 }
 
 <*

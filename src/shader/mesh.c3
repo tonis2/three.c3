@@ -28,8 +28,6 @@ declare the same resources.
 *>
 module three;
 
-import shady;
-
 macro ShaderDef mesh_def(
 	String fragment_code = "",
 	MaterialUniform[] uniforms = {},

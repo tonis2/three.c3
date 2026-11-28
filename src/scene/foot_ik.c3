@@ -429,6 +429,7 @@ fn void Scene.solve_foot_ik(&self, float dt)
 {
 	if (self.foot_rigs.len() == 0) return;
 	Clock started = clock::now();
+	defer self.foot_ik.us += (float)((long)started.to_now()) / 1000.0f;
 
 	// A character that died took its bones with it.
 	for (sz i = self.foot_rigs.len(); i > 0; i--)
@@ -455,11 +456,7 @@ fn void Scene.solve_foot_ik(&self, float dt)
 		}
 		active = true;
 	}
-	if (!active)
-	{
-		self.foot_ik.us += (float)((long)started.to_now()) / 1000.0f;
-		return;
-	}
+	if (!active) return;
 
 	// Each character's own bones, not the scene: the whole walk was nine tenths of
 	// the pass on the Evil Forest, and the draw does it again afterwards anyway.
@@ -469,8 +466,6 @@ fn void Scene.solve_foot_ik(&self, float dt)
 		self.update_subtree_matrices(rig.root);
 		self.solve_rig(rig, dt);
 	}
-
-	self.foot_ik.us += (float)((long)started.to_now()) / 1000.0f;
 }
 
 fn void Scene.solve_rig(&self, FootIkRig* rig, float dt)

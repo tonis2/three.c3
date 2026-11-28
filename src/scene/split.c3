@@ -232,7 +232,9 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 		for (usz t = 0; t < triangles; t++)
 		{
 			uint a = geometry.indices[(sz)(t * 3)];
-			if (a >= vertices) continue;
+			uint b = geometry.indices[(sz)(t * 3 + 1)];
+			uint c = geometry.indices[(sz)(t * 3 + 2)];
+			if (a >= vertices || b >= vertices || c >= vertices) continue;
 			uint root = sets.find(a);
 			if (piece_of[root] != 0) continue;
 			if (first_triangle.len() >= MAX_SPLIT_PIECES) return TOO_MANY_SPLIT_PIECES~;
@@ -280,7 +282,9 @@ fn uint? Assets.split_mesh(&self, Gpu* gpu, AssetId id, uint mesh, List{MeshPiec
 			for (usz t = 0; t < triangles; t++)
 			{
 				uint a = geometry.indices[(sz)(t * 3)];
-				if (a >= vertices) continue;
+				uint b = geometry.indices[(sz)(t * 3 + 1)];
+				uint c = geometry.indices[(sz)(t * 3 + 2)];
+				if (a >= vertices || b >= vertices || c >= vertices) continue;
 				if (piece_of[sets.find(a)] != p + 1) continue;
 
 				for (usz corner = 0; corner < 3; corner++)

@@ -151,71 +151,6 @@ struct PassIo
 	uint layer;
 }
 
-<*
- One full-screen pass over the frame.
-
- The protocol, which the interface cannot express and every implementer must
- honour: on entry `prev` and `scene` are in `SHADER_READ_ONLY_OPTIMAL` and `dst`
- is in whatever the last frame left — open it with `color_attachment_barrier`,
- which discards from `UNDEFINED`, or `storage_open_barrier` to write it from a
- compute shader. On exit `dst` is in `COLOR_ATTACHMENT_OPTIMAL` with rendering
- ended, or in `GENERAL` for a pass that wrote it as a storage image — and then
- the pass implements `close_barrier`, because closing `dst` for the next reader
- is the chain's and the chain has to be told which layout it is closing from.
- `target.depth` is not yours and neither is `target.color`, unless you are the
- tonemap.
-
- `dst` is null for a side pass, which writes no frame at all.
-
- The layout half of that is at least checked: a missing barrier is only visible
- to validation as a layout mismatch, which is why the layouts here are specific
- rather than `GENERAL`.
-
- ## Why an interface here and nowhere else
-
- This is the one kind of pass whose contract is uniform across implementers: read
- one full-screen image, write another at the same extent. A script's pass is one
- shader; an engine-provided bloom is internally a pyramid of twelve. Same
- contract, different types — which is what dynamic dispatch is for.
-
- A geometry pass and a full-screen pass under one interface would be worse than
- no interface: it would grant compile-time substitutability the GPU does not
- honour, the compiler would accept a shadow pass in a full-screen slot, and the
- failure is a validation error in a debug build or a black frame in a release
- one. Their simply being different functions with different arguments is the
- stronger guarantee.
-
- ## Interface values are pointers
-
- A `FullscreenPass` is `{void*, typeid}`, so one taken from a `List` is
- invalidated by anything that grows it — and `three.addPass` grows it at
- arbitrary times. `PostPass.stages` holds *boxed* stages for that reason, and the
- values here are taken fresh each frame rather than cached.
-*>
-interface FullscreenPass
-{
-	fn void? record(vk::CommandBuffer cmd, PassIo io);
-
-	<*
-	 The target changed size. Anything owned at the old extent is now wrong.
-
-	 Optional, and it is the member that earns `@optional`: a pass that is one
-	 shader over the whole frame owns nothing that has an extent, and a pyramid
-	 owns twelve things that do.
-	*>
-	fn void? resize(Gpu* gpu, vk::Extent2D extent) @optional;
-
-	// Give back device objects. Optional for the pass that holds none.
-	fn void free(Gpu* gpu) @optional;
-
-	<*
-	 The barrier that hands `dst` to the next reader, for a pass that leaves it
-	 somewhere other than `COLOR_ATTACHMENT_OPTIMAL`. Optional: the chain closes
-	 an attachment with `shader_read_barrier` when this is absent.
-	*>
-	fn vk::ImageMemoryBarrier2 close_barrier(vk::Image dst) @optional;
-}
-
 // ============================================================================
 // The chain's images
 // ============================================================================
@@ -250,13 +185,6 @@ fn void? PostPass.ensure_images(&self, Gpu* gpu, Target* target, sz stages)
 		// here rather than in `destroy_images`, which `free` also calls after the
 		// stages are already gone.
 		foreach (stage : self.stages) if (stage.keep.exists()) stage.keep.free(gpu);
-		// Every stage that owns anything at the old extent hears about it. A stage
-		// that owns nothing does not implement `resize` and is skipped.
-		foreach (boxed : self.stages)
-		{
-			FullscreenPass pass = boxed;
-			if (&pass.resize) pass.resize(gpu, extent)!;
-		}
 	}
 	self.extent = extent;
 	self.layers = layers;
@@ -438,6 +366,19 @@ fn bool PostImage.matches(&self, PostImageDecl decl)
 		&& self.width == decl.width && self.height == decl.height && self.per_frame == decl.per_frame;
 }
 
+fn void write_image_conflict(String* diagnostic, PostImage* existing, PostImageDecl decl)
+{
+	if (diagnostic == null) return;
+	@pool()
+	{
+		*diagnostic = string::format(mem,
+			"post: image '%s' is already in the chain as %s %s, and this pass declares it %s %s - "
+				"one name is one image",
+			decl.name, existing.format.name, image_size_words(existing.width, existing.height),
+			decl.format, image_size_words(decl.width, decl.height));
+	};
+}
+
 <*
  The image a declaration names: one the chain already has under that name, or a
  new one.
@@ -448,8 +389,8 @@ fn bool PostImage.matches(&self, PostImageDecl decl)
  new image then lives beside it until they go.
 
  @param replacing : `True from set: the chain's current passes are about to be dropped.`
- @return ? POST_IMAGE_CONFLICT : `An existing image of that name was declared differently. diagnostic says how.`
- @return ? STORAGE_FORMAT_UNSUPPORTED : `This device cannot store to the format.`
+ @return? POST_IMAGE_CONFLICT : `An existing image of that name was declared differently. diagnostic says how.`
+ @return? STORAGE_FORMAT_UNSUPPORTED : `This device cannot store to the format.`
 *>
 fn PostImage*? PostPass.claim_image(&self, Gpu* gpu, PostImageDecl decl, bool replacing, String* diagnostic)
 {
@@ -466,14 +407,7 @@ fn PostImage*? PostPass.claim_image(&self, Gpu* gpu, PostImageDecl decl, bool re
 	}
 	if (conflict != null && !replacing)
 	{
-		if (diagnostic != null)
-		{
-			*diagnostic = string::format(mem,
-				"post: image '%s' is already in the chain as %s %s, and this pass declares it %s %s - "
-					"one name is one image",
-				decl.name, conflict.format.name, image_size_words(conflict.width, conflict.height),
-				decl.format, image_size_words(decl.width, decl.height));
-		}
+		write_image_conflict(diagnostic, conflict, decl);
 		return POST_IMAGE_CONFLICT~;
 	}
 
@@ -489,6 +423,7 @@ fn PostImage*? PostPass.claim_image(&self, Gpu* gpu, PostImageDecl decl, bool re
 	}
 
 	PostImage* made = mem::new(PostImage);
+	defer catch mem::free(made);
 	*made = {
 		.name = decl.name.copy(mem),
 		.format = format,
@@ -497,12 +432,8 @@ fn PostImage*? PostPass.claim_image(&self, Gpu* gpu, PostImageDecl decl, bool re
 		.per_frame = decl.per_frame,
 		.users = 1,
 	};
-	if (catch err = made.ensure(gpu, self.extent, self.layers))
-	{
-		made.name.free(mem);
-		mem::free(made);
-		return err~;
-	}
+	defer catch made.name.free(mem);
+	made.ensure(gpu, self.extent, self.layers)!;
 	self.images.push(made);
 	return made;
 }
@@ -618,235 +549,33 @@ fn void PostPass.free_post_images(&self, Gpu* gpu)
 <*
  Which curve the engine's last pass puts the frame through.
 
- The frame reaches the tonemap in linear float, and something has to decide what
- a value of 8 looks like on a display that stops at 1. This is that decision, and
- it is one of two rather than a number because the two are different shaders:
- `ensure_tonemap` compiles the body this names, and changing it is a recompile.
-
- `NONE` is the default and is deliberately the boring one. Every scene in this
- project was graded against the identity, so making a curve the default would
- restyle all of them in a release nobody asked for it in; a scene that wants the
- filmic answer says so.
+ Calls into `shaders/tonemap.shady`, which a scene drawing straight into a
+ headset's eye images applies too, so both display paths agree.
+ `NONE` is the default identity encode.
 *>
-enum ToneMap : char
+enum ToneMap : char (String name, String body)
 {
-	NONE,
-	AGX,
-	AGX_BLENDER,
-}
-
-<*
- The identity: hand the frame back and let the attachment encode it.
-
- Its job is entirely the *encode* — it reads linear float out of the chain and
- writes an `_SRGB` attachment, which is the hardware conversion — and it clamps
- above 1.0 because a UNORM attachment does.
-
- It goes through `post_source` like any other body, which is the load-bearing
- test of the whole design: the engine's own pass is expressible in the interface
- a script gets.
-*>
-const String TONEMAP_BODY = "float3 post(Post p) { return p.color; }";
-
-<*
- AgX, as three.js writes it in `tonemapping_pars_fragment.glsl.js` — a polynomial
- fit of the operator Blender ships as its default view transform.
-
- A fit, and worth saying so: through the mid-tones and the highlights it lands
- where EEVEE lands, and below about four stops under middle grey it sits a few
- display levels above Blender's own curve. Close enough that a scene graded in
- Blender reads as itself here, and not the same numbers.
-
- The shape of it: rotate into Rec.2020, pull the primaries in (the *inset*, which
- is what desaturates a blown highlight into white instead of into a clipped
- primary), take the log2 of a 16.5-stop window from -12.47 EV to +4.03 EV,
- run a sigmoid over the 0..1 that produces, rotate back out and undo the 2.2 the
- fit was made against. The result is linear again — the `_SRGB` attachment does
- the display encode after this, exactly as it does under the identity.
-
- The matrices are three.js's, transposed: GLSL's `mat3(a, b, c)` takes columns
- and the Slang-era `float3x3(a, b, c)` takes rows, so every one of these is the
- transpose of the literal in that file. `mul(M, v)` is then the row-times-column
- product the original wrote as `M * v`.
-
- `exposure` is a uniform rather than a constant folded into the string, which is
- the whole reason `three.toneMappingExposure` is a 4-byte write instead of a
- recompile.
-*>
-const String TONEMAP_AGX_BODY = `static const float3x3 AGX_SRGB_TO_REC2020 = float3x3(
-	float3(0.6274, 0.3293, 0.0433),
-	float3(0.0691, 0.9195, 0.0113),
-	float3(0.0164, 0.0880, 0.8956));
-
-static const float3x3 AGX_REC2020_TO_SRGB = float3x3(
-	float3(1.6605, -0.5876, -0.0728),
-	float3(-0.1246, 1.1329, -0.0083),
-	float3(-0.0182, -0.1006, 1.1187));
-
-static const float3x3 AGX_INSET = float3x3(
-	float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
-	float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
-	float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
-
-static const float3x3 AGX_OUTSET = float3x3(
-	float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
-	float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
-	float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
-
-// The seven-term fit of AgX's tone curve, over the 0..1 the log2 window
-// produced. Horner would be fewer multiplies and this is the published form.
-float3 agx_contrast(float3 x)
-{
-	float3 x2 = x * x;
-	float3 x4 = x2 * x2;
-	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
-}
-
-float3 post(Post p)
-{
-	float3 c = p.color * exposure;
-	c = mul(AGX_SRGB_TO_REC2020, c);
-	c = mul(AGX_INSET, c);
-	// -12.47393 EV to +4.026069 EV, which is the 16.5-stop window AgX is defined
-	// over. The floor keeps log2(0) out of it.
-	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
-	c = agx_contrast(c);
-	c = mul(AGX_OUTSET, c);
-	c = pow(max(c, 0.0), 2.2);
-	c = mul(AGX_REC2020_TO_SRGB, c);
-	// Still linear: the attachment encodes. The clamp is what a UNORM does to the
-	// out-of-gamut values the rotation back to sRGB can produce.
-	return clamp(c, 0.0, 1.0);
-}`;
-
-<*
- The same transform with Blender's own contrast curve in place of the fit.
-
- Everything around the curve is shared with `TONEMAP_AGX_BODY` — the same
- rotation into Rec.2020, the same inset, the same 16.5-stop log window, the same
- outset — because that part is not where the two part company. The curve is.
-
- AgX's contrast is a sigmoid built from two hyperbolic segments meeting at a
- pivot: `y = x / (1 + x^p)^(1/p)` run backwards below the pivot and forwards
- above it, each scaled so the curve reaches 0 at the bottom of the window and 1
- at the top. `agx_contrast` in the body above is a seven-term polynomial fitted
- to that sigmoid, and it is a *fit*: measured against the curve Blender actually
- applies it is out by up to 0.052, low through the toe and high from the pivot
- up, which reads as crushed shadows and lifted mid-tones — most of a night
- scene.
-
- The five parameters were recovered from Blender rather than copied from a
- config: a 2048-step linear ramp from 2^-16 to 2^4 rendered through the AgX view
- transform at 16 bits, the display encode and the 2.2 undone, and the sigmoid
- fitted to what came back. The residual is 0.00176 at worst and 0.00051 rms,
- which is a fifth of an 8-bit level once the 2.2 and the encode are back on —
- against 0.052 and 0.023 for the polynomial. `tools/ff9_blender_reference.py`
- renders the comparison frames this was checked against.
-
- The two scales are constants because the five parameters are: they are what
- makes `curve(0)` exactly 0 and `curve(1)` exactly 1, and solving for them per
- pixel would be two `pow`s for a number that never moves.
-*>
-const String TONEMAP_AGX_BLENDER_BODY = `static const float3x3 AGX_SRGB_TO_REC2020 = float3x3(
-	float3(0.6274, 0.3293, 0.0433),
-	float3(0.0691, 0.9195, 0.0113),
-	float3(0.0164, 0.0880, 0.8956));
-
-static const float3x3 AGX_REC2020_TO_SRGB = float3x3(
-	float3(1.6605, -0.5876, -0.0728),
-	float3(-0.1246, 1.1329, -0.0083),
-	float3(-0.0182, -0.1006, 1.1187));
-
-static const float3x3 AGX_INSET = float3x3(
-	float3(0.856627153315983, 0.0951212405381588, 0.0482516061458583),
-	float3(0.137318972929847, 0.761241990602591, 0.101439036467562),
-	float3(0.11189821299995, 0.0767994186031903, 0.811302368396859));
-
-static const float3x3 AGX_OUTSET = float3x3(
-	float3(1.1271005818144368, -0.11060664309660323, -0.016493938717834573),
-	float3(-0.1413297634984383, 1.157823702216272, -0.016493938717834257),
-	float3(-0.14132976349843826, -0.11060664309660294, 1.2519364065950405));
-
-static const float AGX_PIVOT_X = 0.6186810;
-static const float AGX_PIVOT_Y = 0.4886874;
-static const float AGX_SLOPE = 2.4290370;
-static const float AGX_TOE_POWER = 1.7141845;
-static const float AGX_SHOULDER_POWER = 1.4540615;
-static const float AGX_TOE_SCALE = 0.5357367;
-static const float AGX_SHOULDER_SCALE = 0.7450037;
-
-// The segment, and the reason the negative half is kept rather than clamped: at
-// any x one of the two calls below has a negative argument, and the max inside the
-// power keeps that branch finite so the select can throw it away. Clamping the
-// argument itself would fold the wrong branch onto the pivot instead.
-float3 agx_segment(float3 u, float power)
-{
-	return u * pow(1.0 + pow(max(u, 0.0), power), -1.0 / power);
-}
-
-float3 agx_contrast(float3 x)
-{
-	float3 toe = AGX_PIVOT_Y - AGX_TOE_SCALE
-		* agx_segment((AGX_PIVOT_X - x) * (AGX_SLOPE / AGX_TOE_SCALE), AGX_TOE_POWER);
-	float3 shoulder = AGX_PIVOT_Y + AGX_SHOULDER_SCALE
-		* agx_segment((x - AGX_PIVOT_X) * (AGX_SLOPE / AGX_SHOULDER_SCALE), AGX_SHOULDER_POWER);
-	return lerp(shoulder, toe, step(x, float3(AGX_PIVOT_X)));
-}
-
-float3 post(Post p)
-{
-	float3 c = p.color * exposure;
-	c = mul(AGX_SRGB_TO_REC2020, c);
-	c = mul(AGX_INSET, c);
-	c = clamp((log2(max(c, 1e-10)) + 12.47393) / (4.026069 + 12.47393), 0.0, 1.0);
-	c = agx_contrast(c);
-	c = mul(AGX_OUTSET, c);
-	c = pow(max(c, 0.0), 2.2);
-	c = mul(AGX_REC2020_TO_SRGB, c);
-	return clamp(c, 0.0, 1.0);
-}`;
-
-// The body one mode is.
-fn String tonemap_body(ToneMap mode)
-{
-	switch (mode)
-	{
-		case AGX: return TONEMAP_AGX_BODY;
-		case AGX_BLENDER: return TONEMAP_AGX_BLENDER_BODY;
-		default: return TONEMAP_BODY;
-	}
-}
-
-<*
- The same three curves in shady's spelling, which is what the compiler is given:
- calls into `shaders/tonemap.shady`, which a scene drawing straight into a
- headset's eye images applies too, so the two ways a frame is toned agree.
- `exposure` is `p.uniforms.exposure` under the generator's struct.
-*>
-const String TONEMAP_BODY_SHADY = `fn float3 post(Post p)
+	NONE {
+		"none",
+		`fn float3 post(Post p)
 {
 	return p.color;
-}`;
-
-const String TONEMAP_AGX_BODY_SHADY = `fn float3 post(Post p)
+}`,
+	},
+	AGX {
+		"agx",
+		`fn float3 post(Post p)
 {
 	return tone_agx(p.color * p.uniforms.exposure);
-}`;
-
-const String TONEMAP_AGX_BLENDER_BODY_SHADY = `fn float3 post(Post p)
+}`,
+	},
+	AGX_BLENDER {
+		"agx-blender",
+		`fn float3 post(Post p)
 {
 	return tone_agx_blender(p.color * p.uniforms.exposure);
-}`;
-
-// The body one mode compiles through shady.
-fn String tonemap_body_shady(ToneMap mode)
-{
-	switch (mode)
-	{
-		case AGX: return TONEMAP_AGX_BODY_SHADY;
-		case AGX_BLENDER: return TONEMAP_AGX_BLENDER_BODY_SHADY;
-		default: return TONEMAP_BODY_SHADY;
-	}
+}`,
+	},
 }
 
 // What AgX's exposure uniform is called, in the body and in the push block.
@@ -855,19 +584,9 @@ const String TONEMAP_EXPOSURE = "exposure";
 <*
  Compiles the tonemap, and recompiles it when the mode changes.
 
- Not once for the life of the renderer, which is what it used to be: the body is
- no longer a constant, so the pipeline is retired and rebuilt when
- `three.toneMapping` moves. Everything else about it still is — a `setPost` does
- not touch this, because what a script wrote is not what this pass does.
-
  The exposure survives the recompile because it is a uniform, not part of the
- string: `apply_exposure` writes it into the block against the *new* module's
- reflected offset, so a mode change carries the current value across rather than
- resetting it to one.
-
- Its pipeline is built with `target.color_format` — the only pipeline in the
- chain that is — which is what makes the format decision *not* a property of the
- passes above it.
+ string: `apply_exposure` writes it into the block against the new module's
+ reflected offset. Its pipeline is built with `target.color_format`.
 *>
 fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 {
@@ -879,40 +598,27 @@ fn void? PostPass.ensure_tonemap(&self, Gpu* gpu, Target* target)
 	self.tonemap.pipeline = { };
 
 	ToneMap mode = self.tonemap_mode;
-	// Only the curves declare one. The identity would have the compiler drop an
-	// unread uniform before reflection saw it, which is a push field that is there
-	// on one build and not on the next.
+	// Only the curves declare exposure; the identity would have the compiler
+	// drop an unread uniform before reflection sees it.
 	MaterialUniform[1] uniforms = { { .name = TONEMAP_EXPOSURE, .components = 1, .rows = 1 } };
 	MaterialUniform[] declared = mode != ToneMap.NONE ? uniforms[..] : {};
 
 	@pool()
 	{
-		ShaderModule mod = compile_shader(
-			ShaderPass.TONEMAP,
-			body: tonemap_body(mode), body_shady: tonemap_body_shady(mode), uniforms: declared)!;
+		ShaderModule mod = compile_shader(ShaderPass.POST, body: mode.body, uniforms: declared)!;
 		defer mod.free();
 		if (!mod.ok) return SHADER_COMPILE_FAILED~;
 		self.tonemap.pipeline.init_post(gpu, &mod, target.color_format)!;
 	};
 	self.tonemap_built = mode;
 	self.apply_exposure();
-	// Stamped against the clock like any other stage, though neither body reads
-	// the time: leaving it at whatever the struct started with would be one stage
-	// out of N whose `p.time` meant something different.
 	self.tonemap.set_at = self.now;
 }
 
 <*
  Puts `tonemap_exposure` into the tonemap's push block.
 
- A 4-byte write against the reflected offset, which is what keeps a change of
- exposure off the compiler entirely — the same door `PostPass.set_uniform` opens
- for a script's own pass, minus the stage lookup, because the tonemap is not in
- `stages` and never will be.
-
- Silent on the identity, where there is no such field. That is not a failure to
- report: the body ignores exposure by construction, and `three.toneMappingExposure`
- keeps the number for whenever a mode that reads it is selected.
+ Silent on the identity, where there is no such field.
 *>
 fn void PostPass.apply_exposure(&self)
 {
@@ -926,22 +632,12 @@ fn void PostPass.apply_exposure(&self)
 <*
  `three.toneMapping = 'agx'` — which curve the frame ends on.
 
- Eager rather than lazy, and that is the whole of what this function adds over
- assigning the field: with no script pass in the chain the tonemap is the only
- thing in it, so the images and the pipeline have to exist before the next frame
- asks `active()` and gets told to render into an image A that was never created.
-
  @param mode : `The curve. NONE is the identity and is where a renderer starts.`
 *>
 fn void? PostPass.set_tonemap(&self, Gpu* gpu, Target* target, ToneMap mode)
 {
 	if (mode == self.tonemap_mode) return;
 	self.tonemap_mode = mode;
-	// Nothing to build for a chain that is about to be inert. The identity with
-	// no stage in front of it is `active() == false` and no frame goes near the
-	// chain, so allocating image A for it would be a full-size attachment
-	// nothing reads.
-	if (!self.active()) return;
 	self.ensure_images(gpu, target, self.stages.len())!;
 	self.ensure_tonemap(gpu, target)!;
 }
@@ -967,10 +663,10 @@ fn void PostPass.set_tonemap_exposure(&self, float value)
 *>
 fn bool PostPass.reads_depth(&self)
 {
-	if (pipeline_declares_binding(&self.tonemap.pipeline, 2)) return true;
+	if (pipeline_declares_binding(&self.tonemap.pipeline, PostBinding.DEPTH)) return true;
 	foreach (stage : self.stages)
 	{
-		if (pipeline_declares_binding(&stage.pipeline, 2)) return true;
+		if (pipeline_declares_binding(&stage.pipeline, PostBinding.DEPTH)) return true;
 	}
 	return false;
 }
@@ -1061,28 +757,15 @@ fn void? PostPass.record_chain(
 	// and a history image keeps one history per eye. Each run opens only its own
 	// layer of the destination; the close below hands both on at once.
 	uint eyes = layered ? self.layers : 1;
-	foreach (i, boxed : self.stages)
+	foreach (i, stage : self.stages)
 	{
-		// `output_of` rather than `pong[i & 1]`, in all three places a destination
-		// or a source is named: a stage something taps writes into an image of its
-		// own, and the whole difference between the two kinds lives in that one
-		// function. A side pass has no destination at all.
-		PostStage* stage   = self.stages[i];
 		LayeredImage* dst  = stage.writes_output ? self.output_of(i) : null;
 		int tapped         = stage.tap;
 
-		// Taken fresh from the boxed stage rather than cached — see
-		// `FullscreenPass` on interface values being pointers.
-		FullscreenPass pass = boxed;
 		for (uint eye = 0; eye < eyes; eye++)
 		{
-			// The first pass's `prev` is the scene, which makes a chain of one
-			// identical to the single pass this replaced: both bindings point at the
-			// same image, so `p.color == p.scene` and a shader written before the
-			// chain existed reads exactly what it always read. `source_view` steps
-			// over side passes, which leave the frame as they found it.
 			vk::ImageView scene = self.scene_view(eye);
-			pass.record(
+			stage.record(
 				cmd,
 				{
 					.prev = self.source_view(i, eye),
@@ -1105,7 +788,7 @@ fn void? PostPass.record_chain(
 
 		if (dst != null)
 		{
-			vk::ImageMemoryBarrier2 close = &pass.close_barrier ? pass.close_barrier(dst.whole.image) : shader_read_barrier(dst.whole.image);
+			vk::ImageMemoryBarrier2 close = stage.close_barrier(dst.whole.image);
 			vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ close }));
 		}
 		// What this pass stored into its own images, before the next pass - or the
@@ -1124,11 +807,7 @@ fn void? PostPass.record_chain(
 
 	// The one pass that writes `target.color`, and the one pipeline in the chain
 	// built with its format.
-	FullscreenPass tone = &self.tonemap;
-	// A that reads its own predecessor, and A again with no predecessor to read:
-	// a tonemap-only chain is the first pass of a chain, and its `prev` is what
-	// every first pass's is.
-	tone.record(
+	self.tonemap.record(
 		cmd,
 		{
 			.prev = self.source_view(count, 0),
@@ -1140,8 +819,7 @@ fn void? PostPass.record_chain(
 			.depth = target.depth_view,
 			.depth_sampler = self.depth_sampler,
 			.near_plane = near_plane,
-			.far_plane = far_plane, // The tonemap is the engine's and reads no third source. Image A, for the
-			// reason `PassIo.tap` gives.
+			.far_plane = far_plane,
 			.tap = self.scene.view,
 			.assets = assets,
 			.time = now,

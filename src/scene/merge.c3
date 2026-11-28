@@ -234,13 +234,17 @@ fn AssetId? Assets.merge(&self, Gpu* gpu, MergeInput[] inputs, uint* failed_at)
 			bool piece_has_normals = (usz)piece.normals.len() == vertices;
 			bool piece_has_uvs     = (usz)piece.uvs.len() == vertices;
 			bool piece_has_colors  = (usz)piece.colors.len() == vertices;
-			if (piece_has_colors) needs_colors = true;
+			uint base = (uint)geometry.positions.len();
+			if (piece_has_colors && !needs_colors)
+			{
+				needs_colors = true;
+				for (uint prev = 0; prev < base; prev++) geometry.colors.push({ 1, 1, 1, 1 });
+			}
 
 			Matrix4f nmat = normal_matrix(input.matrix);
 			bool flip     = linear_determinant(input.matrix) < 0;
 			float[4] tint = srgb_to_linear_rgb(input.color);
 
-			uint base = (uint)geometry.positions.len();
 			for (usz v = 0; v < vertices; v++)
 			{
 				geometry.positions.push(transform_point(input.matrix, piece.positions[(sz)v]));

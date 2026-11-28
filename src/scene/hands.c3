@@ -385,15 +385,6 @@ fn bool Scene.untrack_hand(&self, NodeId id)
 	return false;
 }
 
-fn bool Scene.is_tracked(&self, NodeId id)
-{
-	foreach (entry : self.tracked)
-	{
-		if (entry.node == id) return true;
-	}
-	return false;
-}
-
 <*
  Moves every tracked node onto its hand, and hides the engine's own while that
  hand is disconnected. A node that died or was moved under a parent is dropped,

@@ -587,8 +587,7 @@ export class Scene extends Object3D {
 	// with a sorted array of every intersection and takes the objects to
 	// consider; this answers with the closest drawable hit in the whole
 	// scene, or null. An array that never held more than one element would
-	// be a fact about this implementation wearing Three.js's name — which
-	// is the half-match `plan.md` §4 says is worse than a new name.
+	// be a fact about this implementation wearing Three.js's name.
 
 	// What a world-space ray hits. The direction need not be normalised;
 	// `distance` comes back in world units either way, so hits on

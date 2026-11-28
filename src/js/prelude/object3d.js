@@ -126,9 +126,9 @@ export class Object3D {
 		// A body hangs on a host node and there is no host node until an `add`.
 		this._onAdded = null;
 		// Whether this object is in the half of the shadow map that is drawn
-		// once and kept — `plan.md` §19.3. Off by default, and the host refuses
-		// it on anything with a skin, which is why the setter reads the answer
-		// back rather than assuming it took.
+		// once and kept. Off by default, and the host refuses it on anything
+		// with a skin, which is why the setter reads the answer back rather
+		// than assuming it took.
 		this._static = false;
 		// An exact rotation, when this object has one — `[x, y, z, w]`. Only
 		// `asset.instantiate()` sets it, because only a glTF node arrives as

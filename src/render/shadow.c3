@@ -487,8 +487,7 @@ struct ShadowSettings
 	 costs.
 
 	 **Not a default anything derives.** Which of the two a scene wants depends on
-	 how big the level is and on whether the camera moves, and neither is knowable
-	 from here — see `plan.md`'s standing constraint about `shadow.size`.
+	 how big the level is and on whether the camera moves, so the scene chooses.
 	*>
 	bool follow;
 }
@@ -500,14 +499,9 @@ const ShadowSettings DEFAULT_SHADOW = {
 	.size = SHADOW_DEFAULT_SIZE,
 	.bias = 0.0,
 	.intensity = 1.0,
-	// The one field here whose default is not the zero value, which is why both
-	// places that build a `ShadowSettings` state it: a forgotten initializer is a
-	// scene-fitted map, which works and is coarse, rather than a visible fault.
 	.follow = true,
 };
 
-const uint POINT_SHADOW_FACES = 6;
-const uint POINT_SHADOW_LAYERS = (MAX_LIGHTS - 1) * POINT_SHADOW_FACES;
 const uint POINT_SHADOW_MAX_SIZE = 2048;
 
 struct PointShadowSettings
@@ -547,8 +541,6 @@ struct PointShadowMap
 {
 	inline PointShadowSettings settings;
 	uint created;
-	bool sample_static;
-	uint plan;
 	uint static_draws;
 	bool live;
 	uint draws;
@@ -560,8 +552,6 @@ fn void PointShadowMap.apply(&self, PointShadowSettings settings)
 	self.live = false;
 	self.draws = 0;
 	self.static_draws = 0;
-	self.sample_static = false;
-	self.plan = SHADOW_PLAN_FULL;
 }
 
 <*
@@ -585,53 +575,8 @@ struct ShadowMap
 	// against `size` rather than trusted, because a script may write `size` at any
 	// moment and the image can only change between frames.
 	uint created;
-
-	<*
-	 What the cached image is a picture of, and the whole of the invalidation.
-
-	 Two things are compared, and each is a way the stored depths stop meaning what
-	 the lookup will assume they mean:
-
-	 - the fit, because a shadow map is only depths *in a particular projection*
-	 and re-projecting is not something a stored image can do. See
-	 `SHADOW_FIT_SLACK`.
-	 - `Scene.static_revision`, which moves when a static caster is added, removed,
-	 hidden, re-parented, re-materialled or moved.
-
-	 The size is a third and is not compared, because it cannot drift: `ensure`
-	 destroys both images when it changes and `invalidate_static` goes with it.
-
-	 What is deliberately *not* in here is anything about the camera or about a
-	 dynamic node. That is the point: a character walking through the village must
-	 not cost the village its map, and a camera that turns must not either.
-
-	 A camera that turns *did*, for as long as the focus was a box: `fit` read its
-	 extent off an axis-aligned box around an oriented frustum, which grows as it
-	 yaws, so the fit moved and this key went with it. `Camera.view_sphere` is the
-	 shape that made the sentence above true rather than intended, and
-	 `ShadowSettings.follow` is how a scene takes the camera out of the key
-	 altogether.
-	*>
-	Matrix4f static_fit;
-	uint static_revision;
-	// False until the image holds a fit and a revision worth comparing — after
-	// creation, after a resize, and after `defaults`.
-	bool static_valid;
-	// How many buckets the last *static* rebuild drew, for `stats()` to report
-	// beside `draws`. Zero in every frame that did not rebuild.
+	// How many buckets the last static rebuild drew, reported beside `draws`.
 	uint static_draws;
-
-	<*
-	 Whether the colour pass samples the cached image rather than the live one.
-
-	 True in a `SHADOW_PLAN_STATIC` frame and only there: nothing moves, so the
-	 cached image *is* the shadow map, and copying it into a second image to sample
-	 that instead would be a full-image copy per frame to change nothing.
-	*>
-	bool sample_static;
-	// This frame's shape — one of the three `SHADOW_PLAN_` constants. Decided by
-	// `MeshPass.plan_shadow` once the draw list exists, read by `record_shadow`.
-	uint plan;
 	// ---- the fit, as it last landed ----
 
 	<*
@@ -708,27 +653,8 @@ struct ShadowMap
 	uint draws;
 }
 
-// Whether two matrices are the same one. Element by element and bitwise, which is
-// the right comparison here rather than a tolerance: `fit` is deterministic, so
-// the same inputs produce the same sixteen floats, and "nearly the same fit" is
-// not a thing a stored depth image can be sampled through.
-fn bool same_matrix(Matrix4f a, Matrix4f b) @local
-{
-	for (usz i = 0; i < 16; i++)
-	{
-		if (a.m[i] != b.m[i]) return false;
-	}
-	return true;
-}
-
 <*
  Puts a scene's shadow settings on, and forgets what the last one's fit meant.
-
- `activate()` and `MeshPass.init` are the two callers, and everything below the
- assignment is what stops being true when the world changes underneath the
- image: the fit was a projection of a scene that is no longer on screen, and the
- cached half is a picture of it.
-
  The fitted projection and pipelines are retained for the next scene.
 *>
 fn void ShadowMap.apply(&self, ShadowSettings settings)
@@ -737,63 +663,12 @@ fn void ShadowMap.apply(&self, ShadowSettings settings)
 	self.light_view_projection = matrix::IDENTITY4{float};
 	self.live = false;
 	self.draws = 0;
-	// The compatibility key is forgotten when the active scene changes.
-	self.invalidate_static();
 	self.static_draws = 0;
-	self.sample_static = false;
-	self.plan = SHADOW_PLAN_FULL;
 	self.has_fit = false;
 }
 
-// The settings a shadow map starts at. One spelling of a default, so that
-// `MeshPass.init` and a fresh `Scene` cannot drift apart.
+// The settings a shadow map starts at.
 fn void ShadowMap.defaults(&self) => self.apply(DEFAULT_SHADOW);
-
-<*
- Says that the cached image is a picture of something that is no longer true.
-
- One line, and it is a function so the places that have to call it are a list
- somebody can read: a resize, a `defaults`, and a freshly created image. The two
- keys drifting is not one of them — `static_current` compares them every frame.
- Nothing is destroyed and nothing is drawn: the next frame that wants the static
- half finds `static_valid` false and rebuilds it.
-*>
-fn void ShadowMap.invalidate_static(&self)
-{
-	self.static_valid = false;
-}
-
-<*
- Is the cached image still a picture of this frame?
-
- `ShadowMap.static_fit` is the argument for the two terms and for what is
- deliberately absent from them. Both are compared rather than trusted — the fit
- bitwise, because it is recomputed every frame from inputs that have not changed
- and therefore comes out the same sixteen floats.
-
- @param revision : `Scene.static_revision, which moves when anything about a static caster does.`
-*>
-fn bool ShadowMap.static_current(&self, uint revision)
-{
-	return self.static_valid && self.static_revision == revision && same_matrix(
-		self.static_fit,
-		self.light_view_projection
-	);
-}
-
-<*
- The cached image now holds this revision under this fit.
-
- Called immediately after the rebuild and from nowhere else, so the keys are
- always written from the same values the pass just drew with rather than from
- whatever they are by the time somebody asks.
-*>
-fn void ShadowMap.mark_static_built(&self, uint revision)
-{
-	self.static_valid = true;
-	self.static_revision = revision;
-	self.static_fit = self.light_view_projection;
-}
 
 <*
  Compiles the depth-only caster pipeline on first use.
@@ -1032,10 +907,8 @@ fn void ShadowMap.fit(
 	// which is the exact condition for the map still being right rather than a
 	// heuristic for it. The half-size test is what lets density come back after a
 	// zoom.
-	bool keep = stable && self.has_fit && self.fit_near == near && self.fit_far == far && same_matrix(
-		self.fit_view,
-		view
-	) && lit.min.x >= self.fit_low_x && lit.min.y >= self.fit_low_y && lit.max.x <= self.fit_low_x
+	bool keep = stable && self.has_fit && self.fit_near == near && self.fit_far == far && self.fit_view.m == view.m
+		&& lit.min.x >= self.fit_low_x && lit.min.y >= self.fit_low_y && lit.max.x <= self.fit_low_x
 		+ self.fit_extent && lit.max.y <= self.fit_low_y + self.fit_extent && extent * 2.0f >= self.fit_extent;
 
 	float low_x;

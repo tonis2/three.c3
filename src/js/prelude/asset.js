@@ -1580,9 +1580,8 @@ export class Asset {
 	// describes nothing this can build.
 	//
 	// **Everything here is a modelling decision and it is written down rather
-	// than buried**, because "what a glTF material becomes on this side" is the
-	// question `plan.md` §2 left open and this is one answer to it, not the
-	// answer:
+	// than buried**, so the mapping from glTF material fields to this renderer
+	// is explicit:
 	//
 	//  - **Every map goes on a `MeshLambertMaterial`.** The normal map, the
 	//    occlusion map, the metallic-roughness pair and the emissive map are four

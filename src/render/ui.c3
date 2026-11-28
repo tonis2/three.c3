@@ -76,7 +76,7 @@ import vk;
  stopped matching after a `set` renamed a node is a HUD that quietly freezes, and
  finding out why costs an afternoon.
 *>
-excuse UI_NO_SUCH_KEY, UI_NO_TREE, UI_BAD_PARENT, UI_NO_DEVICE;
+excuse UI_NO_SUCH_KEY, UI_NO_TREE, UI_BAD_PARENT;
 
 <*
  The font the interface draws with, in the binary rather than on disk.
@@ -709,9 +709,8 @@ struct UiNodeSpec
 	bool has_selected;
 	bool has_offset;
 
-	// A `tree`'s look beyond the common theme. `has_tree_style` says the script
-	// named a `style` at all; within it a zero is "keep the default".
-	bool has_tree_style;
+	// A `tree`'s look beyond the common theme; within it a zero means "keep the
+	// default".
 	UiTreeStyle tree_style;
 
 	// Which callbacks the script attached. The widget gets a function pointer
@@ -1252,20 +1251,6 @@ fn void? UiLayer.ensure_sized(&self, Gpu* gpu, vk::Extent2D extent, vk::Format f
 		self.ui = null;
 	}
 
-	// The heap by name. A zeroed `DString` or `List` takes the *temp* allocator
-	// on its first write, and all of these are written from a script callback
-	// that runs inside a `@pool()` — the string a widget borrows would then point
-	// into memory the frame gave back. `init(mem, 0)` names the allocator and
-	// allocates nothing.
-	self.overlay_text.init(mem, 0);
-	self.held.init(mem, 0);
-	self.nodes.init(mem, 0);
-	self.building.init(mem, 0);
-	self.textures.init(mem, 0);
-	self.spare.init(mem, 0);
-	self.icon_table = mem::new_array(cui::widgets::TreeIcon, TREE_ICON_MAX);
-	self.register_tree_icons();
-
 	self.font = self.ui.load_font_bytes(UI_FONT[..])!;
 
 	// FORMAT_UNDEFINED because `begin_overlay` gives the rendering no depth
@@ -1279,6 +1264,16 @@ fn void? UiLayer.ensure_sized(&self, Gpu* gpu, vk::Extent2D extent, vk::Format f
 		FORMAT_UNDEFINED,
 		size
 	)!;
+
+	// The heap by name so writes from inside `@pool()` callbacks stay valid.
+	self.overlay_text.init(mem, 0);
+	self.held.init(mem, 0);
+	self.nodes.init(mem, 0);
+	self.building.init(mem, 0);
+	self.textures.init(mem, 0);
+	self.spare.init(mem, 0);
+	self.icon_table = mem::new_array(cui::widgets::TreeIcon, TREE_ICON_MAX);
+	self.register_tree_icons();
 
 	// Reachable by type from every widget hook in the tree, which is how a
 	// Button's callback finds its way back here — cui has no app type to name,
@@ -1393,9 +1388,9 @@ fn void UiLayer.free(&self)
 	if (self.icon_table) free(self.icon_table);
 	self.icon_table = null;
 	self.icon_count = 0;
-	foreach (i, node : self.nodes) self.nodes[i].free();
+	foreach (&node : self.nodes) node.free();
 	self.nodes.free();
-	foreach (i, node : self.building) self.building[i].free();
+	foreach (&node : self.building) node.free();
 	self.building.free();
 	self.tree = null;
 	self.pending = null;
@@ -1530,7 +1525,7 @@ fn void UiLayer.abandon_tree(&self)
 	// hanging inside the subtree above, and releasing it first would leave the
 	// panel holding a recycled element.
 	self.release_borrowed(&self.building);
-	foreach (i, node : self.building) self.building[i].free();
+	foreach (&node : self.building) node.free();
 	self.building.clear();
 	self.pending = null;
 	self.open = false;
@@ -1574,7 +1569,7 @@ fn void UiLayer.commit_tree(&self)
 	// The bodies the outgoing dialogs borrowed, now that the tree that held them
 	// has been unmounted and cui has detached rather than freed them.
 	self.release_borrowed(&self.nodes);
-	foreach (i, node : self.nodes) self.nodes[i].free();
+	foreach (&node : self.nodes) node.free();
 	self.nodes.clear();
 	foreach (node : self.building) self.nodes.push(node);
 	self.building.clear();
@@ -1591,16 +1586,11 @@ fn void UiLayer.commit_tree(&self)
 }
 
 <*
- Hands every widget the array it borrows.
-
- Deferred to here because a `List` moves its storage when it grows, and a
- `Select` handed `options.array_view()` halfway through the pushes would be
- pointing at a freed block by the last one. This is the single moment the lists
- are known to be finished.
+ Hands every widget the array it borrows once `self.nodes` has stopped growing.
 *>
 fn void UiLayer.repoint(&self)
 {
-	foreach (i, node : self.nodes) repoint_node(&self.nodes[i]);
+	foreach (&node : self.nodes) repoint_node(node);
 }
 
 fn void repoint_node(UiNode* node) @local
@@ -1615,16 +1605,11 @@ fn void repoint_node(UiNode* node) @local
 		case DRAW:
 			node.element.widget_as(UiPainting).ops = node.ops.array_view();
 		case MENU:
-			// Two levels, and the inner one first: each `Menu` was given a slice
-			// whose length is right and whose pointer was into a block the next
-			// push may have freed. The runs are contiguous and in push order, so
-			// walking a cursor along them recovers where each one starts without
-			// storing it.
 			usz at = 0;
-			foreach (i, menu : node.menus)
+			foreach (&menu : node.menus)
 			{
 				usz count = menu.items.len;
-				node.menus[i].items = node.items.array_view()[at : count];
+				menu.items = node.items.array_view()[at : count];
 				at += count;
 			}
 			node.element.widget_as(cui::widgets::MenuBar).menus = node.menus.array_view();
@@ -1689,7 +1674,7 @@ fn void UiLayer.drop_tree(&self)
 		self.tree = null;
 	}
 	self.release_borrowed(&self.nodes);
-	foreach (i, node : self.nodes) self.nodes[i].free();
+	foreach (&node : self.nodes) node.free();
 	self.nodes.clear();
 	self.ui.request_frame();
 }
@@ -1719,9 +1704,9 @@ fn void UiLayer.drop_tree(&self)
 fn void UiLayer.release_borrowed(&self, List{UiNode}* table)
 {
 	if (self.ui == null) return;
-	for (sz i = 0; i < table.len(); i++)
+	foreach (&node : *table)
 	{
-		cui::Element* body = (*table)[i].content;
+		cui::Element* body = node.content;
 		if (body == null) continue;
 		if (body.parent != null)
 		{
@@ -1731,7 +1716,7 @@ fn void UiLayer.release_borrowed(&self, List{UiNode}* table)
 		{
 			self.ui.release(body);
 		}
-		(*table)[i].content = null;
+		node.content = null;
 	}
 }
 
@@ -1864,18 +1849,13 @@ fn void UiLayer.set_root(&self, cui::Element* root)
 
  @param element : `The mount point, or null to withdraw.`
 *>
-fn void UiLayer.set_slot(&self, void* element)
+fn void UiLayer.set_slot(&self, cui::Element* element)
 {
 	if (self.ui == null) return;
+	if (element == self.slot) return;
 
-	cui::Element* offered = (cui::Element*)element;
-	if (offered == self.slot) return;
-
-	// Either way the snapshot goes: into a slot it would have to be moved, out of
-	// one it is already gone. One rule instead of two, and the generation is what
-	// tells the script to draw it again.
 	self.drop_tree();
-	self.slot = offered;
+	self.slot = element;
 	self.slot_generation++;
 	self.ui.request_frame();
 }
@@ -2891,38 +2871,41 @@ fn void UiLayer.reset_graph(&self, uint node, bool nodes, bool ports, bool wires
 {
 	UiNode* live = self.at(node);
 	if (live == null) return;
-	cui::widgets::GraphNode[] kept_nodes;
-	cui::widgets::GraphPort[] kept_ports;
-	cui::widgets::GraphWire[] kept_wires;
-	if (!nodes)
+	@pool()
 	{
-		kept_nodes = @tclone_slice(live.graph_nodes.array_view());
-		foreach (&n : kept_nodes)
+		cui::widgets::GraphNode[] kept_nodes;
+		cui::widgets::GraphPort[] kept_ports;
+		cui::widgets::GraphWire[] kept_wires;
+		if (!nodes)
 		{
-			n.title = n.title.copy(tmem);
-			n.tag = n.tag.copy(tmem);
+			kept_nodes = @tclone_slice(live.graph_nodes.array_view());
+			foreach (&n : kept_nodes)
+			{
+				n.title = n.title.copy(tmem);
+				n.tag = n.tag.copy(tmem);
+			}
 		}
-	}
-	if (!ports)
-	{
-		kept_ports = @tclone_slice(live.graph_ports.array_view());
-		foreach (&p : kept_ports) p.label = p.label.copy(tmem);
-	}
-	if (!wires) kept_wires = @tclone_slice(live.graph_wires.array_view());
+		if (!ports)
+		{
+			kept_ports = @tclone_slice(live.graph_ports.array_view());
+			foreach (&p : kept_ports) p.label = p.label.copy(tmem);
+		}
+		if (!wires) kept_wires = @tclone_slice(live.graph_wires.array_view());
 
-	live.drop_list();
-	foreach (n : kept_nodes)
-	{
-		n.title = n.title.len > 0 ? live.keep_listed(n.title) : "";
-		n.tag = n.tag.len > 0 ? live.keep_listed(n.tag) : "";
-		live.graph_nodes.push(n);
-	}
-	foreach (p : kept_ports)
-	{
-		p.label = p.label.len > 0 ? live.keep_listed(p.label) : "";
-		live.graph_ports.push(p);
-	}
-	foreach (w : kept_wires) live.graph_wires.push(w);
+		live.drop_list();
+		foreach (n : kept_nodes)
+		{
+			n.title = n.title.len > 0 ? live.keep_listed(n.title) : "";
+			n.tag = n.tag.len > 0 ? live.keep_listed(n.tag) : "";
+			live.graph_nodes.push(n);
+		}
+		foreach (p : kept_ports)
+		{
+			p.label = p.label.len > 0 ? live.keep_listed(p.label) : "";
+			live.graph_ports.push(p);
+		}
+		foreach (w : kept_wires) live.graph_wires.push(w);
+	};
 }
 
 <*
@@ -3152,12 +3135,9 @@ fn void UiLayer.patch(&self, uint node, UiPatch fields)
 			cui::widgets::Dialog* widget = elem.widget_as(cui::widgets::Dialog);
 			if (fields.has_checked)
 			{
-				// The flag is raised across the close and not the open, because
-				// only the close has a callback behind it — see
-				// `UiLayer.closing_dialog`.
 				self.closing_dialog = true;
+				defer self.closing_dialog = false;
 				widget.set_open(elem, fields.checked);
-				self.closing_dialog = false;
 			}
 			if (fields.has_text)
 			{
@@ -3867,8 +3847,8 @@ fn void UiLayer.feed(&self, Cursor cursor, KeyBits keys, String text, float dt_m
 	};
 
 	self.dispatching = true;
+	defer self.dispatching = false;
 	self.ui.process_input(frame, dt_ms / 1000.0f);
-	self.dispatching = false;
 
 	self.wants_pointer = self.ui.hovered != null || self.ui.captured != null;
 	// The whole keyboard only while a text field has it: typing is every key,
@@ -3957,6 +3937,7 @@ fn uint? UiLayer.texture(&self, char[] rgba, uint width, uint height, uint handl
 	if (self.spare.len() > 0)
 	{
 		uint reused = self.spare.pop()!!;
+		defer catch self.spare.push(reused);
 		self.pass.update_pixels((cui::Texture)reused, rgba, width, height, linear)!;
 		self.textures.push(reused);
 		return reused;

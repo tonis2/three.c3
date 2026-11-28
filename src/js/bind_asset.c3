@@ -302,7 +302,7 @@ fn js::Value? js_asset_text(JsRuntime* self, String asked)
  than failing when the folder already exists.
 
  `@private` rather than `@local` because `bind_scene.c3` writes a PNG through
- the same door — the same reason `bind_shader.c3`'s `split_commas` is.
+ the same door.
 
  @param writing : `The resolved path.`
 *>
@@ -2437,38 +2437,29 @@ fn js::Value? js_asset_clips(JsRuntime* self, AssetId id)
 *>
 fn js::Value? js_asset_bones(JsRuntime* self, AssetId id)
 {
-	Asset* asset     = self.pass.assets.slot(id);
+	Asset* asset    = self.pass.assets.slot(id);
 	js::Value names = self.js.array()!;
 
 	// The names already emitted, borrowed from the asset rather than copied — this
 	// list outlives nothing and the asset outlives it.
-	List{String} seen;
-	seen.init(mem, 16);
-	defer seen.free();
-
-	foreach (&skin : asset.skins)
+	@pool()
 	{
-		foreach (source : skin.joints)
+		List{String} seen;
+		seen.tinit(16);
+
+		foreach (&skin : asset.skins)
 		{
-			if (source >= asset.nodes.len()) continue;
-			String name = asset.nodes[source].name;
-			if (name.len == 0) continue;
-
-			bool already = false;
-			foreach (had : seen)
+			foreach (source : skin.joints)
 			{
-				if (had == name)
-				{
-					already = true;
-					break;
-				}
-			}
-			if (already) continue;
+				if (source >= asset.nodes.len()) continue;
+				String name = asset.nodes[source].name;
+				if (name.len == 0 || seen.contains(name)) continue;
 
-			seen.push(name);
-			self.js.push(names, self.js.string(name)!);
+				seen.push(name);
+				self.js.push(names, self.js.string(name)!);
+			}
 		}
-	}
+	};
 	return names;
 }
 

@@ -123,30 +123,9 @@ enum ShaderFile : int (String name, String text)
 *>
 fn String? read_shader_source(ShaderFile file, alloc::Allocator allocator = mem)
 {
-	String path = "";
-	@pool()
-	{
-		String[2] candidates = {
-			string::tformat("shaders/%s", file.name),
-			string::tformat("build/shaders/%s", file.name),
-		};
-		foreach (candidate : candidates)
-		{
-			if (!file::is_file(candidate)) continue;
-			path = candidate.copy(mem);
-			break;
-		}
-	};
-
-	if (path.len)
+	if (try path = find_shader(file, mem))
 	{
 		defer free(path);
-		// A source read off disk instead of out of the binary changes what the GPU
-		// runs, and when it is the wrong file the failure names a push block
-		// rather than a path — so this line is the one that explains it. It is a
-		// `--debug` line because a checkout reads a dozen sources this way before
-		// the first frame, and a dozen of them is the whole output of an ordinary
-		// run.
 		@debug_log("three: %s from %s (not the built-in)", file.name, path);
 		return read_source(path, allocator);
 	}
@@ -171,16 +150,8 @@ fn String? read_shader_source(ShaderFile file, alloc::Allocator allocator = mem)
 fn String? load_source(ShaderFile file, alloc::Allocator allocator = mem)
 {
 	String raw = read_shader_source(file, allocator)!;
-	String? resolved = shady::resolve_imports(raw, file.name, &load_import, allocator: allocator);
-	if (catch err = resolved)
-	{
-		alloc::free(allocator, raw.ptr);
-		return err~;
-	}
-	// `raw` is the caller's until this call built the closure; free it with
-	// the allocator it came from, which may be a temporary.
-	alloc::free(allocator, raw.ptr);
-	return resolved;
+	defer alloc::free(allocator, raw.ptr);
+	return shady::resolve_imports(raw, file.name, &load_import, allocator: allocator);
 }
 
 <*

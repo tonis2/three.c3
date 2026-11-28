@@ -699,47 +699,17 @@ fn bool js_physics_soft_unpin(JsRuntime* self, NodeRef ref, int particle, float 
  whereas four registrations is four things to unbind and four to forget.
 *>
 fn void? js_on_trigger(JsRuntime* self, js::Value f)
-{
-	bool clearing = f.is_nullish();
-	if (!clearing && !f.is_function())
-	{
-		return self.js.fail("three.onTrigger(fn) wants a function, or null to unbind")~;
-	}
-
-	self.trigger_handler.release(self.js);
-	if (clearing) return;
-	self.trigger_handler.hold(self.js, f);
-}
+	=> self.set_handler(&self.trigger_handler, f, "three.onTrigger(fn) wants a function, or null to unbind");
 
 fn void? js_on_contact(JsRuntime* self, js::Value f)
-{
-	bool clearing = f.is_nullish();
-	if (!clearing && !f.is_function())
-	{
-		return self.js.fail("three.onContact(fn) wants a function, or null to unbind")~;
-	}
-
-	self.contact_handler.release(self.js);
-	if (clearing) return;
-	self.contact_handler.hold(self.js, f);
-}
+	=> self.set_handler(&self.contact_handler, f, "three.onContact(fn) wants a function, or null to unbind");
 
 fn void? js_on_joint_break(JsRuntime* self, js::Value f)
-{
-	bool clearing = f.is_nullish();
-	if (!clearing && !f.is_function())
-	{
-		return self.js.fail("three.onJointBreak(fn) wants a function, or null to unbind")~;
-	}
-
-	self.break_handler.release(self.js);
-	if (clearing) return;
-	self.break_handler.hold(self.js, f);
-}
+	=> self.set_handler(&self.break_handler, f, "three.onJointBreak(fn) wants a function, or null to unbind");
 
 <*
- Lets both handlers go. Same rule as `clear_key_handlers`: before the context
- goes, never after.
+ Lets the physics handlers go. Same rule as `clear_key_handlers`: before the
+ context goes, never after.
 *>
 fn void JsRuntime.clear_physics_handlers(&self)
 {
@@ -759,7 +729,7 @@ fn void JsRuntime.drop_physics_events(&self) => self.pass.scene.physics.drop_eve
  somebody debugs for an hour. Reported through the frame log, where an agent
  already looks for what went wrong inside a frame.
 *>
-fn void JsRuntime.report_diverged_bodies(&self)
+fn void JsRuntime.report_diverged_bodies(&self) => @pool()
 {
 	sz count = self.pass.scene.physics.diverged.len();
 	if (count == 0) return;

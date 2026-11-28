@@ -482,6 +482,7 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 
 	List{int} cells;
 	cells.init(mem, 1024);
+	defer cells.free();
 
 	for (int z = NAV_PAD; z < nz - NAV_PAD; z++)
 	{
@@ -518,7 +519,6 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 
 	if (cells.len() == 0)
 	{
-		cells.free();
 		mem::free(index);
 		return false;
 	}
@@ -533,7 +533,6 @@ fn bool Scene.bake_nav(&self, Assets* assets, NavSettings settings, NavMesh* out
 		.index = index,
 		.cells = cells.to_array(mem),
 	};
-	cells.free();
 
 	out.walkable_cells = (uint)out.grid.cells.len;
 	out.built = true;
@@ -834,32 +833,9 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 	float here = field[entry];
 	if (here >= collision::VOXEL_UNREACHED) return { 0, 0, 0 };
 
-	int plane      =  self.grid.nx * self.grid.ny;
-	int max_dy    = self.max_vertical_steps();
-	float best     =  here;
-	int best_voxel = -1;
-
-	for (int dz = -1; dz <= 1; dz++)
-	{
-		for (int dy = -max_dy; dy <= max_dy; dy++)
-		{
-			for (int dx = -1; dx <= 1; dx++)
-			{
-				if (dx == 0 && dy == 0 && dz == 0) continue;
-				if (!self.linked(voxel, dx, dy, dz)) continue;
-				int step      = dz * plane + dy * self.grid.nx + dx;
-				int neighbour = self.grid.index[voxel + step];
-				if (neighbour < 0) continue;
-				float there = field[neighbour];
-				if (there >= collision::VOXEL_UNREACHED) continue;
-				if (there < best)
-				{
-					best = there;
-					best_voxel = voxel + step;
-				}
-			}
-		}
-	}
+	int plane      = self.grid.nx * self.grid.ny;
+	int max_dy     = self.max_vertical_steps();
+	int best_voxel = self.downhill_neighbour(voxel, field, here, plane, max_dy);
 
 	if (best_voxel < 0) return { 0, 0, 0 };
 
@@ -868,6 +844,32 @@ fn Vec3 NavMesh.direction_at(&self, float[] field, Vec3 point)
 	float length = towards.length();
 	if (length < 1e-6f) return { 0, 0, 0 };
 	return towards / length;
+}
+
+fn int NavMesh.downhill_neighbour(&self, int voxel, float[] field, float best, int plane, int max_dy)
+{
+	int next = -1;
+	for (int dz = -1; dz <= 1; dz++)
+	{
+		for (int dy = -max_dy; dy <= max_dy; dy++)
+		{
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				if (dx == 0 && dy == 0 && dz == 0) continue;
+				if (!self.linked(voxel, dx, dy, dz)) continue;
+				int candidate = voxel + dz * plane + dy * self.grid.nx + dx;
+				int neighbour = self.grid.index[candidate];
+				if (neighbour < 0) continue;
+				float there = field[neighbour];
+				if (there < best)
+				{
+					best = there;
+					next = candidate;
+				}
+			}
+		}
+	}
+	return next;
 }
 
 <*
@@ -921,28 +923,7 @@ fn uint NavMesh.walk(&self, float[] field, Vec3 from, Vec3[] out, int[] voxels =
 		float best = field[here];
 		if (best <= 0.0f) break;
 
-		int next = -1;
-		for (int dz = -1; dz <= 1; dz++)
-		{
-			for (int dy = -max_dy; dy <= max_dy; dy++)
-			{
-				for (int dx = -1; dx <= 1; dx++)
-				{
-					if (dx == 0 && dy == 0 && dz == 0) continue;
-					if (!self.linked(voxel, dx, dy, dz)) continue;
-					int candidate = voxel + dz * plane + dy * self.grid.nx + dx;
-					int neighbour = self.grid.index[candidate];
-					if (neighbour < 0) continue;
-					float there = field[neighbour];
-					if (there < best)
-					{
-						best = there;
-						next = candidate;
-					}
-				}
-			}
-		}
-
+		int next = self.downhill_neighbour(voxel, field, best, plane, max_dy);
 		if (next < 0) break;
 		voxel = next;
 		if (count < voxels.len) voxels[count] = voxel;

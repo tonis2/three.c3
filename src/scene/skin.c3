@@ -302,7 +302,7 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 	pose_at(asset, null, 0, scratch, locals, world);
 	foreach (&skin : asset.skins)
 	{
-		write_joints(asset, skin, world, poses[skin.rest_offset..]);
+		write_joints(skin, world, poses[skin.rest_offset..]);
 	}
 
 	foreach (&segment : asset.baked)
@@ -318,7 +318,7 @@ fn void Asset.bake_poses(&self, Matrix4f[] poses)
 			pose_at(asset, clip, time, scratch, locals, world);
 
 			usz at = (usz)segment.frame_offset + (usz)frame * (usz)segment.joint_count;
-			write_joints(asset, skin, world, poses[at..]);
+			write_joints(skin, world, poses[at..]);
 		}
 	}
 }
@@ -407,7 +407,7 @@ fn void Asset.compose_posed(&self, PosedNode[] posed, Matrix4f[] locals, Matrix4
 fn void Asset.skin_joints(&self, uint skin, Matrix4f[] world, Matrix4f[] out)
 {
 	if (skin >= self.skins.len()) return;
-	write_joints(self, &self.skins[skin], world, out);
+	write_joints(&self.skins[skin], world, out);
 }
 
 <*
@@ -435,7 +435,7 @@ fn void compose_from(Asset* asset, uint index, Matrix4f parent, Matrix4f[] local
  puts it wherever that joint has moved to. Reversing them produces a mesh turned
  inside out around its own root rather than a posed one.
 *>
-fn void write_joints(Asset* asset, AssetSkin* skin, Matrix4f[] world, Matrix4f[] out) @local
+fn void write_joints(AssetSkin* skin, Matrix4f[] world, Matrix4f[] out) @local
 {
 	foreach (j, node : skin.joints)
 	{

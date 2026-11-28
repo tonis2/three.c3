@@ -116,7 +116,7 @@ fn void? JsRuntime.bind_frame_verbs(&self, js::Value host)
 }
 
 <*
- What the two loop callbacks are called in the sentences that stop them.
+ What the loop callbacks are called in the sentences that stop them.
 
  Constants rather than literals at four call sites, because the frame's three
  sentences are asserted on by name in `test/frame_test.c3` and a second loop that
@@ -667,14 +667,14 @@ fn bool JsRuntime.call_handler(&self, js::Value handler, js::Value[] args, Strin
 }
 
 <*
- Calls one of the two loop callbacks once and says whether it survived.
+ Calls one of the loop callbacks once and says whether it survived.
 
  Shared because the three ways a callback stops are a property of *being called
  inside a frame* rather than of which callback it is. What is not shared is which
  reference gets released, which is why this reports the failure and the caller
  does the clearing.
 
- @param what : `Which callback, for the sentence: FRAME_CALLBACK or FIXED_CALLBACK.`
+ @param what : `Which callback, for the sentence: FRAME_CALLBACK, FIXED_CALLBACK or LATE_CALLBACK.`
  @param keep_on_timeout : `The caller will keep the callback if the budget was what stopped it — see call_fixed. The reason is still reported, once.`
  @return `false when the call did not finish. The reason is already reported.`
 *>
@@ -876,7 +876,7 @@ fn void JsRuntime.drain_frame_jobs(&self)
 		drained++;
 		if (self.timed_out) break;
 	}
-	if (self.timed_out) self.stop_frame(self.frame_timeout_message());
+	if (self.timed_out) @pool() { self.stop_frame(self.frame_timeout_message()); };
 }
 
 // ============================================================================

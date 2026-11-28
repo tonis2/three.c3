@@ -196,9 +196,7 @@ fn String? tool_run_script(Object* args, void* user_data, DString* detail)
 		report.append_string(result.frame_running ? "true" : "false");
 		report.append_string(`,"ticks":`);
 		report.appendf("%d", result.frame_ticks)!!;
-		// Only in a game boot, where it is ever non-zero — and then always, even at
-		// zero, because "no frames ran long" is the answer somebody checking for
-		// hitching came to read.
+		// Reported only when at least one frame overran its budget.
 		if (result.frame_overruns > 0)
 		{
 			report.append_string(`,"overruns":`);
@@ -243,18 +241,27 @@ fn String? tool_screenshot(Object* args, void* user_data, DString* detail)
 	report.append_string(`,"height":`);
 	report.appendf("%d", host.renderer.target.extent.height)!!;
 
-	if (path.len > 0)
+	@pool()
 	{
-		if (catch err = host.renderer.screenshot(path))
+		image::Image? frame = host.renderer.capture(tmem);
+		if (catch err = frame)
 		{
-			detail.appendf("could not write %s: %s", path, err)!!;
+			detail.appendf("could not capture frame: %s", err)!!;
 			return TOOL_WRITE_FAILED~;
 		}
-		report.append_string(`,"path":`);
-		append_json_string(&report, path);
-	}
-
-	return content_with_frame(host, &report);
+		image::Image shot = frame;
+		if (path.len > 0)
+		{
+			if (catch err = png::save_file(&shot, path))
+			{
+				detail.appendf("could not write %s: %s", path, err)!!;
+				return TOOL_WRITE_FAILED~;
+			}
+			report.append_string(`,"path":`);
+			append_json_string(&report, path);
+		}
+		return content_with_frame(host, &report, captured: &shot);
+	};
 }
 
 // ============================================================================
@@ -372,7 +379,7 @@ const uint FRAME_MAX_EDGE = 1568;
  @param with_image : `False to leave the frame out and not draw one.`
  @return `The content array, allocated from mem, for a raw_content tool.`
 *>
-fn String? content_with_frame(ToolHost* host, DString* report, bool with_image = true)
+fn String? content_with_frame(ToolHost* host, DString* report, bool with_image = true, image::Image* captured = null)
 {
 	DString out;
 	out.init(mem, 4096);
@@ -381,9 +388,9 @@ fn String? content_with_frame(ToolHost* host, DString* report, bool with_image =
 	@pool()
 	{
 		String data = "";
-		if (with_image && host.renderer != null)
+		if (with_image && (captured != null || host.renderer != null))
 		{
-			image::Image? frame = host.renderer.capture(tmem);
+			image::Image? frame = captured != null ? *captured : host.renderer.capture(tmem);
 			if (try shot = frame)
 			{
 				image::Image sent = shot;

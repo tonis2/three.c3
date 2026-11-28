@@ -4,8 +4,6 @@
 *>
 module three;
 
-import shady;
-
 macro ShaderDef ambient_occlusion_def()
 {
 	ShaderSource[] sources = {

@@ -850,8 +850,8 @@ fn uint MeshPass.claim_slot(&self, Material material)
  A material an agent compiled holds a `VkPipeline` until `material.dispose()`
  gives it back, and `PipelineCache`'s eviction cannot help: an entry with a live
  material on it has a reference and is never unused. So a script that builds a
- material and drops the handle leaks one pipeline per distinct shader source, for
- the life of the process, exactly as the entry in `plan.md` §2 said it would.
+ material and drops the handle leaks one pipeline per distinct shader source for
+ the life of the process.
 
  The answer is a warning and not a `FinalizationRegistry`, and that was decided
  before it was written: a collector-driven free makes device memory depend on
@@ -2213,27 +2213,6 @@ fn uint MeshPass.point_shadow_signature(&self)
 	return hash;
 }
 
-// False only when every copy in the range is outside either the light's sphere
-// or this cube face. Deformed geometry stays on the conservative draw path.
-fn bool MeshPass.point_range_visible(&self, GpuMesh* mesh, Material* material, Bucket bucket,
-	uint offset, uint count, Light light, uint face)
-{
-	if (count == 0) return false;
-	if (mesh.has_skin || mesh.morph_targets > 0 || bucket.node != NO_NODE || material.vertex.len > 0) return true;
-	Vec3 centre = { light.direction[0], light.direction[1], light.direction[2] };
-	float range2 = light.direction[3] * light.direction[3];
-	Frustum side = frustum_of(point_shadow_matrix(light, face));
-	for (uint n = 0; n < count; n++)
-	{
-		Instance* copy = &self.shadow_instances[bucket.first + offset + n];
-		collision::Aabb3 box = mesh.bounds.transform_matrix(copy.model);
-		Vec3 nearest = math::min(math::max(centre, box.min), box.max);
-		Vec3 delta = nearest - centre;
-		if (delta.dot(delta) <= range2 && side.contains(box)) return true;
-	}
-	return false;
-}
-
 <*
  Draws one half of the casters, or both, into whatever depth attachment is open.
 
@@ -2247,20 +2226,10 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 	Matrix4f projection = self.shadows.light_view_projection, Light* point = null, uint point_face = 0,
 	MeshPipeline* plain = null, MeshPipeline* cutout = null, bool view_cameras = false)
 {
-	// Two pipelines at most, and one in nearly every scene. There is no material
-	// in a depth pass and so nothing to change pipelines for — except
-	// `material.alphaTest`, which is the one property that decides whether a
-	// fragment is there at all. `bound` is `record`'s tracking for `record`'s
-	// reason: the draw list is material-major, so a scene with foliage in it costs
-	// one bind per run rather than one per bucket, and a scene without it costs the
-	// single bind this always was.
 	vk::Pipeline bound = (vk::Pipeline)null;
-
-	// No `cmdSetCullMode`: `init_shadow` bakes CULL_MODE_NONE in and does not
-	// declare the dynamic state, so `material.side` is deliberately not honoured
-	// here. A single-sided wall still casts the shadow of both its faces, which is
-	// the same shadow.
 	uint recorded = 0;
+	Frustum point_frustum;
+	if (point != null) point_frustum = frustum_of(point_shadow_matrix(*point, point_face));
 
 	foreach (i, bucket : self.scene.buckets)
 	{
@@ -2273,11 +2242,6 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		if (!self.casts_shadow(material)) continue;
 		if (which == CASTERS_VISIBLE && material.vertex.len > 0) continue;
 
-		// `cutout_ready` and not only the threshold: the pipeline is compiled the
-		// first frame something asks for it, and a compile that failed leaves
-		// `cutout_refused` set — either way the caster falls back to the pipeline
-		// every other one uses and casts its whole geometry, which is the picture
-		// this pass drew before cut-outs existed.
 		MeshPipeline* solid = plain != null ? plain : &self.shadows.pipeline;
 		MeshPipeline* cut = plain != null ? cutout : (self.shadows.cutout_ready ? &self.shadows.cutout_pipeline : null);
 		MeshPipeline* pipeline = cut != null && material.alpha_test > 0.0f ? cut : solid;
@@ -2285,16 +2249,10 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 		if (pipeline.handle != bound)
 		{
 			vk::cmdBindPipeline(cmd, PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
-			// Beside the pipeline bind, because set 0 differs per shader and a set
-			// binding survives only while the layouts stay compatible up to its own
-			// number. A no-op on a device without the table.
 			self.assets.bind_texture_table(cmd, pipeline.layout);
 			bound = pipeline.handle;
 		}
 
-		// The four cells of `Bucket.static_first`, read back out. `tail` is the
-		// hidden dynamic copies, which are the one group that is not adjacent to its
-		// own kind — the cost the layout pays to keep `visible` a prefix.
 		uint tail_at = bucket.static_first + bucket.static_count;
 		switch (which)
 		{
@@ -2302,32 +2260,25 @@ fn uint MeshPass.record_casters(&self, vk::CommandBuffer cmd, uint which,
 				recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.visible, projection,
 					view_cameras: view_cameras);
 			case CASTERS_ALL:
-				// `count`, not `visible` — the counterpart of the line in `record`.
-				// This pass wants every copy the light's box kept, which is the
-				// visible prefix plus the tail of casters the camera cannot see.
-				if (point == null || self.point_range_visible(mesh, material, bucket, 0, bucket.count, *point, point_face))
+				if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.count, &point_frustum, point))
 				{
 					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.count, projection);
 				}
 			case CASTERS_STATIC:
-				if (point == null || self.point_range_visible(mesh, material, bucket,
-					bucket.static_first, bucket.static_count, *point, point_face)) recorded += self.draw_casters(
-					cmd,
-					pipeline,
-					mesh,
-					bucket,
-					at,
-					bucket.static_first,
-					bucket.static_count,
-					projection
-				);
+				if (point == null || self.shadow_range_reaches(mesh, material, bucket,
+					bucket.static_first, bucket.static_count, &point_frustum, point))
+				{
+					recorded += self.draw_casters(
+						cmd, pipeline, mesh, bucket, at, bucket.static_first, bucket.static_count, projection
+					);
+				}
 			case CASTERS_DYNAMIC:
-				if (point == null || self.point_range_visible(mesh, material, bucket, 0, bucket.static_first, *point, point_face))
+				if (point == null || self.shadow_range_reaches(mesh, material, bucket, 0, bucket.static_first, &point_frustum, point))
 				{
 					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, 0, bucket.static_first, projection);
 				}
-				if (point == null || self.point_range_visible(mesh, material, bucket, tail_at,
-					bucket.count - tail_at, *point, point_face))
+				if (point == null || self.shadow_range_reaches(mesh, material, bucket, tail_at,
+					bucket.count - tail_at, &point_frustum, point))
 				{
 					recorded += self.draw_casters(cmd, pipeline, mesh, bucket, at, tail_at, bucket.count - tail_at, projection);
 				}
@@ -2479,7 +2430,7 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 	gpu.grow_slot_buffer(&self.frame_blocks[slot], &self.frame_block_capacity[slot], count, 2, FrameBlock::size)!;
 	ulong address = self.frame_blocks[slot].address;
 
-	FrameBlock[] blocks = alloc::new_array(tmem, FrameBlock, count);
+	FrameBlock* blocks = (FrameBlock*)self.frame_blocks[slot].data();
 	blocks[0] = *main;
 	foreach (i, view : self.prepared_views)
 	{
@@ -2488,7 +2439,7 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 		block.view_projection = view.view_projection;
 		block.inverse_view_projection = invert(view.view_projection);
 		Vec3 eye = view.camera.eye();
-		block.camera = { eye.x, eye.y, eye.z, 0 };
+		block.camera = { eye.x, eye.y, eye.z, main.camera[3] };
 		block.cluster_counts = self.view_cluster_counts(slot, (uint)i + 1);
 		block.cluster_indices = self.view_cluster_indices(slot, (uint)i + 1);
 		block.cluster_screen[2] = view.camera.near_plane;
@@ -2496,7 +2447,6 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 		block.view_rect = rect_floats(view.rect);
 		self.prepared_views[i].frame_address = address + (ulong)(i + 1) * FrameBlock::size;
 	}
-	self.frame_blocks[slot].upload(blocks.ptr, count * FrameBlock::size);
 	return address;
 }
 
@@ -3655,29 +3605,17 @@ fn uint? MeshPass.create_texture_material(&self, int texture, int side = SIDE_FR
 *>
 fn void? MeshPass.set_material_uv(&self, uint index, float repeat_u, float repeat_v, float offset_u, float offset_v)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
+	Material* material = self.editable(index)!;
 	if (repeat_u == 0 || repeat_v == 0) return MATERIAL_REPEAT_IS_ZERO~;
 
-	self.materials[index].uv_transform = { repeat_u, repeat_v, offset_u, offset_v };
+	material.uv_transform = { repeat_u, repeat_v, offset_u, offset_v };
 }
 
 <*
  `material.roughness`, `.metalness`, `.reflectance` and `.alphaTest` — the whole
  of `DrawRecord.surface`.
 
- One verb for the four, for `set_material_uv`'s reason: they are one `float4` in
- the record and setting them separately would be four host crossings to write the
- same sixteen bytes.
-
- Free to animate, like the opacity and unlike the side: nothing is rebuilt, and a
- material that goes from matte to wet between frames costs the write. `alphaTest`
- is free in the colour pass for the same reason and is *not* free in the shadow
- pass: the first frame a cut-out caster exists compiles a second shadow pipeline
- — see `ShadowMap.build_cutout_pipeline` — and after that it is a bind.
-
- The prelude has already refused a value outside 0..1 by name.
-
- @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.set_material_surface(
 	&self,
@@ -3688,9 +3626,7 @@ fn void? MeshPass.set_material_surface(
 	float alpha_test = 0
 )
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	Material* material = &self.materials[index];
+	Material* material = self.editable(index)!;
 	material.one_minus_roughness = 1.0f - roughness;
 	material.metalness = metalness;
 	material.reflectance = reflectance;
@@ -3701,23 +3637,11 @@ fn void? MeshPass.set_material_surface(
  `material.emissive` and `material.emissiveIntensity` — what this surface gives
  off regardless of any light.
 
- One verb for the four numbers, for `set_material_surface`'s reason: they are one
- `float4` in the draw record, and the colour and the strength are never set apart
- from each other in practice — a lamp is a colour and how bright it is.
-
- Free to change between frames. Nothing is rebuilt and nothing recompiled, so a
- pulsing rune is a write per frame and stays in the draw call it was in.
-
- The prelude has already clamped the colour; the strength is deliberately not
- clamped, because that is how a light source goes brighter than white.
-
- @return ? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.set_material_emissive(&self, uint index, float r, float g, float b, float intensity)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	Material* material = &self.materials[index];
+	Material* material = self.editable(index)!;
 	material.emissive = { r, g, b };
 	material.one_minus_emissive_intensity = 1.0f - intensity;
 }
@@ -3726,20 +3650,11 @@ fn void? MeshPass.set_material_emissive(&self, uint index, float r, float g, flo
  `material.heightScale`, `.parallaxSteps` and `.parallaxShadow` — how the
  built-in look marches its height map.
 
- One verb for the three, for `set_material_emissive`'s reason: they are one
- `float4` in the draw record. Free to change between frames.
-
- The prelude has refused a negative scale or shadow; the steps are clamped here
- to `MAX_PARALLAX_STEPS`, so a script cannot ask the GPU for a thousand taps a
- pixel. Zero steps is the default.
-
- @return ? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.set_material_relief(&self, uint index, float scale, uint steps, float shadow)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	Material* material = &self.materials[index];
+	Material* material = self.editable(index)!;
 	material.height_scale_over_default = max(scale, 0.0f) - DEFAULT_HEIGHT_SCALE;
 	material.parallax_steps = min(steps, MAX_PARALLAX_STEPS);
 	material.parallax_shadow = min(max(shadow, 0.0f), 1.0f);
@@ -3751,25 +3666,19 @@ fn void? MeshPass.set_material_relief(&self, uint index, float scale, uint steps
 *>
 fn float[3] MeshPass.material_relief(&self, uint index)
 {
-	if (index >= self.materials.len()) return { DEFAULT_HEIGHT_SCALE, (float)DEFAULT_PARALLAX_STEPS, 0 };
-
-	Material* material = &self.materials[index];
+	Material* material = self.material(index);
+	if (material == null) return { DEFAULT_HEIGHT_SCALE, (float)DEFAULT_PARALLAX_STEPS, 0 };
 	return { material.height_scale(), (float)material.parallax_step_count(), material.parallax_shadow };
 }
 
 <*
  What those four read back as: the colour as it was written, and the strength
  beside it rather than folded in.
-
- A material that does not exist answers black at strength 1, which is
- `material_surface`'s rule — a getter answers what a material nobody gave
- anything would answer.
 *>
 fn float[4] MeshPass.material_emissive(&self, uint index)
 {
-	if (index >= self.materials.len()) return { 0, 0, 0, 1 };
-
-	Material* material = &self.materials[index];
+	Material* material = self.material(index);
+	if (material == null) return { 0, 0, 0, 1 };
 	return {
 		material.emissive[0], material.emissive[1], material.emissive[2], material.emissive_intensity()
 	};
@@ -3778,32 +3687,19 @@ fn float[4] MeshPass.material_emissive(&self, uint index)
 <*
  `material.stochastic` — sample this material's maps so they stop repeating.
 
- A bool and not a strength, because there is nothing continuous to turn down:
- the blend is a partition of unity over a lattice, and a half-applied one is
- three taps to arrive at a picture between two answers. Turning it off is the
- way to have less of it.
-
- Free to change between frames, like the opacity and unlike the side: it is one
- bit of the draw record, so nothing is rebuilt and nothing is recompiled.
-
- @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.set_material_stochastic(&self, uint index, bool on)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	self.materials[index].stochastic = on;
+	Material* material = self.editable(index)!;
+	material.stochastic = on;
 }
 
-<*
- What that reads back as. False for an index that names nothing, which is
- `material_uv`'s rule: a getter answers what a material nobody asked anything of
- would answer.
-*>
+<* What that reads back as. False for an index that names nothing. *>
 fn bool MeshPass.material_stochastic(&self, uint index)
 {
-	if (index >= self.materials.len()) return false;
-	return self.materials[index].stochastic;
+	Material* material = self.material(index);
+	return material != null ? material.stochastic : false;
 }
 
 <*
@@ -3811,68 +3707,43 @@ fn bool MeshPass.material_stochastic(&self, uint index)
  maps. Free to change between frames: the shadow pass asks `casts_shadow` as it
  records, and a change rebuilds the cached static maps.
 
- @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.set_material_cast_shadow(&self, uint index, bool on)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-	if (self.materials[index].cast_shadow_off == !on) return;
-	self.materials[index].cast_shadow_off = !on;
+	Material* material = self.editable(index)!;
+	if (material.cast_shadow_off == !on) return;
+	material.cast_shadow_off = !on;
 	// The cached static maps, the sun's and the lamps', hold this material's casters.
 	self.scene.static_revision++;
 }
 
-<*
- What that reads back as. True for an index that names nothing: a material nobody
- asked anything of casts.
-*>
+<* What that reads back as. True for an index that names nothing. *>
 fn bool MeshPass.material_cast_shadow(&self, uint index)
 {
-	if (index >= self.materials.len()) return true;
-	return !self.materials[index].cast_shadow_off;
+	Material* material = self.material(index);
+	return material != null ? !material.cast_shadow_off : true;
 }
 
 <*
- `material.uvVariants` — a uv transform per copy, on the channel that already
- varies per copy.
+ Clears `material.uvVariants` before appending rows via `add_material_uv_variant`.
 
- One row at a time, which is `add_material_layer`'s crossing shape and for the
- same reason: eight rows of four numbers is thirty-two arguments, and the host
- verbs take scalars. `begin_material_uv_variants` clears the table and every
- `add_material_uv_variant` after it appends one row, so a script assigning a
- shorter list cannot leave the tail of a longer one behind it.
-
- ## Why the table is not checked for sense
-
- A row of all zeroes is the identity and is a perfectly reasonable first entry —
- it is what "leave this copy alone" looks like — so there is nothing here to
- refuse the way `set_material_uv` refuses a zero repeat. `turns` and `flip` are
- masked in the shader rather than clamped here, so a fourth quarter turn is the
- identity instead of an error, which is what makes arithmetic in a script safe.
-
- @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.begin_material_uv_variants(&self, uint index)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	self.materials[index].uv_variant_count = 0;
+	Material* material = self.editable(index)!;
+	material.uv_variant_count = 0;
 }
 
 <*
- One more row, or nothing when the table is already full.
+ Appends one UV-variant row, ignoring rows beyond `UV_VARIANTS`.
 
- Silent about the ninth row rather than throwing, because the prelude has already
- refused a longer list by name and with the limit in the message — this is the
- second line of defence and its job is to not write past the array.
-
- @return ? MATERIAL_UNKNOWN : `No such material in this context.`
+ @return? MATERIAL_UNKNOWN : `No such material, or a built-in one every node shares.`
 *>
 fn void? MeshPass.add_material_uv_variant(&self, uint index, float offset_u, float offset_v, float turns, float flip)
 {
-	if (index >= self.materials.len()) return MATERIAL_UNKNOWN~;
-
-	Material* material = &self.materials[index];
+	Material* material = self.editable(index)!;
 	if (material.uv_variant_count >= UV_VARIANTS) return;
 
 	material.uv_variants[material.uv_variant_count] = { offset_u, offset_v, turns, flip };
@@ -3880,16 +3751,13 @@ fn void? MeshPass.add_material_uv_variant(&self, uint index, float offset_u, flo
 }
 
 <*
- What that table reads back as, flattened four numbers to a row.
-
- The temp arena, like every other list-shaped answer here: the binding copies it
- into a JavaScript array before the pool closes.
+ What that table reads back as, flattened four numbers to a row, in `tmem`.
 *>
 fn float[] MeshPass.material_uv_variants(&self, uint index)
 {
-	if (index >= self.materials.len()) return {};
+	Material* material = self.material(index);
+	if (material == null) return {};
 
-	Material* material = &self.materials[index];
 	float[] out = alloc::new_array(tmem, float, (sz)material.uv_variant_count * 4);
 	for (uint i = 0; i < material.uv_variant_count; i++)
 	{
@@ -3902,26 +3770,18 @@ fn float[] MeshPass.material_uv_variants(&self, uint index)
 	return out;
 }
 
-<*
- What those three read back as.
-
- An index that names nothing answers the default surface rather than throwing,
- which is `material_uv`'s rule and `material_opacity`'s: a getter answers what a
- material nobody asked for anything would answer.
-*>
+<* What surface parameters read back as. *>
 fn float[4] MeshPass.material_surface(&self, uint index)
 {
-	if (index >= self.materials.len()) return { 1, 0, 0, 0 };
-	return self.materials[index].surface();
+	Material* material = self.material(index);
+	return material != null ? material.surface() : { 1, 0, 0, 0 };
 }
 
-<*
- What `material.repeat` and `material.offset` read back as.
-*>
+<* What `material.repeat` and `material.offset` read back as. *>
 fn float[4] MeshPass.material_uv(&self, uint index)
 {
-	if (index >= self.materials.len()) return UV_IDENTITY;
-	return self.materials[index].uv_transform_or_identity();
+	Material* material = self.material(index);
+	return material != null ? material.uv_transform_or_identity() : UV_IDENTITY;
 }
 
 <*
@@ -4193,10 +4053,13 @@ fn void MeshPass.collect_materials(&self, Gpu* gpu)
 	@pool()
 	{
 		bool[] named = alloc::new_array(tmem, bool, self.materials.len());
-		foreach (&node : self.scene.nodes)
+		foreach (scene : self.scenes)
 		{
-			if (!node.alive) continue;
-			if (node.material < named.len) named[node.material] = true;
+			foreach (&node : scene.nodes)
+			{
+				if (!node.alive) continue;
+				if (node.material < named.len) named[node.material] = true;
+			}
 		}
 
 		foreach (i, &material : self.materials)

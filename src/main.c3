@@ -270,9 +270,6 @@ fn int main(String[] args) @feat(!ANDROID) // android_main is the entry there
 		return 0;
 	}
 
-	// Before `run`, and therefore before anything compiles: these choose the
-	// implementation per pass, and the first compile of a pass picks for good.
-
 	// Before anything that opens a window or a device, and before anything that
 	// could print: this process is the stdio end of another one's server, and the
 	// only thing a client will tolerate on its stdout is JSON-RPC.
@@ -281,14 +278,11 @@ fn int main(String[] args) @feat(!ANDROID) // android_main is the entry there
 	if (catch err = run(opts))
 	{
 		io::printfn("three: %s", err);
-		// All six templates are in the binary, so this is never a missing
-		// shaders/ directory and there is no build step to suggest: it is a name
-		// that is on neither the search path nor in here, which is a typo.
 		if (err == SHADER_NOT_FOUND)
 		{
-			io::printn("  No template by that name, on the search path or in this binary. The six");
-			io::printn("  are embedded, so this is a typo rather than a missing shaders/ directory");
-			io::printn("  — see shader/load.c3.");
+			io::printn("  No template by that name, on the search path or in this binary. All");
+			io::printn("  shipped shaders are embedded, so this is a typo rather than a missing");
+			io::printn("  shaders/ directory — see shader/load.c3.");
 		}
 		// The path is named here rather than in the fault, because this is the only
 		// place that still has it: a `--script` typo is otherwise a bare fault name

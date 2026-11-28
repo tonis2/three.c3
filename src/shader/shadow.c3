@@ -19,8 +19,6 @@
 *>
 module three;
 
-import shady;
-
 macro ShaderDef shadow_def()
 {
 	ShaderSource[] sources = {

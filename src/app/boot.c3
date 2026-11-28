@@ -243,6 +243,15 @@ fn void choose_caches(Options opts)
  `stage` is that same staircase written down instead of implied. `open` raises
  it as each piece comes up; `close` walks back down it. Nothing else reads it.
 *>
+enum EngineStage : char
+{
+	CLOSED,
+	WINDOW,
+	INSTANCE,
+	SURFACE,
+	RENDERER,
+}
+
 struct Engine
 {
 	c3w::Window window;
@@ -250,8 +259,8 @@ struct Engine
 	vk::Instance instance;
 	vk::SurfaceKHR surface;
 	Renderer renderer;
-	// How far `open` got. See the note above — this is the unwound `defer` chain.
-	int stage;
+	// How far `open` got, so `close` unwinds only the stages that succeeded.
+	EngineStage stage;
 }
 
 <*
@@ -276,10 +285,10 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint
 			name: WINDOW_DEFAULT_TITLE
 		)!;
 	}
-	self.stage = 1;
+	self.stage = WINDOW;
 
 	self.instance = create_instance(debugging, headless: headless)!;
-	self.stage = 2;
+	self.stage = INSTANCE;
 
 	if (self.windowed)
 	{
@@ -288,37 +297,25 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint
 			(c3w::VkGetInstanceProcAddrFn)vk::getInstanceProcAddr
 		)!;
 	}
-	self.stage = 3;
+	self.stage = SURFACE;
 
 	self.renderer.init(self.instance, self.surface, width, height, debugging, views, samples)!;
-	self.stage = 4;
+	self.stage = RENDERER;
 
-	// The device table on every debug run, where it used to take a flag of its own.
-	// A run that asked for the validation layers is a run somebody is diagnosing,
-	// and the first question a diagnosis asks is which device and which limits —
-	// `Gpu.report` prints whether validation actually loaded, which is the one
-	// thing `--debug` cannot promise on its own.
 	if (debugging) self.renderer.gpu.report();
-
-	// The shader is compiled here, from shaders/mesh.shady on disk. Editing it and
-	// re-running changes the picture — no rebuild of this binary, and no build step
-	// for the shader either.
 	self.renderer.pass.init(&self.renderer.gpu, &self.renderer.target)!;
 }
 
 <*
- Takes the engine down, in the order the `defer`s would have.
-
- Reverse of `open` and guarded by the stage it reached, so it is safe on a
- half-open engine and safe to call twice.
+ Takes the engine down in reverse order of `open`, safe on a half-open engine or twice.
 *>
 fn void Engine.close(&self)
 {
-	if (self.stage >= 4) self.renderer.free();
-	if (self.stage >= 3 && self.windowed) self.surface.free(self.instance);
-	if (self.stage >= 2) self.instance.free();
-	if (self.stage >= 1 && self.windowed) self.window.free();
-	self.stage = 0;
+	if (self.stage >= RENDERER) self.renderer.free();
+	if (self.stage >= SURFACE && self.windowed) self.surface.free(self.instance);
+	if (self.stage >= INSTANCE) self.instance.free();
+	if (self.stage >= WINDOW && self.windowed) self.window.free();
+	self.stage = CLOSED;
 }
 
 <*
@@ -403,9 +400,12 @@ fn void? run(Options opts)
 		aim_camera(renderer, opts.camera);
 		for (uint i = 0; i < math::max(opts.frames, (uint)1); i++)
 		{
-			String out = frame_path(opts.screenshot, i);
-			renderer.screenshot(out)!;
-			io::printfn("wrote %s (%dx%d)", out, opts.width, opts.height);
+			@pool()
+			{
+				String out = frame_path(opts.screenshot, i);
+				renderer.screenshot(out)!;
+				io::printfn("wrote %s (%dx%d)", out, opts.width, opts.height);
+			};
 			if (opts.every == 0) break;
 		}
 		return;

@@ -72,7 +72,7 @@ const renderedNav = makeSceneNav(renderedScene);
 // A turntable, not a free Object3D, and named so. Three.js's
 // `camera.position.set(...)` has no meaning here, so the properties that
 // would half-match it do not exist — `orbit()` and `frameAll()` are names
-// Three.js does not have, which is `plan.md` §4's rule for a divergence.
+// Three.js does not have, so a divergence is explicit.
 
 // -------------------------------------------------------------------
 // The lights
@@ -85,9 +85,9 @@ const renderedNav = makeSceneNav(renderedScene);
 // else. Not `scene.add(new three.DirectionalLight(...))`:
 // that name would promise a light with a position, a light you can parent
 // something to, and a light `scene.remove` reaches. A light here is none of
-// those — it is a direction, a colour and a slot. `plan.md` §4's half-match
-// rule: a name Three.js does not have is a name nobody expects Three.js's
-// behaviour from, and `three.lights` is a registry rather than a graph.
+// those — it is a direction, a colour and a slot. A name Three.js does not
+// have is a name nobody expects Three.js's behaviour from, and `three.lights`
+// is a registry rather than a graph.
 //
 // **`three.light` is `three.lights[0]`, the same object.** It is the sun: the
 // one the shadow map is fitted around and the only one that casts, which is
@@ -386,8 +386,8 @@ Object.defineProperties(light, {
 	// than as `castShadow` on the light or `shadowMap.enabled` on a
 	// renderer, because there is neither a light object nor a renderer
 	// object to hang it on. And `size` is one number where Three.js has
-	// `mapSize`, a Vector2: this map is square, and a name Three.js does
-	// not have is `plan.md` §4's rule for saying so.
+	// `mapSize`, a Vector2: this map is square, and the distinct name makes
+	// that clear.
 	//
 	// A fresh object each read, like `direction` above, so the
 	// properties always answer with what the host holds rather than with
@@ -1710,8 +1710,7 @@ const input = {
 	//
 	// They keep coming while the cursor is outside the window, because the
 	// window goes on saying where it is; they stop at the edge of the
-	// *screen*, where the platform stops the cursor. Getting past that is
-	// pointer lock and there is none — see the note in `plan.md` §17.
+	// *screen*, where the platform stops the cursor unless pointer lock is active.
 	//
 	// **`scroll` is positive away from the user**, which is the opposite of
 	// the browser's `deltaY` and the same direction the camera's zoom
@@ -1726,7 +1725,7 @@ const input = {
 	// three.onClick is the one thing dispatched from it.
 	get pointer() { return H.pointer(); },
 
-	// Take the mouse pointer out of the user's hands — plan.md §17.
+	// Take the mouse pointer out of the user's hands.
 	//
 	// **What it buys is a look that does not stop.** Without it, `pointer.dx`
 	// is a difference of cursor positions, and a cursor stops at the edge of
@@ -1774,11 +1773,8 @@ function asIntersection(raw) {
 //
 // **A frame with no visible shadows in it has three explanations** — the pass
 // did not run, the pass ran and the map is fitted somewhere else, or everything
-// in shot is genuinely inside one big shadow — and until this existed the
-// renderer distinguished none of them. `plan.md` §20.2 is the hour that cost,
-// and the way it was eventually settled was decoding a PNG in Python and
-// averaging the luminance of the lower third of the frame. Each of these views
-// is that hour as one render.
+// in shot is genuinely inside one big shadow — and each of these views
+// isolates one cause in a single render.
 //
 // It is deliberately not scene state: `new three.Scene()` does not clear it,
 // for the same reason it does not move the camera. A script rebuilding the

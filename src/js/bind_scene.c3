@@ -11,12 +11,12 @@
 
  ## Nodes are handles, revalidated on every call
 
- `plan.md` §1 requires a JS handle to revalidate on access and *throw* rather
- than dereference a freed node, which is what `NodeId`'s generation was built for
- at M2. A node crosses as its `Node` handle (bind_args.c3), and every verb below
- that names one resolves it through `NodeRef.from_js` first: a stale one raises a
- JS `Error` naming what happened, so a script that keeps a mesh across a
- `scene.dispose()` gets a sentence, not a corrupted neighbour.
+ A JS handle revalidates on access and *throws* rather than dereference a freed
+ node, which is what `NodeId`'s generation was built for. A node crosses as its
+ `Node` handle (bind_args.c3), and every verb below that names one resolves it
+ through `NodeRef.from_js` first: a stale one raises a JS `Error` naming what
+ happened, so a script that keeps a mesh across a `scene.dispose()` gets a
+ sentence, not a corrupted neighbour.
 
  The verbs about one node are methods of the `Node` class — `obj._h.setName(n)` —
  and the rest are functions on `__three`.
@@ -606,12 +606,15 @@ fn void say_nan_transform(NodeId id, Node* node) @local
 	{
 		return;
 	}
-	String what = node.name.len > 0 ? node.name.copy(tmem) : string::tformat("node %d", (int)id.index);
-	@advise(
-		"three: a NaN or infinite transform was written to '%s' — an undefined or non-numeric "
-			"component in a position.set(), scale or rotation? It draws nowhere and every distance "
-			"test against it answers NaN.",
-		what);
+	@pool()
+	{
+		String what = node.name.len > 0 ? node.name : string::tformat("node %d", (int)id.index);
+		@advise(
+			"three: a NaN or infinite transform was written to '%s' — an undefined or non-numeric "
+				"component in a position.set(), scale or rotation? It draws nowhere and every distance "
+				"test against it answers NaN.",
+			what);
+	};
 }
 
 <*
@@ -1313,7 +1316,7 @@ struct FrameStatsAnswer
 
 <*
  `stats(sceneId)`, or `stats()` for the rendered scene — the numbers an agent
- reads its own cost off (`plan.md`'s second thesis).
+ reads its own cost off.
 
  The scene being asked about is not always the one being rendered: a script
  building the next level wants to know how big it has got before it shows it.
@@ -1329,7 +1332,7 @@ struct FrameStatsAnswer
  **Always set, even at zero.** A runtime with no device answers 0, not
  `undefined`: a missing key makes `ms > 16` false and `ms.toFixed(2)` throw, and
  neither failure names the reason. The five phase milliseconds sum to `gpuMs` —
- `gpu/timing.c3` writes the marks and `plan.md` §18.3 has why they exist.
+ `gpu/timing.c3` writes the marks.
 
  @return? js::THREW
 *>
@@ -1650,7 +1653,7 @@ fn double js_render_scale_get(JsRuntime* self)
 *>
 fn bool? js_render_scale_set(JsRuntime* self, double scale)
 {
-	if (scale < RENDER_SCALE_MIN || scale > RENDER_SCALE_MAX)
+	if (!math::is_finite(scale) || scale < RENDER_SCALE_MIN || scale > RENDER_SCALE_MAX)
 	{
 		return self.js.fail("three.window.renderScale wants a fraction between %s and %s, or null for full resolution; got %s",
 			RENDER_SCALE_MIN, RENDER_SCALE_MAX, scale)~;
@@ -1724,8 +1727,7 @@ fn js::Value? js_background_get(JsRuntime* self, uint id)
  onto were a question, and it is not: the offscreen target is blitted to an
  opaque swapchain image and encoded to a PNG that nothing is behind. Taking an
  alpha here would let a script write a number that changes no pixel, which is
- worse than not offering it — `plan.md` §4's half-match rule applied to a
- parameter rather than to a name.
+ worse than not offering it.
 
  ## Components, not a hex value
 
@@ -1871,7 +1873,7 @@ fn double js_budget_get(JsRuntime* self) => (double)(self.script_budget_ns / 1_0
 *>
 fn void? js_budget_set(JsRuntime* self, float asked)
 {
-	if (asked <= 0)
+	if (!math::is_finite(asked) || asked <= 0)
 	{
 		return self.js.fail(
 			"three.budget wants a positive number of milliseconds — there is no way to turn the interrupt off"
@@ -2234,7 +2236,7 @@ fn uint? js_light_add(JsRuntime* self, LightArgs numbers)
 
 	Lighting lighting = self.pass.lighting;
 	light.meta[0] = lighting.next_light_id++;
-	light.meta[1] = 0xffffffff;
+	light.meta[1] = SHADOW_VIEW_NONE;
 	if (light.meta[2] < 2) light.meta[2] = light.direction[3] > 0.0f ? 1 : 0;
 	lighting.lights[lighting.count] = light;
 	lighting.count++;
@@ -2319,6 +2321,16 @@ fn LightShadowState? js_light_shadow_get(JsRuntime* self, int asked)
 
  @return? js::THREW
 *>
+// Clamps a requested shadow tile size and rounds it down to a power of two.
+fn uint shadow_tile_size(float requested, uint max_size, bool allow_zero = false) @local
+{
+	if (allow_zero && !(requested > 0.0f)) return 0;
+	uint wanted  = (uint)math::clamp(requested, (float)SHADOW_MIN_SIZE, (float)max_size);
+	uint rounded = SHADOW_MIN_SIZE;
+	while (rounded * 2 <= wanted) rounded *= 2;
+	return rounded;
+}
+
 fn void? js_light_shadow_set(JsRuntime* self, int asked, int mode_asked, float requested)
 {
 	uint index = light_slot(self, asked, 0)!;
@@ -2328,11 +2340,8 @@ fn void? js_light_shadow_set(JsRuntime* self, int asked, int mode_asked, float r
 			"three.lights[0] is the sun and its shadow is fitted rather than tiled — set three.light.shadow"
 		)~;
 	}
-	uint mode = (uint)math::clamp(mode_asked, 0, 2);
-	uint wanted = requested > 0.0f
-		? (uint)math::clamp(requested, (float)SHADOW_MIN_SIZE, (float)POINT_SHADOW_MAX_SIZE) : 0;
-	uint rounded = wanted > 0 ? SHADOW_MIN_SIZE : 0;
-	while (rounded > 0 && rounded * 2 <= wanted) rounded *= 2;
+	uint mode    = (uint)math::clamp(mode_asked, 0, 2);
+	uint rounded = shadow_tile_size(requested, POINT_SHADOW_MAX_SIZE, allow_zero: true);
 	if (mode == LIGHT_SHADOW_ON && rounded == 0 && self.pass.point_shadows.size == 0)
 	{
 		return self.js.fail(
@@ -2623,10 +2632,7 @@ fn void js_point_shadow_set(JsRuntime* self, float enabled, float requested, flo
 {
 	PointShadowSettings settings;
 	settings.enabled = enabled != 0.0f;
-	uint wanted = requested > 0.0f
-		? (uint)math::clamp(requested, (float)SHADOW_MIN_SIZE, (float)POINT_SHADOW_MAX_SIZE) : 0;
-	uint rounded = wanted > 0 ? SHADOW_MIN_SIZE : 0;
-	while (rounded > 0 && rounded * 2 <= wanted) rounded *= 2;
+	uint rounded = shadow_tile_size(requested, POINT_SHADOW_MAX_SIZE, allow_zero: true);
 	settings.size = rounded;
 	if (rounded > 512)
 	{
@@ -2760,10 +2766,14 @@ fn int js_xr_foveation_get(JsRuntime* self)
 <*
  `xrFoveationSet(level)` — a `Foveation` ordinal for the XR loop to apply.
 
- @require level >= 0 && level < Foveation::len : "Level out of range"
+ @return? js::THREW
 *>
-fn void js_xr_foveation_set(JsRuntime* self, int level)
+fn void? js_xr_foveation_set(JsRuntime* self, int level)
 {
+	if (level < 0 || level >= (int)Foveation::len)
+	{
+		return self.js.fail("three.xr.foveation level %d is out of range (0..%d)", level, (int)Foveation::len - 1)~;
+	}
 	if (self.renderer != null) self.renderer.xr_display.foveation_request = (char)(level + 1);
 }
 
@@ -2879,9 +2889,7 @@ fn void js_shadow_set(JsRuntime* self, float enabled, float size, float bias, fl
 	ShadowSettings settings;
 	settings.enabled = enabled != 0.0f;
 
-	uint wanted  = (uint)math::clamp(size, (float)SHADOW_MIN_SIZE, (float)SHADOW_MAX_SIZE);
-	uint rounded = SHADOW_MIN_SIZE;
-	while (rounded * 2 <= wanted) rounded *= 2;
+	uint rounded = shadow_tile_size(size, SHADOW_MAX_SIZE);
 	settings.size = rounded;
 	say_shadow_size(self.pass.shadows.settings.size, rounded);
 
@@ -2983,8 +2991,8 @@ fn void js_frame_all(JsRuntime* self) => self.pass.frame_camera();
 <*
  `cameraAttach(node, ox, oy, oz, distance, lag, local)` — follow a node.
 
- `plan.md` §17. Everything about what this does is in `CameraFollow`; what is
- here is the two things the boundary has to decide.
+ Everything about what this does is in `CameraFollow`; what is here is the two
+ things the boundary has to decide.
 
  **The distance is applied once, not held.** It is written straight onto the
  camera and the follow never looks at it again, so the wheel, a drag and
@@ -3017,7 +3025,7 @@ fn void? js_camera_attach(JsRuntime* self, NodeRef ref, Vec3 offset, float dista
 			"three.camera.attach(object)")~;
 	}
 
-	if (lag < 0.0f)
+	if (!math::is_finite(lag) || lag < 0.0f)
 	{
 		return self.js.fail("three.camera.attach(object, { lag }) wants seconds — 0 for rigid, and never a negative")~;
 	}

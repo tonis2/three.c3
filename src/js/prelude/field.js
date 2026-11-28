@@ -1,4 +1,4 @@
-// A scalar grid in world coordinates — plan.md §18.4c and §18.4d.
+// A scalar grid in world coordinates.
 //
 // **One object for the terrain's heights and for a splat mask**, and that is
 // the whole design rather than a convenience. The plan's answer to "ground
@@ -497,14 +497,13 @@ export class Field {
 	}
 }
 
-// Where to put a hundred trees — plan.md §18.6.
+// Where to put a hundred trees.
 //
 // **Written by hand three times before this existed**, twice in one file: a
 // seeded LCG, rejection sampling, keep-out circles, point-to-polyline
 // distance, and a slope test. It is the most repeated block in any scene with
 // a landscape in it, and it is engine-shaped precisely because it wants
-// `terrain.heightAt` and `normalAt` — which is why it lands here and not
-// before §18.4b.
+// `terrain.heightAt` and `normalAt`.
 //
 // Rejection sampling rather than a Poisson disc: `spacing` is a minimum
 // separation and not a guarantee of one, the sampler gives up after a bounded

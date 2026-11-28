@@ -177,8 +177,6 @@ struct Compute
 	vk::CommandPool  pool;
 	vk::CommandBuffer cmd;
 	vk::Fence        fence;
-	List{ComputeKernel} kernels;
-	bool             recording;
 	// Commands recorded since the last submit. What lets a host-side copy - a
 	// `write`, a `read` - know whether the GPU still owes it work that was
 	// recorded first, and what lets an empty `submit` cost nothing.
@@ -202,6 +200,7 @@ fn void? Compute.init(&self, Gpu* gpu)
 	if (!gpu.limits.push_descriptor) return COMPUTE_NOT_READY~;
 
 	self.gpu = gpu;
+	defer catch self.free();
 	self.pool = gpu.handle.createCommandPool(queue: gpu.graphics.index)!;
 
 	vk::CommandBufferList allocated = gpu.handle.createCommandBuffers(self.pool, count: 1)!;
@@ -213,18 +212,15 @@ fn void? Compute.init(&self, Gpu* gpu)
 	// is invalid usage that leaves it signalled, which made the first `submit()`
 	// return without waiting for the GPU at all.
 	self.fence = vk::fenceCreateInfo().build(gpu.handle)!;
-	self.kernels.init(mem, 8);
 
 	vk::beginCommandBuffer(self.cmd, &&vk::commandBufferBeginInfo())!;
-	self.recording = true;
 	return;
 }
 
 fn void Compute.free(&self)
 {
-	self.submit()!!;
-	foreach (kernel : self.kernels) kernel.free(self.gpu.handle);
-	self.kernels.free();
+	if (self.gpu == null) return;
+	if (self.pending > 0 || self.in_flight) (void)self.submit();
 	if (self.fence != null) vk::destroyFence(self.gpu.handle, self.fence, null);
 	if (self.pool != null) self.pool.free(self.gpu.handle);
 	*self = { };
@@ -325,14 +321,16 @@ fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, Str
 	bool entry_found = false;
 	foreach (candidate : shader.entries)
 	{
-		if (candidate.stage == STAGE_COMPUTE && candidate.name == entry) entry_found = true;
+		if (candidate.stage == STAGE_COMPUTE && candidate.name == entry)
+		{
+			entry_found = true;
+			break;
+		}
 	}
 	if (!entry_found) return COMPUTE_KERNEL_NO_ENTRY~;
 
-	// The layout the module says it wants, in binding order. Set 0 only: a
-	// kernel's buffers, storage images and textures are all its own, so a set it
-	// never mentioned would be a binding no dispatch could fill. One descriptor
-	// per binding - an array of images is a table no dispatch here fills.
+	// The layout the module says it wants, in binding order. Set 0 only, one
+	// descriptor per binding.
 	uint count = 0;
 	uint storage_images = 0;
 	GpuLimits* limits = &gpu.limits;
@@ -348,29 +346,28 @@ fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, Str
 			default:
 				return COMPUTE_UNSUPPORTED_BINDING~;
 		}
-		if (binding.type == DESCRIPTOR_TYPE_STORAGE_IMAGE)
-		{
-			storage_images++;
-			// A format the host picks is read and written through the two
-			// without-format features, one per direction; a declared format
-			// outside the core thirteen needs the extended-formats one.
-			if (binding.storage_format == 0)
-			{
-				if (binding.reads && !limits.storage_image_read_without_format) return COMPUTE_IMAGE_FEATURE~;
-				if (binding.writes && !limits.storage_image_write_without_format) return COMPUTE_IMAGE_FEATURE~;
-			}
-			else if (shady::storage_format_extended((shady::ImageFormat)binding.storage_format)
-				&& !limits.storage_image_extended_formats)
-			{
-				return COMPUTE_IMAGE_FEATURE~;
-			}
-		}
 		if (binding.binding + 1 > count) count = binding.binding + 1;
+		if (binding.type != DESCRIPTOR_TYPE_STORAGE_IMAGE) continue;
+
+		storage_images++;
+		if (binding.storage_format == 0)
+		{
+			if (binding.reads && !limits.storage_image_read_without_format) return COMPUTE_IMAGE_FEATURE~;
+			if (binding.writes && !limits.storage_image_write_without_format) return COMPUTE_IMAGE_FEATURE~;
+		}
+		else if (shady::storage_format_extended((shady::ImageFormat)binding.storage_format)
+			&& !limits.storage_image_extended_formats)
+		{
+			return COMPUTE_IMAGE_FEATURE~;
+		}
 	}
 	if (count == 0) return COMPUTE_UNSUPPORTED_BINDING~;
 	if (count > COMPUTE_MAX_BINDINGS) return COMPUTE_NOT_READY~;
 	if (storage_images > limits.max_per_stage_storage_images) return COMPUTE_TOO_MANY_IMAGES~;
+	uint lanes = shader.subgroup_size;
+	if (!limits.offers_subgroup(lanes)) return COMPUTE_UNSUPPORTED_SUBGROUP_SIZE~;
 
+	defer catch self.free(gpu.handle);
 	self.name = name.copy(mem);
 	self.binding_names.init(mem, count);
 	self.binding_count = count;
@@ -430,10 +427,6 @@ fn void? ComputeKernel.create(&self, Compute* compute, ShaderModule* shader, Str
 	vk::ShaderModule shader_module = vk::loadShaderModule(gpu.handle, shader.spirv)!;
 	defer shader_module.free(gpu.handle);
 
-	// A kernel written for a subgroup size (`@subgroup_size(n)`) gets exactly
-	// that one; a device that cannot promise it cannot run the kernel.
-	uint lanes = shader.subgroup_size;
-	if (!limits.offers_subgroup(lanes)) return COMPUTE_UNSUPPORTED_SUBGROUP_SIZE~;
 	self.pipeline = gpu.create_compute_pipeline(shader_module, entry, self.layout, lanes)!;
 }
 
@@ -457,41 +450,14 @@ fn void? Compute.dispatch(&self, ComputeKernel* kernel, StorageBuffer[] buffers,
 	uint groups_x, uint groups_y = 1, uint groups_z = 1)
 {
 	if (buffers.len < kernel.binding_count) return COMPUTE_NOT_READY~;
-	BufferView[COMPUTE_MAX_BINDINGS] views;
-	for (uint i = 0; i < kernel.binding_count; i++) views[i] = buffers[i].view();
-	return self.dispatch_views(kernel, views[:kernel.binding_count], push_constants, groups_x, groups_y, groups_z);
-}
-
-<*
- `dispatch`, over ranges of buffers rather than whole ones.
-
- `barrier` false is the caller saying the next command does not read what this
- one writes - the Q, K and V projections of one layer, three matmuls over the
- same input - so the GPU may overlap them. The barrier then comes from whichever
- command after them does ask for one, and it covers all of them.
-
- Each view's offset has to be a multiple of the device's
- `minStorageBufferOffsetAlignment`. The caller checks that, because the caller
- knows which binding it was and can say so.
-*>
-fn void? Compute.dispatch_views(&self, ComputeKernel* kernel, BufferView[] views, void* push_constants,
-	uint groups_x, uint groups_y = 1, uint groups_z = 1, bool barrier = true)
-{
-	if (views.len < kernel.binding_count) return COMPUTE_NOT_READY~;
 	ComputeBinding[COMPUTE_MAX_BINDINGS] bindings;
-	for (uint i = 0; i < kernel.binding_count; i++) bindings[i] = { .buffer = views[i] };
-	return self.dispatch_bindings(kernel, bindings[:kernel.binding_count], push_constants,
-		groups_x, groups_y, groups_z, barrier);
+	for (uint i = 0; i < kernel.binding_count; i++) bindings[i] = { .buffer = buffers[i].view() };
+	return self.dispatch_bindings(kernel, bindings[:kernel.binding_count], push_constants, groups_x, groups_y, groups_z);
 }
 
 <*
- `dispatch_views`, where a binding may be an image as well as a buffer.
-
- Each binding is written as the kernel declared it: a buffer range, a storage
- image in `GENERAL`, or a texture through its own sampler. Whether the image a
- caller handed over is the one the shader declared - its format, whether it can
- be sampled at all - is the caller's to check, because the caller can name the
- binding in the sentence; `storage_image_mismatch` is that check.
+ Record one dispatch where each binding may be a buffer range, a storage image,
+ or a sampled texture.
 
  The first dispatch of a recording that binds an image orders itself after
  everything already on the queue (`open_images`), which is what makes a kernel
@@ -506,9 +472,16 @@ fn void? Compute.dispatch_bindings(&self, ComputeKernel* kernel, ComputeBinding[
 	bool images = false;
 	for (uint i = 0; i < kernel.binding_count; i++)
 	{
-		if (!kernel.info[i].is_image()) continue;
-		if (bound[i].image == null) return COMPUTE_NOT_READY~;
-		images = true;
+		if (kernel.info[i].is_image())
+		{
+			if (bound[i].image == null) return COMPUTE_NOT_READY~;
+			images = true;
+		}
+		else
+		{
+			BufferView view = bound[i].buffer;
+			if (view.buffer == null || view.offset + view.range() > view.buffer.size) return COMPUTE_NOT_READY~;
+		}
 	}
 	if (images) self.open_images();
 
@@ -523,7 +496,6 @@ fn void? Compute.dispatch_bindings(&self, ComputeKernel* kernel, ComputeBinding[
 		if (info.type == DESCRIPTOR_TYPE_STORAGE_BUFFER)
 		{
 			BufferView view = bound[i].buffer;
-			if (view.buffer == null || view.offset + view.range() > view.buffer.size) return COMPUTE_NOT_READY~;
 			infos[i] = {
 				.buffer = view.buffer.memory.buffer,
 				.offset = (vk::DeviceSize)view.offset,
@@ -565,7 +537,7 @@ fn void? Compute.dispatch_bindings(&self, ComputeKernel* kernel, ComputeBinding[
 
 	vk::cmdDispatch(self.cmd, groups_x, groups_y, groups_z);
 	self.pending++;
-	if (barrier) self.barrier();
+	if (barrier) self.barrier()!;
 	return;
 }
 
@@ -602,7 +574,7 @@ fn void Compute.open_images(&self)
  freely (a copy of a latent between two kernels, a cleared accumulator before a
  matmul) and the cost of the wider stage mask is nothing next to a missed one.
 *>
-fn void Compute.barrier(&self)
+fn void? Compute.barrier(&self)
 {
 	vk::MemoryBarrier2 barrier = vk::memoryBarrier2()
 		.setSrcStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
@@ -610,7 +582,7 @@ fn void Compute.barrier(&self)
 		.setDstStageMask(PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | PIPELINE_STAGE_2_ALL_TRANSFER_BIT)
 		.setDstAccessMask(ACCESS_2_SHADER_READ_BIT | ACCESS_2_SHADER_WRITE_BIT
 			| ACCESS_2_TRANSFER_READ_BIT | ACCESS_2_TRANSFER_WRITE_BIT);
-	if (catch self.settle()) return;
+	self.settle()!;
 	vk::cmdPipelineBarrier2(self.cmd, &&vk::dependencyInfo().setMemoryBarriers({ barrier }));
 }
 
@@ -637,7 +609,7 @@ fn void? Compute.copy(&self, StorageBuffer* source, usz source_offset,
 		}
 	});
 	self.pending++;
-	if (barrier) self.barrier();
+	if (barrier) self.barrier()!;
 	return;
 }
 
@@ -646,12 +618,12 @@ fn void? Compute.copy(&self, StorageBuffer* source, usz source_offset,
  writes it, so an accumulator starts at nought rather than at whatever the last
  buffer in that memory left behind.
 *>
-fn void Compute.clear(&self, StorageBuffer* buffer)
+fn void? Compute.clear(&self, StorageBuffer* buffer)
 {
-	if (catch self.settle()) return;
+	self.settle()!;
 	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, 0, vk::WHOLE_SIZE, 0);
 	self.pending++;
-	self.barrier();
+	self.barrier()!;
 }
 
 <*
@@ -669,7 +641,7 @@ fn void? Compute.fill(&self, StorageBuffer* buffer, usz offset, usz size, uint w
 
 	vk::cmdFillBuffer(self.cmd, buffer.memory.buffer, (vk::DeviceSize)offset, (vk::DeviceSize)size, word);
 	self.pending++;
-	if (barrier) self.barrier();
+	if (barrier) self.barrier()!;
 	return;
 }
 
@@ -706,7 +678,7 @@ fn void? Compute.submit(&self)
 fn void? Compute.submit_async(&self)
 {
 	self.settle()!;
-	if (!self.recording) return;
+	if (self.cmd == null) return;
 	// Nothing recorded is nothing to wait for. A `read` submits first whether or
 	// not a script dispatched anything, and that should not cost a round trip.
 	if (self.pending == 0) return;

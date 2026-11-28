@@ -243,12 +243,12 @@ fn InventoryEntry? describe_gltf(String root, String relative) @local
 				widen(&entry, &stream.gltf, primitive);
 			}
 			entry.triangles += triangles;
-			entry.meshes.push({ .name = mesh.name.copy(mem), .triangles = triangles });
+			entry.meshes.push({ .name = mesh.name.len > 0 ? mesh.name.copy(mem) : "", .triangles = triangles });
 		}
 
 		foreach (&animation : stream.gltf.animations)
 		{
-			entry.animations.push(animation.name.copy(mem));
+			entry.animations.push(animation.name.len > 0 ? animation.name.copy(mem) : "");
 		}
 
 		find_markers(&entry, &stream.gltf);

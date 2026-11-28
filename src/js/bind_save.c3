@@ -94,8 +94,8 @@ fn bool valid_slot(String name)
  case where there is nothing to name a folder after, and a folder named after
  nothing is one a player never finds again.
 
- @return ? SAVE_DIR_UNSET : `Nothing has named a save directory and no script was run to name one after.`
- @return ? SAVE_DIR_UNAVAILABLE : `There is a name and no writable place to put it — no home directory, or a state root that cannot be created.`
+ @return? SAVE_DIR_UNSET : `Nothing has named a save directory and no script was run to name one after.`
+ @return? SAVE_DIR_UNAVAILABLE : `There is a name and no writable place to put it — no home directory, or a state root that cannot be created.`
 *>
 fn String? JsRuntime.save_directory(&self)
 {
@@ -122,7 +122,7 @@ fn String? JsRuntime.save_directory(&self)
  not three hours in, at a checkpoint.
 
  @param slug : `Already checked by valid_slot.`
- @return ? SAVE_DIR_UNAVAILABLE : `No state directory on this machine, or it could not be created.`
+ @return? SAVE_DIR_UNAVAILABLE : `No state directory on this machine, or it could not be created.`
 *>
 fn String? JsRuntime.set_save_directory(&self, String slug)
 {
@@ -230,18 +230,20 @@ fn js::Value? js_save_dir_get(JsRuntime* self)
 	return self.js.string(dir);
 }
 
-<*
- @return? js::THREW
-*>
-fn bool? js_save_write_text(JsRuntime* self, String name, String body)
+fn bool? save_write_raw(JsRuntime* self, String name, char[] body, String verb) @local
 {
-	String where = self.save_path_for(name, "three.save.write")!;
-	if (catch err = file::save(where, (char[])body))
+	String where = self.save_path_for(name, verb)!;
+	if (catch err = file::save(where, body))
 	{
-		return self.js.fail("three.save.write could not write %s: %s", where, err)~;
+		return self.js.fail("%s could not write %s: %s", verb, where, err)~;
 	}
 	return true;
 }
+
+<*
+ @return? js::THREW
+*>
+fn bool? js_save_write_text(JsRuntime* self, String name, String body) => save_write_raw(self, name, (char[])body, "three.save.write");
 
 <*
  `saveReadText(name)` — the file as a string, or null when there is none.
@@ -266,15 +268,7 @@ fn js::Value? js_save_read_text(JsRuntime* self, String name)
 <*
  @return? js::THREW
 *>
-fn bool? js_save_write_bytes(JsRuntime* self, String name, char[] body)
-{
-	String where = self.save_path_for(name, "three.save.writeBytes")!;
-	if (catch err = file::save(where, body))
-	{
-		return self.js.fail("three.save.writeBytes could not write %s: %s", where, err)~;
-	}
-	return true;
-}
+fn bool? js_save_write_bytes(JsRuntime* self, String name, char[] body) => save_write_raw(self, name, body, "three.save.writeBytes");
 
 <*
  `saveSize(name)` — how many bytes the file holds, or -1 when there is none.

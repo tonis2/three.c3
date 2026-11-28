@@ -74,6 +74,7 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	env::set_var("HOME", internal);
 
 	GameDir game = find_game(app.activity.asset_manager, internal, external)!;
+	defer game.free();
 	io::printfn("three: game %s", game.script);
 
 	// Before the engine: the runtime decides which Vulkan device and extensions
@@ -141,11 +142,11 @@ fn void? run_android(ndk::App* app, String internal, String external)
 		HeadsetDev* dev = mem::new(HeadsetDev);
 		defer mem::free(dev);
 		dev.open(&runtime, &engine.renderer, game, external);
+		game = {}; // ownership moved to `dev`
 		defer dev.close();
 		run_xr(app, host, &engine.renderer, &runtime, dev)!;
 		return;
 	}
-	defer game.free();
 	run_probe(app, &engine.renderer, &runtime)!;
 }
 
@@ -212,6 +213,7 @@ fn GameDir? find_game(void* assets, String internal, String external)
 		free(pushed);
 	}
 	String unpacked = string::format(mem, "%s/game", internal);
+	defer catch free(unpacked);
 	unpack_game(assets, unpacked)!;
 	return game_in(unpacked);
 }

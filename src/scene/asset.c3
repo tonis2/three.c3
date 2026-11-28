@@ -42,6 +42,7 @@
 *>
 module three;
 
+import ktx::basis;
 import std::io;
 import std::io::file;
 import std::collections::list;
@@ -96,12 +97,6 @@ fn bool AssetId.equals(
 
 <*
  One layer of `CUSTOM_materials_layers`, resolved to texture slots.
-
- The extension's `MaterialLayer` as this renderer can actually use it, which is
- deliberately less than the file carries: the PBR half — metallic, roughness,
- subsurface — is dropped rather than stored. The specular term reads one roughness
- and one metalness for a whole material, so a per-layer pair is a field nothing
- evaluates, which is worse than an absence. Height and bump go the same way.
 
  The texture fields are indices into `Assets.textures`, or -1, and each holds one
  reference for as long as this record does — released by `GpuMesh.release_layers`
@@ -597,10 +592,8 @@ const float GLTF_RANGE_UNSET = 50.0f;
  in, which `Assets.ensure_poses` does at the same moment it bakes — so a file that
  describes a skeleton and never draws it reads no matrices.
 
- `bind` is the inverse of `inverse_bind`, kept because recovering a *bone's*
- world transform out of a baked pose needs it: the table holds
- `world * inverse_bind`, so `pose * bind` is the bone. Nothing reads it yet; it is
- one matrix per joint and it is the whole of what a socket API would need.
+ `bind` is the inverse of `inverse_bind`, kept to recover a bone's world
+ transform out of a baked pose (`pose * bind`), used by bone sockets.
 *>
 struct AssetSkin
 {
@@ -768,8 +761,6 @@ struct Asset
 	uint generation;
 	bool alive;
 }
-
-fn collision::Aabb3 Asset.aabb(&self) => self.bounds;
 
 <*
  A deduplicated texture, and how many `GpuMesh`es name it.
@@ -1952,39 +1943,6 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 {
 	UnloadReport report;
 
-	bool sweepable = false;
-	foreach (&asset : self.assets)
-	{
-		if (!asset.alive) continue;
-		if (asset.refs == 0)
-		{
-			sweepable = true;
-			break;
-		}
-		// A file still in use can hold meshes that are not. Since G3/S3 the
-		// refcount is per mesh, so a level that swapped which pieces of a kit it
-		// places gives back the ones it stopped using without giving back the
-		// kit — which is the whole reason the count moved down a level.
-		foreach (&mesh : asset.meshes)
-		{
-			if (mesh.uploaded && mesh.refs == 0)
-			{
-				sweepable = true;
-				break;
-			}
-		}
-		if (sweepable) break;
-	}
-	if (!sweepable) return report;
-
-	// `game.md` G2/S4. `MAX_FRAMES_IN_FLIGHT` is 2 and a buffer freed now may
-	// still be referenced by a command buffer the GPU has not finished, so
-	// something has to keep the two apart. This used to be `gpu.wait_idle()` —
-	// right for a level boundary, which is already a stall, and wrong the moment
-	// a game unloads while it is running. Every free below now goes through
-	// `gpu/retire.c3` instead, so the sweep costs an allocation and a list push
-	// per object and the frames in flight finish undisturbed.
-
 	usz bytes_before     = self.texture_bytes();
 	uint textures_before = self.texture_count();
 
@@ -1999,21 +1957,13 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 		}
 
 		// The file stays; the pieces of it nothing draws do not. A freed mesh
-		// keeps its slot, its name, its bounds and its glTF indices — everything
-		// `describe_primitive` produced — so it is back to being described and
-		// the next node that names it uploads it again.
+		// keeps its slot, its name, its bounds and its glTF indices so the next
+		// node that names it uploads it again.
 		foreach (m, &mesh : asset.meshes)
 		{
 			if (!mesh.uploaded || mesh.refs > 0) continue;
-			// A mesh with no primitive behind it was generated rather than read —
-			// an implicit shape's collision proxy — and `ensure_uploaded` has
-			// nothing to read it back from, so giving it up would be giving it up
-			// for good. It is a dozen triangles either way.
 			if (mesh.gltf_mesh < 0) continue;
 			self.release_texture(gpu, mesh.texture);
-			// The stack is re-resolved when the mesh uploads again, exactly as the
-			// base colour map is, so giving it back here is what keeps a sweep of an
-			// unused piece of a kit from holding that piece's images forever.
 			mesh.release_layers(self, gpu);
 			mesh.release_material(self, gpu);
 			mesh.release_device(gpu);
@@ -2023,7 +1973,12 @@ fn UnloadReport Assets.unload_unused(&self, Gpu* gpu)
 			mesh.has_uvs = false;
 			mesh.has_colors = false;
 			mesh.has_tangents = false;
+			mesh.has_skin = false;
 			mesh.colors_are_mask = false;
+			mesh.uv_v_down = false;
+			mesh.lightmap_eligible = false;
+			mesh.lightmap_uv_area = 0;
+			mesh.lightmap_local_area = 0;
 			mesh.index_count = 0;
 			mesh.base_color = { 1, 1, 1, 1 };
 			report.meshes++;
@@ -2249,16 +2204,18 @@ fn void pretranscode_basis_images(Asset* asset, BasisTargets targets) @local
 		if (!wanted) continue;
 		char[]? encoded = asset.stream.get_image_data((uint)index);
 		if (catch encoded) continue;
-		if (!is_basis_ktx2(encoded)) continue;
+		if (!is_ktx2(encoded)) continue;
+		basis::Info? info = basis::info(encoded);
+		if (catch info) continue;
 		// An image this device samples none of the mappings for takes the RGBA8 path.
-		TextureFamily family = targets.family_for(encoded);
+		TextureFamily family = targets.family_for_info(info);
 		if (family == TextureFamily.RGBA8) continue;
 		slots.push({
 			.encoded = encoded,
 			.format = { family, ColorSpace.SRGB },
 			.image = (int)index,
-			.cost = basis_image_cost(encoded),
-			.generated = basis_needs_chain(encoded),
+			.cost = (ulong)info.width * info.height,
+			.generated = basis_info_needs_chain(info),
 		});
 	}
 
@@ -2710,7 +2667,7 @@ fn GpuMesh describe_primitive(gltf::GltfStream* stream, gltf::Mesh mesh, gltf::P
 	if (catch position_accessor) return out;
 	if (position_accessor < 0 || position_accessor >= stream.gltf.accessors.len()) return out;
 
-	out.name = mesh.name.copy(mem);
+	out.name = mesh.name.len > 0 ? mesh.name.copy(mem) : "";
 	out.vertex_count = stream.gltf.accessors[position_accessor].count;
 
 	gltf::Aabb box = stream.gltf.primitive_aabb(primitive);
@@ -3297,14 +3254,19 @@ fn void read_channels(gltf::GltfStream* stream, uint source_index, List{Animatio
 				built.values[k] = stream.@cast_buffer(values, k, float);
 			}
 		}
+		else if (stride == 4)
+		{
+			for (sz k = 0; k < values.count; k++)
+			{
+				Vec4 value = stream.@cast_buffer(values, k, Vec4);
+				for (uint c = 0; c < 4; c++) built.values[(usz)k * 4 + c] = value[c];
+			}
+		}
 		else
 		{
 			for (sz k = 0; k < values.count; k++)
 			{
-				// Read as a Vec4 regardless: a VEC3 accessor's stride is what
-				// `@cast_buffer` uses to step, so this reads three floats and one
-				// past them, and only `stride` of them are kept.
-				Vec4 value = stream.@cast_buffer(values, k, Vec4);
+				Vec3 value = stream.@cast_buffer(values, k, Vec3);
 				for (uint c = 0; c < stride; c++) built.values[(usz)k * stride + c] = value[c];
 			}
 		}
@@ -3567,7 +3529,13 @@ fn GpuMesh? Assets.upload_primitive(
 	// on the way out. Without this the failure is a leak that surfaces as
 	// "child objects not destroyed" when the device goes away, several layers
 	// from the cause.
-	defer catch out.free_buffers(gpu);
+	defer catch
+	{
+		self.release_texture(gpu, out.texture);
+		out.release_layers(self, gpu);
+		out.release_material(self, gpu);
+		out.free_buffers(gpu);
+	};
 
 	GeometryBuilder geometry;
 	geometry.init();
@@ -3577,7 +3545,7 @@ fn GpuMesh? Assets.upload_primitive(
 	List{Vec2}* uvs = &geometry.uvs;
 	List{uint}* indices = &geometry.indices;
 
-	out.name = mesh.name.copy(mem);
+	out.name = mesh.name.len > 0 ? mesh.name.copy(mem) : "";
 	gltf::Aabb box = stream.gltf.primitive_aabb(primitive);
 	out.bounds = { .min = box.min, .max = box.max };
 	out.upload_streams(gpu, &geometry)!;
@@ -3904,99 +3872,87 @@ fn void read_tangents(gltf::GltfStream* stream, gltf::Primitive primitive, List{
 {
 	sz? attr = primitive.attributes.get("TANGENT");
 	if (catch attr) return;
+	if (attr < 0 || attr >= stream.gltf.accessors.len()) return;
 
 	gltf::Accessor accessor = stream.gltf.accessors[attr];
 	if (accessor.type != gltf::AccessorType.VEC4) return;
 
-	for (sz i = 0; i < accessor.count; i++)
+	switch (accessor.data_type)
 	{
-		switch (accessor.data_type)
-		{
-			case gltf::DataType.ICHAR:
+		case gltf::DataType.ICHAR:
+			for (sz i = 0; i < accessor.count; i++)
+			{
 				ichar[<4>] c = stream.@cast_buffer(accessor, i, ichar[<4>]);
 				out.push({
 					math::max(c[0] / 127.0f, -1.0f), math::max(c[1] / 127.0f, -1.0f),
 					math::max(c[2] / 127.0f, -1.0f), math::max(c[3] / 127.0f, -1.0f),
 				});
-			case gltf::DataType.SHORT:
+			}
+		case gltf::DataType.SHORT:
+			for (sz i = 0; i < accessor.count; i++)
+			{
 				short[<4>] c = stream.@cast_buffer(accessor, i, short[<4>]);
 				out.push({
 					math::max(c[0] / 32767.0f, -1.0f), math::max(c[1] / 32767.0f, -1.0f),
 					math::max(c[2] / 32767.0f, -1.0f), math::max(c[3] / 32767.0f, -1.0f),
 				});
-			case gltf::DataType.FLOAT:
-				out.push(stream.@cast_buffer(accessor, i, Vec4));
-			default:
-				// An unsigned or 32-bit integer tangent is not a thing glTF permits.
-				out.clear();
-				return;
-		}
+			}
+		case gltf::DataType.FLOAT:
+			for (sz i = 0; i < accessor.count; i++) out.push(stream.@cast_buffer(accessor, i, Vec4));
+		default:
+			return;
 	}
 }
 
 <*
- Indices, read at whatever width the file stored them.
-
- glTF allows unsigned byte, short or int, and a chooser that assumes one width
- silently pairs adjacent bytes into one index — a 4-vertex quad comes back
- referring to vertex 770. Everything is widened to uint on the way to the GPU
- so there is a single index type to bind.
+ Indices, read at whatever width the file stored them and widened to uint.
 *>
 fn void read_indices(gltf::GltfStream* stream, gltf::Primitive primitive, List{uint}* out)
 {
 	sz? attr = primitive.attributes.get("indices");
 	if (catch attr) return;
+	if (attr < 0 || attr >= stream.gltf.accessors.len()) return;
 
 	gltf::Accessor accessor = stream.gltf.accessors[attr];
-	for (sz i = 0; i < accessor.count; i++)
+	switch (accessor.data_type)
 	{
-		switch (accessor.data_type)
-		{
-			case gltf::DataType.CHAR:
-				out.push((uint)stream.@cast_buffer(accessor, i, char));
-			case gltf::DataType.USHORT:
-				out.push((uint)stream.@cast_buffer(accessor, i, ushort));
-			case gltf::DataType.SHORT:
-				out.push((uint)stream.@cast_buffer(accessor, i, short));
-			default:
-				out.push(stream.@cast_buffer(accessor, i, uint));
-		}
+		case gltf::DataType.CHAR:
+			for (sz i = 0; i < accessor.count; i++) out.push((uint)stream.@cast_buffer(accessor, i, char));
+		case gltf::DataType.USHORT:
+			for (sz i = 0; i < accessor.count; i++) out.push((uint)stream.@cast_buffer(accessor, i, ushort));
+		case gltf::DataType.SHORT:
+			for (sz i = 0; i < accessor.count; i++) out.push((uint)stream.@cast_buffer(accessor, i, short));
+		default:
+			for (sz i = 0; i < accessor.count; i++) out.push(stream.@cast_buffer(accessor, i, uint));
 	}
 }
 
 <*
  Read a primitive's WEIGHTS_0 into four floats a vertex.
-
- **By hand rather than through `@each_weight`**, which casts the accessor to a
- `Vec4` and is therefore right only for the float encoding. glTF also allows
- normalised `ubyte` and `ushort`, and reading four bytes *as* a float there is not
- a wrong number — it is a denormal or a NaN, which poses the vertex to somewhere
- no clipping recovers from. `read_colors` below makes the same distinction for the
- same reason.
-
- Normalisation is the caller's, not this function's: it needs every set read
- first, and there is only ever one set here.
 *>
 fn void read_weights(gltf::GltfStream* stream, gltf::Primitive primitive, List{Vec4}* out)
 {
 	sz? attr = primitive.attributes.get("WEIGHTS_0");
 	if (catch attr) return;
+	if (attr < 0 || attr >= stream.gltf.accessors.len()) return;
 
 	gltf::Accessor accessor = stream.gltf.accessors[attr];
-
-	for (sz i = 0; i < accessor.count; i++)
+	switch (accessor.data_type)
 	{
-		switch (accessor.data_type)
-		{
-			case gltf::DataType.CHAR:
+		case gltf::DataType.CHAR:
+			for (sz i = 0; i < accessor.count; i++)
+			{
 				char[<4>] w = stream.@cast_buffer(accessor, i, char[<4>]);
 				out.push({ w[0] / 255.0f, w[1] / 255.0f, w[2] / 255.0f, w[3] / 255.0f });
-			case gltf::DataType.USHORT:
+			}
+		case gltf::DataType.USHORT:
+			for (sz i = 0; i < accessor.count; i++)
+			{
 				ushort[<4>] w = stream.@cast_buffer(accessor, i, ushort[<4>]);
 				out.push({ w[0] / 65535.0f, w[1] / 65535.0f, w[2] / 65535.0f, w[3] / 65535.0f });
-			default:
-				out.push(stream.@cast_buffer(accessor, i, Vec4));
-		}
+			}
+		default:
+			for (sz i = 0; i < accessor.count; i++) out.push(stream.@cast_buffer(accessor, i, Vec4));
 	}
 }
 
@@ -4059,47 +4015,60 @@ fn void read_colors(gltf::GltfStream* stream, gltf::Primitive primitive, List{Ve
 {
 	sz? attr = primitive.attributes.get("COLOR_0");
 	if (catch attr) return;
+	if (attr < 0 || attr >= stream.gltf.accessors.len()) return;
 
 	gltf::Accessor accessor = stream.gltf.accessors[attr];
 	bool three              = accessor.type == gltf::AccessorType.VEC3;
 
-	for (sz i = 0; i < accessor.count; i++)
+	switch (accessor.data_type)
 	{
-		switch (accessor.data_type)
-		{
-			case gltf::DataType.CHAR:
-				if (three)
+		case gltf::DataType.CHAR:
+			if (three)
+			{
+				for (sz i = 0; i < accessor.count; i++)
 				{
 					char[<3>] c = stream.@cast_buffer(accessor, i, char[<3>]);
 					out.push({ c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1 });
 				}
-				else
+			}
+			else
+			{
+				for (sz i = 0; i < accessor.count; i++)
 				{
 					char[<4>] c = stream.@cast_buffer(accessor, i, char[<4>]);
 					out.push({ c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, c[3] / 255.0f });
 				}
-			case gltf::DataType.USHORT:
-				if (three)
+			}
+		case gltf::DataType.USHORT:
+			if (three)
+			{
+				for (sz i = 0; i < accessor.count; i++)
 				{
 					ushort[<3>] c = stream.@cast_buffer(accessor, i, ushort[<3>]);
 					out.push({ c[0] / 65535.0f, c[1] / 65535.0f, c[2] / 65535.0f, 1 });
 				}
-				else
+			}
+			else
+			{
+				for (sz i = 0; i < accessor.count; i++)
 				{
 					ushort[<4>] c = stream.@cast_buffer(accessor, i, ushort[<4>]);
 					out.push({ c[0] / 65535.0f, c[1] / 65535.0f, c[2] / 65535.0f, c[3] / 65535.0f });
 				}
-			default:
-				if (three)
+			}
+		default:
+			if (three)
+			{
+				for (sz i = 0; i < accessor.count; i++)
 				{
 					Vec3 c = stream.@cast_buffer(accessor, i, Vec3);
 					out.push({ c.x, c.y, c.z, 1 });
 				}
-				else
-				{
-					out.push(stream.@cast_buffer(accessor, i, Vec4));
-				}
-		}
+			}
+			else
+			{
+				for (sz i = 0; i < accessor.count; i++) out.push(stream.@cast_buffer(accessor, i, Vec4));
+			}
 	}
 }
 
@@ -4303,25 +4272,28 @@ fn void warn_uv_transform(UvTransform uv, String mesh, String layer) @local
 {
 	if (!uv.mixed && uv.rotation == 0) return;
 
-	String where = layer.len > 0
-		? string::tformat(`"%s", layer "%s"`, mesh, layer)
-		: string::tformat(`"%s"`, mesh);
-	if (uv.mixed)
+	@pool()
 	{
-		io::printfn(
-			"three: %s gives its maps more than one KHR_texture_transform, and there is one uv "
-				"per material here — they all draw at the base colour map's",
-			where
-		);
-	}
-	if (uv.rotation != 0)
-	{
-		io::printfn(
-			"three: %s asks for a KHR_texture_transform rotation, which nothing here draws — "
-				"its maps are scaled and offset but not turned",
-			where
-		);
-	}
+		String where = layer.len > 0
+			? string::tformat(`"%s", layer "%s"`, mesh, layer)
+			: string::tformat(`"%s"`, mesh);
+		if (uv.mixed)
+		{
+			io::printfn(
+				"three: %s gives its maps more than one KHR_texture_transform, and there is one uv "
+					"per material here — they all draw at the base colour map's",
+				where
+			);
+		}
+		if (uv.rotation != 0)
+		{
+			io::printfn(
+				"three: %s asks for a KHR_texture_transform rotation, which nothing here draws — "
+					"its maps are scaled and offset but not turned",
+				where
+			);
+		}
+	};
 }
 
 <*
@@ -4442,49 +4414,29 @@ fn void? Assets.load_material_layers(
 			.enabled = source.enabled,
 		};
 		if (source.name.len > 0) layer.name = source.name.copy(mem);
+		out.layers.push(layer);
+		GpuLayer* stored = &out.layers[out.layers.len() - 1];
 
-		// **A disabled layer resolves nothing.** It reaches the JS side as a
-		// description with `enabled: false` on it, which the generator drops
-		// before it emits a sampler for it — so uploading its images here would be
-		// bytes on the device that no shader can name.
 		if (source.enabled)
 		{
-			layer.texture = self.load_material_texture(gpu, stream, images, source.baseColorTexture)!;
-			layer.normal_texture = self.load_material_texture(
-				gpu,
-				stream,
-				images,
-				source.normalTexture,
-				ColorSpace.LINEAR
+			stored.texture = self.load_material_texture(gpu, stream, images, source.baseColorTexture)!;
+			stored.normal_texture = self.load_material_texture(
+				gpu, stream, images, source.normalTexture, ColorSpace.LINEAR
 			)!;
-			layer.emissive_texture = self.load_material_texture(gpu, stream, images, source.emissiveTexture)!;
-			layer.metallic_roughness_texture = self.load_material_texture(
-				gpu,
-				stream,
-				images,
-				source.metallicRoughnessTexture,
-				ColorSpace.LINEAR
+			stored.emissive_texture = self.load_material_texture(gpu, stream, images, source.emissiveTexture)!;
+			stored.metallic_roughness_texture = self.load_material_texture(
+				gpu, stream, images, source.metallicRoughnessTexture, ColorSpace.LINEAR
 			)!;
-			layer.height_texture = self.load_material_texture(
-				gpu,
-				stream,
-				images,
-				source.heightTexture,
-				ColorSpace.LINEAR
+			stored.height_texture = self.load_material_texture(
+				gpu, stream, images, source.heightTexture, ColorSpace.LINEAR
 			)!;
 			if (source.mask.source == gltf::LayerMaskSource.TEXTURE)
 			{
-				layer.mask_texture = self.load_material_texture(
-					gpu,
-					stream,
-					images,
-					source.mask.texture,
-					ColorSpace.LINEAR
+				stored.mask_texture = self.load_material_texture(
+					gpu, stream, images, source.mask.texture, ColorSpace.LINEAR
 				)!;
 			}
 		}
-
-		out.layers.push(layer);
 	}
 
 	self.hoist_shared_mask(gpu, out);
@@ -5351,10 +5303,10 @@ fn vk::DescriptorImageInfo Texture.descriptor(&self)
 <*
  A hardcoded triangle, uploaded through exactly the same path as a glTF mesh.
 
- This is `base_stage.md` S8 on its own: geometry reaching the shader through a
- buffer device address, with no file involved. Keeping it separate from the
- glTF path means a blank window is never ambiguous — if the triangle draws and
- a `.glb` does not, the loader is at fault and not the pipeline.
+ Exercises geometry reaching the shader through a buffer device address with no
+ file involved. Keeping it separate from the glTF path means a blank window is
+ never ambiguous — if the triangle draws and a `.glb` does not, the loader is at
+ fault and not the pipeline.
 
  Wound counter-clockwise as seen from +Z, which is glTF's front-face
  convention, so it is culled by the same rule real geometry is.

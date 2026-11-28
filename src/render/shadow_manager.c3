@@ -724,6 +724,17 @@ fn ulong? MeshPass.write_shadow_manager(&self, Gpu* gpu, uint slot)
 	return self.shadow_view_buffers[slot].address;
 }
 
+fn float[4] tile_uv_rect(ShadowTile tile, ShadowRect footprint) @local
+{
+	float inv = 1.0f / (float)tile.size;
+	return {
+		(float)(footprint.x - tile.x) * inv,
+		(float)(footprint.y - tile.y) * inv,
+		(float)(footprint.x + footprint.width - tile.x) * inv,
+		(float)(footprint.y + footprint.height - tile.y) * inv,
+	};
+}
+
 fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 {
 	ShadowManager* manager = &self.shadow_manager;
@@ -777,8 +788,6 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 		}
 		manager.caster_signature = signature;
 	}
-	self.shadows.plan = manager.plan; self.shadows.sample_static = manager.sample_static;
-	self.point_shadows.plan = manager.plan; self.point_shadows.sample_static = manager.sample_static;
 	manager.updates = 0; manager.update_texels = 0; manager.deferred = 0; manager.copied_texels = 0;
 	ShadowGpuView* uploaded = self.shadow_view_buffers[manager.frame_slot].buffer != null
 		? (ShadowGpuView*)self.shadow_view_buffers[manager.frame_slot].data() : null;
@@ -837,17 +846,10 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 				else if (uploaded != null && manager.plan == SHADOW_PLAN_COMBINED
 					&& view.static_valid && view.live_valid)
 				{
-					ShadowTile tile = manager.tiles[at];
 					ShadowRect footprint = manager.cached_dynamic_rects[at];
 					if (footprint.width > 0 && footprint.height > 0)
 					{
-						float inv = 1.0f / (float)tile.size;
-						uploaded[packed].dynamic_rect = {
-							(float)(footprint.x - tile.x) * inv,
-							(float)(footprint.y - tile.y) * inv,
-							(float)(footprint.x + footprint.width - tile.x) * inv,
-							(float)(footprint.y + footprint.height - tile.y) * inv,
-						};
+						uploaded[packed].dynamic_rect = tile_uv_rect(manager.tiles[at], footprint);
 					}
 				}
 				manager.deferred++;
@@ -858,15 +860,8 @@ fn void MeshPass.plan_shadow_manager(&self, Gpu* gpu)
 			bool coherent = (view.static_valid && view.live_valid) || work;
 			if (uploaded != null && overlay && manager.plan == SHADOW_PLAN_COMBINED && coherent)
 			{
-				ShadowTile tile = manager.tiles[at];
 				ShadowRect footprint = shadow_rect_union(manager.cached_dynamic_rects[at], dynamic_rect);
-				float inv = 1.0f / (float)tile.size;
-				uploaded[packed].dynamic_rect = {
-					(float)(footprint.x - tile.x) * inv,
-					(float)(footprint.y - tile.y) * inv,
-					(float)(footprint.x + footprint.width - tile.x) * inv,
-					(float)(footprint.y + footprint.height - tile.y) * inv,
-				};
+				uploaded[packed].dynamic_rect = tile_uv_rect(manager.tiles[at], footprint);
 			}
 			manager.scheduled[at] = work;
 			if (work) manager.updates++;
@@ -890,7 +885,7 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		{
 			ShadowView* view = &entries.views[at];
 			if (!view.live || view.static_valid || !manager.scheduled[at]) continue;
-			if (!begun) { manager.atlas.begin_static(cmd, false); begun = true; }
+			if (!begun) { manager.atlas.begin_static(cmd); begun = true; }
 			manager.atlas.begin_tile(cmd, manager.tiles[at], true);
 			uint i = manager.light_indices[at];
 			Light* light = &self.lighting.lights[i];
@@ -899,11 +894,10 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 			if (i == 0) { self.shadows.static_draws += draws; }
 			else { self.point_shadows.static_draws += draws; }
 			vk::cmdEndRendering(cmd); view.static_valid = true;
-			if (i == 0) self.shadows.mark_static_built(self.scene.static_revision);
 		}
 		if (!begun && !manager.atlas.static_initialized)
 		{
-			manager.atlas.begin_static(cmd, false); begun = true;
+			manager.atlas.begin_static(cmd); begun = true;
 		}
 		if (begun) manager.atlas.end_static(cmd);
 	}
@@ -921,11 +915,11 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 	}
 	if (count == 0)
 	{
-		if (!manager.atlas.initialized) { manager.atlas.begin_live(cmd, false); manager.atlas.end_live(cmd); }
+		if (!manager.atlas.initialized) { manager.atlas.begin_live(cmd); manager.atlas.end_live(cmd); }
 		return;
 	}
 	if (manager.plan == SHADOW_PLAN_COMBINED) { manager.atlas.copy_static(cmd, copies[:count]); }
-	else { manager.atlas.begin_live(cmd, false); }
+	else { manager.atlas.begin_live(cmd); }
 	for (uint at = 0; at < entries.count; at++)
 	{
 		ShadowView* view = &entries.views[at];
@@ -948,14 +942,11 @@ fn void MeshPass.record_shadow_manager(&self, vk::CommandBuffer cmd)
 		vk::cmdEndRendering(cmd);
 		view.live_valid = true;
 		view.live_dynamic = manager.plan == SHADOW_PLAN_COMBINED;
-		if (manager.plan != SHADOW_PLAN_STATIC)
+		view.dynamic_valid = true;
+		view.dynamic_signature = manager.dynamic_signatures[at];
+		if (manager.plan == SHADOW_PLAN_COMBINED)
 		{
-			view.dynamic_valid = true;
-			view.dynamic_signature = manager.dynamic_signatures[at];
-			if (manager.plan == SHADOW_PLAN_COMBINED)
-			{
-				manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
-			}
+			manager.cached_dynamic_rects[at] = manager.dynamic_rects[at];
 		}
 	}
 	manager.atlas.end_live(cmd);

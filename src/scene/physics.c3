@@ -47,7 +47,6 @@ const String PHYSICS_OWNS_SOFT_TRANSFORM = "this object's transform belongs to t
 // simulations, so `PhysicsWorld.state_hash` agrees only between worlds stepped at
 // one rate, but a headset drawing at 90 or 120 Hz wants a step every frame.
 const uint PHYSICS_RATE = 60;
-const double PHYSICS_STEP_MS = 1000.0 / (double)PHYSICS_RATE;
 // The rates `three.physics.rate` takes, in steps a second.
 const uint PHYSICS_MIN_RATE = 30;
 const uint PHYSICS_MAX_RATE = 240;
@@ -723,21 +722,14 @@ fn void? Physics.add(
 		},
 	};
 
+	defer catch body.drop();
 	if (kind == BodyKind.TRIGGER)
 	{
-		if (catch err = self.world.add_trigger(rigid))
-		{
-			body.drop();
-			return err~;
-		}
+		self.world.add_trigger(rigid)!;
 	}
 	else
 	{
-		if (catch err = self.world.add_body(rigid))
-		{
-			body.drop();
-			return err~;
-		}
+		self.world.add_body(rigid)!;
 	}
 
 	self.bodies.push(body);
@@ -1833,7 +1825,8 @@ fn void? Physics.add_soft(&self, Scene* scene, Assets* assets, NodeId node_id, S
 		// is a child of the scene root. Reading `node.world` would be the same
 		// answer one frame later and the identity right now, because nothing has
 		// walked the graph since the script placed this.
-		foreach (point : points) source.vertices.push(transform_point(node.local_matrix(), point));
+		Matrix4f local = node.local_matrix();
+		foreach (point : points) source.vertices.push(transform_point(local, point));
 		foreach (triangle : slot.hull_triangles)
 		{
 			source.triangles.push({ map[triangle[0]], map[triangle[1]], map[triangle[2]] });

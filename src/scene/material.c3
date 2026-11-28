@@ -381,13 +381,10 @@ struct Material
 	// 
 	// ## Why reflectance is 0 rather than the 4% that real dielectrics reflect
 	// 
-	// **For a material a script wrote**, because the standing constraint at the
-	// bottom of `plan.md` says a default is invented when the answer stops
-	// depending on the scene, and this one has not: every scene in this project was
-	// authored against a Lambert renderer, and turning a 4% highlight on for all of
-	// them would relight all of them. So the physical value is one line away —
-	// `material.reflectance = 0.5` — and off until asked for, exactly as shadows
-	// are.
+	// **For a material a script wrote**, reflectance stays 0 by default because
+	// existing scenes were authored against a Lambert renderer and turning on a 4%
+	// highlight would relight all of them. The physical value is one line away —
+	// `material.reflectance = 0.5` — and off until asked for, just as shadows are.
 	// 
 	// **An imported material gets 0.5, and the difference is that the file states
 	// it.** This used to read as "glTF has no reflectance, so applying the file's
@@ -491,9 +488,9 @@ struct Material
 	// What a `three.LayeredMaterial` *is*, beside what it compiled to. Empty for
 	// every other material, including a hand-written `ShaderMaterial`.
 	ScriptLayers script_layers;
-	// `material.uvVariants` — one uv transform per copy, picked by
-	// `mesh.variant`. `plan.md` §27 is the entry, `gpu/pipeline.c3`'s `UvVariant`
-	// is a row, and `DrawRecord.uv_variants` is where these are copied to.
+	// `material.uvVariants` — one uv transform per copy, picked by `mesh.variant`.
+	// `gpu/pipeline.c3`'s `UvVariant` is a row, and `DrawRecord.uv_variants` is
+	// where these are copied to.
 	// 
 	// Held here rather than in `block` because a built-in material has no block to
 	// hold it in: this is a property of every material and not only of the ones
@@ -995,14 +992,14 @@ fn void Material.add_script_layer(&self, ScriptLayer layer)
 {
 	if (!self.script_layers.present) return;
 	ScriptLayer copy = layer;
-	copy.name = layer.name.copy(mem);
+	copy.name = layer.name.len > 0 ? layer.name.copy(mem) : "";
 	self.script_layers.layers.push(copy);
 }
 
 fn void Material.free_script_layers(&self)
 {
 	if (!self.script_layers.present) return;
-	foreach (layer : self.script_layers.layers) layer.name.free(mem);
+	foreach (layer : self.script_layers.layers) if (layer.name.len > 0) layer.name.free(mem);
 	self.script_layers.layers.free();
 	self.script_layers = { };
 }
@@ -1057,7 +1054,11 @@ fn MaterialUniform[] copy_uniform_declarations(MaterialUniform[] from)
 	MaterialUniform[] made = mem::new_array(MaterialUniform, from.len);
 	foreach (i, uniform : from)
 	{
-		made[i] = { .name = uniform.name.copy(mem), .components = uniform.components, .rows = uniform.rows };
+		made[i] = {
+			.name = uniform.name.len > 0 ? uniform.name.copy(mem) : "",
+			.components = uniform.components,
+			.rows = uniform.rows,
+		};
 	}
 	return made;
 }
@@ -1066,7 +1067,7 @@ fn MaterialTexture[] copy_texture_declarations(MaterialTexture[] from)
 {
 	if (from.len == 0) return { };
 	MaterialTexture[] made = mem::new_array(MaterialTexture, from.len);
-	foreach (i, texture : from) made[i] = { .name = texture.name.copy(mem) };
+	foreach (i, texture : from) made[i] = { .name = texture.name.len > 0 ? texture.name.copy(mem) : "" };
 	return made;
 }
 

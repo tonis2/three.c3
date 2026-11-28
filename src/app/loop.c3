@@ -826,11 +826,14 @@ fn void? play_frames(
 		// After the tick and immediately before the capture, so what lands in the
 		// PNG is what was asked for rather than wherever `camera.attach` left it.
 		aim_camera(renderer, camera);
-		String out = frame_path(screenshot, shots);
-		long wait_ns;
-		renderer.screenshot(out, &wait_ns)!;
-		runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
-		io::printfn("wrote %s (frame %d)", out, i + 1);
+		@pool()
+		{
+			String out = frame_path(screenshot, shots);
+			long wait_ns;
+			renderer.screenshot(out, &wait_ns)!;
+			runtime.complete_host_frame((long)host_started.to_now(), wait_ns);
+			io::printfn("wrote %s (frame %d)", out, i + 1);
+		};
 		shots++;
 	}
 
@@ -852,9 +855,9 @@ fn void? play_frames(
  @param spec : `"yaw,pitch,distance" in degrees and world units. Empty does nothing; anything that does not parse says so and does nothing.`
  @return `true when the camera was moved.`
 *>
-fn bool aim_camera(Renderer* renderer, String spec)
+fn void aim_camera(Renderer* renderer, String spec)
 {
-	if (spec.len == 0) return false;
+	if (spec.len == 0) return;
 
 	@pool()
 	{
@@ -862,7 +865,7 @@ fn bool aim_camera(Renderer* renderer, String spec)
 		if (parts.len != 3)
 		{
 			io::printfn("--camera %s: expected yaw,pitch,distance", spec);
-			return false;
+			return;
 		}
 
 		float[3] value;
@@ -872,7 +875,7 @@ fn bool aim_camera(Renderer* renderer, String spec)
 			if (catch number)
 			{
 				io::printfn("--camera %s: '%s' is not a number", spec, part);
-				return false;
+				return;
 			}
 			value[i] = (float)number;
 		}
@@ -882,7 +885,6 @@ fn bool aim_camera(Renderer* renderer, String spec)
 		renderer.pass.camera.distance = value[2];
 		renderer.pass.camera.clamp_angles();
 		renderer.pass.derive_camera_planes();
-		return true;
 	};
 }
 
@@ -904,12 +906,7 @@ fn bool aim_camera(Renderer* renderer, String spec)
 *>
 fn String frame_path(String pattern, uint index)
 {
-	usz at     = 0;
-	usz stop   = 0;
-	usz width  = 0;
-	bool found = false;
-
-	for (usz i = 0; i + 1 < pattern.len && !found; i++)
+	for (usz i = 0; i + 1 < pattern.len; i++)
 	{
 		if (pattern[i] != '%') continue;
 		usz j      = i + 1;
@@ -921,22 +918,15 @@ fn String frame_path(String pattern, uint index)
 		}
 		if (j < pattern.len && pattern[j] == 'd')
 		{
-			at = i;
-			stop = j + 1;
-			width = digits;
-			found = true;
+			DString out;
+			out.init(tmem);
+			out.append(pattern[:i]);
+			String number = string::tformat("%d", index);
+			for (usz k = number.len; k < digits; k++) out.append("0");
+			out.append(number);
+			out.append(pattern[j + 1..]);
+			return out.str_view();
 		}
 	}
-
-	if (!found) return pattern;
-
-	DString out;
-	out.init(tmem);
-	out.append(pattern[:at]);
-
-	String number = string::tformat("%d", index);
-	for (usz i = number.len; i < width; i++) out.append("0");
-	out.append(number);
-	out.append(pattern[stop..]);
-	return out.str_view();
+	return pattern;
 }

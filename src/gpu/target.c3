@@ -183,10 +183,12 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 				samples: self.samples)!;
 		}
 	}
+	FoveationMap foveation;
+	if (gpu.limits.fragment_density_map) foveation.init(gpu, self.view_extent, self.views, Foveation.MEDIUM)!;
+
 	self.msaa_color = msaa_color;
 	self.msaa_depth = msaa_depth;
 	self.msaa_display = msaa_display;
-
 	self.color = color.image;
 	self.color_view = color.view;
 	self.color_memory = color.memory;
@@ -194,7 +196,7 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 	self.depth_view = depth.whole.view;
 	self.depth_memory = depth.whole.memory;
 	self.depth_layers = depth.layers;
-	if (gpu.limits.fragment_density_map) self.foveation.init(gpu, self.view_extent, self.views, Foveation.MEDIUM)!;
+	self.foveation = foveation;
 
 	return *self;
 }

@@ -112,11 +112,13 @@ fn void? AmbientOcclusion.ensure(&self, Gpu* gpu, vk::Extent2D extent, uint view
 	if (self.sampler == null) self.sampler = gpu.clamp_sampler(FILTER_NEAREST)!;
 	if (self.linear == null) self.linear = gpu.clamp_sampler(FILTER_LINEAR)!;
 
-	vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-	self.format = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
-	vk::FormatProperties properties;
-	vk::getPhysicalDeviceFormatProperties(gpu.pdevice, self.format, &properties);
-	if ((properties.optimalTilingFeatures & wanted) != wanted) return SHADOW_FORMAT_UNSUPPORTED~;
+	if (self.format == FORMAT_UNDEFINED)
+	{
+		vk::FormatFeatureFlags wanted = FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+		vk::Format picked = vk::findDepthFormat(features: wanted, device: gpu.pdevice);
+		if (!gpu.has_format_features(picked, wanted)) return SHADOW_FORMAT_UNSUPPORTED~;
+		self.format = picked;
+	}
 
 	if (views > 1)
 	{

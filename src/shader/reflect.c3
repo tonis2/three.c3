@@ -56,12 +56,12 @@ struct ShaderBinding
 <*
  What a storage image's texels are, as the shader reads them.
 *>
-enum TexelClass : char
+enum TexelClass : char (String name)
 {
-	NONE,
-	FLOAT,
-	SINT,
-	UINT,
+	NONE  { "unknown" },
+	FLOAT { "float" },
+	SINT  { "int" },
+	UINT  { "uint" },
 }
 
 <*

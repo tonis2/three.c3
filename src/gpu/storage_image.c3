@@ -33,17 +33,17 @@ excuse STORAGE_FORMAT_UNKNOWN, STORAGE_FORMAT_UNSUPPORTED;
  exact. `PACKED32` is the two formats whose channels do not sit on byte
  boundaries - `rgb10_a2` and `r11f_g11f_b10f` - and arrives as the raw words.
 *>
-enum TexelStore : char
+enum TexelStore : char (uint component_bytes, uint read_bytes, bool packed)
 {
-	F32,
-	F16,
-	U8,
-	S8,
-	U16,
-	S16,
-	U32,
-	S32,
-	PACKED32,
+	F32      { 4, 4, false },
+	F16      { 2, 4, false },
+	U8       { 1, 1, false },
+	S8       { 1, 1, false },
+	U16      { 2, 2, false },
+	S16      { 2, 2, false },
+	U32      { 4, 4, false },
+	S32      { 4, 4, false },
+	PACKED32 { 4, 4, true },
 }
 
 <*
@@ -65,50 +65,14 @@ struct StorageImageFormat
 	bool extended;
 }
 
-<*
- Bytes one texel occupies in the image.
-*>
-fn uint StorageImageFormat.texel_bytes(&self)
-{
-	switch (self.store)
-	{
-		case F32:
-		case U32:
-		case S32: return 4 * self.channels;
-		case F16:
-		case U16:
-		case S16: return 2 * self.channels;
-		case U8:
-		case S8: return self.channels;
-		case PACKED32: return 4;
-	}
-}
+<* Bytes one texel occupies in the image. *>
+fn uint StorageImageFormat.texel_bytes(&self) => self.store.packed ? self.store.component_bytes : self.store.component_bytes * self.channels;
 
-<*
- Bytes one component of a texel occupies once it has been read back: what a
- typed array over the readback is made of. Half floats widen to 4.
-*>
-fn uint StorageImageFormat.read_bytes(&self)
-{
-	switch (self.store)
-	{
-		case F32:
-		case F16:
-		case U32:
-		case S32:
-		case PACKED32: return 4;
-		case U16:
-		case S16: return 2;
-		case U8:
-		case S8: return 1;
-	}
-}
+<* Bytes one component occupies once read back (half floats widen to 4). *>
+fn uint StorageImageFormat.read_bytes(&self) => self.store.read_bytes;
 
-<*
- How many numbers one texel reads back as - its channels, or one word for a
- packed format.
-*>
-fn uint StorageImageFormat.read_components(&self) => self.store == TexelStore.PACKED32 ? 1 : self.channels;
+<* How many numbers one texel reads back as - its channels, or one word for a packed format. *>
+fn uint StorageImageFormat.read_components(&self) => self.store.packed ? 1 : self.channels;
 
 <*
  Whether a sampler may read this format as numbers in 0..1 or -1..1 - every
@@ -119,7 +83,7 @@ fn uint StorageImageFormat.read_components(&self) => self.store == TexelStore.PA
 fn bool StorageImageFormat.is_float(&self) => self.texel == TexelClass.FLOAT;
 
 const StorageImageFormat[*] STORAGE_IMAGE_FORMATS = {
-	// The core thirteen, in shady's order.
+	// Storage formats in shady's order (core thirteen have extended = false).
 	{ "rgba32f",        1,  FORMAT_R32G32B32A32_SFLOAT,     4, F32,      FLOAT, false },
 	{ "rgba16f",        2,  FORMAT_R16G16B16A16_SFLOAT,     4, F16,      FLOAT, false },
 	{ "r32f",           3,  FORMAT_R32_SFLOAT,              1, F32,      FLOAT, false },
@@ -220,48 +184,14 @@ fn String storage_format_hint(String name)
 	}
 }
 
-<*
- The name of a texel class, for a message a person reads.
-*>
-fn String texel_class_name(TexelClass texel)
-{
-	switch (texel)
-	{
-		case FLOAT: return "float";
-		case SINT: return "int";
-		case UINT: return "uint";
-		default: return "unknown";
-	}
-}
+<* The name of a texel class, for diagnostics. *>
+fn String texel_class_name(TexelClass texel) => texel.name;
 
-<*
- Whether this device can store to an image of this format, from a shader.
+<* Whether this device can store to an image of this format from a shader. *>
+fn bool Gpu.can_store(&self, vk::Format format) => self.has_format_features(format, FORMAT_FEATURE_STORAGE_IMAGE_BIT);
 
- Per format and uncached, for `can_sample`'s reason. The atomics an `r32ui`
- image is used for need no question of their own: `STORAGE_IMAGE_ATOMIC_BIT` is
- mandatory for `R32_UINT` and `R32_SINT`.
-*>
-fn bool Gpu.can_store(&self, vk::Format format)
-{
-	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_STORAGE_IMAGE_BIT;
-
-	vk::FormatProperties props;
-	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
-	return (props.optimalTilingFeatures & NEEDED) == NEEDED;
-}
-
-<*
- Whether a sampler over this format may filter linearly. `R32_SFLOAT` and
- `R32G32B32A32_SFLOAT` are the common formats a device is entitled to refuse.
-*>
-fn bool Gpu.can_filter(&self, vk::Format format)
-{
-	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-
-	vk::FormatProperties props;
-	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
-	return (props.optimalTilingFeatures & NEEDED) == NEEDED;
-}
+<* Whether a sampler over this format may filter linearly. *>
+fn bool Gpu.can_filter(&self, vk::Format format) => self.has_format_features(format, FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
 
 <*
  Whether this device can have a storage image of this format at all: the format
@@ -322,6 +252,7 @@ fn Texture? Gpu.create_storage_texture(&self, uint width, uint height, StorageIm
 	};
 
 	texture.memory = self.create_device_image(format.vk, width, height, usage)!;
+	defer catch texture.memory.free();
 	texture.image = texture.memory.image;
 
 	self.handle.@single_time_command(queue: self.graphics ; vk::CommandBuffer cmd)

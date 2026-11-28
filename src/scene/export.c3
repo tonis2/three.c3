@@ -103,7 +103,7 @@
  A morph *animation* is not in it. A WEIGHTS channel drives a mesh's blend shapes
  through the node the mesh hangs on, and that node is not a joint and so is not in
  any skeleton's map — so what each copy's weights *are* goes into the file and the
- curve that would move them does not. `plan.md` §16 has it.
+ curve that would move them does not.
 
  Lines are not in it yet. A line mesh has no CPU copy of its vertices
  (`upload_built` skips `build_bvh`, and `build_bvh` is what keeps the copy) and a
@@ -1865,20 +1865,10 @@ fn uint Exporter.collision_filter_index(&self, gltf::CollisionFilter* filter)
 {
 	foreach (i, &known : self.out.collision_filters)
 	{
-		if (same_systems(&known.systems, &filter.systems) && same_systems(&known.colliding_with, &filter.colliding_with)
-			&& same_systems(&known.not_colliding, &filter.not_colliding)) return (uint)i;
+		if (same_names(&known.systems, &filter.systems) && same_names(&known.colliding_with, &filter.colliding_with)
+			&& same_names(&known.not_colliding, &filter.not_colliding)) return (uint)i;
 	}
 	return self.out.add_collision_filter(*filter);
-}
-
-fn bool same_systems(List{String}* a, List{String}* b) @local
-{
-	if (a.len() != b.len()) return false;
-	foreach (i, name : *a)
-	{
-		if (name != (*b)[i]) return false;
-	}
-	return true;
 }
 
 <*
@@ -2152,8 +2142,7 @@ fn bool Exporter.drives_a_bone(&self, AssetId id, AnimationClip* clip)
  **A WEIGHTS channel is never one of them.** It drives a mesh's blend shapes
  through the node the mesh hangs on, and that node is not a joint and is not in a
  skeleton's map. What each copy's weights *are* went into the file on the copy's
- own node; the curve that would move them did not, and `plan.md` §16 is where
- that would be picked up.
+ own node; the curve that would move them did not.
 *>
 fn int Exporter.first_target(&self, AssetId id, uint node, AnimatedPath path)
 {
@@ -2692,7 +2681,7 @@ fn bool Exporter.world_space_body(&self, uint material)
 fn bool Exporter.body_discards(&self, uint material)
 {
 	if (material >= self.pass.materials.len()) return false;
-	return self.pass.materials[material].fragment.contains("discard");
+	return self.pass.materials[material].fragment_discards;
 }
 
 <*
@@ -3719,18 +3708,18 @@ fn ExportSurface? Exporter.surface_for(&self, Node* node, Material* material_of,
 	// emissive *factor* below already follows, applied to the images beside it. A
 	// script that put its own normal map on a file's mesh drew with the script's,
 	// and writing the file's would be a picture the frame did not show.
-	if (surface.normal.texture < 0) surface.normal = self.source_texture_ref(node.asset, source.normalTexture);
+	if (surface.normal.texture < 0) surface.normal = self.write_layer_texture(node.asset, source.normalTexture);
 	if (surface.occlusion.texture < 0)
 	{
-		surface.occlusion = self.source_texture_ref(node.asset, source.occlusionTexture);
+		surface.occlusion = self.write_layer_texture(node.asset, source.occlusionTexture);
 	}
 	if (surface.emissive.texture < 0)
 	{
-		surface.emissive = self.source_texture_ref(node.asset, source.emissiveTexture);
+		surface.emissive = self.write_layer_texture(node.asset, source.emissiveTexture);
 	}
 	if (surface.metallic_roughness.texture < 0)
 	{
-		surface.metallic_roughness = self.source_texture_ref(node.asset, source.metallicRoughnessTexture);
+		surface.metallic_roughness = self.write_layer_texture(node.asset, source.metallicRoughnessTexture);
 	}
 	// The file's factor, and only where the script did not state one. Every other
 	// field here is read off the source material unconditionally because the script
@@ -3773,17 +3762,6 @@ fn gltf::WriteTextureRef Exporter.material_map(&self, Material* material, uint b
 {
 	int texture = self.device_texture_for(material.textures.at(binding));
 	return texture < 0 ? gltf::NO_TEXTURE_REF : uv_texture_ref(texture, uv);
-}
-
-// A source document's textureInfo as a written one: its image resolved to an
-// output texture, its `KHR_texture_transform` carried across untouched.
-fn gltf::WriteTextureRef Exporter.source_texture_ref(&self, AssetId id, gltf::TextureInfo info)
-{
-	gltf::WriteTextureRef written = gltf::texture_ref(self.layer_texture_for(id, info.source));
-	written.rotation = info.rotation;
-	written.offset = info.offset;
-	written.scale = info.scale;
-	return written;
 }
 
 <*
@@ -4002,7 +3980,7 @@ fn void Exporter.write_light(&self)
 	// The scene's own copy, which `set_lighting` keeps equal to the frame's while
 	// the scene is on screen and which is the only copy while it is not.
 	Lighting* lighting = &self.scene.look.lighting;
-	for (uint i = 0; i < lighting.count; i++)
+	for (uint i = 0; i < lighting.count; i++) @pool()
 	{
 		Light light   = lighting.lights[i];
 		if (light.meta[2] >= 2)
@@ -4050,7 +4028,7 @@ fn void Exporter.write_light(&self)
 		self.out.set_node_light(node, written);
 		self.out.add_root(node);
 		self.report.nodes++;
-	}
+	};
 }
 
 <*

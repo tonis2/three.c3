@@ -369,9 +369,6 @@ fn void js_clear_post(JsRuntime* self)
 // The tonemap — the engine's own pass, which is not one of the script's
 // ============================================================================
 
-// The modes by the names a script writes, in `ToneMap` order.
-const String[3] TONE_MAP_NAMES = { "none", "agx", "agx-blender" };
-
 // A tonemap mode argument, by name.
 struct ToneMapName
 {
@@ -389,10 +386,9 @@ fn void? ToneMapName.from_js(&self, js::Call* c, int at)
 	@pool()
 	{
 		String name = c.text(at);
-		foreach (i, known : TONE_MAP_NAMES)
+		if (try mode = ToneMap::lookup_field(name, name))
 		{
-			if (name != known) continue;
-			self.mode = ToneMap::from_ordinal(i);
+			self.mode = mode;
 			return;
 		}
 		return c.js.fail_with(TYPE_ERROR, "three.toneMapping: unknown mode '%s' — one of %s", name,
@@ -416,9 +412,9 @@ struct ToneMapRead
 *>
 fn ToneMapRead js_tone_map_get(JsRuntime* self)
 {
-	if (self.renderer == null) return { TONE_MAP_NAMES[0], 1.0 };
+	if (self.renderer == null) return { ToneMap.NONE.name, 1.0 };
 	return {
-		TONE_MAP_NAMES[self.renderer.post.tonemap_mode.ordinal],
+		self.renderer.post.tonemap_mode.name,
 		self.renderer.post.tonemap_exposure,
 	};
 }

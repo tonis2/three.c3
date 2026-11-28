@@ -80,7 +80,10 @@ bool advice_quiet @local;
 *>
 macro @advise(format, ...)
 {
-	three::advise_note(string::tformat(format, ...$vaarg));
+	@pool()
+	{
+		three::advise_note(string::tformat(format, ...$vaarg));
+	};
 }
 
 <*

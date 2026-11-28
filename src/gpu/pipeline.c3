@@ -168,7 +168,6 @@ const uint FLAG_BLENDED                     = 16384;
  they should not be.
 *>
 const uint POSE_LIVE = 0x80000000;
-const uint POSE_MASK = 0x7fffffff;
 
 // The size every implementation must offer. Treated as a budget, not a limit to
 // grow into.
@@ -701,6 +700,8 @@ const PushFieldLayout[*] CLUSTER_PUSH_FIELDS = {
 	{ "camera_near", 100, 16 }, { "far_plane", 116, 4 },
 };
 
+$assert ClusterPush::size <= PUSH_BUDGET : "the cluster push block outgrew the 128 bytes every device must offer";
+$assert @layout_matches(ClusterPush, CLUSTER_PUSH_FIELDS) : "ClusterPush no longer lays out the way CLUSTER_PUSH_FIELDS says";
 $assert SkinPush::size <= PUSH_BUDGET : "the skinning push block outgrew the 128 bytes every device must offer";
 
 const PushFieldLayout[*] SKIN_PUSH_FIELDS = {
@@ -1184,20 +1185,6 @@ const PipelineState BAKE_STATE = {
 	.color = TARGET_COLOR_FORMAT,
 };
 
-fn ulong PipelineState.hash(self)
-{
-	return ((ulong)self.topology * 0xbf58476d1ce4e5b9) ^ (self.depth_test ? 0x94d049bb133111ebUL
-		: 0) ^ (self.depth_write ? 0x2545f4914f6cdd1dUL
-			: 0) // Multiplied rather than xor'd with a constant per value, so the three modes
-			// are three different numbers and `NONE` still contributes nothing — every
-			// state written before blending existed hashes exactly as it did.
-			^ ((ulong)self
-				.blend
-				.ordinal
-				* 0x9e3779b97f4a7c15)
-			^ ((ulong)self.color * 0xd6e8feb86659fd93);
-}
-
 fn bool PipelineState.equals(self, PipelineState other)
 {
 	return self.topology == other.topology && self.depth_test == other.depth_test
@@ -1605,23 +1592,26 @@ fn bool GpuLimits.offers_subgroup(&self, uint lanes)
  A compute pipeline over one entry point, held to exactly `lanes` a subgroup
  when that is not zero. Check `GpuLimits.offers_subgroup` first.
 *>
-fn vk::Pipeline? Gpu.create_compute_pipeline(&self, vk::ShaderModule module_handle, char* entry,
+fn vk::Pipeline? Gpu.create_compute_pipeline(&self, vk::ShaderModule module_handle, String entry,
 	vk::PipelineLayout layout, uint lanes = 0)
 {
-	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
-		.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
-		.requiredSubgroupSize = lanes,
+	@pool()
+	{
+		vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo required_lanes = {
+			.sType = STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+			.requiredSubgroupSize = lanes,
+		};
+		vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
+			.setStage(vk::pipelineShaderStageCreateInfo()
+				.setNext(lanes != 0 ? (void*)&required_lanes : null)
+				.setStage(SHADER_STAGE_COMPUTE_BIT)
+				.setMod(module_handle)
+				.setName(entry.zstr_tcopy()))
+			.setLayout(layout);
+		vk::Pipeline handle;
+		vk::createComputePipelines(self.handle, self.driver_cache.handle, 1, &info, null, &handle)!;
+		return handle;
 	};
-	vk::ComputePipelineCreateInfo info = vk::computePipelineCreateInfo()
-		.setStage(vk::pipelineShaderStageCreateInfo()
-			.setNext(lanes != 0 ? (void*)&required_lanes : null)
-			.setStage(SHADER_STAGE_COMPUTE_BIT)
-			.setMod(module_handle)
-			.setName(entry))
-		.setLayout(layout);
-	vk::Pipeline handle;
-	vk::createComputePipelines(self.handle, self.driver_cache.handle, 1, &info, null, &handle)!;
-	return handle;
 }
 
 // The vertex and fragment entries every drawing pipeline links under.
@@ -1876,8 +1866,7 @@ fn MeshPipeline? MeshPipeline.init_post(&self, Gpu* gpu, ShaderModule* mod, vk::
  @return ? SHADER_WORKGROUP_TOO_LARGE : `The @threads the body declared exceed what this device runs in one workgroup.`
  @return ? SHADER_SUBGROUP_SIZE_UNSUPPORTED : `The body asked for a @subgroup_size this device cannot promise.`
 *>
-fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* mod,
-	PushFieldLayout[] contract = POST_PUSH_FIELDS[..])
+fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* mod)
 {
 	if (mod.entries.len() != 1 || mod.entries[0].stage != STAGE_COMPUTE)
 	{
@@ -1899,22 +1888,18 @@ fn MeshPipeline? MeshPipeline.init_post_compute(&self, Gpu* gpu, ShaderModule* m
 	uint lanes = mod.subgroup_size;
 	if (!limits.offers_subgroup(lanes)) return SHADER_SUBGROUP_SIZE_UNSUPPORTED~;
 
-	self.build_layouts(gpu, mod, contract, { entry }, texture_table: false)!;
+	self.build_layouts(gpu, mod, POST_PUSH_FIELDS[..], { entry }, texture_table: false)!;
+	defer catch
+	{
+		if (self.layout != null) self.layout.free(gpu.handle);
+		if (self.descriptor_layout != null) self.descriptor_layout.free(gpu.handle);
+		*self = { };
+	};
 
 	vk::ShaderModule module_handle = vk::loadShaderModule(gpu.handle, mod.spirv)!;
 	defer module_handle.free(gpu.handle);
 
-	vk::Pipeline? handle = gpu.create_compute_pipeline(module_handle, (ZString)entry.name.zstr_tcopy(), self.layout, lanes);
-	if (catch err = handle)
-	{
-		// Built above and not yet anyone's: a failed pipeline must not strand them.
-		self.layout.free(gpu.handle);
-		self.descriptor_layout.free(gpu.handle);
-		*self = { };
-		return err~;
-	}
-
-	self.handle = handle;
+	self.handle = gpu.create_compute_pipeline(module_handle, entry.name, self.layout, lanes)!;
 	self.shader = mod.layout.copy();
 	self.bind_point = PIPELINE_BIND_POINT_COMPUTE;
 	self.local_size = size;
@@ -2295,7 +2280,7 @@ fn String module_key(
 	foreach (texture : textures) out.appendf("%s;", texture.name);
 	out.append_char('\x1f');
 	out.append_string(vertex);
-	return out.copy_str(mem);
+	return out.str_view();
 }
 
 <*
@@ -2317,68 +2302,51 @@ fn CachedModule*? PipelineCache.module_for(
 	String vertex = "",
 	bool bake = false)
 {
-	String key = module_key(pass, body, uniforms, textures, vertex, bake);
-	ulong hash = content_hash((char[])key);
-
-	foreach (existing : self.modules)
+	@pool()
 	{
-		if (existing.hash != hash) continue;
-		// Identity, not the hash — see `CachedModule.key`.
-		if (existing.key != key) continue;
-		key.free(mem);
-		self.hits++;
-		return existing;
-	}
+		String key = module_key(pass, body, uniforms, textures, vertex, bake);
+		ulong hash = content_hash((char[])key);
 
-	// Through the disk cache, so the *first* compile in a process can be free too —
-	// the one level the in-memory cache above cannot reach. Everything below this
-	// line is unchanged by which side answered, the diagnostic included: a stored
-	// module carries the warning it was compiled with.
-	bool ran         = false;
-	ShaderModule? maybe = compile_shader(
-		pass, &ran,
-		body: body, uniforms: uniforms, textures: textures, vertex: vertex, bake: bake
-	);
-	if (catch err = maybe)
-	{
-		key.free(mem);
-		return err~;
-	}
-	ShaderModule mod = maybe;
-	if (ran)
-	{
-		self.compiles++;
-	}
-	else
-	{
-		self.disk_hits++;
-	}
+		foreach (existing : self.modules)
+		{
+			if (existing.hash != hash || existing.key != key) continue;
+			self.hits++;
+			return existing;
+		}
 
-	// Handed over before the `ok` check, because a successful compile can still
-	// warn and the caller asked for the text, not for the failures.
-	if (diagnostic != null && mod.diagnostic.len > 0) *diagnostic = mod.diagnostic.copy(mem);
+		// Through the disk cache, so the *first* compile in a process can be free too —
+		// the one level the in-memory cache above cannot reach.
+		bool ran = false;
+		ShaderModule mod = compile_shader(
+			pass, &ran,
+			body: body, uniforms: uniforms, textures: textures, vertex: vertex, bake: bake
+		)!;
+		if (ran)
+		{
+			self.compiles++;
+		}
+		else
+		{
+			self.disk_hits++;
+		}
 
-	if (!mod.ok)
-	{
-		// Printed only when nobody took delivery: a compile that fails quietly is
-		// the worst possible outcome, so the text has to reach *someone* on every
-		// path.
-		if (diagnostic == null) io::eprintn(mod.diagnostic);
-		// Freed rather than kept. A cached failure would be handed to the next
-		// caller as though it were a shader, and the next caller is usually the
-		// agent having just fixed the typo.
-		mod.free();
-		key.free(mem);
-		return SHADER_COMPILE_FAILED~;
-	}
-	if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
+		if (diagnostic != null && mod.diagnostic.len > 0) *diagnostic = mod.diagnostic.copy(mem);
 
-	CachedModule* entry = mem::new(CachedModule);
-	entry.hash = hash;
-	entry.key = key;
-	entry.mod = mod;
-	self.modules.push(entry);
-	return entry;
+		if (!mod.ok)
+		{
+			if (diagnostic == null) io::eprintn(mod.diagnostic);
+			mod.free();
+			return SHADER_COMPILE_FAILED~;
+		}
+		if (diagnostic == null && mod.diagnostic.len > 0) io::eprintn(mod.diagnostic);
+
+		CachedModule* entry = mem::new(CachedModule);
+		entry.hash = hash;
+		entry.key = key.copy(mem);
+		entry.mod = mod;
+		self.modules.push(entry);
+		return entry;
+	};
 }
 
 <*

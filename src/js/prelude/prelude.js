@@ -1,7 +1,6 @@
 // three.c3 — the tier-1 scene API, as an agent sees it.
 //
-// This file is the API surface from `plan.md` §4. It is deliberately JavaScript
-// rather than C3: the shape an agent has memorized is Three.js's, and matching
+// This file is the JS API surface. It is deliberately JavaScript rather than C3: the shape an agent has memorized is Three.js's, and matching
 // it means constructors, prototype chains, getters that write through, and a
 // `children` array that behaves like an array. Writing that in the host means
 // one C3 function per property per class; writing it here means the host only

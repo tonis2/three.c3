@@ -294,101 +294,10 @@ fn bool scene_cache_project_points(float[<4>][8] world, Matrix4f camera,
 	return !scene_cache_empty(*out);
 }
 
-fn bool scene_cache_project_box(collision::Aabb3 box, Matrix4f camera,
-	vk::Extent2D extent, uint padding, vk::Rect2D* out)
+fn float[<4>][8] scene_cache_frustum_corners(Matrix4f camera) @local
 {
-	float[<4>][8] points;
-	for (uint corner = 0; corner < 8; corner++)
-	{
-		points[corner] = {
-			(corner & 1) != 0 ? box.max.x : box.min.x,
-			(corner & 2) != 0 ? box.max.y : box.min.y,
-			(corner & 4) != 0 ? box.max.z : box.min.z,
-			1,
-		};
-	}
-	bool found = scene_cache_project_points(points, camera, extent, padding, out);
-
-	// Add the other half of a complete convex intersection: camera-frustum edges
-	// piercing box faces. Box edges alone miss a large box wrapped around a narrow
-	// view and can underestimate a near-plane crossing.
 	Matrix4f inverse_camera = invert(camera);
 	float[<4>][8] frustum;
-	for (uint corner = 0; corner < 8; corner++)
-	{
-		float[<4>] p = inverse_camera * (float[<4>]) {
-			(corner & 1) != 0 ? 1 : -1, (corner & 2) != 0 ? 1 : -1,
-			(corner & 4) != 0 ? 1 : 0, 1 };
-		frustum[corner] = p / p[3];
-	}
-	for (uint edge = 0; edge < 12; edge++)
-	{
-		float[<4>] a = frustum[SCENE_CACHE_BOX_EDGES[edge * 2]];
-		float[<4>] b = frustum[SCENE_CACHE_BOX_EDGES[edge * 2 + 1]];
-		float first = 0;
-		float last = 1;
-		for (uint axis = 0; axis < 3; axis++)
-		{
-			float d = b[axis] - a[axis];
-			float lo = axis == 0 ? box.min.x : (axis == 1 ? box.min.y : box.min.z);
-			float hi = axis == 0 ? box.max.x : (axis == 1 ? box.max.y : box.max.z);
-			if (math::abs(d) < 1e-8f)
-			{
-				if (a[axis] < lo || a[axis] > hi) { first = 1; last = 0; break; }
-				continue;
-			}
-			float t0 = (lo - a[axis]) / d;
-			float t1 = (hi - a[axis]) / d;
-			if (t0 > t1) { float swap = t0; t0 = t1; t1 = swap; }
-			first = math::max(first, t0); last = math::min(last, t1);
-		}
-		if (first > last) continue;
-		float[<4>] delta = b - a;
-		float[<4>][2] ends = { a + delta * first, a + delta * last };
-		for (uint end = 0; end < 2; end++)
-		{
-			float[<4>] p = camera * ends[end];
-			float sx = (p[0] / p[3] * 0.5f + 0.5f) * extent.width;
-			float sy = (-p[1] / p[3] * 0.5f + 0.5f) * extent.height;
-			vk::Rect2D point = scene_cache_clip({ .offset = { (int)math::floor((double)sx) - (int)padding,
-				(int)math::floor((double)sy) - (int)padding },
-				.extent = { padding * 2 + 1, padding * 2 + 1 } }, extent);
-			*out = found ? scene_cache_union(*out, point) : point;
-			found = !scene_cache_empty(*out);
-		}
-	}
-	return found;
-}
-
-<*
- Projects the changed texels of a shadow view through its complete depth range.
- This is the receiver region: it extends beyond the caster's own screen bounds.
-*>
-fn bool scene_cache_project_shadow(ShadowView* view, ShadowTile tile, ShadowRect changed,
-	Matrix4f camera, vk::Extent2D extent, vk::Rect2D* out)
-{
-	if (changed.width == 0 || changed.height == 0 || tile.size == 0) return false;
-	float u0 = (float)((int)changed.x - (int)tile.x) / (float)tile.size;
-	float v0 = (float)((int)changed.y - (int)tile.y) / (float)tile.size;
-	float u1 = (float)((int)(changed.x + changed.width) - (int)tile.x) / (float)tile.size;
-	float v1 = (float)((int)(changed.y + changed.height) - (int)tile.y) / (float)tile.size;
-	Matrix4f inverse_light = invert(view.view_projection);
-	float[<4>][8] world;
-	for (uint corner = 0; corner < 8; corner++)
-	{
-		float u = (corner & 1) != 0 ? u1 : u0;
-		float v = (corner & 2) != 0 ? v1 : v0;
-		float z = (corner & 4) != 0 ? 1 : 0;
-		float[<4>] p = inverse_light * (float[<4>]) { u * 2 - 1, 1 - v * 2, z, 1 };
-		world[corner] = p / p[3];
-	}
-	bool found = scene_cache_project_points(world, camera, extent, 3, out);
-
-	// The intersection of two convex volumes also has vertices made by an edge of
-	// the camera frustum piercing a face of the shadow prism. Add those edges; the
-	// prism edges above alone can underestimate or miss that shape entirely.
-	Matrix4f inverse_camera = invert(camera);
-	float[<4>][8] camera_world;
 	for (uint corner = 0; corner < 8; corner++)
 	{
 		float[<4>] p = inverse_camera * (float[<4>]) {
@@ -397,83 +306,35 @@ fn bool scene_cache_project_shadow(ShadowView* view, ShadowTile tile, ShadowRect
 			(corner & 4) != 0 ? 1 : 0,
 			1,
 		};
-		camera_world[corner] = p / p[3];
+		frustum[corner] = p / p[3];
 	}
-	float x0 = u0 * 2 - 1;
-	float x1 = u1 * 2 - 1;
-	float y0 = 1 - v1 * 2;
-	float y1 = 1 - v0 * 2;
-	for (uint edge = 0; edge < 12; edge++)
-	{
-		float[<4>] wa = camera_world[SCENE_CACHE_BOX_EDGES[edge * 2]];
-		float[<4>] wb = camera_world[SCENE_CACHE_BOX_EDGES[edge * 2 + 1]];
-		float[<4>] la = view.view_projection * wa;
-		float[<4>] lb = view.view_projection * wb;
-		float first = 0;
-		float last = 1;
-		for (uint plane = 0; plane < 6; plane++)
-		{
-			float da;
-			float db;
-			switch (plane)
-			{
-				case 0: da = la[0] - x0 * la[3]; db = lb[0] - x0 * lb[3];
-				case 1: da = x1 * la[3] - la[0]; db = x1 * lb[3] - lb[0];
-				case 2: da = la[1] - y0 * la[3]; db = lb[1] - y0 * lb[3];
-				case 3: da = y1 * la[3] - la[1]; db = y1 * lb[3] - lb[1];
-				case 4: da = la[2]; db = lb[2];
-				default: da = la[3] - la[2]; db = lb[3] - lb[2];
-			}
-			if (da < 0 && db < 0) { first = 1; last = 0; break; }
-			if (da >= 0 && db >= 0) continue;
-			float t = da / (da - db);
-			if (da < 0) { first = math::max(first, t); }
-			else { last = math::min(last, t); }
-		}
-		if (first > last) continue;
-		float[<4>] delta = wb - wa;
-		float[<4>][2] ends = { wa + delta * first, wa + delta * last };
-		for (uint end = 0; end < 2; end++)
-		{
-			float[<4>] p = camera * ends[end];
-			float sx = (p[0] / p[3] * 0.5f + 0.5f) * extent.width;
-			float sy = (-p[1] / p[3] * 0.5f + 0.5f) * extent.height;
-			vk::Rect2D point = scene_cache_clip({ .offset = { (int)math::floor((double)sx) - 3,
-				(int)math::floor((double)sy) - 3 }, .extent = { 7, 7 } }, extent);
-			*out = found ? scene_cache_union(*out, point) : point;
-			found = !scene_cache_empty(*out);
-		}
-	}
-	return found;
+	return frustum;
 }
 
-fn bool scene_cache_shadow_reaches_box(ShadowView* view, ShadowTile tile,
-	ShadowRect changed, collision::Aabb3 box)
+fn float scene_cache_shadow_prism_plane(float[<4>] p, uint plane, float x0, float x1, float y0, float y1) @local
 {
-	float min_x = 1;
-	float min_y = 1;
-	float max_x = -1;
-	float max_y = -1;
-	for (uint corner = 0; corner < 8; corner++)
+	switch (plane)
 	{
-		float[<4>] p = view.view_projection * (float[<4>]) {
-			(corner & 1) != 0 ? box.max.x : box.min.x,
-			(corner & 2) != 0 ? box.max.y : box.min.y,
-			(corner & 4) != 0 ? box.max.z : box.min.z, 1 };
-		if (p[3] <= 0) return true;
-		float x = p[0] / p[3];
-		float y = p[1] / p[3];
-		min_x = math::min(min_x, x); max_x = math::max(max_x, x);
-		min_y = math::min(min_y, y); max_y = math::max(max_y, y);
+		case 0: return p[0] - x0 * p[3];
+		case 1: return x1 * p[3] - p[0];
+		case 2: return p[1] - y0 * p[3];
+		case 3: return y1 * p[3] - p[1];
+		case 4: return p[2];
+		default: return p[3] - p[2];
 	}
-	int left = (int)tile.x + (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - 3;
-	int right = (int)tile.x + (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + 3;
-	int top = (int)tile.y + (int)math::floor((double)((-max_y * 0.5f + 0.5f) * tile.size)) - 3;
-	int bottom = (int)tile.y + (int)math::ceil((double)((-min_y * 0.5f + 0.5f) * tile.size)) + 3;
-	int changed_right = (int)(changed.x + changed.width);
-	int changed_bottom = (int)(changed.y + changed.height);
-	return right > (int)changed.x && left < changed_right
-		&& bottom > (int)changed.y && top < changed_bottom;
+}
+
+fn void scene_cache_add_screen_point(vk::Rect2D* rect, bool* found, float[<4>] world,
+	Matrix4f camera, vk::Extent2D extent, uint padding = 3)
+{
+	float[<4>] p = camera * world;
+	if (p[3] <= 0) return;
+	float sx = (p[0] / p[3] * 0.5f + 0.5f) * extent.width;
+	float sy = (-p[1] / p[3] * 0.5f + 0.5f) * extent.height;
+	vk::Rect2D point = scene_cache_clip({ .offset = { (int)math::floor((double)sx) - (int)padding,
+		(int)math::floor((double)sy) - (int)padding }, .extent = { padding * 2 + 1, padding * 2 + 1 } }, extent);
+	*rect = *found ? scene_cache_union(*rect, point) : point;
+	*found = !scene_cache_empty(*rect);
 }
 
 fn bool scene_cache_clip_world_box(float[<4>]* a, float[<4>]* b, collision::Aabb3 box)
@@ -513,17 +374,8 @@ fn bool scene_cache_clip_shadow_prism(float[<4>]* a, float[<4>]* b, Matrix4f lig
 	float last = 1;
 	for (uint plane = 0; plane < 6; plane++)
 	{
-		float da;
-		float db;
-		switch (plane)
-		{
-			case 0: da = ca[0] - x0 * ca[3]; db = cb[0] - x0 * cb[3];
-			case 1: da = x1 * ca[3] - ca[0]; db = x1 * cb[3] - cb[0];
-			case 2: da = ca[1] - y0 * ca[3]; db = cb[1] - y0 * cb[3];
-			case 3: da = y1 * ca[3] - ca[1]; db = y1 * cb[3] - cb[1];
-			case 4: da = ca[2]; db = cb[2];
-			default: da = ca[3] - ca[2]; db = cb[3] - cb[2];
-		}
+		float da = scene_cache_shadow_prism_plane(ca, plane, x0, x1, y0, y1);
+		float db = scene_cache_shadow_prism_plane(cb, plane, x0, x1, y0, y1);
 		if (da < 0 && db < 0) return false;
 		if (da >= 0 && db >= 0) continue;
 		float t = da / (da - db);
@@ -538,17 +390,102 @@ fn bool scene_cache_clip_shadow_prism(float[<4>]* a, float[<4>]* b, Matrix4f lig
 	return true;
 }
 
-fn void scene_cache_add_screen_point(vk::Rect2D* rect, bool* found, float[<4>] world,
-	Matrix4f camera, vk::Extent2D extent)
+fn bool scene_cache_project_box(collision::Aabb3 box, Matrix4f camera,
+	vk::Extent2D extent, uint padding, vk::Rect2D* out)
 {
-	float[<4>] p = camera * world;
-	if (p[3] <= 0) return;
-	float sx = (p[0] / p[3] * 0.5f + 0.5f) * extent.width;
-	float sy = (-p[1] / p[3] * 0.5f + 0.5f) * extent.height;
-	vk::Rect2D point = scene_cache_clip({ .offset = { (int)math::floor((double)sx) - 3,
-		(int)math::floor((double)sy) - 3 }, .extent = { 7, 7 } }, extent);
-	*rect = *found ? scene_cache_union(*rect, point) : point;
-	*found = !scene_cache_empty(*rect);
+	float[<4>][8] points;
+	for (uint corner = 0; corner < 8; corner++)
+	{
+		points[corner] = {
+			(corner & 1) != 0 ? box.max.x : box.min.x,
+			(corner & 2) != 0 ? box.max.y : box.min.y,
+			(corner & 4) != 0 ? box.max.z : box.min.z,
+			1,
+		};
+	}
+	bool found = scene_cache_project_points(points, camera, extent, padding, out);
+
+	// Camera-frustum edges piercing box faces.
+	float[<4>][8] frustum = scene_cache_frustum_corners(camera);
+	for (uint edge = 0; edge < 12; edge++)
+	{
+		float[<4>] a = frustum[SCENE_CACHE_BOX_EDGES[edge * 2]];
+		float[<4>] b = frustum[SCENE_CACHE_BOX_EDGES[edge * 2 + 1]];
+		if (!scene_cache_clip_world_box(&a, &b, box)) continue;
+		scene_cache_add_screen_point(out, &found, a, camera, extent, padding);
+		scene_cache_add_screen_point(out, &found, b, camera, extent, padding);
+	}
+	return found;
+}
+
+<*
+ Projects the changed texels of a shadow view through its complete depth range.
+ This is the receiver region: it extends beyond the caster's own screen bounds.
+*>
+fn bool scene_cache_project_shadow(ShadowView* view, ShadowTile tile, ShadowRect changed,
+	Matrix4f camera, vk::Extent2D extent, vk::Rect2D* out)
+{
+	if (changed.width == 0 || changed.height == 0 || tile.size == 0) return false;
+	float u0 = (float)((int)changed.x - (int)tile.x) / (float)tile.size;
+	float v0 = (float)((int)changed.y - (int)tile.y) / (float)tile.size;
+	float u1 = (float)((int)(changed.x + changed.width) - (int)tile.x) / (float)tile.size;
+	float v1 = (float)((int)(changed.y + changed.height) - (int)tile.y) / (float)tile.size;
+	Matrix4f inverse_light = invert(view.view_projection);
+	float[<4>][8] world;
+	for (uint corner = 0; corner < 8; corner++)
+	{
+		float u = (corner & 1) != 0 ? u1 : u0;
+		float v = (corner & 2) != 0 ? v1 : v0;
+		float z = (corner & 4) != 0 ? 1 : 0;
+		float[<4>] p = inverse_light * (float[<4>]) { u * 2 - 1, 1 - v * 2, z, 1 };
+		world[corner] = p / p[3];
+	}
+	bool found = scene_cache_project_points(world, camera, extent, 3, out);
+
+	// Camera-frustum edges piercing a face of the shadow prism.
+	float[<4>][8] camera_world = scene_cache_frustum_corners(camera);
+	float x0 = u0 * 2 - 1;
+	float x1 = u1 * 2 - 1;
+	float y0 = 1 - v1 * 2;
+	float y1 = 1 - v0 * 2;
+	for (uint edge = 0; edge < 12; edge++)
+	{
+		float[<4>] wa = camera_world[SCENE_CACHE_BOX_EDGES[edge * 2]];
+		float[<4>] wb = camera_world[SCENE_CACHE_BOX_EDGES[edge * 2 + 1]];
+		if (!scene_cache_clip_shadow_prism(&wa, &wb, view.view_projection, x0, x1, y0, y1)) continue;
+		scene_cache_add_screen_point(out, &found, wa, camera, extent);
+		scene_cache_add_screen_point(out, &found, wb, camera, extent);
+	}
+	return found;
+}
+
+fn bool scene_cache_shadow_reaches_box(ShadowView* view, ShadowTile tile,
+	ShadowRect changed, collision::Aabb3 box)
+{
+	float min_x = 1;
+	float min_y = 1;
+	float max_x = -1;
+	float max_y = -1;
+	for (uint corner = 0; corner < 8; corner++)
+	{
+		float[<4>] p = view.view_projection * (float[<4>]) {
+			(corner & 1) != 0 ? box.max.x : box.min.x,
+			(corner & 2) != 0 ? box.max.y : box.min.y,
+			(corner & 4) != 0 ? box.max.z : box.min.z, 1 };
+		if (p[3] <= 0) return true;
+		float x = p[0] / p[3];
+		float y = p[1] / p[3];
+		min_x = math::min(min_x, x); max_x = math::max(max_x, x);
+		min_y = math::min(min_y, y); max_y = math::max(max_y, y);
+	}
+	int left = (int)tile.x + (int)math::floor((double)((min_x * 0.5f + 0.5f) * tile.size)) - 3;
+	int right = (int)tile.x + (int)math::ceil((double)((max_x * 0.5f + 0.5f) * tile.size)) + 3;
+	int top = (int)tile.y + (int)math::floor((double)((-max_y * 0.5f + 0.5f) * tile.size)) - 3;
+	int bottom = (int)tile.y + (int)math::ceil((double)((-min_y * 0.5f + 0.5f) * tile.size)) + 3;
+	int changed_right = (int)(changed.x + changed.width);
+	int changed_bottom = (int)(changed.y + changed.height);
+	return right > (int)changed.x && left < changed_right
+		&& bottom > (int)changed.y && top < changed_bottom;
 }
 
 fn void scene_cache_add_segment(vk::Rect2D* rect, bool* found, float[<4>] a,
@@ -583,15 +520,7 @@ fn float scene_cache_intersection_plane(float[<4>] world, uint plane,
 	float[<4>] p = plane < 12 ? camera * world : light * world;
 	uint side = plane % 6;
 	if (plane < 12) return scene_cache_clip_plane(p, side);
-	switch (side)
-	{
-		case 0: return p[0] - x0 * p[3];
-		case 1: return x1 * p[3] - p[0];
-		case 2: return p[1] - y0 * p[3];
-		case 3: return y1 * p[3] - p[1];
-		case 4: return p[2];
-		default: return p[3] - p[2];
-	}
+	return scene_cache_shadow_prism_plane(p, side, x0, x1, y0, y1);
 }
 
 fn void scene_cache_clip_face(vk::Rect2D* rect, bool* found, float[<4>]* corners,
@@ -694,15 +623,7 @@ fn bool scene_cache_project_shadow_box(ShadowView* view, ShadowTile tile, Shadow
 	if (receiver_inside_camera) return found;
 	// The third family of intersection vertices: a camera-frustum edge piercing
 	// both the receiver and the shadow prism.
-	Matrix4f inverse_camera = invert(camera);
-	float[<4>][8] frustum;
-	for (uint corner = 0; corner < 8; corner++)
-	{
-		float[<4>] p = inverse_camera * (float[<4>]) {
-			(corner & 1) != 0 ? 1 : -1, (corner & 2) != 0 ? 1 : -1,
-			(corner & 4) != 0 ? 1 : 0, 1 };
-		frustum[corner] = p / p[3];
-	}
+	float[<4>][8] frustum = scene_cache_frustum_corners(camera);
 	for (uint edge = 0; edge < 12; edge++)
 	{
 		float[<4>] a = frustum[SCENE_CACHE_BOX_EDGES[edge * 2]];

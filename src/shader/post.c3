@@ -14,8 +14,6 @@
 *>
 module three;
 
-import shady;
-
 struct PostPush
 {
 	// `float[4]` and `float[2]` rather than the engine's `Vec4`/`Vec2` spellings

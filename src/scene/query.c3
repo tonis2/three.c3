@@ -566,18 +566,21 @@ fn void Scene.rebuild_query_index(&self, Assets* assets)
 	// the starts as a moving cursor — which is why the cursor is read out of
 	// `starts` and written back, and why `starts` is one longer than the cell
 	// count: the run for cell k is `starts[k] .. starts[k + 1]` and stays so.
-	List{uint} cursor;
-	cursor.tinit((sz)cells);
-	for (int i = 0; i < cells; i++) cursor.push(index.starts[(sz)i]);
-
-	foreach (i, entry : index.entries)
+	@pool()
 	{
-		index.@each_cell(entry.box; sz k)
+		List{uint} cursor;
+		cursor.tinit((sz)cells);
+		for (int i = 0; i < cells; i++) cursor.push(index.starts[(sz)i]);
+
+		foreach (i, entry : index.entries)
 		{
-			index.items[(sz)cursor[k]] = (uint)i;
-			cursor[k]++;
-		};
-	}
+			index.@each_cell(entry.box; sz k)
+			{
+				index.items[(sz)cursor[k]] = (uint)i;
+				cursor[k]++;
+			};
+		}
+	};
 }
 
 <*

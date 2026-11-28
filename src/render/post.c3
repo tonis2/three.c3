@@ -94,15 +94,8 @@ import vk;
 <*
  One shader in the chain: a body, its uniforms, its samplers and the pipeline
  they were compiled into.
-
- The project's first implementer of an interface, and the reason the interface is
- worth having at one implementer is that an engine-provided bloom is internally a
- pyramid of twelve passes with the same contract and a completely different type.
-
- Heap-allocated and held by pointer in `PostPass.stages`, because an interface
- value is a pointer and `three.addPass` grows that list at arbitrary times.
 *>
-struct PostStage (FullscreenPass)
+struct PostStage
 {
 	// Owned outright — see the header.
 	MeshPipeline pipeline;
@@ -288,7 +281,8 @@ fn void PostPass.init(&self)
 *>
 fn usz PostPass.bytes(&self)
 {
-	usz total = (usz)(self.scene.memory.size + self.pong[0].whole.memory.size + self.pong[1].whole.memory.size);
+	usz total = (usz)(self.scene.memory.size + self.eyes.whole.memory.size
+		+ self.pong[0].whole.memory.size + self.pong[1].whole.memory.size);
 	foreach (stage : self.stages) total += (usz)stage.keep.whole.memory.size;
 	foreach (image : self.images) total += (usz)image.image.whole.memory.size;
 	return total;
@@ -588,14 +582,7 @@ fn PostStage*? PostPass.build_stage(
 			foreach (existing : self.images)
 			{
 				if (existing.name != image.name || existing.matches(image)) continue;
-				if (diagnostic != null)
-				{
-					*diagnostic = string::format(mem,
-						"post: image '%s' is already in the chain as %s %s, and this pass declares it %s %s - "
-							"one name is one image",
-						image.name, existing.format.name, image_size_words(existing.width, existing.height),
-						image.format, image_size_words(image.width, image.height));
-				}
+				write_image_conflict(diagnostic, existing, image);
 				return POST_IMAGE_CONFLICT~;
 			}
 		}
@@ -687,6 +674,13 @@ fn PostStage*? PostPass.build_stage(
 	};
 
 	PostStage* stage = mem::new(PostStage);
+	defer catch
+	{
+		stage.release_images(self, gpu);
+		gpu.retire_pipeline(stage.pipeline);
+		if (stage.fragment.ptr != null) stage.fragment.free(mem);
+		mem::free(stage);
+	};
 	stage.pipeline = built;
 	stage.fragment = fragment.copy(mem);
 	stage.set_at = self.now;
@@ -701,16 +695,7 @@ fn PostStage*? PostPass.build_stage(
 	// what it took.
 	foreach (i, image : images)
 	{
-		PostImage*? claimed = self.claim_image(gpu, image, replacing, diagnostic);
-		if (catch err = claimed)
-		{
-			stage.release_images(self, gpu);
-			gpu.retire_pipeline(stage.pipeline);
-			stage.fragment.free(mem);
-			mem::free(stage);
-			return err~;
-		}
-		stage.images[i] = claimed;
+		stage.images[i] = self.claim_image(gpu, image, replacing, diagnostic)!;
 		stage.image_count = (uint)i + 1;
 	}
 	return stage;
@@ -781,7 +766,6 @@ fn void PostStage.release_images(&self, PostPass* chain, Gpu* gpu)
 *>
 fn void PostPass.clear(&self, Gpu* gpu, Assets* assets = null)
 {
-	if (!self.active()) return;
 	self.drop_stages(gpu, assets);
 }
 
@@ -1049,7 +1033,7 @@ fn void PostStage.free(&self, Gpu* gpu) @dynamic
  carry `uv.y = 1 - r/height` and sample the source's row `height - r` — a
  vertical flip no validation layer objects to.
 *>
-fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io) @dynamic
+fn void? PostStage.record(&self, vk::CommandBuffer cmd, PassIo io)
 {
 	if (self.kind == PostKind.COMPUTE) return self.record_compute(cmd, io);
 
@@ -1184,7 +1168,7 @@ fn void? PostStage.record_compute(&self, vk::CommandBuffer cmd, PassIo io)
  the dispatch left it, to the `SHADER_READ_ONLY_OPTIMAL` every chain image is read
  in. A fragment pass closes the attachment it rendered.
 *>
-fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst) @dynamic
+fn vk::ImageMemoryBarrier2 PostStage.close_barrier(&self, vk::Image dst)
 {
 	return self.kind == PostKind.COMPUTE ? storage_close_barrier(dst) : shader_read_barrier(dst);
 }

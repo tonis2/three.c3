@@ -78,7 +78,7 @@ fn void? ShadowAtlas.ensure_compare(&self, Gpu* gpu)
 fn void ShadowAtlas.record_blank(&self, vk::CommandBuffer cmd)
 {
 	if (self.blank.image == null || self.blank_ready) return;
-	self.begin_image(cmd, self.blank.image, false, true);
+	self.begin_image(cmd, self.blank.image, false);
 	self.finish_image(cmd, self.blank.image);
 	self.blank_ready = true;
 }
@@ -126,15 +126,15 @@ fn vk::DescriptorImageInfo ShadowAtlas.compare_descriptor(&self, bool sample_sta
 		.imageLayout = IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 }
 
-fn void ShadowAtlas.begin_image(&self, vk::CommandBuffer cmd, vk::Image image, bool initialized, bool discard)
+fn void ShadowAtlas.begin_image(&self, vk::CommandBuffer cmd, vk::Image image, bool initialized)
 {
-	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_open_barrier(image, discard || !initialized) }));
+	vk::cmdPipelineBarrier2(cmd, &&vk::dependencyInfo().setImageMemoryBarriers({ depth_open_barrier(image, !initialized) }));
 }
 
-fn void ShadowAtlas.begin_live(&self, vk::CommandBuffer cmd, bool discard = false)
-{ self.static_target = false; self.begin_image(cmd, self.live.image, self.initialized, discard); }
-fn void ShadowAtlas.begin_static(&self, vk::CommandBuffer cmd, bool discard = false)
-{ self.static_target = true; self.begin_image(cmd, self.statics.image, self.static_initialized, discard); }
+fn void ShadowAtlas.begin_live(&self, vk::CommandBuffer cmd)
+{ self.static_target = false; self.begin_image(cmd, self.live.image, self.initialized); }
+fn void ShadowAtlas.begin_static(&self, vk::CommandBuffer cmd)
+{ self.static_target = true; self.begin_image(cmd, self.statics.image, self.static_initialized); }
 
 fn void ShadowAtlas.begin_tile(&self, vk::CommandBuffer cmd, ShadowTile tile, bool clear)
 {

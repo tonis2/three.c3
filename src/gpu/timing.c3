@@ -118,7 +118,7 @@ enum FrameMark : char
 	END,
 }
 
-const uint FRAME_MARKS = FrameMark.END.ordinal + 1;
+const uint FRAME_MARKS = FrameMark::len;
 const ushort ALL_MARKS = (ushort)((1 << FRAME_MARKS) - 1);
 
 <*
@@ -183,6 +183,7 @@ struct FrameTimer
 fn FrameTimer? FrameTimer.init(&self, Gpu* gpu)
 {
 	*self = { };
+	defer catch self.free(gpu);
 
 	if (gpu.limits.pipeline_statistics)
 	{

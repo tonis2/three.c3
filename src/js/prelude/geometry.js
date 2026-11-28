@@ -593,7 +593,7 @@ function terrainColors(colors, side, where) {
 // the lowest x and z to the highest (Blender's cut). The host takes the ordinal.
 const TERRAIN_DIAGONALS = { '+x-z': 0, '+x+z': 1 };
 
-// A surface rather than a pile of boxes — plan.md §18.4.
+// A surface rather than a pile of boxes.
 //
 // The one generated shape that carries data instead of parameters, and the
 // one that answers questions afterwards. `heightAt` and `normalAt` read the

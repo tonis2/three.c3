@@ -84,7 +84,7 @@ struct AnimationChannel
 	float[] times;
 	float[] values;
 
-	// 3 for a translation or a scale, 4 for a rotation.
+	// 3 for a translation or a scale, 4 for a rotation, or the target count for WEIGHTS.
 	uint stride;
 }
 
@@ -838,7 +838,7 @@ fn void AnimationPlayer.pose(&self, Scene* scene, Asset* owner)
 	if (self.layer_count == 1 && only.weight >= 1.0f && only.clip >= 0 && only.clip < owner.clips.len()
 		&& !self.composes(&owner.clips[only.clip]))
 	{
-		self.write_clip(scene, &owner.clips[only.clip], only.time, 1.0f);
+		self.write_clip(scene, &owner.clips[only.clip], only.time);
 		self.composed = false;
 	}
 	else
@@ -1089,28 +1089,6 @@ fn void AnimationPlayer.reset_targets(&self, Scene* scene, Asset* owner, Animati
 }
 
 <*
- One transform mixed toward another. `weight >= 1` is the plain assignment the
- unblended path wants, and it is an early return rather than a lerp by 1 so that
- the ordinary case costs nothing and lands on exactly the sampled value.
-*>
-fn Vec3 mix_vec(Vec3 from, Vec3 to, float weight) @local
-{
-	if (weight >= 1.0f) return to;
-	return from + (to - from) * weight;
-}
-
-<*
- The same for a rotation, and a slerp rather than a lerp for `sample`'s reason: a
- component-wise mix of two quaternions is not a unit quaternion and speeds up in
- the middle of the arc.
-*>
-fn Quaternionf mix_quat(Quaternionf from, Quaternionf to, float weight) @local
-{
-	if (weight >= 1.0f) return to;
-	return from.slerp(to, weight);
-}
-
-<*
  Points every skinned mesh under this player at the two baked frames either side
  of the dominant layer's time, and how far between them it is — when one clip is
  all of the picture.
@@ -1172,19 +1150,14 @@ fn void AnimationPlayer.key_pose(&self, Scene* scene, Asset* owner)
 }
 
 <*
- Writes a clip's value at `time` into every node it targets, mixed in by `weight`.
-
- `weight` of 1 is the plain write, and is what everything but the second half of a
- crossfade asks for. Below 1 the sampled value is mixed into whatever the node
- already holds, which is what makes the fade two calls to this and no third
- buffer: the outgoing clip is written straight and the incoming one is mixed over
- it.
+ Writes a single clip's value at `time` into every node it targets.
 
  Split from `advance` so `play()` can pose an instance at frame zero without
  stepping it — a prop placed paused should look like its first frame, not like
- whatever its rest pose happened to be.
+ whatever its rest pose happened to be. Multi-layer blending goes through
+ `blend_layers`.
 *>
-fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, float time, float weight)
+fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, float time)
 {
 	float[4] value;
 
@@ -1201,7 +1174,7 @@ fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, flo
 		// the door of its own rather than a fourth case below.
 		if (channel.path == AnimatedPath.WEIGHTS)
 		{
-			self.write_weights(scene, channel, id, time, weight);
+			self.write_weights(scene, channel, id, time);
 			continue;
 		}
 
@@ -1210,15 +1183,11 @@ fn void AnimationPlayer.write_clip(&self, Scene* scene, AnimationClip* clip, flo
 		switch (channel.path)
 		{
 			case AnimatedPath.TRANSLATION:
-				node.position = mix_vec(node.position, (Vec3) { value[0], value[1], value[2] }, weight);
+				node.position = { value[0], value[1], value[2] };
 			case AnimatedPath.ROTATION:
-				node.rotation = mix_quat(
-					node.rotation,
-					(Quaternionf) { value[0], value[1], value[2], value[3] },
-					weight
-				);
+				node.rotation = { value[0], value[1], value[2], value[3] };
 			case AnimatedPath.SCALE:
-				node.scale = mix_vec(node.scale, (Vec3) { value[0], value[1], value[2] }, weight);
+				node.scale = { value[0], value[1], value[2] };
 			default:
 				break;
 		}
@@ -1264,8 +1233,7 @@ fn void AnimationPlayer.write_weights(
 	Scene* scene,
 	AnimationChannel* channel,
 	NodeId id,
-	float time,
-	float weight
+	float time
 )
 {
 	uint targets = scene.morph_target_count(id);
@@ -1276,16 +1244,6 @@ fn void AnimationPlayer.write_weights(
 	channel.sample(time, self.weight_scratch.array_view());
 
 	uint count = channel.stride < targets ? channel.stride : targets;
-	if (weight < 1.0f)
-	{
-		// Read before the write below, which may free the entry this views into.
-		float[] current = scene.morph_weights(id);
-		for (uint i = 0; i < count && i < current.len; i++)
-		{
-			self.weight_scratch[i] = current[i] + (self.weight_scratch[i] - current[i]) * weight;
-		}
-	}
-
 	scene.set_morph_weights(id, self.weight_scratch.array_view()[0:count]);
 }
 

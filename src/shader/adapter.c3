@@ -185,11 +185,6 @@ fn ShaderModule compile_compute_shader_cached(String name, String source)
  The words are taken ownership of, like the compiler's output: the caller hands
  them over and the module frees them.
 *>
-// SPIR-V's own numbers for the two operands read here: the execution model
-// that makes a stage compute, and the execution mode that carries a local size.
-const uint EXECUTION_MODEL_GL_COMPUTE = 5;
-const uint EXECUTION_MODE_LOCAL_SIZE  = 17;
-
 fn ShaderModule adopt_spirv_module(String name, char[] spirv, String entry = "")
 {
 	ShaderModule mod = { };
@@ -212,15 +207,17 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv, String entry = "")
 	// workgroup size. SPIR-V 1.4 made an entry's interface list every global it
 	// touches, which is what makes the question answerable; an older module, or
 	// no entry named, is described whole as before.
-	uint entry_id = 0;
-	bool[] used = entry_interface(mod.spirv, entry, &entry_id);
-	defer if (used.len > 0) alloc::free(mem, used);
+	@pool()
+	{
+		uint entry_id = 0;
+		bool[] used = entry_interface(mod.spirv, entry, &entry_id);
 
-	reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count, used);
-	mod.layout.stages = stage_union(mod.entries.array_view());
-	mod.layout.push_size = reflect_push_block_size(mod.spirv, used);
-	mod.local_size = reflect_local_size(mod.spirv, entry_id);
-	mod.subgroup_size = reflect_subgroup_size(mod.spirv);
+		reflect_shady_module(mod.spirv, &mod.entries, &mod.layout.bindings, &mod.layout.set_count, used);
+		mod.layout.stages = stage_union(mod.entries.array_view());
+		mod.layout.push_size = reflect_push_block_size(mod.spirv, used);
+		mod.local_size = reflect_local_size(mod.spirv, entry_id);
+		mod.subgroup_size = reflect_subgroup_size(mod.spirv);
+	};
 
 	if (mod.entries.len() == 0)
 	{
@@ -234,7 +231,8 @@ fn ShaderModule adopt_spirv_module(String name, char[] spirv, String entry = "")
 }
 
 <*
- The globals one entry point uses, as a set of ids, when the module says.
+ The globals one entry point uses, as a set of ids allocated in tmem, when the
+ module says.
 
  Empty when there is no such entry, no entry was named, or the module predates
  SPIR-V 1.4 - before which an entry's interface listed only its inputs and
@@ -257,14 +255,14 @@ fn bool[] entry_interface(char[] spirv, String entry, uint* entry_id) @local
 		uint word = words[i];
 		usz length = (usz)(word >> 16);
 		if (length == 0 || i + length > count) break;
-		if ((word & 0xffff) == 15 && length >= 4)
+		if ((shady::Opcode)(word & 0xffff) == shady::Opcode.ENTRY_POINT && length >= 4)
 		{
 			// OpEntryPoint: model, id, name (a padded string), interface ids.
 			String name = spirv_string(words, i + 3, i + length);
 			if (name == entry)
 			{
 				usz first = i + 3 + (name.len + 4) / 4;
-				bool[] used = alloc::new_array(mem, bool, bound);
+				bool[] used = alloc::new_array(tmem, bool, bound);
 				for (usz j = first; j < i + length; j++)
 				{
 					if (words[j] < bound) used[words[j]] = true;
@@ -295,14 +293,11 @@ fn uint reflect_subgroup_size(char[] spirv)
 		uint word = words[i];
 		usz length = (usz)(word >> 16);
 		if (length == 0 || i + length > count) break;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		// OpModuleProcessed: one literal string.
-		if ((word & 0xffff) == 330 && length >= 2)
+		if (opcode == shady::Opcode.MODULE_PROCESSED && length >= 2)
 		{
-			char* text = (char*)&words[i + 1];
-			usz limit = (length - 1) * 4;
-			usz n = 0;
-			while (n < limit && text[n] != 0) n++;
-			String note = (String)text[:n];
+			String note = spirv_string(words, i + 1, i + length);
 			if (note.starts_with(prefix))
 			{
 				uint size = 0;
@@ -311,7 +306,7 @@ fn uint reflect_subgroup_size(char[] spirv)
 			}
 		}
 		// Past the debug section there are no more notes to find.
-		if ((word & 0xffff) == 71) break; // OpDecorate
+		if (opcode == shady::Opcode.DECORATE) break;
 		i += length;
 	}
 	return 0;
@@ -333,40 +328,43 @@ fn uint[3] reflect_local_size(char[] spirv, uint only_entry = 0)
 	usz count = spirv.len / 4;
 	if (count < 5) return size;
 	uint* words = (uint*)spirv.ptr;
-
-	// The compute entry points, by result id: `LocalSize` is matched against
-	// these rather than taken from whichever `OpExecutionMode` comes first,
-	// which for a module with a fragment stage in it would be the wrong one.
-	// Entries are numbered from 1 and the bound is a ceiling on them.
 	uint bound = words[3];
-	bool[] compute_entry = alloc::new_array(mem, bool, bound);
-	defer alloc::free(mem, compute_entry);
 
-	usz i = 5;
-	while (i < count)
+	@pool()
 	{
-		uint word = words[i];
-		usz length = (usz)(word >> 16);
-		if (length == 0 || i + length > count) break;
-		uint opcode = word & 0xffff;
+		// The compute entry points, by result id: `LocalSize` is matched against
+		// these rather than taken from whichever `OpExecutionMode` comes first,
+		// which for a module with a fragment stage in it would be the wrong one.
+		bool[] compute_entry = alloc::new_array(tmem, bool, bound);
 
-		// OpEntryPoint: execution model, entry id, name, interface...
-		if (opcode == 15 && length >= 4 && words[i + 1] == EXECUTION_MODEL_GL_COMPUTE)
+		usz i = 5;
+		while (i < count)
 		{
-			uint entry = words[i + 2];
-			if (entry < bound) compute_entry[entry] = true;
-		}
-		// OpExecutionMode: entry id, mode, then its literals.
-		else if (opcode == 16 && length == 6 && words[i + 2] == EXECUTION_MODE_LOCAL_SIZE)
-		{
-			uint entry = words[i + 1];
-			if (entry < bound && compute_entry[entry] && (only_entry == 0 || entry == only_entry))
+			uint word = words[i];
+			usz length = (usz)(word >> 16);
+			if (length == 0 || i + length > count) break;
+			shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
+
+			// OpEntryPoint: execution model, entry id, name, interface...
+			if (opcode == shady::Opcode.ENTRY_POINT && length >= 4
+				&& words[i + 1] == (uint)shady::ExecutionModel.GL_COMPUTE)
 			{
-				size = { words[i + 3], words[i + 4], words[i + 5] };
+				uint entry = words[i + 2];
+				if (entry < bound) compute_entry[entry] = true;
 			}
+			// OpExecutionMode: entry id, mode, then its literals.
+			else if (opcode == shady::Opcode.EXECUTION_MODE && length == 6
+				&& words[i + 2] == (uint)shady::ExecutionMode.LOCAL_SIZE)
+			{
+				uint entry = words[i + 1];
+				if (entry < bound && compute_entry[entry] && (only_entry == 0 || entry == only_entry))
+				{
+					size = { words[i + 3], words[i + 4], words[i + 5] };
+				}
+			}
+			i += length;
 		}
-		i += length;
-	}
+	};
 	return size;
 }
 
@@ -429,14 +427,35 @@ fn bool compile_shady_spirv(ShaderModule* mod, String source) @local
 	return true;
 }
 
+struct MemberDecor @local
+{
+	uint struct_id;
+	uint member;
+	uint value;
+}
+
+struct PushTypeTable @local
+{
+	uint* words;
+	usz count;
+	uint bound;
+	ushort[] type_op;
+	uint[] op_a;
+	uint[] op_b;
+	uint[] op_c;
+	uint[] array_stride;
+	uint[] matrix_stride;
+	MemberDecor[] offsets;
+}
+
 <*
  The byte size of a module's `@pushconstant` block, read back out of the
  SPIR-V.
 
  Nothing walks a compute shader's push block the way `compile_shady` walks a
  pass's - the block is a struct in the shader's own source - so the size is
- what the module says it is: the last member's offset plus that member's own
- size, with strides folded in for the arrays and matrices on the way.
+ what the module says it is: the largest member end across the block, with
+ strides folded in for arrays and matrices on the way.
 
  Only what the walk needs is gathered, and only from `OpDecorate` /
  `OpMemberDecorate`. A module with no push block answers zero, which is what
@@ -451,164 +470,151 @@ fn uint reflect_push_block_size(char[] spirv, bool[] used = {}) @local
 	uint* words = (uint*)spirv.ptr;
 	uint bound = words[3];
 
-	// What the size walk needs: the type table, plus the three decorations that
-	// are part of a size rather than a binding.
-	ushort[] type_op   = alloc::new_array(mem, ushort, bound);
-	uint[]   op_a      = alloc::new_array(mem, uint, bound);
-	uint[]   op_b      = alloc::new_array(mem, uint, bound);
-	uint[]   op_c      = alloc::new_array(mem, uint, bound);
-	uint[]   array_stride  = alloc::new_array(mem, uint, bound);
-	uint[]   matrix_stride = alloc::new_array(mem, uint, bound);
-	uint[]   block_id  = alloc::new_array(mem, uint, 1);
-
-	defer
+	@pool()
 	{
-		alloc::free(mem, type_op);
-		alloc::free(mem, op_a);
-		alloc::free(mem, op_b);
-		alloc::free(mem, op_c);
-		alloc::free(mem, array_stride);
-		alloc::free(mem, matrix_stride);
-		alloc::free(mem, block_id);
+		PushTypeTable table = {
+			.words         = words,
+			.count         = count,
+			.bound         = bound,
+			.type_op       = alloc::new_array(tmem, ushort, bound),
+			.op_a          = alloc::new_array(tmem, uint, bound),
+			.op_b          = alloc::new_array(tmem, uint, bound),
+			.op_c          = alloc::new_array(tmem, uint, bound),
+			.array_stride  = alloc::new_array(tmem, uint, bound),
+			.matrix_stride = alloc::new_array(tmem, uint, bound),
+		};
+
+		List{MemberDecor} offsets;
+		offsets.tinit(16);
+		List{MemberDecor} matrix_strides;
+		matrix_strides.tinit(4);
+
+		// Two passes, because the block's pointer and the struct it points at are
+		// written wherever the emitter put them - the struct is declared after the
+		// variable that uses it, so one pass would look up a type table that is not
+		// filled in yet.
+		usz i = 5;
+		while (i < count)
+		{
+			uint word  = words[i];
+			usz length = (usz)(word >> 16);
+			if (length == 0 || i + length > count) break;
+
+			switch ((shady::Opcode)(word & 0xffff))
+			{
+				case shady::Opcode.TYPE_VECTOR:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						table.type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_VECTOR;
+						table.op_a[words[i + 1]]    = words[i + 2]; // component
+						table.op_b[words[i + 1]]    = words[i + 3]; // count
+					}
+				case shady::Opcode.TYPE_MATRIX:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						table.type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_MATRIX;
+						table.op_a[words[i + 1]]    = words[i + 2]; // column type
+						table.op_b[words[i + 1]]    = words[i + 3]; // columns
+					}
+				case shady::Opcode.TYPE_ARRAY:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						table.type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_ARRAY;
+						table.op_a[words[i + 1]]    = words[i + 2]; // element
+						table.op_b[words[i + 1]]    = words[i + 3]; // length constant id
+					}
+				case shady::Opcode.TYPE_STRUCT:
+					if (length >= 2 && words[i + 1] < bound)
+					{
+						table.type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_STRUCT;
+						// Word offset into `words` where this struct's member type ids begin.
+						table.op_a[words[i + 1]] = (uint)(i + 2);
+						table.op_b[words[i + 1]] = (uint)(length - 2);
+					}
+				case shady::Opcode.TYPE_POINTER:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						table.type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_POINTER;
+						table.op_a[words[i + 1]]    = words[i + 2]; // storage class
+						table.op_b[words[i + 1]]    = words[i + 3]; // pointee
+					}
+				case shady::Opcode.CONSTANT:
+					if (length >= 4 && words[i + 2] < bound) table.op_c[words[i + 2]] = words[i + 3];
+				case shady::Opcode.DECORATE:
+					if (length >= 4 && words[i + 1] < bound && words[i + 2] == (uint)shady::Decoration.ARRAY_STRIDE)
+					{
+						table.array_stride[words[i + 1]] = words[i + 3];
+					}
+				case shady::Opcode.MEMBER_DECORATE:
+					if (length >= 5 && words[i + 1] < bound)
+					{
+						if (words[i + 3] == (uint)shady::Decoration.OFFSET)
+						{
+							offsets.push({ .struct_id = words[i + 1], .member = words[i + 2], .value = words[i + 4] });
+						}
+						else if (words[i + 3] == (uint)shady::Decoration.MATRIX_STRIDE)
+						{
+							matrix_strides.push({ .struct_id = words[i + 1], .member = words[i + 2], .value = words[i + 4] });
+						}
+					}
+				default:
+			}
+			i += length;
+		}
+
+		// MatrixStride decorates a struct member, while `type_size` looks up by
+		// the matrix type id. Resolve each decorated member to its type id now
+		// that every `OpTypeStruct` is recorded.
+		foreach (decor : matrix_strides)
+		{
+			if (table.type_op[decor.struct_id] != (ushort)shady::Opcode.TYPE_STRUCT) continue;
+			if (decor.member >= table.op_b[decor.struct_id]) continue;
+			usz at = (usz)table.op_a[decor.struct_id] + decor.member;
+			if (at < count && words[at] < bound) table.matrix_stride[words[at]] = decor.value;
+		}
+		table.offsets = offsets.array_view();
+
+		// The block's pointer, not the pointer to a member of it: a `@pushconstant`
+		// struct is reached both ways, and the one whose pointee is a struct is the
+		// block.
+		uint block_id = 0;
+		i = 5;
+		while (i < count)
+		{
+			uint word  = words[i];
+			usz length = (usz)(word >> 16);
+			if (length == 0 || i + length > count) break;
+
+			if (used.len == 0
+				&& (shady::Opcode)(word & 0xffff) == shady::Opcode.TYPE_POINTER
+				&& length >= 4 && words[i + 1] < bound
+				&& words[i + 2] == (uint)shady::StorageClass.PUSH_CONSTANT
+				&& words[i + 3] < bound
+				&& table.type_op[words[i + 3]] == (ushort)shady::Opcode.TYPE_STRUCT)
+			{
+				block_id = words[i + 3];
+			}
+			// With an entry's interface in hand, the block is the one behind the
+			// push-constant variable that entry uses: OpVariable's result type is
+			// its pointer, and the pointer's pointee is the block.
+			if (used.len > 0
+				&& (shady::Opcode)(word & 0xffff) == shady::Opcode.VARIABLE
+				&& length >= 4 && words[i + 2] < bound && used[words[i + 2]]
+				&& words[i + 3] == (uint)shady::StorageClass.PUSH_CONSTANT
+				&& words[i + 1] < bound
+				&& table.type_op[words[i + 1]] == (ushort)shady::Opcode.TYPE_POINTER)
+			{
+				uint pointee = table.op_b[words[i + 1]];
+				if (pointee < bound && table.type_op[pointee] == (ushort)shady::Opcode.TYPE_STRUCT) block_id = pointee;
+			}
+			i += length;
+		}
+
+		if (block_id == 0 || block_id >= bound) return 0;
+		if (table.type_op[block_id] != (ushort)shady::Opcode.TYPE_STRUCT) return 0;
+
+		return type_size(block_id, &table, 0);
 	};
-
-	block_id[0] = 0;
-
-	// Two passes, because the block's pointer and the struct it points at are
-	// written wherever the emitter put them - the struct is declared after the
-	// variable that uses it, so one pass would look up a type table that is not
-	// filled in yet.
-	usz i = 5;
-	while (i < count)
-	{
-		uint word  = words[i];
-		usz length = (usz)(word >> 16);
-		if (length == 0 || i + length > count) break;
-
-		switch ((shady::Opcode)(word & 0xffff))
-		{
-			case shady::Opcode.TYPE_VECTOR:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_VECTOR;
-					op_a[words[i + 1]]    = words[i + 2]; // component
-					op_b[words[i + 1]]    = words[i + 3]; // count
-				}
-			case shady::Opcode.TYPE_MATRIX:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_MATRIX;
-					op_a[words[i + 1]]    = words[i + 2]; // column type
-					op_b[words[i + 1]]    = words[i + 3]; // columns
-				}
-			case shady::Opcode.TYPE_ARRAY:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_ARRAY;
-					op_a[words[i + 1]]    = words[i + 2]; // element
-					op_b[words[i + 1]]    = words[i + 3]; // length constant id
-				}
-			case shady::Opcode.TYPE_STRUCT:
-				if (length >= 2 && words[i + 1] < bound)
-				{
-					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_STRUCT;
-					// The member type ids, packed into the type's own slot in
-					// `op_a` - a struct is the one type with a list, and one
-					// id is enough to keep the others reachable.
-					op_a[words[i + 1]] = (uint)(i + 2);
-					op_b[words[i + 1]] = (uint)(length - 2);
-				}
-			case shady::Opcode.TYPE_POINTER:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					type_op[words[i + 1]] = (ushort)shady::Opcode.TYPE_POINTER;
-					op_a[words[i + 1]]    = words[i + 2]; // storage class
-					op_b[words[i + 1]]    = words[i + 3]; // pointee
-				}
-			case shady::Opcode.CONSTANT:
-				if (length >= 4 && words[i + 2] < bound) op_c[words[i + 2]] = words[i + 3];
-			case shady::Opcode.DECORATE:
-				if (length >= 4 && words[i + 1] < bound && words[i + 2] == (uint)shady::Decoration.ARRAY_STRIDE)
-				{
-					array_stride[words[i + 1]] = words[i + 3];
-				}
-			case shady::Opcode.MEMBER_DECORATE:
-				if (length >= 5 && words[i + 1] < bound && words[i + 3] == (uint)shady::Decoration.MATRIX_STRIDE)
-				{
-					matrix_stride[words[i + 1]] = words[i + 4];
-				}
-			default:
-		}
-		i += length;
-	}
-
-	// The block's pointer, not the pointer to a member of it: a `@pushconstant`
-	// struct is reached both ways, and the one whose pointee is a struct is the
-	// block.
-	i = 5;
-	while (i < count)
-	{
-		uint word  = words[i];
-		usz length = (usz)(word >> 16);
-		if (length == 0 || i + length > count) break;
-
-		if (used.len == 0
-			&& (shady::Opcode)(word & 0xffff) == shady::Opcode.TYPE_POINTER
-			&& length >= 4 && words[i + 1] < bound
-			&& words[i + 2] == (uint)shady::StorageClass.PUSH_CONSTANT
-			&& words[i + 3] < bound
-			&& type_op[words[i + 3]] == (ushort)shady::Opcode.TYPE_STRUCT)
-		{
-			block_id[0] = words[i + 3];
-		}
-		// With an entry's interface in hand, the block is the one behind the
-		// push-constant variable that entry uses: OpVariable's result type is
-		// its pointer, and the pointer's pointee is the block.
-		if (used.len > 0
-			&& (shady::Opcode)(word & 0xffff) == shady::Opcode.VARIABLE
-			&& length >= 4 && words[i + 2] < bound && used[words[i + 2]]
-			&& words[i + 3] == (uint)shady::StorageClass.PUSH_CONSTANT
-			&& words[i + 1] < bound
-			&& type_op[words[i + 1]] == (ushort)shady::Opcode.TYPE_POINTER)
-		{
-			uint pointee = op_b[words[i + 1]];
-			if (pointee < bound && type_op[pointee] == (ushort)shady::Opcode.TYPE_STRUCT) block_id[0] = pointee;
-		}
-		i += length;
-	}
-
-	if (block_id[0] == 0 || block_id[0] >= bound) return 0;
-	if (type_op[block_id[0]] != (ushort)shady::Opcode.TYPE_STRUCT) return 0;
-
-	// The last member's offset plus its own size: the end of a block, which is
-	// what a push range has to cover.
-	uint member_count = op_b[block_id[0]];
-	uint member_at    = op_a[block_id[0]];
-	if (member_count == 0) return 0;
-
-	uint last_offset = 0;
-	bool offset_found = false;
-	usz j = 5;
-	while (j < count)
-	{
-		uint word   = words[j];
-		usz length  = (usz)(word >> 16);
-		if (length == 0 || j + length > count) break;
-
-		if ((shady::Opcode)(word & 0xffff) == shady::Opcode.MEMBER_DECORATE
-			&& length >= 5 && words[j + 1] == block_id[0]
-			&& words[j + 3] == (uint)shady::Decoration.OFFSET
-			&& words[j + 2] + 1 == member_count)
-		{
-			last_offset  = words[j + 4];
-			offset_found = true;
-		}
-		j += length;
-	}
-	if (!offset_found) return 0;
-
-	uint last_type = words[member_at + member_count - 1];
-	return last_offset + type_size(last_type, type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, 0);
 }
 
 <*
@@ -620,41 +626,43 @@ fn uint reflect_push_block_size(char[] spirv, bool[] used = {}) @local
  one member that could be an array or a matrix is what the strides above are
  for.
 *>
-fn uint type_size(
-	uint id, ushort[] type_op, uint[] op_a, uint[] op_b, uint[] op_c,
-	uint[] array_stride, uint[] matrix_stride, uint bound, uint depth) @local
+fn uint type_size(uint id, PushTypeTable* table, uint depth) @local
 {
-	if (id >= bound || depth > 8) return 0;
+	if (id >= table.bound || depth > 8) return 0;
 
-	switch ((shady::Opcode)type_op[id])
+	switch ((shady::Opcode)table.type_op[id])
 	{
 		case shady::Opcode.TYPE_VECTOR:
-			return type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1) * op_b[id];
+			return type_size(table.op_a[id], table, depth + 1) * table.op_b[id];
 		case shady::Opcode.TYPE_MATRIX:
 		{
-			uint column = matrix_stride[id] > 0
-				? matrix_stride[id]
-				: type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1);
-			return column * op_b[id];
+			uint column = table.matrix_stride[id] > 0
+				? table.matrix_stride[id]
+				: type_size(table.op_a[id], table, depth + 1);
+			return column * table.op_b[id];
 		}
 		case shady::Opcode.TYPE_ARRAY:
 		{
-			uint length = op_b[id] < bound ? op_c[op_b[id]] : 0;
-			uint stride = array_stride[id] > 0
-				? array_stride[id]
-				: type_size(op_a[id], type_op, op_a, op_b, op_c, array_stride, matrix_stride, bound, depth + 1);
+			uint length = table.op_b[id] < table.bound ? table.op_c[table.op_b[id]] : 0;
+			uint stride = table.array_stride[id] > 0
+				? table.array_stride[id]
+				: type_size(table.op_a[id], table, depth + 1);
 			return length * stride;
 		}
 		case shady::Opcode.TYPE_STRUCT:
 		{
-			// The end of its last member, which is what `assign_offsets` rounds
-			// up to the struct's alignment - so this is an upper bound and a
-			// fine one for a push range that only has to be big enough.
-			uint member_count = op_b[id];
-			uint member_at    = op_a[id];
-			if (member_count == 0) return 0;
-			return type_size(op_a[member_at + member_count - 1], type_op, op_a, op_b, op_c,
-				array_stride, matrix_stride, bound, depth + 1);
+			uint member_count = table.op_b[id];
+			uint member_at    = table.op_a[id];
+			if (member_count == 0 || (usz)member_at + member_count > table.count) return 0;
+			uint max_end = 0;
+			foreach (decor : table.offsets)
+			{
+				if (decor.struct_id != id || decor.member >= member_count) continue;
+				uint member_type = table.words[(usz)member_at + decor.member];
+				uint end = decor.value + type_size(member_type, table, depth + 1);
+				if (end > max_end) max_end = end;
+			}
+			return max_end;
 		}
 		default:
 			return 4;
@@ -676,32 +684,32 @@ fn uint type_size(
 *>
 macro ShaderModule compile_shady_cached(ShaderDef def, $Type, bool* compiled, ShaderSpec[] specs)
 {
-	DString source;
-	source.tinit(64 * 1024);
-	append_shader_def(&source, def, $Type);
+	@pool()
+	{
+		DString source;
+		source.tinit(64 * 1024);
+		append_shader_def(&source, def, $Type);
 
-	// The walked half: one field per C3 member, at the offset C3 gave it. The
-	// names are compile-time literals here and copied onto `mem` below, where
-	// the module owns them.
-	List{ShaderField} walked;
-	walked.init(mem, 8);
+		// The walked half: one field per C3 member, at the offset C3 gave it. The
+		// names are compile-time literals here and copied onto `mem` below, where
+		// the module owns them.
+		List{ShaderField} walked;
+		walked.tinit(8);
 
-	var $align = 4;
-	$foreach $m : $Type::members:
-		var $offset = $m.offset;
-		var $size = $m.size;
-		walked.push({ .name = $m.name, .offset = (uint)$offset, .size = (uint)$size });
-		$if wire_align($m.type) > $align:
-			$align = wire_align($m.type);
-		$endif
-	$endforeach
+		var $align = 4;
+		$foreach $m : $Type::members:
+			var $offset = $m.offset;
+			var $size = $m.size;
+			walked.push({ .name = $m.name, .offset = (uint)$offset, .size = (uint)$size });
+			$if wire_align($m.type) > $align:
+				$align = wire_align($m.type);
+			$endif
+		$endforeach
 
-	ShaderModule mod = compile_shady_cached_source(
-		source.str_view(), def, walked.array_view(), (uint)$align, compiled, specs
-	);
-	walked.free();
-	source.free();
-	return mod;
+		return compile_shady_cached_source(
+			source.str_view(), def, walked.array_view(), (uint)$align, compiled, specs
+		);
+	};
 }
 
 <*
@@ -867,234 +875,218 @@ fn void reflect_shady_module(
 	uint* words = (uint*)spirv.ptr;
 	uint bound = words[3];
 
-	String[]     names           = alloc::new_array(mem, String, bound);
-	bool[]       named           = alloc::new_array(mem, bool, bound);
-	ShadyType[]  kinds           = alloc::new_array(mem, ShadyType, bound);
-	uint[]       op_a            = alloc::new_array(mem, uint, bound);
-	uint[]       op_b            = alloc::new_array(mem, uint, bound);
-	bool[]       blocks          = alloc::new_array(mem, bool, bound);
-	bool[]       has_set         = alloc::new_array(mem, bool, bound);
-	uint[]       sets            = alloc::new_array(mem, uint, bound);
-	bool[]       has_binding     = alloc::new_array(mem, bool, bound);
-	uint[]       binding_numbers = alloc::new_array(mem, uint, bound);
-	uint[]       constants       = alloc::new_array(mem, uint, bound);
-	// A storage image's declared format, by image type id, and the two access
-	// decorations by variable id. See `ShaderBinding.storage_format`.
-	uint[]       formats         = alloc::new_array(mem, uint, bound);
-	bool[]       non_readable    = alloc::new_array(mem, bool, bound);
-	bool[]       non_writable    = alloc::new_array(mem, bool, bound);
-
-	defer
+	@pool()
 	{
-		alloc::free(mem, names);
-		alloc::free(mem, named);
-		alloc::free(mem, kinds);
-		alloc::free(mem, op_a);
-		alloc::free(mem, op_b);
-		alloc::free(mem, blocks);
-		alloc::free(mem, has_set);
-		alloc::free(mem, sets);
-		alloc::free(mem, has_binding);
-		alloc::free(mem, binding_numbers);
-		alloc::free(mem, constants);
-		alloc::free(mem, formats);
-		alloc::free(mem, non_readable);
-		alloc::free(mem, non_writable);
-	};
+		String[]     names           = alloc::new_array(tmem, String, bound);
+		bool[]       named           = alloc::new_array(tmem, bool, bound);
+		ShadyType[]  kinds           = alloc::new_array(tmem, ShadyType, bound);
+		uint[]       op_a            = alloc::new_array(tmem, uint, bound);
+		uint[]       op_b            = alloc::new_array(tmem, uint, bound);
+		bool[]       blocks          = alloc::new_array(tmem, bool, bound);
+		bool[]       has_set         = alloc::new_array(tmem, bool, bound);
+		uint[]       sets            = alloc::new_array(tmem, uint, bound);
+		bool[]       has_binding     = alloc::new_array(tmem, bool, bound);
+		uint[]       binding_numbers = alloc::new_array(tmem, uint, bound);
+		uint[]       constants       = alloc::new_array(tmem, uint, bound);
+		// A storage image's declared format, by image type id, and the two access
+		// decorations by variable id. See `ShaderBinding.storage_format`.
+		uint[]       formats         = alloc::new_array(tmem, uint, bound);
+		bool[]       non_readable    = alloc::new_array(tmem, bool, bound);
+		bool[]       non_writable    = alloc::new_array(tmem, bool, bound);
 
-	List{ShadyVariable} variables;
-	variables.init(mem, 8);
-	defer variables.free();
+		List{ShadyVariable} variables;
+		variables.tinit(8);
 
-	usz i = 5;
-	while (i < count)
-	{
-		uint word = words[i];
-		usz length = (usz)(word >> 16);
-		if (length == 0 || i + length > count) break;
-
-		switch ((shady::Opcode)(word & 0xffff))
+		usz i = 5;
+		while (i < count)
 		{
-			case shady::Opcode.NAME:
-				if (length >= 3)
-				{
-					uint id = words[i + 1];
-					if (id < bound)
+			uint word = words[i];
+			usz length = (usz)(word >> 16);
+			if (length == 0 || i + length > count) break;
+
+			switch ((shady::Opcode)(word & 0xffff))
+			{
+				case shady::Opcode.NAME:
+					if (length >= 3)
 					{
-						names[id] = spirv_string(words, i + 2, i + length);
-						named[id] = true;
+						uint id = words[i + 1];
+						if (id < bound)
+						{
+							names[id] = spirv_string(words, i + 2, i + length);
+							named[id] = true;
+						}
 					}
-				}
-			case shady::Opcode.DECORATE:
-				if (length >= 3)
-				{
-					uint id = words[i + 1];
-					if (id >= bound) break;
-					switch ((shady::Decoration)words[i + 2])
+				case shady::Opcode.DECORATE:
+					if (length >= 3)
 					{
-						case shady::Decoration.BLOCK: // `OpDecorate %s Block` carries no operand
-							blocks[id] = true;
-						case shady::Decoration.DESCRIPTOR_SET:
-							if (length < 4) break;
-							sets[id] = words[i + 3];
-							has_set[id] = true;
-						case shady::Decoration.BINDING:
-							if (length < 4) break;
-							binding_numbers[id] = words[i + 3];
-							has_binding[id] = true;
-						case shady::Decoration.NON_READABLE:
-							non_readable[id] = true;
-						case shady::Decoration.NON_WRITABLE:
-							non_writable[id] = true;
+						uint id = words[i + 1];
+						if (id >= bound) break;
+						switch ((shady::Decoration)words[i + 2])
+						{
+							case shady::Decoration.BLOCK: // `OpDecorate %s Block` carries no operand
+								blocks[id] = true;
+							case shady::Decoration.DESCRIPTOR_SET:
+								if (length < 4) break;
+								sets[id] = words[i + 3];
+								has_set[id] = true;
+							case shady::Decoration.BINDING:
+								if (length < 4) break;
+								binding_numbers[id] = words[i + 3];
+								has_binding[id] = true;
+							case shady::Decoration.NON_READABLE:
+								non_readable[id] = true;
+							case shady::Decoration.NON_WRITABLE:
+								non_writable[id] = true;
+							default:
+						}
+					}
+				case shady::Opcode.TYPE_IMAGE:
+					if (length >= 8)
+					{
+						uint id = words[i + 1];
+						if (id < bound)
+						{
+							kinds[id] = ShadyType.IMAGE_TYPE;
+							op_a[id] = words[i + 2]; // the sampled type: float, int or uint
+							op_b[id] = words[i + 7]; // the `sampled` operand
+							if (length >= 9) formats[id] = words[i + 8];
+						}
+					}
+				case shady::Opcode.TYPE_INT:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						kinds[words[i + 1]] = ShadyType.INT_TYPE;
+						op_b[words[i + 1]] = words[i + 3];
+					}
+				case shady::Opcode.TYPE_FLOAT:
+					if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.FLOAT_TYPE;
+				case shady::Opcode.TYPE_SAMPLED_IMAGE:
+					if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.SAMPLED_IMAGE_TYPE;
+				case shady::Opcode.TYPE_SAMPLER:
+					if (length >= 2 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.SAMPLER_TYPE;
+				case shady::Opcode.TYPE_ARRAY:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						kinds[words[i + 1]] = ShadyType.ARRAY_TYPE;
+						op_a[words[i + 1]] = words[i + 2];
+						op_b[words[i + 1]] = words[i + 3];
+					}
+				case shady::Opcode.TYPE_RUNTIME_ARRAY:
+					if (length >= 3 && words[i + 1] < bound)
+					{
+						kinds[words[i + 1]] = ShadyType.RUNTIME_ARRAY_TYPE;
+						op_a[words[i + 1]] = words[i + 2];
+					}
+				case shady::Opcode.TYPE_STRUCT:
+					if (length >= 2 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.STRUCT_TYPE;
+				case shady::Opcode.TYPE_POINTER:
+					if (length >= 4 && words[i + 1] < bound)
+					{
+						kinds[words[i + 1]] = ShadyType.POINTER_TYPE;
+						op_a[words[i + 1]] = words[i + 2]; // storage class
+						op_b[words[i + 1]] = words[i + 3]; // pointee
+					}
+				case shady::Opcode.CONSTANT:
+					if (length >= 4 && words[i + 2] < bound) constants[words[i + 2]] = words[i + 3];
+				case shady::Opcode.VARIABLE:
+					if (length >= 4) variables.push({ .id = words[i + 2], .pointer = words[i + 1], .storage = words[i + 3] });
+				case shady::Opcode.ENTRY_POINT:
+					if (length >= 4)
+					{
+						String name = spirv_string(words, i + 3, i + length);
+						entries.push({
+							.name = name.copy(mem),
+							.stage = stage_of((shady::ExecutionModel)words[i + 1]),
+						});
+					}
+				default:
+			}
+			i += length;
+		}
+
+		vk::ShaderStageFlags stages = stage_union(entries.array_view());
+		uint highest = 0;
+
+		foreach (variable : variables)
+		{
+			if (variable.storage != (uint)shady::StorageClass.UNIFORM_CONSTANT
+				&& variable.storage != (uint)shady::StorageClass.UNIFORM
+				&& variable.storage != (uint)shady::StorageClass.STORAGE_BUFFER) continue;
+			if (variable.id >= bound || variable.pointer >= bound) continue;
+			if (used.len > 0 && !used[variable.id]) continue;
+			if (kinds[variable.pointer] != ShadyType.POINTER_TYPE) continue;
+
+			// A runtime-sized array unwraps to its element - it is the one resource
+			// this project binds whole, at set 1 - and a fixed one multiplies the
+			// count the array's own length implies.
+			uint pointee = op_b[variable.pointer];
+			uint array_count = 1;
+			while (pointee < bound)
+			{
+				if (kinds[pointee] == ShadyType.ARRAY_TYPE)
+				{
+					uint length_id = op_b[pointee];
+					if (length_id < bound && constants[length_id] != 0) array_count *= constants[length_id];
+				}
+				else if (kinds[pointee] != ShadyType.RUNTIME_ARRAY_TYPE)
+				{
+					break;
+				}
+				pointee = op_a[pointee];
+			}
+			if (pointee >= bound) continue;
+
+			vk::DescriptorType type = DESCRIPTOR_TYPE_UNBINDABLE;
+			switch (kinds[pointee])
+			{
+				case ShadyType.SAMPLED_IMAGE_TYPE:
+					type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				case ShadyType.IMAGE_TYPE:
+					type = op_b[pointee] == (uint)shady::SampledImage.STORAGE
+						? DESCRIPTOR_TYPE_STORAGE_IMAGE
+						: DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+				case ShadyType.SAMPLER_TYPE:
+					type = DESCRIPTOR_TYPE_SAMPLER;
+				case ShadyType.STRUCT_TYPE:
+					type = blocks[pointee] && variable.storage == (uint)shady::StorageClass.UNIFORM
+						? DESCRIPTOR_TYPE_UNIFORM_BUFFER
+						: blocks[pointee] && variable.storage == (uint)shady::StorageClass.STORAGE_BUFFER
+							? DESCRIPTOR_TYPE_STORAGE_BUFFER
+							: DESCRIPTOR_TYPE_UNBINDABLE;
+				default:
+			}
+
+			ShaderBinding found = {
+				.name = (named[variable.id] ? names[variable.id] : "").copy(mem),
+				.set = has_set[variable.id] ? sets[variable.id] : 0,
+				.binding = has_binding[variable.id] ? binding_numbers[variable.id] : 0,
+				.count = array_count,
+				.type = type,
+				.stages = stages,
+			};
+			if (type == DESCRIPTOR_TYPE_STORAGE_IMAGE)
+			{
+				found.storage_format = formats[pointee];
+				found.reads = !non_readable[variable.id];
+				found.writes = !non_writable[variable.id];
+				uint texel = op_a[pointee];
+				if (texel < bound)
+				{
+					switch (kinds[texel])
+					{
+						case ShadyType.FLOAT_TYPE: found.texel = TexelClass.FLOAT;
+						case ShadyType.INT_TYPE: found.texel = op_b[texel] != 0 ? TexelClass.SINT : TexelClass.UINT;
 						default:
 					}
 				}
-			case shady::Opcode.TYPE_IMAGE:
-				if (length >= 8)
-				{
-					uint id = words[i + 1];
-					if (id < bound)
-					{
-						kinds[id] = ShadyType.IMAGE_TYPE;
-						op_a[id] = words[i + 2]; // the sampled type: float, int or uint
-						op_b[id] = words[i + 7]; // the `sampled` operand
-						if (length >= 9) formats[id] = words[i + 8];
-					}
-				}
-			case shady::Opcode.TYPE_INT:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					kinds[words[i + 1]] = ShadyType.INT_TYPE;
-					op_b[words[i + 1]] = words[i + 3];
-				}
-			case shady::Opcode.TYPE_FLOAT:
-				if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.FLOAT_TYPE;
-			case shady::Opcode.TYPE_SAMPLED_IMAGE:
-				if (length >= 3 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.SAMPLED_IMAGE_TYPE;
-			case shady::Opcode.TYPE_SAMPLER:
-				if (length >= 2 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.SAMPLER_TYPE;
-			case shady::Opcode.TYPE_ARRAY:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					kinds[words[i + 1]] = ShadyType.ARRAY_TYPE;
-					op_a[words[i + 1]] = words[i + 2];
-					op_b[words[i + 1]] = words[i + 3];
-				}
-			case shady::Opcode.TYPE_RUNTIME_ARRAY:
-				if (length >= 3 && words[i + 1] < bound)
-				{
-					kinds[words[i + 1]] = ShadyType.RUNTIME_ARRAY_TYPE;
-					op_a[words[i + 1]] = words[i + 2];
-				}
-			case shady::Opcode.TYPE_STRUCT:
-				if (length >= 2 && words[i + 1] < bound) kinds[words[i + 1]] = ShadyType.STRUCT_TYPE;
-			case shady::Opcode.TYPE_POINTER:
-				if (length >= 4 && words[i + 1] < bound)
-				{
-					kinds[words[i + 1]] = ShadyType.POINTER_TYPE;
-					op_a[words[i + 1]] = words[i + 2]; // storage class
-					op_b[words[i + 1]] = words[i + 3]; // pointee
-				}
-			case shady::Opcode.CONSTANT:
-				if (length >= 4 && words[i + 2] < bound) constants[words[i + 2]] = words[i + 3];
-			case shady::Opcode.VARIABLE:
-				if (length >= 4) variables.push({ .id = words[i + 2], .pointer = words[i + 1], .storage = words[i + 3] });
-			case shady::Opcode.ENTRY_POINT:
-				if (length >= 4)
-				{
-					String name = spirv_string(words, i + 3, i + length);
-					entries.push({
-						.name = name.copy(mem),
-						.stage = stage_of((shady::ExecutionModel)words[i + 1]),
-					});
-				}
-			default:
-		}
-		i += length;
-	}
-
-	vk::ShaderStageFlags stages = stage_union(entries.array_view());
-	uint highest = 0;
-
-	foreach (variable : variables)
-	{
-		if (variable.storage != (uint)shady::StorageClass.UNIFORM_CONSTANT
-			&& variable.storage != (uint)shady::StorageClass.UNIFORM
-			&& variable.storage != (uint)shady::StorageClass.STORAGE_BUFFER) continue;
-		if (variable.id >= bound || variable.pointer >= bound) continue;
-		if (used.len > 0 && !used[variable.id]) continue;
-		if (kinds[variable.pointer] != ShadyType.POINTER_TYPE) continue;
-
-		// A runtime-sized array unwraps to its element - it is the one resource
-		// this project binds whole, at set 1 - and a fixed one multiplies the
-		// count the array's own length implies.
-		uint pointee = op_b[variable.pointer];
-		uint array_count = 1;
-		while (pointee < bound)
-		{
-			if (kinds[pointee] == ShadyType.ARRAY_TYPE)
-			{
-				uint length_id = op_b[pointee];
-				if (length_id < bound && constants[length_id] != 0) array_count *= constants[length_id];
 			}
-			else if (kinds[pointee] != ShadyType.RUNTIME_ARRAY_TYPE)
-			{
-				break;
-			}
-			pointee = op_a[pointee];
-		}
-		if (pointee >= bound) continue;
-
-		vk::DescriptorType type = DESCRIPTOR_TYPE_UNBINDABLE;
-		switch (kinds[pointee])
-		{
-			case ShadyType.SAMPLED_IMAGE_TYPE:
-				type = DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			case ShadyType.IMAGE_TYPE:
-				type = op_b[pointee] == (uint)shady::SampledImage.STORAGE
-					? DESCRIPTOR_TYPE_STORAGE_IMAGE
-					: DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-			case ShadyType.SAMPLER_TYPE:
-				type = DESCRIPTOR_TYPE_SAMPLER;
-			case ShadyType.STRUCT_TYPE:
-				type = blocks[pointee] && variable.storage == (uint)shady::StorageClass.UNIFORM
-					? DESCRIPTOR_TYPE_UNIFORM_BUFFER
-					: blocks[pointee] && variable.storage == (uint)shady::StorageClass.STORAGE_BUFFER
-						? DESCRIPTOR_TYPE_STORAGE_BUFFER
-						: DESCRIPTOR_TYPE_UNBINDABLE;
-			default:
+			bindings.push(found);
+			uint set = has_set[variable.id] ? sets[variable.id] : 0;
+			if (set + 1 > highest) highest = set + 1;
 		}
 
-		ShaderBinding found = {
-			.name = (named[variable.id] ? names[variable.id] : "").copy(mem),
-			.set = has_set[variable.id] ? sets[variable.id] : 0,
-			.binding = has_binding[variable.id] ? binding_numbers[variable.id] : 0,
-			.count = array_count,
-			.type = type,
-			.stages = stages,
-		};
-		if (type == DESCRIPTOR_TYPE_STORAGE_IMAGE)
-		{
-			found.storage_format = formats[pointee];
-			found.reads = !non_readable[variable.id];
-			found.writes = !non_writable[variable.id];
-			uint texel = op_a[pointee];
-			if (texel < bound)
-			{
-				switch (kinds[texel])
-				{
-					case ShadyType.FLOAT_TYPE: found.texel = TexelClass.FLOAT;
-					case ShadyType.INT_TYPE: found.texel = op_b[texel] != 0 ? TexelClass.SINT : TexelClass.UINT;
-					default:
-				}
-			}
-		}
-		bindings.push(found);
-		uint set = has_set[variable.id] ? sets[variable.id] : 0;
-		if (set + 1 > highest) highest = set + 1;
-	}
-
-	*set_count = highest;
+		*set_count = highest;
+	};
 }
 
 <*

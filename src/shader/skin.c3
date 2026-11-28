@@ -8,8 +8,6 @@
 *>
 module three;
 
-import shady;
-
 macro ShaderDef skin_def()
 {
 	ShaderSource[] sources = {

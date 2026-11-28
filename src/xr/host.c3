@@ -17,7 +17,7 @@ import vk;
 import three::ndk;
 
 // Requested even though Quest reports more: VK_FORMAT_R8G8B8A8_SRGB, then BGRA.
-const long[2] XR_COLOR_FORMATS = { 43, 50 };
+const long[2] XR_COLOR_FORMATS = { (long)vk::FORMAT_R8G8B8A8_SRGB, (long)vk::FORMAT_B8G8B8A8_SRGB };
 
 struct XrHost
 {
@@ -220,6 +220,7 @@ fn char[]? XrHost.extension_text(&self, xr::GetVulkanExtensionsFn query)
 	uint needed;
 	xr::check(query(self.instance, self.system, 0, &needed, null), "xrGetVulkan*ExtensionsKHR")!;
 	char[] text = mem::new_array(char, (sz)needed + 1);
+	defer catch free(text);
 	xr::check(query(self.instance, self.system, needed, &needed, text.ptr), "xrGetVulkan*ExtensionsKHR")!;
 	return text;
 }

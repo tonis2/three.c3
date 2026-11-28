@@ -61,10 +61,10 @@ export class Mesh extends Object3D {
 	// nothing, reads back the old value, and the frame draws the old shape. That
 	// is the worst of the three possible behaviours, and it cost a session.
 	//
-	// Geometry is immutable by design and not by omission — plan.md's first
-	// thesis is that two copies of one shape are one draw call because a shape
-	// cannot be edited under them — so this is the same sentence the engine
-	// already gives a dynamic body whose transform a script writes.
+	// Geometry is immutable by design and not by omission — two copies of one
+	// shape are one draw call because a shape cannot be edited under them — so
+	// this is the same sentence the engine already gives a dynamic body whose
+	// transform a script writes.
 	set geometry(_) {
 		throw new TypeError(
 			'mesh.geometry cannot be reassigned — a geometry is immutable, which is what lets '

@@ -192,9 +192,8 @@ export function texturesProxy(owner, declared, what) {
 // uniforms object of `{ value }` wrappers. This takes a fragment *function* —
 // `fn float3 shade(Surface s)` — and a flat uniforms object, because three.c3
 // supplies the vertex stage, the Surface, the descriptor layout and the push
-// block. That is what `plan.md` §4 calls tier 2, and it is what removes almost
-// every Vulkan failure mode while keeping the property that makes Three.js
-// pleasant to generate for.
+// block. That removes almost every Vulkan failure mode while keeping the
+// property that makes Three.js pleasant to generate for.
 //
 // Compiling in the constructor rather than at first use is deliberate: the
 // error names the line the agent wrote, and it arrives at the line that wrote

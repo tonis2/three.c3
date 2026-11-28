@@ -285,15 +285,10 @@ fn String actual_text()
 		three::MaterialTexture[1] tint_map = { { .name = "tint_map" } };
 		append_post(&out, "post_declared", POST_DECLARED_BODY, gain[..], tint_map[..]);
 
-		append_post(&out, "tonemap_none", three::tonemap_body_shady(three::ToneMap.NONE), none, no_textures);
+		append_post(&out, "tonemap_none", three::ToneMap.NONE.body, none, no_textures);
 		three::MaterialUniform[1] exposure = { { .name = "exposure", .components = 1, .rows = 1 } };
-		append_post(&out, "tonemap_agx", three::tonemap_body_shady(three::ToneMap.AGX), exposure[..]);
-		append_post(
-			&out,
-			"tonemap_agx_blender",
-			three::tonemap_body_shady(three::ToneMap.AGX_BLENDER),
-			exposure[..]
-		);
+		append_post(&out, "tonemap_agx", three::ToneMap.AGX.body, exposure[..]);
+		append_post(&out, "tonemap_agx_blender", three::ToneMap.AGX_BLENDER.body, exposure[..]);
 	}
 
 	return out.copy_str(mem);

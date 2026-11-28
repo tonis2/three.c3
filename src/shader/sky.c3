@@ -12,8 +12,6 @@
 *>
 module three;
 
-import shady;
-
 macro ShaderDef sky_def()
 {
 	ShaderSource[] sources = {

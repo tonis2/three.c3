@@ -69,24 +69,19 @@ enum ShaderPass : char
 	MESH_REFERENCE,
 	MESH_MATERIAL,
 	POST,
-	TONEMAP,
 	LIGHTMAP,
 	LIGHTMAP_MATERIAL,
 	// A script's compute post pass: `post_compute.shady` with the script's
-	// entry point after it. Last before COUNT so no earlier number moves.
+	// entry point after it.
 	POST_COMPUTE,
 	// The half-resolution ambient occlusion the mesh shader reads.
 	AMBIENT_OCCLUSION,
-	COUNT,
 }
-
-excuse SHADY_PASS_UNWIRED;
 
 <*
  Compiles one pass.
 
- `body` and `body_shady` are the two spellings of a spliced body for POST and
- TONEMAP - a script's or the engine's own - and empty `body_shady` takes `body`.
+ `body` is the spliced text for POST / POST_COMPUTE / MESH_MATERIAL.
  `uniforms` and `textures` are the declared lists the def emits the regions a
  body reads by name from. `bake` is the scripted bake's second module: the
  material row compiles the same body with `MATERIAL_BAKE` on, which rasterises
@@ -101,7 +96,6 @@ fn ShaderModule? compile_shader(
 	ShaderPass pass,
 	bool* compiled = null,
 	String body = "",
-	String body_shady = "",
 	MaterialUniform[] uniforms = {},
 	MaterialTexture[] textures = { },
 	String vertex = "",
@@ -113,54 +107,23 @@ fn ShaderModule? compile_shader(
 	switch (pass)
 	{
 		case ShaderPass.CLUSTER:
-			ShaderModule cluster = compile_shady_cached(cluster_def(), ClusterPush, compiled, specs);
-			return cluster;
+			return compile_shady_cached(cluster_def(), ClusterPush, compiled, specs);
 		case ShaderPass.SKIN:
-			ShaderModule skin = compile_shady_cached(skin_def(), SkinPush, compiled, specs);
-			return skin;
+			return compile_shady_cached(skin_def(), SkinPush, compiled, specs);
 		case ShaderPass.SHADOW:
-			ShaderModule shadow = compile_shady_cached(shadow_def(), ShadowPush, compiled, specs);
-			return shadow;
+			return compile_shady_cached(shadow_def(), ShadowPush, compiled, specs);
 		case ShaderPass.SHADOW_CUTOUT:
-			ShaderModule cutout = compile_shady_cached(shadow_cutout_def(), ShadowPush, compiled, specs);
-			return cutout;
+			return compile_shady_cached(shadow_cutout_def(), ShadowPush, compiled, specs);
 		case ShaderPass.SKY:
-			ShaderModule sky = compile_shady_cached(sky_def(), SkyPush, compiled, specs);
-			return sky;
+			return compile_shady_cached(sky_def(), SkyPush, compiled, specs);
 		case ShaderPass.MESH:
-			// The built-in material: no script wrote a body, so both holes keep
-			// the template's fallbacks and the uniform set is the reserved empty
-			// one. `built_in` is what makes the half fold COLOR_0 the way the
-			// original does, which a script's body would decide for itself.
 			return compile_shady_cached(mesh_def(built_in: true), MeshPush, compiled, specs);
 		case ShaderPass.MESH_REFERENCE:
-			// The same built-in module with the area algorithm's numeric
-			// half: no fit table, no binding for one, and the quadrature the
-			// fit is measured against. A module of its own because that is a
-			// resource difference rather than a value.
 			return compile_shady_cached(mesh_def(built_in: true, reference: true), MeshPush, compiled, specs);
 		case ShaderPass.LIGHTMAP:
-			// The built-in material's lightmap bake: the default body, the
-			// chart-space vertex stage, and the LTC half - whose
-			// `area_diffuse` is the polygon form factor the original's bake
-			// stores. The fit table that half declares is never read, and
-			// the bake's descriptor walk binds the shared white to every
-			// sampler a module declares.
 			return compile_shady_cached(mesh_def(built_in: true, lightmap: true), MeshPush, compiled, specs);
 		case ShaderPass.MESH_MATERIAL:
 		case ShaderPass.LIGHTMAP_MATERIAL:
-			// A script's own half: the same files as the built-in path,
-			// with `built_in: false` so the record's COLOR_0 reaches the
-			// body instead of being folded into the albedo. The def decides
-			// the uniforms' storage once - `material_spills` - for the
-			// region, the push block and the offsets together.
-			//
-			// The lightmap row is the same half compiled as a lightmap
-			// bake: `MATERIAL_LIGHTMAP_BAKE` makes `standard` answer with
-			// the baked lights' direct diffuse, and the vertex stage places
-			// the triangle by its chart instead of by the camera. It is a
-			// second module rather than a spec constant because both of
-			// those are interface changes.
 			bool as_lightmap = pass == ShaderPass.LIGHTMAP_MATERIAL;
 			return compile_shady_cached(
 				mesh_def(
@@ -174,22 +137,10 @@ fn ShaderModule? compile_shader(
 				),
 				MeshPush, compiled, specs);
 		case ShaderPass.POST:
-		case ShaderPass.TONEMAP:
-			// The one def whose body is not a file: a script's `post` for
-			// POST, the engine's own curve for TONEMAP, filling the hole the
-			// fixed half declares. `body_shady` is the spelling to splice
-			// when the two languages disagree about a body.
-			String spliced = body_shady.len > 0 ? body_shady : body;
-			return compile_shady_cached(post_def(spliced, uniforms, textures, images), PostPush, compiled, specs);
+			return compile_shady_cached(post_def(body, uniforms, textures, images), PostPush, compiled, specs);
 		case ShaderPass.POST_COMPUTE:
-			// The same push block and the same uniforms and samplers, and a body
-			// that is the whole entry point rather than a function the template
-			// calls - see `post_compute_def`.
 			return compile_shady_cached(post_compute_def(body, uniforms, textures, images), PostPush, compiled, specs);
 		case ShaderPass.AMBIENT_OCCLUSION:
 			return compile_shady_cached(ambient_occlusion_def(), AoPush, compiled, specs);
-		default:
-			@advise("three: no module is wired for pass %d", (int)pass);
-			return SHADY_PASS_UNWIRED~;
 	}
 }

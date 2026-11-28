@@ -316,7 +316,6 @@ struct UiKeys
 	js::Key highlighted;
 	js::Key toggles;
 	js::Key on;
-	js::Key shown;
 	// Its lists
 	js::Key ops;
 	js::Key options;
@@ -457,7 +456,7 @@ fn double? field_number(js::Engine* js, js::Value obj, js::Key key, double fallb
 	js::Value v = js.get(obj, key)!;
 	if (v.is_nullish()) return fallback;
 	double n = js.number(v)!;
-	return n == n ? n : fallback;
+	return math::is_nan(n) ? fallback : n;
 }
 
 <*
@@ -512,7 +511,7 @@ macro field_numbers(js::Engine* js, js::Value obj, js::Key key, $Type) @local
 	for (int i = 0; i < $Type::len; i++)
 	{
 		double n = js.number(js.get(list, i)!)!;
-		out[i] = (float)(n == n ? n : 0);
+		out[i] = (float)(math::is_nan(n) ? 0 : n);
 	}
 	return out;
 }
@@ -803,7 +802,6 @@ fn void? JsRuntime.patch_tree(&self, UiLayer* layer, String key, js::Value props
 	// The list-valued fields, which are a replacement rather than a write: the
 	// node's old strings go, the new ones are copied in, and the widget is
 	// re-pointed at an array that has stopped growing.
-	bool relist = true;
 	if (has_field(js, props, k.ops)!)
 	{
 		layer.reset_list(node);
@@ -837,9 +835,9 @@ fn void? JsRuntime.patch_tree(&self, UiLayer* layer, String key, js::Value props
 	}
 	else
 	{
-		relist = false;
+		return;
 	}
-	if (relist) layer.relist(node);
+	layer.relist(node);
 }
 
 // ============================================================================
@@ -1191,7 +1189,6 @@ fn void? JsRuntime.read_tree_style(&self, js::Value node, UiNodeSpec* spec)
 	UiKeys* k = &self.ui_keys;
 	js::Value style = js.get(node, k.style)!;
 	if (style.is_nullish()) return;
-	spec.has_tree_style = true;
 	spec.tree_style = {
 		.row_height = field_float(js, style, k.row_height)!,
 		.indent = field_float(js, style, k.indent)!,
@@ -1488,9 +1485,10 @@ fn usz? JsRuntime.ui_event_args(&self, UiEvent event, js::Value[] argv)
 		case ROW_TOGGLE:
 		case MENU_CHOOSE:
 			argv[0] = js::integer((int)event.index);
-		// The row, then the modifier bits (shift 1, ctrl 2, alt 4) or the switch column.
+		// The row/menu, then the modifier bits (shift 1, ctrl 2, alt 4), switch column, or menu item.
 		case ROW_SELECT:
 		case ROW_SWITCH:
+		case MENU_PICK:
 			argv[0] = js::integer((int)event.index);
 			argv[1] = js::integer((int)event.item);
 			return 2;
@@ -1499,10 +1497,6 @@ fn usz? JsRuntime.ui_event_args(&self, UiEvent event, js::Value[] argv)
 			argv[1] = js::number((double)event.at.x);
 			argv[2] = js::number((double)event.at.y);
 			return 3;
-		case MENU_PICK:
-			argv[0] = js::integer((int)event.index);
-			argv[1] = js::integer((int)event.item);
-			return 2;
 		case TEXT_CHANGE:
 		case TEXT_SUBMIT:
 		case FILE_CHOOSE:
@@ -1597,7 +1591,6 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 	binding.dispatching = true;
 	defer binding.dispatching = false;
 
-	bool kept = true;
 	@pool()
 	{
 		String who = string::tformat("a %s %s handler", binding.name, what);
@@ -1607,12 +1600,11 @@ fn void js_ui_event(void* host, uint node, UiEvent event) @local
 		{
 			self.report_frame_failure(string::tformat("%s could not be called: %s", who, self.js.take_error(tmem)));
 		}
-		else
+		else if (!self.call_handler(self.js.held(*handler), argv[:argc], who))
 		{
-			kept = self.call_handler(self.js.held(*handler), argv[:argc], who);
+			self.js.drop(handler);
 		}
 	};
-	if (!kept) self.js.drop(handler);
 }
 
 // ============================================================================

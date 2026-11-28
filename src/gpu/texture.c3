@@ -86,96 +86,43 @@ enum ColorSpace : char
  whose blocks are ETC1's: the colour alone at 8 bytes a block, or with EAC
  alpha in front of it at 16.
 *>
-enum TextureFamily : char
+enum TextureFamily : char (String name, uint block_side, uint block_bytes, vk::Format unorm, vk::Format srgb)
 {
-	RGBA8,
-	BC1,
-	BC3,
-	BC5,
-	BC7,
-	ASTC4,
-	ETC2_RGB,
-	ETC2_RGBA,
+	RGBA8     { "RGBA8",     1,  4, FORMAT_R8G8B8A8_UNORM,          FORMAT_R8G8B8A8_SRGB },
+	BC1       { "BC1",       4,  8, FORMAT_BC1_RGB_UNORM_BLOCK,     FORMAT_BC1_RGB_SRGB_BLOCK },
+	BC3       { "BC3",       4, 16, FORMAT_BC3_UNORM_BLOCK,         FORMAT_BC3_SRGB_BLOCK },
+	BC5       { "BC5",       4, 16, FORMAT_BC5_UNORM_BLOCK,         FORMAT_BC5_UNORM_BLOCK },
+	BC7       { "BC7",       4, 16, FORMAT_BC7_UNORM_BLOCK,         FORMAT_BC7_SRGB_BLOCK },
+	ASTC4     { "ASTC 4x4",  4, 16, FORMAT_ASTC_4X4_UNORM_BLOCK,    FORMAT_ASTC_4X4_SRGB_BLOCK },
+	ETC2_RGB  { "ETC2 RGB",  4,  8, FORMAT_ETC2_R8G8B8_UNORM_BLOCK, FORMAT_ETC2_R8G8B8_SRGB_BLOCK },
+	ETC2_RGBA { "ETC2 RGBA", 4, 16, FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK, FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK },
 }
 
-<*
- What a texture *is* on the device: a family, and the space its bytes are read in.
-
- `ColorSpace` used to be this by itself — it answered `R8G8B8A8_SRGB` or
- `R8G8B8A8_UNORM` and there was nothing else a texture could be, so a
- block-compressed image had nowhere to say what it was. The space still means
- exactly what it meant and is still the caller's request; the family is what was
- missing, and pairing them is what lets `BC7_SRGB` and `BC7_UNORM` be the same
- choice for blocks that `R8G8B8A8_SRGB` and `R8G8B8A8_UNORM` are for texels.
-*>
+<* What a texture *is* on the device: a family and the colour space its bytes are read in. *>
 struct TextureFormat
 {
 	TextureFamily family;
 	ColorSpace space;
 }
 
-<*
- The RGBA8 format for a space — what every decode path in this engine produces.
-*>
+<* The RGBA8 format for a space — what every decode path in this engine produces. *>
 fn TextureFormat rgba8(ColorSpace space) => { TextureFamily.RGBA8, space };
 
 <*
  The Vulkan format this pair resolves to.
-
- The one table. `BC5` ignores the space rather than obeying it: it is a
- two-channel format with no sRGB form at all, so a normal map's xy is `UNORM`
- whatever the caller asked for, and answering `SRGB` here would be answering
- with a format that does not exist.
+ `BC5` has no sRGB form so both spaces map to `FORMAT_BC5_UNORM_BLOCK`.
 *>
-fn vk::Format TextureFormat.vk(self)
-{
-	bool srgb = self.space == ColorSpace.SRGB;
-	switch (self.family)
-	{
-		case BC1: return srgb ? FORMAT_BC1_RGB_SRGB_BLOCK : FORMAT_BC1_RGB_UNORM_BLOCK;
-		case BC3: return srgb ? FORMAT_BC3_SRGB_BLOCK : FORMAT_BC3_UNORM_BLOCK;
-		case BC5: return FORMAT_BC5_UNORM_BLOCK;
-		case BC7: return srgb ? FORMAT_BC7_SRGB_BLOCK : FORMAT_BC7_UNORM_BLOCK;
-		case ASTC4: return srgb ? FORMAT_ASTC_4X4_SRGB_BLOCK : FORMAT_ASTC_4X4_UNORM_BLOCK;
-		case ETC2_RGB: return srgb ? FORMAT_ETC2_R8G8B8_SRGB_BLOCK : FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
-		case ETC2_RGBA: return srgb ? FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK : FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
-		default:  return srgb ? FORMAT_R8G8B8A8_SRGB : FORMAT_R8G8B8A8_UNORM;
-	}
-}
+fn vk::Format TextureFormat.vk(self) => self.space == ColorSpace.SRGB ? self.family.srgb : self.family.unorm;
 
 fn bool TextureFormat.is_block(self) => self.family != TextureFamily.RGBA8;
 
-<*
- The side of one block in texels: 4 for every block family, 1 for RGBA8.
+<* The side of one block in texels: 4 for every block family, 1 for RGBA8. *>
+fn uint TextureFormat.block_side(self) => self.family.block_side;
 
- RGBA8 answering 1 rather than being a special case is what lets `image_size`
- be one calculation instead of two.
-*>
-fn uint TextureFormat.block_side(self) => self.family == TextureFamily.RGBA8 ? 1 : 4;
-
-fn uint TextureFormat.block_bytes(self)
-{
-	switch (self.family)
-	{
-		case RGBA8: return 4;
-		case BC1:
-		case ETC2_RGB: return 8;
-		default: return 16;
-	}
-}
+fn uint TextureFormat.block_bytes(self) => self.family.block_bytes;
 
 <*
  Bytes one level of this format occupies, rounded up to whole blocks.
-
- The rounding is the whole point, and it is exactly where `width * height * 4`
- stops being right: a 2x2 level of a BC7 image is still one entire 4x4 block and
- costs 16 bytes rather than 4. `test/fixtures/oblong_bc7.ktx2` is 12x6 so that
- three of its four levels round up, which is what makes a wrong answer here
- visible instead of merely latent.
-
- This is `ktx::vk::image_size`'s calculation, kept here rather than imported
- because the GPU side should not have to reach into a decoder library to know
- how big its own images are.
 *>
 fn sz TextureFormat.image_size(self, uint width, uint height)
 {
@@ -185,32 +132,12 @@ fn sz TextureFormat.image_size(self, uint width, uint height)
 	return across * down * (sz)self.block_bytes();
 }
 
-<*
- Whether two textures are the same format — the dedup key's question.
-*>
+<* Whether two textures are the same format — the dedup key's question. *>
 fn bool TextureFormat.equals(self, TextureFormat other)
 	=> self.family == other.family && self.space == other.space;
 
-<*
- A family's name, for a message a person reads.
-
- Worth the switch: "texture.read() cannot read a BC7 texture" names something a
- script's author can act on, and a number would not.
-*>
-fn String block_family_name(TextureFamily family)
-{
-	switch (family)
-	{
-		case BC1: return "BC1";
-		case BC3: return "BC3";
-		case BC5: return "BC5";
-		case BC7: return "BC7";
-		case ASTC4: return "ASTC 4x4";
-		case ETC2_RGB: return "ETC2 RGB";
-		case ETC2_RGBA: return "ETC2 RGBA";
-		default: return "RGBA8";
-	}
-}
+<* A family's name, for diagnostics. *>
+fn String block_family_name(TextureFamily family) => family.name;
 
 struct Texture
 {
@@ -300,6 +227,14 @@ const uint MAX_UPLOAD_LEVELS = 32;
 excuse TEXTURE_TOO_MANY_LEVELS, TEXTURE_LEVEL_WRONG_SIZE, TEXTURE_FORMAT_UNSUPPORTED,
 	TEXTURE_IS_COMPRESSED, TEXTURE_IS_NOT_RGBA8;
 
+<* Whether this physical device supports all `needed` optimal-tiling features for `format`. *>
+fn bool Gpu.has_format_features(&self, vk::Format format, vk::FormatFeatureFlags needed)
+{
+	vk::FormatProperties props;
+	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
+	return (props.optimalTilingFeatures & needed) == needed;
+}
+
 <*
  Whether this device can build a mip chain for this format by blitting.
 
@@ -316,45 +251,14 @@ excuse TEXTURE_TOO_MANY_LEVELS, TEXTURE_LEVEL_WRONG_SIZE, TEXTURE_FORMAT_UNSUPPO
 *>
 fn bool Gpu.can_generate_mips(&self, vk::Format format)
 {
-	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_BLIT_SRC_BIT | FORMAT_FEATURE_BLIT_DST_BIT
-		| FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-
-	vk::FormatProperties props;
-	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
-	return (props.optimalTilingFeatures & NEEDED) == NEEDED;
+	return self.has_format_features(format,
+		FORMAT_FEATURE_BLIT_SRC_BIT | FORMAT_FEATURE_BLIT_DST_BIT | FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
 }
 
-<*
- Whether this device can sample an image in this format at all.
-
- The question `can_generate_mips` does not ask. RGBA8 is in Vulkan's mandatory
- format table and every device sampling anything samples that, so nothing needed
- to ask until a format arrived that a device is entitled to refuse. BC7 is
- exactly that: universal on desktop and absent on a good deal of mobile, and
- ASTC-only hardware is the common case rather than an exotic one.
-
- `SAMPLED_IMAGE_BIT` and not the filter bit beside it, because these two are
- different refusals. A format that can be sampled but not linearly filtered is a
- usable image with a blocky sampler; a format that cannot be sampled is not an
- image this device can have, and creating one is not a soft failure — it is
- `VK_ERROR_FORMAT_NOT_SUPPORTED` at `vkCreateImage` if the driver is honest and
- undefined behaviour if it is not.
-
- The answer decides which format to *decode to*, which is why it is asked before
- a decode rather than after one: a device without BC7 wants the KTX2 narrowed to
- RGBA8 the way it always was, and that costs the decode this section exists to
- avoid — correct everywhere, fast where the hardware allows it.
-
- Per format and uncached for `can_generate_mips`'s reason, and it costs the same
- one call.
-*>
+<* Whether this device can sample an image in this format. *>
 fn bool Gpu.can_sample(&self, vk::Format format)
 {
-	const vk::FormatFeatureFlags NEEDED = FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-
-	vk::FormatProperties props;
-	vk::getPhysicalDeviceFormatProperties(self.pdevice, format, &props);
-	return (props.optimalTilingFeatures & NEEDED) == NEEDED;
+	return self.has_format_features(format, FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 }
 
 <*
@@ -457,6 +361,7 @@ fn Texture? Gpu.create_texture(
 	// admit (`VUID-VkImageMemoryBarrier2-oldLayout-01212`).
 	texture.memory = self.create_device_image(format, width, height,
 		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT, levels)!;
+	defer catch texture.memory.free();
 	texture.image = texture.memory.image;
 
 	vk::Memory stage = self.create_upload(rgba.len, rgba.ptr)!;
@@ -609,6 +514,11 @@ fn void? Gpu.finish_texture(&self, Texture* texture, vk::Format format, bool nea
 	uint levels = texture.levels;
 
 	texture.view = self.create_view_2d(texture.image, format, IMAGE_ASPECT_COLOR_BIT, levels)!;
+	defer catch
+	{
+		texture.view.free(self.handle);
+		texture.view = (vk::ImageView)null;
+	};
 
 	vk::Filter filter        = nearest ? FILTER_NEAREST : FILTER_LINEAR;
 	vk::SamplerMipmapMode mode = nearest ? SAMPLER_MIPMAP_MODE_NEAREST : SAMPLER_MIPMAP_MODE_LINEAR;
@@ -705,6 +615,7 @@ fn Texture? Gpu.create_texture_levels(
 	// `TRANSFER_SRC` for the RGBA8 path's reason: a later readback needs it.
 	texture.memory = self.create_device_image(vkformat, width, height,
 		IMAGE_USAGE_TRANSFER_DST_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT | IMAGE_USAGE_SAMPLED_BIT, count)!;
+	defer catch texture.memory.free();
 	texture.image = texture.memory.image;
 
 	vk::Memory stage = self.create_upload(total)!;
@@ -756,6 +667,11 @@ fn Texture? Gpu.create_texture_levels(
 *>
 fn usz Texture.device_bytes(&self)
 {
+	if (self.storage != FORMAT_UNDEFINED)
+	{
+		StorageImageFormat fmt = self.storage_format();
+		return (usz)self.width * (usz)self.height * (usz)fmt.texel_bytes();
+	}
 	usz total = 0;
 	for (uint level = 0; level < self.levels; level++)
 	{

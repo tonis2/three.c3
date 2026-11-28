@@ -172,7 +172,6 @@ struct ShaderCacheKey
 	String arguments;
 	String name;
 	ShaderSpec[] specs;
-	ShaderEntry[] entries;
 	String source;
 }
 
@@ -395,12 +394,6 @@ fn ulong cache_key(ShaderCacheKey key) @local
 	cache_put_blob(&payload, key.arguments);
 	cache_put_blob(&payload, key.name);
 	cache_put_blob(&payload, cache_spec_blob(key.specs));
-	foreach (entry : key.entries)
-	{
-		payload.append_string(entry.name);
-		payload.append_char('\0');
-		cache_put_u32(&payload, entry.stage);
-	}
 	payload.append_string(key.source);
 	// FNV-1a, from `gpu/texture.c3`. Not cryptographic and does not need to be: a
 	// collision costs one identity check and one recompile.

@@ -7,8 +7,6 @@
 *>
 module three;
 
-import shady;
-
 macro ShaderDef cluster_def()
 {
 	ShaderSource[] sources = {

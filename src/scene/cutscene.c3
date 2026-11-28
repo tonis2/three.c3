@@ -103,7 +103,10 @@ fn String free_clip_name(Asset* owner, String wanted)
 	if (owner.find_clip(wanted) < 0) return wanted.copy(mem);
 	for (int n = 2; ; n++)
 	{
-		String candidate = string::tformat("%s#%d", wanted, n);
-		if (owner.find_clip(candidate) < 0) return candidate.copy(mem);
+		@pool()
+		{
+			String candidate = string::tformat("%s#%d", wanted, n);
+			if (owner.find_clip(candidate) < 0) return candidate.copy(mem);
+		};
 	}
 }

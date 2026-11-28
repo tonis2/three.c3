@@ -573,10 +573,11 @@ fn js::Value? js_key_names(JsRuntime* self)
 *>
 fn void? js_on_key(JsRuntime* self, String key, bool on_press, js::Value f)
 {
+	String verb = on_press ? "three.onKeyDown" : "three.onKeyUp";
 	bool clearing = f.is_nullish();
 	if (!clearing && !f.is_function())
 	{
-		return self.js.fail("three.onKeyDown(key, fn) wants a function, or null to unbind")~;
+		return self.js.fail("%s(key, fn) wants a function, or null to unbind", verb)~;
 	}
 
 	KeyName row = named_key(self, key)!;
@@ -597,8 +598,8 @@ fn void? js_on_key(JsRuntime* self, String key, bool on_press, js::Value f)
 	if (self.key_handler_count >= MAX_KEY_HANDLERS)
 	{
 		return self.js.fail("there is room for %d key handlers and they are all taken — "
-			"unbind one with three.onKeyDown(key, null)",
-			MAX_KEY_HANDLERS)~;
+			"unbind one with %s(key, null)",
+			MAX_KEY_HANDLERS, verb)~;
 	}
 
 	self.key_handlers[self.key_handler_count] = {
@@ -888,12 +889,6 @@ fn bool? js_window_title_set(JsRuntime* self, String wanted)
 }
 
 <*
- The clipboard under `--headless`, where there is no system one to reach: a
- copy is pasteable inside this process and nowhere else.
-*>
-String headless_clipboard @local;
-
-<*
  `clipboardRead()` — the system clipboard's text, or "".
 
  It asks whoever owns the clipboard and waits for the answer, which is a round
@@ -901,7 +896,7 @@ String headless_clipboard @local;
 *>
 fn String js_clipboard_read(JsRuntime* self)
 {
-	if (self.window == null) return headless_clipboard;
+	if (self.window == null) return self.headless_clipboard.str_view();
 	return self.window.get_clipboard(tmem);
 }
 
@@ -916,13 +911,9 @@ fn js::Value? js_drops_take(JsRuntime* self)
 	if (self.window == null) return paths;
 	@pool()
 	{
-		String list = self.window.take_drops(tmem);
-		usz start = 0;
-		for (usz i = 0; i <= list.len; i++)
+		foreach (entry : self.window.take_drops(tmem).tsplit("\n"))
 		{
-			if (i < list.len && list[i] != '\n') continue;
-			if (i > start) self.js.push(paths, self.js.string(list[start:i - start])!);
-			start = i + 1;
+			if (entry.len > 0) self.js.push(paths, self.js.string(entry)!);
 		}
 	};
 	return paths;
@@ -939,8 +930,8 @@ fn void js_clipboard_write(JsRuntime* self, String text)
 {
 	if (self.window == null)
 	{
-		if (headless_clipboard.ptr != null) headless_clipboard.free(mem);
-		headless_clipboard = text.copy(mem);
+		self.headless_clipboard.clear();
+		self.headless_clipboard.append_string(text);
 		return;
 	}
 	self.window.set_clipboard(text);
@@ -1007,7 +998,7 @@ fn uint js_window_max_fps_get(JsRuntime* self) => self.max_fps;
 *>
 fn uint? js_window_max_fps_set(JsRuntime* self, double wanted)
 {
-	if (wanted != wanted || wanted < 0.0 || wanted > (double)WINDOW_MAX_FPS)
+	if (math::is_nan(wanted) || wanted < 0.0 || wanted > (double)WINDOW_MAX_FPS)
 	{
 		return self.js.fail("three.window.maxFps wants a rate between 1 and %d, or null for no cap; got %s",
 			WINDOW_MAX_FPS, wanted)~;

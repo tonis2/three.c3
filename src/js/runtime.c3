@@ -299,6 +299,20 @@ fn void HeldFn.release(&self, js::Engine* js)
 
 fn js::Value HeldFn.get(&self, js::Engine* js) => js.held(self.callback);
 
+<*
+ Installs, replaces, or (with nullish) clears one `HeldFn` callback slot.
+ Validates before releasing so an invalid call leaves the existing handler intact.
+
+ @return? js::THREW
+*>
+fn void? JsRuntime.set_handler(&self, HeldFn* slot, js::Value f, String usage)
+{
+	bool clearing = f.is_nullish();
+	if (!clearing && !f.is_function()) return self.js.fail("%s", usage)~;
+	slot.release(self.js);
+	if (!clearing) slot.hold(self.js, f);
+}
+
 
 <*
  One engine, and the host state it drives.
@@ -459,6 +473,8 @@ struct JsRuntime
 	// `JsRuntime.scripted_pointer_frame`.
 	MouseTracker scripted_mouse;
 	DString input_text;
+	// Clipboard text under `--headless`, where there is no system clipboard.
+	DString headless_clipboard;
 	KeyHandler[MAX_KEY_HANDLERS] key_handlers;
 	usz key_handler_count;
 
@@ -629,8 +645,8 @@ struct PendingLoad
  @param pass : `The scene, assets and camera the bindings drive. Must outlive the runtime.`
  @param renderer : `Null for a context with no device: three.load and three.render then throw, and everything else works.`
  @param memory_limit : `The JS heap's ceiling. A host that runs pipelines rather than scenes - token lists, embeddings read back for a check - raises it; zero is no limit.`
- @return ? JS_ENGINE_FAILED : `The engine could not be created — out of memory, and nothing else.`
- @return ? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
+ @return? JS_ENGINE_FAILED : `The engine could not be created — out of memory, and nothing else.`
+ @return? JS_PRELUDE_FAILED : `prelude.js did not evaluate. A bug here, not in anything a caller passed.`
 *>
 fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz memory_limit = JS_MEMORY_LIMIT)
 {
@@ -660,6 +676,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	self.frame_debug.init(mem, 256);
 	self.frame_error.init(mem, 128);
 	self.input_text.init(mem, 64);
+	self.headless_clipboard.init(mem, 0);
 	// Written by the first `three.configure` or the first save verb, and never
 	// long. Initialised like the rest so it does not take the temp arena.
 	self.save_dir.init(mem, 64);
@@ -689,6 +706,7 @@ fn void? JsRuntime.open(&self, MeshPass* pass, Renderer* renderer = null, usz me
 	self.script_budget_ns = JS_BUDGET_MS * 1_000_000;
 	self.budget_ns = self.script_budget_ns;
 	self.ready = true;
+	defer catch self.close();
 
 	self.install_console();
 	self.install_bindings();
@@ -758,6 +776,7 @@ fn void JsRuntime.close(&self)
 	self.frame_debug.free();
 	self.frame_error.free();
 	self.input_text.free();
+	self.headless_clipboard.free();
 	self.save_dir.free();
 	self.texture_handles.free();
 	self.ui_main.handlers.free();
@@ -804,6 +823,7 @@ fn RunResult JsRuntime.run_module(&self, String path)
 		if (catch err = source)
 		{
 			self.log.clear();
+			self.advice.clear();
 			self.value.clear();
 			self.debug.clear();
 			self.error.clear();
@@ -1427,7 +1447,7 @@ fn void JsRuntime.install_console(&self)
 	self.js.set(self.js.global(), "console", console)!!;
 }
 
-fn js::Value? js_console(js::Call* c) @local
+fn js::Value? js_console(js::Call* c) @local => @pool()
 {
 	JsRuntime* self = c.host;
 	DString* sink = self.in_frame ? &self.frame_log : &self.log;
@@ -1472,7 +1492,7 @@ fn String display(js::Engine* js, js::Value value, Allocator allocator) @local
 
  Each argument is its own entry, the way `console.log`'s are their own words.
 *>
-fn js::Value? js_debug_write(js::Call* c)
+fn js::Value? js_debug_write(js::Call* c) => @pool()
 {
 	JsRuntime* self = c.host;
 	DString* sink = self.in_frame ? &self.frame_debug : &self.debug;

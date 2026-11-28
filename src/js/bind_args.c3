@@ -4,10 +4,7 @@
 *>
 module three;
 
-import std::math;
-import collision;
 import fastjs::js;
-import std::collections::map;
 import std::collections::list;
 
 <*

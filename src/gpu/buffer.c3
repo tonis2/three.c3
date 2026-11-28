@@ -60,15 +60,10 @@ fn vk::Memory? Gpu.upload_indices(&self, void* data, sz size)
 *>
 fn bool Gpu.has_cached_dynamic_memory(&self)
 {
-	vk::PhysicalDeviceMemoryProperties memory;
-	vk::getPhysicalDeviceMemoryProperties(self.pdevice, &memory);
-	vk::MemoryPropertyFlags wanted = MEMORY_PROPERTY_HOST_VISIBLE_BIT
-		| MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT;
-	for (uint i = 0; i < memory.memoryTypeCount; i++)
-	{
-		if ((memory.memoryTypes[i].propertyFlags & wanted) == wanted) return true;
-	}
-	return false;
+	return self.has_memory(
+		MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT,
+		uint::max
+	);
 }
 
 <*

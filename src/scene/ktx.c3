@@ -162,10 +162,8 @@ fn image::Image? decode_ktx2(char[] encoded, Allocator allocator = mem)
 }
 
 <*
- ETC1S or UASTC to RGBA8, through the transcoder.
-
- `TF_RGBA32` rather than a BC target for the reason in the file header: a
- block-compressed result has nowhere to go on this side yet.
+ ETC1S or UASTC to RGBA8, through the transcoder — fallback when the device
+ samples no compressed block target for the file.
 *>
 fn image::Image? decode_ktx2_basis(char[] encoded, basis::Info info, Allocator allocator) @local
 {
@@ -248,10 +246,8 @@ bitstruct BasisTargets : char
  - ETC1S takes ETC2, else BC7. Its blocks are ETC1 blocks, so ETC2 keeps the
    colour exact, and an opaque file goes at 8 bytes a block, half of BC7.
 *>
-fn TextureFamily BasisTargets.family_for(self, char[] encoded)
+fn TextureFamily BasisTargets.family_for_info(self, basis::Info info)
 {
-	basis::Info? info = basis::info(encoded);
-	if (catch info) return TextureFamily.RGBA8;
 	if (info.uastc)
 	{
 		if (self.bc7) return TextureFamily.BC7;
@@ -261,6 +257,13 @@ fn TextureFamily BasisTargets.family_for(self, char[] encoded)
 	if (self.etc2) return info.alpha ? TextureFamily.ETC2_RGBA : TextureFamily.ETC2_RGB;
 	if (self.bc7) return TextureFamily.BC7;
 	return TextureFamily.RGBA8;
+}
+
+fn TextureFamily BasisTargets.family_for(self, char[] encoded)
+{
+	basis::Info? info = basis::info(encoded);
+	if (catch info) return TextureFamily.RGBA8;
+	return self.family_for_info(info);
 }
 
 <*
@@ -290,11 +293,13 @@ fn ulong basis_image_cost(char[] encoded)
 
  False for anything that is not a Basis KTX2, which has no branch to take.
 *>
+fn bool basis_info_needs_chain(basis::Info info) => info.levels == 1 && (info.width > 1 || info.height > 1);
+
 fn bool basis_needs_chain(char[] encoded)
 {
 	basis::Info? info = basis::info(encoded);
 	if (catch info) return false;
-	return info.levels == 1 && (info.width > 1 || info.height > 1);
+	return basis_info_needs_chain(info);
 }
 
 <*
@@ -325,33 +330,20 @@ fn BlockImage? decode_ktx2_blocks(char[] encoded, ColorSpace space, Allocator al
 	container::Texture? maybe = container::read(allocator, encoded);
 	if (catch maybe) return UNSUPPORTED_IMAGE~;
 	container::Texture tex = maybe;
+	defer catch tex.free();
 
 	TextureFamily? family = block_family_of(tex.vk_format);
-	if (catch family)
-	{
-		// Uncompressed, 16-bit, float — real KTX2 contents this cannot pass
-		// through, and the RGBA8 path narrows all of them.
-		tex.free();
-		return UNSUPPORTED_IMAGE~;
-	}
+	if (catch family) return UNSUPPORTED_IMAGE~;
 
 	uint count = tex.level_count();
-	if (count == 0 || count > MAX_UPLOAD_LEVELS)
-	{
-		tex.free();
-		return UNSUPPORTED_IMAGE~;
-	}
+	if (count == 0 || count > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
 
 	char[][] levels = alloc::new_array(allocator, char[], count);
+	defer catch alloc::free(allocator, levels.ptr);
 	for (uint i = 0; i < count; i++)
 	{
 		char[]? face = tex.image(i, 0, 0);
-		if (catch face)
-		{
-			alloc::free(allocator, levels.ptr);
-			tex.free();
-			return UNSUPPORTED_IMAGE~;
-		}
+		if (catch face) return UNSUPPORTED_IMAGE~;
 		levels[i] = face;
 	}
 
@@ -492,7 +484,7 @@ fn BlockImage? transcode_ktx2_blocks(
 	if (info.width == 0 || info.height == 0) return UNSUPPORTED_IMAGE~;
 	if (info.levels == 0 || info.levels > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
 
-	bool generated = basis_needs_chain(encoded);
+	bool generated = basis_info_needs_chain(info);
 	uint count = generated ? mipgen::chain_length(info.width, info.height) : info.levels;
 	if (count > MAX_UPLOAD_LEVELS) return UNSUPPORTED_IMAGE~;
 
@@ -506,11 +498,7 @@ fn BlockImage? transcode_ktx2_blocks(
 		.owns_levels = true,
 		.allocator = allocator,
 	};
-	// Every level allocated so far goes back on any failure below, which is what
-	// makes a half-transcoded image cost nothing rather than leak the levels that
-	// did succeed.
-	bool ok = false;
-	defer if (!ok) out.free();
+	defer catch out.free();
 
 	if (!generated)
 	{
@@ -523,11 +511,10 @@ fn BlockImage? transcode_ktx2_blocks(
 		for (uint level = 0; level < count; level++) out.levels[level] = mapped[level].data;
 		alloc::free(allocator, mapped.ptr);
 
-		ok = true;
 		if (!quiet)
 		{
 			@debug_log("basis: %dx%d, %d levels mapped to %s in %d ms",
-				info.width, info.height, count, block_family_name(format.family), (long)started.to_now() / 1_000_000);
+				info.width, info.height, count, format.family.name, (long)started.to_now() / 1_000_000);
 		}
 		return out;
 	}
@@ -572,11 +559,10 @@ fn BlockImage? transcode_ktx2_blocks(
 		out.levels[level] = blocks;
 	}
 
-	ok = true;
 	if (!quiet)
 	{
 		@debug_log("basis: %dx%d, level 0 mapped and %d levels encoded to %s in %d ms (the file shipped no chain)",
-			info.width, info.height, count - 1, block_family_name(format.family), (long)started.to_now() / 1_000_000);
+			info.width, info.height, count - 1, format.family.name, (long)started.to_now() / 1_000_000);
 	}
 	return out;
 }
@@ -646,35 +632,16 @@ fn char[]? encode_etc2(Allocator allocator, char[] pixels, uint width, uint heig
 *>
 fn TextureFamily? block_family_of(uint vk_format) @local
 {
-	switch (vk_format)
+	foreach (family : TextureFamily::values)
 	{
-		case 131:
-		case 132:
-			return TextureFamily.BC1;
-		case 137:
-		case 138:
-			return TextureFamily.BC3;
-		case 141:
-			return TextureFamily.BC5;
-		case 145:
-		case 146:
-			return TextureFamily.BC7;
-		case 147:
-		case 148:
-			return TextureFamily.ETC2_RGB;
-		case 151:
-		case 152:
-			return TextureFamily.ETC2_RGBA;
-		case 157:
-		case 158:
-			return TextureFamily.ASTC4;
-		default:
-			return UNSUPPORTED_IMAGE~;
+		if (family == RGBA8) continue;
+		if (vk_format == (uint)family.unorm || vk_format == (uint)family.srgb) return family;
 	}
+	return UNSUPPORTED_IMAGE~;
 }
 
 <*
- RGBA8 pixels to a BC7 KTX2 with a full mip chain — the write side of §23.
+ RGBA8 pixels to a BC7 KTX2 with a full mip chain.
 
  The exporter's, not the loader's. `decode_ktx2_blocks` reads these files and
  this writes them, and until it existed a game's textures became `.ktx2` only by
@@ -711,7 +678,7 @@ fn char[]? encode_ktx2_bc7(
 ) => @pool()
 {
 	bool srgb   = space == ColorSpace.SRGB;
-	uint format = srgb ? 146u : 145u;
+	uint format = (uint)((TextureFormat){ BC7, space }).vk();
 	uint w      = decoded.width;
 	uint h      = decoded.height;
 	if (w == 0 || h == 0) return UNSUPPORTED_IMAGE~;
@@ -758,20 +725,12 @@ fn char[]? encode_ktx2_bc7(
 }
 
 <*
- RGBA8 pixels to an ETC1S KTX2 with a full mip chain — the portable half of §24.
+ RGBA8 pixels to an ETC1S KTX2 with a full mip chain, under `KHR_texture_basisu`.
 
- `encode_ktx2_bc7`'s sibling and its opposite trade. BC7 is what *this* engine
- wants: `decode_ktx2_blocks` uploads those blocks untouched, which is the whole
- saving. Nothing else reads them — `CUSTOM_texture_ktx2` is our own name, so a
- Blender importer or another engine handed one of those files declines it.
+ `encode_ktx2_bc7`'s portable sibling: BasisLZ supercompressed, about a fifth the
+ size of BC7, readable by any glTF toolchain. What it costs is quality — visibly
+ lossy compared to BC7 or UASTC.
 
- ETC1S is the one a stranger can read. It is `KHR_texture_basisu`, which every
- glTF toolchain implements, and it is *supercompressed*: a BasisLZ payload a
- fifth the size of the equivalent BC7. What it costs is quality — it is visibly
- lossy where BC7 is nearly not — and load time here, since this engine has no
- GPU-side transcode and takes the RGBA8 path back in. So it is for a file leaving
- the engine, and PNG stays the default for one coming back.
- 
  The mip chain is basis_universal's rather than this file's: `mipmaps` makes the
  encoder build one internally, from full-precision source, per level, before
  quantising. Running `mipgen` first and handing the levels over as separate
@@ -786,21 +745,7 @@ fn char[]? encode_ktx2_basis(
 	image::Image* decoded,
 	ColorSpace space = ColorSpace.SRGB,
 	Allocator allocator = mem
-) => @pool()
-{
-	uint w = decoded.width;
-	uint h = decoded.height;
-	if (w == 0 || h == 0) return UNSUPPORTED_IMAGE~;
-
-	char[] rgba = decoded.to_rgba();
-	defer free(rgba);
-
-	char[][1] one = { rgba };
-	// The CLI's own numbers — `ktx create -f etc1s` — so a file written here and
-	// one written by hand are the same file.
-	basis::EncodeOptions options = { .quality = 90, .effort = 2, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
-	return basis::encode(allocator, basis::ETC1S, one[..], w, h, basis::TexType.D2, options);
-}
+) => encode_ktx2_with(decoded, basis::ETC1S, 90, 2, space, allocator);
 
 <*
  RGBA8 pixels to a UASTC KTX2 with a full mip chain, under `KHR_texture_basisu`.
@@ -822,7 +767,16 @@ fn char[]? encode_ktx2_uastc(
 	image::Image* decoded,
 	ColorSpace space = ColorSpace.SRGB,
 	Allocator allocator = mem
-) => @pool()
+) => encode_ktx2_with(decoded, basis::UASTC_4X4, 100, 5, space, allocator);
+
+fn char[]? encode_ktx2_with(
+	image::Image* decoded,
+	uint format,
+	CInt quality,
+	CInt effort,
+	ColorSpace space,
+	Allocator allocator
+) @local => @pool()
 {
 	uint w = decoded.width;
 	uint h = decoded.height;
@@ -832,8 +786,6 @@ fn char[]? encode_ktx2_uastc(
 	defer free(rgba);
 
 	char[][1] one = { rgba };
-	// Effort 5 is basisu's default pack level, 2 of 0..4 — `ktx create --encode
-	// uastc` — so a file written here and one written by hand are the same file.
-	basis::EncodeOptions options = { .quality = 100, .effort = 5, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
-	return basis::encode(allocator, basis::UASTC_4X4, one[..], w, h, basis::TexType.D2, options);
+	basis::EncodeOptions options = { .quality = quality, .effort = effort, .srgb = space == ColorSpace.SRGB, .mipmaps = true };
+	return basis::encode(allocator, format, one[..], w, h, basis::TexType.D2, options);
 }
