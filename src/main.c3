@@ -138,6 +138,20 @@ fn Options? parse_args(String[] args)
 						i++;
 					}
 				}
+			case "--vr":
+				opts.vr = true;
+			case "--profile":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				opts.profile_preset = parse_render_preset(args[++i])!;
+				opts.profile_set = true;
+			case "--tune":
+				if (i + 1 >= args.len) return MISSING_VALUE~;
+				if (opts.tune_count == MAX_TUNES)
+				{
+					io::printfn("three takes at most %d --tune overrides", MAX_TUNES);
+					return BAD_ARGUMENT~;
+				}
+				opts.tune_list[opts.tune_count++] = args[++i];
 			case "--mcp-stdio":
 				// The same optional port, for the same reason — and a port already
 				// named by an earlier `--mcp` is kept, so the two flags compose in
@@ -215,6 +229,10 @@ fn void usage()
 	io::printn("  --camera <yaw,pitch,distance>   look from here, over whatever the script set");
 	io::printn("  --quest [scale]       draw like a Quest 3 eye: its pixels per degree, 4x MSAA,");
 	io::printn("                        its passes; scale as debug.three.xr_scale (1.0)");
+	io::printn("  --vr                  render to a PCVR headset over OpenXR (PCVR profile)");
+	io::printn("  --profile <name>      render preset: desktop, pcvr, or quest");
+	io::printn("  --tune <key=value>    override a render knob (msaa, prepass, shadow_filter,");
+	io::printn("                        direct_eyes, xr_scale, foveation, scene_cache, ...); repeatable");
 	io::printn("  --debug               diagnose this run — see below");
 	io::printn("  --cache-dir <dir>     keep compiled shaders here (empty string: no cache)");
 	io::printn("  -h, --help            this");

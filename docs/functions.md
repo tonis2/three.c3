@@ -1769,6 +1769,18 @@ Like the refresh rate it belongs to the renderer: `new three.Scene()` does not r
 three.xr.foveation = 'high';
 ```
 
+## three.xr.renderScale
+
+Fraction of the XR runtime's recommended eye resolution (`0.4` to `1.5`). Applied between frames by idling the GPU, rebuilding the OpenXR eye swapchain, and resizing the target's MSAA, depth, and foveation images.
+
+```js
+three.xr.renderScale = 0.85;
+```
+
+## three.xr.eyeSize
+
+Read-only `{ width, height }` of one rendered eye in pixels. `{ width: 0, height: 0 }` off a headset.
+
 ## three.xr.presenting
 
 Whether frames are going to a headset right now. False at a desk, and on the headset until the session is
@@ -3893,6 +3905,28 @@ but a moving object can still redraw only its affected rectangle. `stats().scene
 
 ```js
 three.sceneCache = false;
+```
+
+## three.platform
+
+Read-only snapshot of the host OS, active render profile, and GPU capabilities so games can adapt defaults across desktop, PCVR, and Quest without guessing:
+
+```js
+const { os, profile, gpu, tiler, multiview, msaa, foveationSupported } = three.platform;
+```
+
+## three.tuning
+
+Live-safe render tuning knobs using the same names as CLI `--tune` and Android `debug.three.*` properties:
+
+- `three.tuning.profile` — read-only active preset (`'desktop'`, `'pcvr'`, or `'quest'`).
+- `three.tuning.shadowFilter` — `'4tap'` (receiver-plane 4-tap PCF) or `'1tap'` (1-tap hardware 2x2 PCF).
+- `three.tuning.directEyes` — `'auto'`, `'always'`, or `'never'` (controls whether multiview XR writes straight into eye swapchain images).
+- `three.tuning.depthPrepass` — alias for `three.depthPrepass`.
+- `three.tuning.sceneCache` — alias for `three.sceneCache`.
+
+```js
+three.tuning.shadowFilter = three.platform.tiler ? '1tap' : '4tap';
 ```
 
 ## the handle three.setPost() and three.addPass() answer with

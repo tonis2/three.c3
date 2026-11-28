@@ -45,6 +45,8 @@ fn void Renderer.use_headset_passes(&self)
 {
 	self.pass.prepass.enabled = false;
 	self.pass.one_tap_shadows = true;
+	self.profile.depth_prepass = false;
+	self.profile.shadow_filter = ShadowFilter.ONE_TAP;
 }
 
 <*
@@ -60,6 +62,7 @@ fn void Renderer.draw_like_quest(&self, float eye_scale)
 {
 	self.use_headset_passes();
 	self.headset_density = eye_scale * QUEST3_EYE_ROWS / QUEST3_EYE_TAN_SPAN;
+	self.profile.headset_density = self.headset_density;
 }
 
 <*

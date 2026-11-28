@@ -219,6 +219,11 @@ fn void? JsRuntime.bind_scene_verbs(&self, js::Value host)
 	self.js.@bind(host, "alwaysRenderSet", &js_always_render_set, self)!;
 	self.js.@bind(host, "sceneCacheGet", &js_scene_cache_get, self)!;
 	self.js.@bind(host, "sceneCacheSet", &js_scene_cache_set, self)!;
+	self.js.@bind(host, "platformInfo", &js_platform_info, self)!;
+	self.js.@bind(host, "renderShadowFilterGet", &js_render_shadow_filter_get, self)!;
+	self.js.@bind(host, "renderShadowFilterSet", &js_render_shadow_filter_set, self)!;
+	self.js.@bind(host, "renderDirectEyesGet", &js_render_direct_eyes_get, self)!;
+	self.js.@bind(host, "renderDirectEyesSet", &js_render_direct_eyes_set, self)!;
 	self.js.@bind(host, "xrRefreshRateGet", &js_xr_refresh_rate_get, self)!;
 	self.js.@bind(host, "xrRefreshRateSet", &js_xr_refresh_rate_set, self)!;
 	self.js.@bind(host, "xrRefreshRatesGet", &js_xr_refresh_rates_get, self)!;
@@ -2725,6 +2730,115 @@ fn void js_scene_cache_set(JsRuntime* self, bool on)
 	if (self.renderer == null) return;
 	self.renderer.scene_cache_disabled = !on;
 	if (!on) self.renderer.scene_cache.invalidate();
+}
+
+struct PlatformInfo
+{
+	String os;
+	String profile;
+	String gpu;
+	bool tiler;
+	bool multiview;
+	uint msaa;
+	bool foveation_supported;
+}
+
+fn String host_os_name() @local
+{
+	$if env::ANDROID:
+		return "android";
+	$else
+		$if env::DARWIN:
+			return "macos";
+		$else
+			$if env::WIN32:
+				return "windows";
+			$else
+				return "linux";
+			$endif
+		$endif
+	$endif
+}
+
+// `platformInfo()` — hardware and active profile facts for adaptive game settings.
+fn PlatformInfo js_platform_info(JsRuntime* self)
+{
+	if (self.renderer == null)
+	{
+		return {
+			.os = host_os_name(),
+			.profile = RenderPreset.DESKTOP.name,
+			.gpu = "",
+			.msaa = 1,
+		};
+	}
+	Renderer* r = self.renderer;
+	RenderProfile p = r.active_profile();
+	return {
+		.os = host_os_name(),
+		.profile = p.preset.name,
+		.gpu = ((ZString)&r.gpu.limits.device_name).str_view(),
+		.tiler = r.gpu.limits.is_tiler,
+		.multiview = r.target.views > 1,
+		.msaa = (uint)r.target.samples,
+		.foveation_supported = r.target.foveation.exists(),
+	};
+}
+
+// `renderShadowFilterGet()` — active shadow filter: "1tap" or "4tap".
+fn String js_render_shadow_filter_get(JsRuntime* self)
+{
+	return self.pass.one_tap_shadows ? ShadowFilter.ONE_TAP.name : ShadowFilter.FOUR_TAP.name;
+}
+
+<*
+ `renderShadowFilterSet(mode)` — switches shadow PCF between 4-tap receiver-plane
+ and 1-tap hardware filtering live via `SKIP_RECEIVER_PLANE`.
+
+ @return? js::THREW
+*>
+fn void? js_render_shadow_filter_set(JsRuntime* self, String mode)
+{
+	switch (mode)
+	{
+		case "1tap":
+			self.pass.one_tap_shadows = true;
+			if (self.renderer != null) self.renderer.profile.shadow_filter = ONE_TAP;
+		case "4tap":
+			self.pass.one_tap_shadows = false;
+			if (self.renderer != null) self.renderer.profile.shadow_filter = FOUR_TAP;
+		default:
+			return self.js.fail("three.tuning.shadowFilter wants '1tap' or '4tap', got '%s'", mode)~;
+	}
+}
+
+// `renderDirectEyesGet()` — active direct-to-eyes policy: "auto", "always", or "never".
+fn String js_render_direct_eyes_get(JsRuntime* self)
+{
+	if (self.renderer == null) return DirectEyesMode.AUTO.name;
+	if (self.renderer.eyes_through_chain) return DirectEyesMode.NEVER.name;
+	return self.renderer.profile.direct_eyes.name;
+}
+
+<*
+ `renderDirectEyesSet(mode)` — sets direct-to-eyes policy live ("auto", "always", "never").
+
+ @return? js::THREW
+*>
+fn void? js_render_direct_eyes_set(JsRuntime* self, String mode)
+{
+	DirectEyesMode parsed;
+	switch (mode)
+	{
+		case "auto":   parsed = AUTO;
+		case "always": parsed = ALWAYS;
+		case "never":  parsed = NEVER;
+		default:
+			return self.js.fail("three.tuning.directEyes wants 'auto', 'always', or 'never', got '%s'", mode)~;
+	}
+	if (self.renderer == null) return;
+	self.renderer.profile.direct_eyes = parsed;
+	self.renderer.eyes_through_chain = parsed == NEVER;
 }
 
 // `xrRefreshRateGet()` — the headset display's rate in Hz, 0 off a headset.

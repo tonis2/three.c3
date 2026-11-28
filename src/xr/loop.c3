@@ -2,15 +2,10 @@
  The XR frame loop: OpenXR's wait, begin, locate, draw and end around the
  engine's own tick, with both eyes drawn in one pass.
 
- The right eye is an extra `SceneView` beside the main camera, so geometry,
- lights and shadows are prepared once for both. Each eye gets its own light
- clusters and AO. On a multiview target every draw reaches both eyes, each
- into its own layer, and each layer goes to the swapchain's layer for that eye:
- written by the scene itself with MSAA, otherwise toned and copied there.
- Without multiview each eye is drawn over its half of the target in turn, and
- the tonemap puts them side by side in the swapchain image.
+ OS-agnostic: runs identically on Android/Quest (`AndroidXrShell`) and Desktop
+ PCVR (`DesktopXrShell`) via the `XrShell` interface.
 *>
-module three @feat(ANDROID);
+module three;
 
 import std::io;
 import std::time;
@@ -18,84 +13,27 @@ import std::math;
 import std::math::vector;
 import xr;
 import vk;
-import three::ndk;
 
 <*
- The eye size to render at: XR_RENDER_SCALE (`gpu/headset.c3`), unless `adb shell setprop
- debug.three.xr_scale 0.9` asks for another between 0.4 and 1.5. Read once, when
- the app starts, because the swapchain is made at that size; restart the app to
- try the next one. It is how a game finds what its scene can afford on the
- headset without rebuilding the engine for each try.
+ OS-specific shell hooks around the shared OpenXR loop.
+ Implemented by `AndroidXrShell` (Quest) and `DesktopXrShell` (PCVR).
 *>
-fn float xr_render_scale()
+interface XrShell
 {
-	String asked = ndk::property("debug.three.xr_scale");
-	if (asked.len == 0) return XR_RENDER_SCALE;
-	float? scale = asked.trim().to_float();
-	if (catch scale)
-	{
-		io::eprintfn("xr: debug.three.xr_scale is %s, not a number; rendering at %.2f", asked, XR_RENDER_SCALE);
-		return XR_RENDER_SCALE;
-	}
-	if (scale < 0.4f || scale > 1.5f)
-	{
-		io::eprintfn("xr: debug.three.xr_scale %.2f is outside 0.4 to 1.5; rendering at %.2f", scale, XR_RENDER_SCALE);
-		return XR_RENDER_SCALE;
-	}
-	io::printfn("xr: debug.three.xr_scale asks for %.2f of the recommended eye size", scale);
-	return scale;
+	// Pump OS events (ALooper on Android, sleep/signal check on PCVR). Returns false to stop.
+	fn bool pump(int timeout_ms);
+	// Answer MCP tool calls and hot-reload between frames.
+	fn void? between_frames(JsRuntime* runtime, Renderer* renderer);
 }
 
 <*
- The eyes' samples per pixel: XR_MSAA (`gpu/headset.c3`), unless `adb shell setprop debug.three.msaa`
- asks for 1 (none), 2 or 4. Read once, when the app starts.
-*>
-fn uint xr_msaa()
-{
-	String asked = ndk::property("debug.three.msaa").trim();
-	switch (asked)
-	{
-		case "": return XR_MSAA;
-		case "1": return 1;
-		case "2": return 2;
-		case "4": return 4;
-	}
-	io::eprintfn("xr: debug.three.msaa is %s, not 1, 2 or 4; %dx MSAA", asked, XR_MSAA);
-	return XR_MSAA;
-}
+ Runs the OpenXR session until the runtime, the OS shell, or the game ends it.
 
-<*
- How the compositor filters the eye images as it scales them to the display:
- Meta Quest Super Resolution, an upscale and sharpen that costs the compositor
- about 0.15 ms, because the eyes are always drawn below the display's size.
- `adb shell setprop debug.three.xr_filter` asks for `none` (bilinear), `sharpen`
- (normal sharpening) or `auto` (Super Resolution where the runtime thinks it
- helps) instead. Read once, when the app starts.
-*>
-fn CompositionLayerSettingsFlagsFB xr_layer_filter()
-{
-	String asked = ndk::property("debug.three.xr_filter").trim();
-	switch (asked)
-	{
-		case "":
-		case "super": return QUALITY_SHARPENING;
-		case "none": return {};
-		case "sharpen": return NORMAL_SHARPENING;
-		case "auto": return QUALITY_SHARPENING | AUTO_LAYER_FILTER;
-	}
-	io::eprintfn("xr: debug.three.xr_filter is %s, not none, sharpen, super or auto; Super Resolution", asked);
-	return QUALITY_SHARPENING;
-}
-
-<*
- Runs the session until the runtime or the activity ends it.
-
- @param [&inout] app : "The glue's app"
+ @param shell : "Platform shell handling OS events and MCP/reload"
  @param [&inout] host : "An open XR host with a started session"
- @param [&inout] dev : "Tool calls and pushed scripts, served between frames"
- @return? xr::CALL_FAILED, HeadsetDev.between_frames!
+ @return? xr::CALL_FAILED
 *>
-fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runtime, HeadsetDev* dev)
+fn void? run_xr(XrShell shell, XrHost* host, Renderer* renderer, JsRuntime* runtime)
 {
 	DString said;
 	said.init(mem, 256);
@@ -105,6 +43,9 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 	defer renderer.gpu.wait_idle();
 	io::printfn("xr: multiview %s", renderer.target.views > 1 ? "on" : "off");
 	host.display = &renderer.xr_display;
+	renderer.xr_display.render_scale = host.render_scale;
+	renderer.xr_display.eye_width = host.eye_width;
+	renderer.xr_display.eye_height = host.eye_height;
 	defer host.display = null;
 	defer renderer.xr_display.presenting = false;
 
@@ -113,20 +54,21 @@ fn void? run_xr(ndk::App* app, XrHost* host, Renderer* renderer, JsRuntime* runt
 	Clock report_since = clock::now();
 	XrFrameStats stats;
 
-	while (app.destroy_requested == 0 && !host.exit_wanted)
+	while (!host.exit_wanted)
 	{
-		// Without a running session nothing paces the loop, so the looper does.
-		ndk::pump(app, host.running ? 0 : 50);
+		// Without a running session nothing paces the loop, so the shell does.
+		if (!shell.pump(host.running ? 0 : 50)) break;
 		host.poll();
-		if (host.exit_wanted || app.destroy_requested != 0) break;
+		if (host.exit_wanted) break;
 		// Served while the session is idle too, so the tools still answer with
 		// the headset off.
-		dev.between_frames(runtime, renderer)!;
+		shell.between_frames(runtime, renderer)!;
 		if (runtime.quit_wanted) host.request_exit();
 		renderer.xr_display.presenting = host.running;
 		if (!host.running) continue;
 		host.apply_refresh_rate();
 		host.apply_passthrough();
+		apply_xr_render_scale(host, renderer)!;
 
 		xr::FrameWaitInfo wait_info = { .type = xr::TYPE_FRAME_WAIT_INFO };
 		xr::FrameState frame = { .type = xr::TYPE_FRAME_STATE };
@@ -274,6 +216,24 @@ fn void aim_eyes(Renderer* renderer, xr::View[2] views) @local
 	renderer.pass.view_rect = layered ? whole : left_half;
 	SceneView[1] extra = { { .camera = right, .rect = layered ? whole : right_half } };
 	renderer.pass.set_extra_views(extra[..]);
+}
+
+<*
+ Applies a deferred `three.xr.renderScale` request between frames: idles the GPU,
+ rebuilds the OpenXR swapchain and layer views, and resizes the renderer target
+ (which also recreates MSAA, depth, and foveation images at the new eye size).
+*>
+fn void? apply_xr_render_scale(XrHost* host, Renderer* renderer) @local
+{
+	float scale = renderer.xr_display.scale_request;
+	if (scale <= 0.0f) return;
+	renderer.xr_display.scale_request = 0.0f;
+	renderer.gpu.wait_idle();
+	host.rebuild_swapchain(&renderer.gpu, scale)!;
+	renderer.resize_target(host.eye_width * 2, host.eye_height)!;
+	renderer.xr_display.render_scale = host.render_scale;
+	renderer.xr_display.eye_width = host.eye_width;
+	renderer.xr_display.eye_height = host.eye_height;
 }
 
 <*

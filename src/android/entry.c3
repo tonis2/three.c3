@@ -67,6 +67,42 @@ fn void on_app_cmd(ndk::App* app, CInt cmd)
 	}
 }
 
+struct AndroidXrShell (XrShell)
+{
+	ndk::App* app;
+	HeadsetDev* dev;
+}
+
+fn bool AndroidXrShell.pump(&self, int timeout_ms) @dynamic
+{
+	ndk::pump(self.app, (CInt)timeout_ms);
+	return self.app.destroy_requested == 0;
+}
+
+fn void? AndroidXrShell.between_frames(&self, JsRuntime* runtime, Renderer* renderer) @dynamic
+{
+	self.dev.between_frames(runtime, renderer)!;
+}
+
+<*
+ Builds the Quest `RenderProfile` and applies every `debug.three.<key>` property
+ override through the same parser desktop `--tune` uses.
+*>
+fn RenderProfile android_render_profile() @local
+{
+	RenderProfile profile = render_profile(QUEST);
+	@pool()
+	{
+		foreach (key : PROFILE_OVERRIDE_KEYS)
+		{
+			String prop = string::tformat("debug.three.%s", key);
+			String val = ndk::property(prop.zstr_tcopy());
+			if (val.len > 0) profile.apply_override(key, val);
+		}
+	};
+	return profile;
+}
+
 fn void? run_android(ndk::App* app, String internal, String external)
 {
 	// Saves land in the app's own data directory; `paths.c3` reads this.
@@ -77,15 +113,21 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	defer game.free();
 	io::printfn("three: game %s", game.script);
 
+	RenderProfile profile = android_render_profile();
+
 	// Before the engine: the runtime decides which Vulkan device and extensions
 	// the engine opens with. Without it the run is the headless probe.
 	XrHost* host = mem::new(XrHost);
 	defer mem::free(host);
-	bool xr_up = @ok(host.open(app, xr_render_scale(), xr_layer_filter()));
+	XrPlatformInit xr_platform = { .android_vm = app.activity.vm, .android_activity = app.activity.clazz };
+	bool xr_up = @ok(host.open(xr_platform, profile));
 	if (!xr_up)
 	{
 		io::eprintn("three: OpenXR is not available; running the headless probe");
 		host.close();
+		profile.views = 1;
+		profile.msaa = 1;
+		profile.lazy_post_images = false;
 	}
 
 	Options opts = {
@@ -104,27 +146,9 @@ fn void? run_android(ndk::App* app, String internal, String external)
 	defer mem::free(engine);
 	defer engine.close();
 	// Both eyes in one multiview pass where the device can.
-	engine.open(opts.width, opts.height, headless: true, views: xr_up ? 2 : 1, samples: xr_up ? xr_msaa() : 1)!;
+	engine.open(opts.width, opts.height, headless: true, views: profile.views, samples: profile.msaa, profile: profile)!;
 	engine.renderer.gpu.report();
-	io::printfn("xr: %dx MSAA", (uint)engine.renderer.target.samples);
-	// No depth prepass and one-tap shadows; `--quest` draws the same way at a desk.
-	engine.renderer.use_headset_passes();
-	// The scene writes the eyes itself only with MSAA. Without it the 4-byte
-	// pixels let Adreno pick bins so big that foveation, which it applies per bin,
-	// saves less than the tonemap pass costs: the game at level 4 took 4.70 ms
-	// that way against 4.43 through the pass, where with 4x it is 4.98 against
-	// 6.19. `debug.three.direct_eyes` 0 or 1 picks one, for comparing the two.
-	String direct = ndk::property("debug.three.direct_eyes").trim();
-	engine.renderer.eyes_through_chain = direct.len > 0 ? direct == "0"
-		: (uint)engine.renderer.target.samples == 1;
-	io::printfn("xr: the eyes are written by %s", engine.renderer.eyes_through_chain ? "the tonemap pass" : "the scene");
-	// For profiling: whether the per-pass GPU timestamps and the statistics query
-	// cost anything shows in Meta's own app GPU time (the VrApi line) with them gone.
-	if (ndk::property("debug.three.timestamps").trim() == "0")
-	{
-		engine.renderer.timer.free(&engine.renderer.gpu);
-		io::printn("xr: debug.three.timestamps is 0, so no GPU timing this run");
-	}
+	engine.renderer.profile.report(&engine.renderer.gpu, &engine.renderer.target);
 	// Runs before `engine.close`: the session holds the engine's device.
 	defer host.close();
 	if (xr_up) host.start(&engine.renderer.gpu, engine.renderer.target.views)!;
@@ -144,7 +168,8 @@ fn void? run_android(ndk::App* app, String internal, String external)
 		dev.open(&runtime, &engine.renderer, game, external);
 		game = {}; // ownership moved to `dev`
 		defer dev.close();
-		run_xr(app, host, &engine.renderer, &runtime, dev)!;
+		AndroidXrShell shell = { .app = app, .dev = dev };
+		run_xr(&shell, host, &engine.renderer, &runtime)!;
 		return;
 	}
 	run_probe(app, &engine.renderer, &runtime)!;

@@ -131,7 +131,8 @@ fn vk::ImageView Target.depth_layer(&self, uint view) => self.views > 1 ? self.d
  @require views >= 1 && views <= MAX_VIEWS && width >= views : "Between one view and MAX_VIEWS"
  @require samples >= 1 : "At least one sample"
 *>
-fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1, uint samples = 1)
+fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1, uint samples = 1,
+	bool lazy_color = false, Foveation foveation_level = Foveation.MEDIUM)
 {
 	self.extent = { .width = width, .height = height };
 	self.views = views > 1 && gpu.limits.multiview ? views : 1;
@@ -149,10 +150,15 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 
 	// TRANSFER_SRC is unconditional, and that is the point: three.c3 created this
 	// image, so there is no supportedUsageFlags to mask against and no
-	// screenshot_supported flag to carry around.
-	GpuImage color = gpu.create_image_2d(self.color_format, self.extent,
-		IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	// screenshot_supported flag to carry around. On direct-to-eyes XR targets
+	// (`lazy_color`), allocation is deferred until an HDR chain or capture needs it.
+	GpuImage color;
 	defer catch color.destroy(gpu);
+	if (!lazy_color)
+	{
+		color = gpu.create_image_2d(self.color_format, self.extent,
+			IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	}
 	// SAMPLED as well as ATTACHMENT, and unconditionally: the post chain binds
 	// this image to every pass so a body can read `p.depth`.
 	// One layer per view; TRANSFER_SRC so the eyes can be copied side by side
@@ -172,8 +178,11 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 	if (self.samples != SAMPLE_COUNT_1_BIT)
 	{
 		vk::ImageUsageFlags transient = IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
-		msaa_color = gpu.create_layered_image(POST_CHAIN_FORMAT, self.view_extent, self.views, transient,
-			samples: self.samples)!;
+		if (!lazy_color || self.views == 1)
+		{
+			msaa_color = gpu.create_layered_image(POST_CHAIN_FORMAT, self.view_extent, self.views, transient,
+				samples: self.samples)!;
+		}
 		msaa_depth = gpu.create_layered_image(self.depth_format, self.view_extent, self.views,
 			IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, IMAGE_ASPECT_DEPTH_BIT,
 			samples: self.samples)!;
@@ -184,7 +193,7 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 		}
 	}
 	FoveationMap foveation;
-	if (gpu.limits.fragment_density_map) foveation.init(gpu, self.view_extent, self.views, Foveation.MEDIUM)!;
+	if (gpu.limits.fragment_density_map) foveation.init(gpu, self.view_extent, self.views, foveation_level)!;
 
 	self.msaa_color = msaa_color;
 	self.msaa_depth = msaa_depth;
@@ -199,6 +208,31 @@ fn Target? Target.init(&self, Gpu* gpu, uint width, uint height, uint views = 1,
 	self.foveation = foveation;
 
 	return *self;
+}
+
+<*
+ Allocates `self.color` on demand for a target initialized with `lazy_color`.
+*>
+fn void? Target.ensure_color(&self, Gpu* gpu)
+{
+	if (self.color != null) return;
+	GpuImage color = gpu.create_image_2d(self.color_format, self.extent,
+		IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSFER_SRC_BIT)!;
+	self.color = color.image;
+	self.color_view = color.view;
+	self.color_memory = color.memory;
+}
+
+<*
+ Allocates `self.msaa_color` (`POST_CHAIN_FORMAT`) on demand when an MSAA target
+ that started in direct-to-eyes mode falls back to the HDR post chain.
+*>
+fn void? Target.ensure_msaa_color(&self, Gpu* gpu)
+{
+	if (self.samples == SAMPLE_COUNT_1_BIT || self.msaa_color.exists()) return;
+	vk::ImageUsageFlags transient = IMAGE_USAGE_COLOR_ATTACHMENT_BIT | IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+	self.msaa_color = gpu.create_layered_image(POST_CHAIN_FORMAT, self.view_extent, self.views, transient,
+		samples: self.samples)!;
 }
 
 <*

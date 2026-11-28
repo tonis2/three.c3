@@ -478,6 +478,7 @@ struct MeshPass
 	 lets a frame identical to the last one be skipped.
 	*>
 	ulong frame_key;
+	bool frame_key_enabled;
 	// False when `prepare` found nothing to draw, which is what `record` returns on
 	// rather than repeating the emptiness checks.
 	bool prepared;
@@ -1168,7 +1169,7 @@ fn void? MeshPass.ensure_reference_pipelines(&self, Gpu* gpu, Target* target)
 
  @param slot : `Which frame in flight this is. Selects the instance array and the draw records to write, and must be one whose fence has already been waited on.`
 *>
-fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot)
+fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target, uint slot, bool compute_frame_key = true)
 {
 	self.prepared = false;
 	self.pose_content_key = KEY_SEED;
@@ -1177,6 +1178,7 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// From nothing, every frame: the fold below has to describe this frame's
 	// uploads and nothing carried over from the last one.
 	self.frame_key = KEY_SEED;
+	self.frame_key_enabled = compute_frame_key;
 	if (!self.ready) return;
 	if (self.area_reference && !self.reference_ready) self.ensure_reference_pipelines(gpu, target)!;
 
@@ -1233,11 +1235,14 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	// case the `buckets.len() == 0` return further down takes.
 	self.frame_view_projection = view_projection;
 	self.prepare_extra_views(target.view_extent, target.views);
-	self.frame_key = @hash_value(self.frame_key, self.prepared_views.len());
-	foreach (view : self.prepared_views)
+	if (compute_frame_key)
 	{
-		self.frame_key = @hash_value(self.frame_key, view.rect);
-		self.frame_key = @hash_value(self.frame_key, view.view_projection);
+		self.frame_key = @hash_value(self.frame_key, self.prepared_views.len());
+		foreach (view : self.prepared_views)
+		{
+			self.frame_key = @hash_value(self.frame_key, view.rect);
+			self.frame_key = @hash_value(self.frame_key, view.view_projection);
+		}
 	}
 
 	// The whole of what `Scene` is told about materials, and deliberately not a
@@ -1343,10 +1348,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	}
 
 	Vec3 eye = self.camera.eye();
-	ulong shadow_view_address = self.write_shadow_views(gpu, slot)!;
-	ulong light_address = self.write_lights(gpu, slot)!;
+	ulong shadow_view_address = self.write_shadow_views(gpu, slot, compute_frame_key)!;
+	ulong light_address = self.write_lights(gpu, slot, compute_frame_key)!;
 	self.resolve_lit_pipelines(gpu, target)!;
-	self.record_clusters(gpu, cmd, slot, light_address)!;
+	bool clusters_ready = self.record_clusters(gpu, cmd, slot, light_address)!;
 	FrameBlock frame = {
 		.view_projection = view_projection,
 		.lighting = { self.lighting.ambient, (float)self.lighting.count, (float)self.clock.time,
@@ -1366,9 +1371,10 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 		.ambient_occlusion = { self.ambient_occlusion.live ? self.ambient_occlusion.intensity : 0.0f,
 			self.ambient_occlusion.radius, self.ambient_occlusion.bias, 0 },
 		.shadow_views = (ShadowGpuView*)shadow_view_address,
-		.cluster_counts = self.view_cluster_counts(slot, 0),
-		.cluster_indices = self.view_cluster_indices(slot, 0),
-		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z, self.cluster_bruteforce ? 0 : CLUSTER_LIGHT_CAPACITY },
+		.cluster_counts = clusters_ready ? self.view_cluster_counts(slot, 0) : null,
+		.cluster_indices = clusters_ready ? self.view_cluster_indices(slot, 0) : null,
+		.cluster_grid = { CLUSTER_X, CLUSTER_Y, CLUSTER_Z,
+			(clusters_ready && !self.cluster_bruteforce) ? CLUSTER_LIGHT_CAPACITY : 0 },
 		.cluster_screen = { (float)target.view_extent.width, (float)target.view_extent.height,
 			self.camera.near_plane, self.camera.far_plane },
 		.view_rect = rect_floats(self.scene_rect),
@@ -1418,8 +1424,9 @@ fn void? MeshPass.prepare(&self, Gpu* gpu, vk::CommandBuffer cmd, Target* target
 	frame.sun = self.frame_sun();
 	self.frame_address = self.write_frame_blocks(gpu, slot, &frame)!;
 
-	// Last, so the two plans above are in it.
-	self.fold_frame_key(slot, &frame);
+	// Last, so the two plans above are in it. Skipped on XR/non-cached frames that
+	// never skip or reuse pixels.
+	if (compute_frame_key) self.fold_frame_key(slot, &frame);
 
 	self.prepared = true;
 }
@@ -1713,6 +1720,8 @@ fn void MeshPass.build_draw_records(&self, uint slot)
 		self.draw_indices.push(recorded);
 		recorded++;
 	}
+
+	if (!self.frame_key_enabled) return;
 
 	// From `base_color` on, skipping the nine buffer addresses at the head. Six of
 	// them name a mesh, which `Bucket` already says; the other three name a slice
@@ -2440,8 +2449,8 @@ fn ulong? MeshPass.write_frame_blocks(&self, Gpu* gpu, uint slot, FrameBlock* ma
 		block.inverse_view_projection = invert(view.view_projection);
 		Vec3 eye = view.camera.eye();
 		block.camera = { eye.x, eye.y, eye.z, main.camera[3] };
-		block.cluster_counts = self.view_cluster_counts(slot, (uint)i + 1);
-		block.cluster_indices = self.view_cluster_indices(slot, (uint)i + 1);
+		block.cluster_counts = main.cluster_counts != null ? self.view_cluster_counts(slot, (uint)i + 1) : null;
+		block.cluster_indices = main.cluster_indices != null ? self.view_cluster_indices(slot, (uint)i + 1) : null;
 		block.cluster_screen[2] = view.camera.near_plane;
 		block.cluster_screen[3] = view.camera.far_plane;
 		block.view_rect = rect_floats(view.rect);
@@ -2557,12 +2566,12 @@ fn uint[4] MeshPass.directional_lights(&self)
 	return out;
 }
 
-fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot)
+fn ulong? MeshPass.write_lights(&self, Gpu* gpu, uint slot, bool compute_frame_key = true)
 {
 	sz needed = self.lighting.count;
 	gpu.grow_slot_buffer(&self.light_buffers[slot], &self.light_capacity[slot], needed, 16, Light::size)!;
 	self.light_buffers[slot].upload(&self.lighting.lights[0], needed * Light::size);
-	self.frame_key = hash_bytes(self.frame_key, &self.lighting.lights[0], (usz)(needed * Light::size));
+	if (compute_frame_key) self.frame_key = hash_bytes(self.frame_key, &self.lighting.lights[0], (usz)(needed * Light::size));
 	return self.light_buffers[slot].address;
 }
 
@@ -2585,14 +2594,17 @@ fn FrameSun MeshPass.frame_sun(&self)
 	return sun;
 }
 
-fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot)
+fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot, bool compute_frame_key = true)
 {
 	ulong address = self.write_shadow_manager(gpu, slot)!;
-	self.frame_key = hash_bytes(
-		self.frame_key,
-		&self.shadow_view_set.views[0],
-		(usz)(self.shadow_view_set.count * ShadowView::size)
-	);
+	if (compute_frame_key)
+	{
+		self.frame_key = hash_bytes(
+			self.frame_key,
+			&self.shadow_view_set.views[0],
+			(usz)(self.shadow_view_set.count * ShadowView::size)
+		);
+	}
 	return address;
 }
 
@@ -2600,8 +2612,12 @@ fn ulong? MeshPass.write_shadow_views(&self, Gpu* gpu, uint slot)
  Bins the lights for every view, one grid each, side by side in this slot's
  buffers: the main view's first, then the extras in order.
 *>
-fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot, ulong lights)
+fn bool? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint slot, ulong lights)
 {
+	// Sun-only frames compile out the light loop (`SKIP_LIGHT_LOOP`), so nothing
+	// reads cluster lists; skip allocating and dispatching the compute shader.
+	if ((self.skip_features & SKIP_LIGHT_LOOP) != 0 && !self.cluster_bruteforce && !self.area_reference) return false;
+
 	const sz CLUSTER_COUNT = CLUSTER_X * CLUSTER_Y * CLUSTER_Z;
 	sz views = (sz)self.prepared_views.len() + 1;
 	sz had_counts = self.cluster_count_views[slot];
@@ -2651,7 +2667,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 		// The producer may be an older submission. Submission order puts it before
 		// this barrier, and the slot fence makes the buffers safe to retain.
 		compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
-		return;
+		return true;
 	}
 	self.cluster_overflow[slot].upload(&zero, uint::size);
 	if (!self.cluster_pipeline.ready)
@@ -2678,6 +2694,7 @@ fn void? MeshPass.record_clusters(&self, Gpu* gpu, vk::CommandBuffer cmd, uint s
 	self.cluster_cached[slot] = true;
 	self.cluster_dispatches++;
 	compute_to_stage_barrier(cmd, PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+	return true;
 }
 
 <*
@@ -2698,12 +2715,14 @@ fn ClusterPush MeshPass.cluster_view(&self, uint view)
 
 fn uint* MeshPass.view_cluster_counts(&self, uint slot, uint view) @inline
 {
+	if (self.cluster_counts[slot].address == 0) return null;
 	const ulong STRIDE = CLUSTER_X * CLUSTER_Y * CLUSTER_Z * uint::size;
 	return (uint*)(self.cluster_counts[slot].address + view * STRIDE);
 }
 
 fn uint* MeshPass.view_cluster_indices(&self, uint slot, uint view) @inline
 {
+	if (self.cluster_indices[slot].address == 0) return null;
 	const ulong STRIDE = CLUSTER_X * CLUSTER_Y * CLUSTER_Z * CLUSTER_LIGHT_CAPACITY * uint::size;
 	return (uint*)(self.cluster_indices[slot].address + view * STRIDE);
 }
@@ -2829,7 +2848,7 @@ fn void? MeshPass.write_tables(&self, Gpu* gpu, uint slot)
 		if (!material.alive || material.table.len == 0) continue;
 		mem::copy(&into[material.table_offset], material.table.ptr, material.table.len);
 	}
-	self.frame_key = hash_bytes(self.frame_key, into, (usz)wanted);
+	if (self.frame_key_enabled) self.frame_key = hash_bytes(self.frame_key, into, (usz)wanted);
 	self.table_address = self.table_buffers[slot].address;
 }
 
@@ -2993,8 +3012,11 @@ fn ulong? MeshPass.write_live_poses(&self, Gpu* gpu, uint slot)
 		at += (uint)entry.matrices.len();
 	}
 
-	self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * Matrix4f::size));
-	self.pose_content_key = hash_bytes(KEY_SEED, palette, (usz)((sz)at * Matrix4f::size));
+	if (self.frame_key_enabled)
+	{
+		self.frame_key = hash_bytes(self.frame_key, palette, (usz)((sz)at * Matrix4f::size));
+		self.pose_content_key = hash_bytes(KEY_SEED, palette, (usz)((sz)at * Matrix4f::size));
+	}
 	return self.pose_buffers[slot].address;
 }
 
@@ -3053,8 +3075,11 @@ fn ulong? MeshPass.write_morph_weights(&self, Gpu* gpu, uint slot)
 		at += (uint)entry.weights.len();
 	}
 
-	self.frame_key = hash_bytes(self.frame_key, weights, (usz)((sz)at * float::size));
-	self.morph_content_key = hash_bytes(KEY_SEED, weights, (usz)((sz)at * float::size));
+	if (self.frame_key_enabled)
+	{
+		self.frame_key = hash_bytes(self.frame_key, weights, (usz)((sz)at * float::size));
+		self.morph_content_key = hash_bytes(KEY_SEED, weights, (usz)((sz)at * float::size));
+	}
 	return self.morph_buffers[slot].address;
 }
 
@@ -3137,8 +3162,11 @@ fn ulong? MeshPass.write_soft_vertices(&self, Gpu* gpu, uint slot)
 		}
 	}
 
-	self.frame_key = hash_bytes(self.frame_key, vertices, (usz)(needed * Vec3::size));
-	self.soft_content_key = hash_bytes(KEY_SEED, vertices, (usz)(needed * Vec3::size));
+	if (self.frame_key_enabled)
+	{
+		self.frame_key = hash_bytes(self.frame_key, vertices, (usz)(needed * Vec3::size));
+		self.soft_content_key = hash_bytes(KEY_SEED, vertices, (usz)(needed * Vec3::size));
+	}
 	return self.soft_buffers[slot].address;
 }
 

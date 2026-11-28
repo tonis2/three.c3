@@ -184,6 +184,10 @@ struct GpuLimits
 	uint max_per_stage_storage_images;
 	uint[3] max_compute_workgroup_size;
 	uint max_image_dimension_2d;
+	uint vendor_id;
+	// True for tile-based GPUs (Adreno, Mali, PowerVR, Apple TBDR) where tile
+	// traffic, transient MSAA resolves, and LRZ matter more than desktop heuristics.
+	bool is_tiler;
 	char[256] device_name;
 }
 
@@ -202,6 +206,22 @@ struct GpuLimits
  simply absent from a 1.0 loader. Asking and taking the lower of the two costs
  one call at startup.
 *>
+fn bool is_tiler_vendor(uint vendor_id) @local
+{
+	// Qualcomm Adreno, ARM Mali, Imagination PowerVR, Apple TBDR, Broadcom VideoCore.
+	switch (vendor_id)
+	{
+		case 0x5143: // Qualcomm
+		case 0x13B5: // ARM
+		case 0x1010: // ImgTec / PowerVR
+		case 0x106B: // Apple
+		case 0x14E4: // Broadcom
+			return true;
+		default:
+			return false;
+	}
+}
+
 fn uint wanted_api_version()
 {
 	const uint V1_0 = vk::@makeApiVersion(0, 1, 0, 0);
@@ -782,6 +802,8 @@ fn Gpu? Gpu.init(&self, vk::Instance instance, vk::SurfaceKHR surface, bool vali
 		.max_per_stage_storage_images = properties.limits.maxPerStageDescriptorStorageImages,
 		.max_compute_workgroup_size = properties.limits.maxComputeWorkGroupSize,
 		.max_image_dimension_2d = properties.limits.maxImageDimension2D,
+		.vendor_id = properties.vendorID,
+		.is_tiler = is_tiler_vendor(properties.vendorID),
 		.device_name = properties.deviceName,
 	};
 
@@ -959,6 +981,7 @@ fn uint validation_message(
 fn void Gpu.report(&self)
 {
 	io::printfn("device       %s", (ZString)&self.limits.device_name);
+	io::printfn("  architecture         %s (vendor 0x%04x)", self.limits.is_tiler ? "tiler" : "immediate", self.limits.vendor_id);
 	uint api = self.limits.api_version;
 	io::printfn("  apiVersion           %d.%d.%d", (api >> 22) & 0x7F, (api >> 12) & 0x3FF, api & 0xFFF);
 	io::printfn("  validation           %s", self.validation ? "on" : "off");

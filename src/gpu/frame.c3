@@ -331,6 +331,9 @@ struct Renderer
 	*>
 	bool always_render;
 
+	// Active render profile (Desktop / PCVR / Quest + overrides). Zero resolves to DESKTOP.
+	RenderProfile profile;
+
 	// The headset's display rate, `three.xr.refreshRate`. Untouched off a headset.
 	XrDisplay xr_display;
 
@@ -378,6 +381,12 @@ struct XrDisplay
 	bool passthrough_supported;
 	// The room is showing on the frame being drawn.
 	bool passthrough_active;
+	// `three.xr.renderScale` requested between frames; 0 when no resize is pending.
+	float scale_request;
+	// Current XR eye scale and resolved single-eye pixel dimensions.
+	float render_scale;
+	uint eye_width;
+	uint eye_height;
 }
 
 <*
@@ -395,10 +404,36 @@ fn float XrDisplay.nearest_offered(&self, float hz)
 }
 
 <*
+ Active render profile, falling back to `DESKTOP` for zero-constructed test renderers.
+*>
+fn RenderProfile Renderer.active_profile(&self)
+{
+	return self.profile.configured ? self.profile : render_profile(DESKTOP);
+}
+
+<*
+ Applies a resolved `RenderProfile` onto this renderer and its pass settings.
+*>
+fn void Renderer.apply_profile(&self, RenderProfile profile)
+{
+	self.profile = profile;
+	self.pass.prepass.enabled = profile.depth_prepass;
+	self.pass.one_tap_shadows = profile.shadow_filter == ShadowFilter.ONE_TAP;
+	self.scene_cache_disabled = !profile.scene_cache;
+	self.headset_density = profile.headset_density;
+	self.eyes_through_chain = profile.direct_eyes == DirectEyesMode.NEVER;
+	if (!profile.gpu_timestamps)
+	{
+		self.timer.free(&self.gpu);
+	}
+}
+
+<*
  @param surface : `Null for headless: no viewer, no swapchain, and render + screenshot still work.`
  @param width : `The offscreen target's extent. Not the window's, ever.`
  @param views : "Views drawn side by side in one multiview pass, where the device has multiview"
  @param samples : "Samples per pixel for the scene: 1, or 2 or 4 for MSAA"
+ @param profile : "Optional render profile; zero defaults to DESKTOP"
 *>
 fn Renderer? Renderer.init(
 	&self,
@@ -408,14 +443,19 @@ fn Renderer? Renderer.init(
 	uint height,
 	bool validate = false,
 	uint views = 1,
-	uint samples = 1
+	uint samples = 1,
+	RenderProfile profile = {}
 )
 {
 	self.windowed = surface != null;
 	self.clear = DEFAULT_CLEAR;
+	self.profile = profile.configured ? profile : render_profile(DESKTOP);
+
+	bool lazy_color = self.profile.lazy_post_images && !self.windowed && views > 1;
+	Foveation fov_level = self.profile.foveation ? self.profile.foveation_level : Foveation.MEDIUM;
 
 	self.gpu.init(instance, surface, validate)!;
-	self.target.init(&self.gpu, width, height, views, samples)!;
+	self.target.init(&self.gpu, width, height, views, samples, lazy_color, fov_level)!;
 	// After the device and before anything that could dispatch: a kernel's
 	// buffers are the script's, so this outlives every frame and owns nothing
 	// the render path frees.
@@ -441,11 +481,14 @@ fn Renderer? Renderer.init(
 		}
 	}
 	self.frames.init(&self.gpu, image_count)!;
-	self.timer.init(&self.gpu)!;
-	// Every scene renders into the float post input. The identity tone map is the
-	// ordinary no-post path and performs only the final sRGB encode.
-	self.post.ensure_images(&self.gpu, &self.target, 0)!;
-	self.post.ensure_tonemap(&self.gpu, &self.target)!;
+	if (self.profile.gpu_timestamps) self.timer.init(&self.gpu)!;
+	// Direct-to-eyes XR profiles defer HDR scene/tonemap allocation until a script
+	// post pass, overlay UI, or capture actually enters the HDR chain.
+	if (!self.profile.lazy_post_images)
+	{
+		self.post.ensure_images(&self.gpu, &self.target, 0)!;
+		self.post.ensure_tonemap(&self.gpu, &self.target)!;
+	}
 
 	return *self;
 }
@@ -500,15 +543,21 @@ fn void? Renderer.resize_target(&self, uint width, uint height, uint views = 0, 
 	// allocate leaves the renderer exactly as it was rather than with no target
 	// at all. Both are resident for the length of this call, which is the price
 	// of the failure being recoverable.
+	bool lazy_color = self.profile.lazy_post_images && !self.windowed && views > 1;
+	Foveation fov_level = self.target.foveation.exists() ? self.target.foveation.level
+		: (self.profile.foveation ? self.profile.foveation_level : Foveation.MEDIUM);
 	Target next;
-	next.init(&self.gpu, width, height, views, samples)!;
+	next.init(&self.gpu, width, height, views, samples, lazy_color, fov_level)!;
 
 	self.gpu.handle.waitIdle();
 	self.target.free(&self.gpu);
 	self.target = next;
 	self.ui.resize(&self.target);
 
-	self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
+	if (!self.profile.lazy_post_images || self.post.stages.len() > 0 || self.post.scene.exists() || self.post.eyes.exists())
+	{
+		self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
+	}
 }
 
 fn void Renderer.free(&self)
@@ -589,124 +638,46 @@ fn ulong Renderer.picture_key(&self)
 	return key;
 }
 
-<*
- A whole frame of scene, recorded into `cmd`: begin the target, draw, end the
- target.
-
- One description of what a frame contains, for three callers. `frame()`,
- `capture()` and `render_offscreen()` would otherwise be the same three calls
- written out three times, which is the shape every "the window shows something
- the screenshot does not" bug has. What the three legitimately differ by — the
- acquire, the blit, the readback, the timestamps spanning all of it — stays with
- them.
-
- ## A sequence, with the destination decided once at the top
-
- The invariant the sequence exists to hold is:
-
- > Exactly one stage writes `target.color`, and the close happens exactly once,
- > here.
-
- With a post chain running, the scene is drawn into image A instead and the
- chain's tonemap is the stage that writes `target.color`. The branch is here and
- nowhere else, which is the payoff for there being one recording function: window,
- screenshot and `render()` get post-processing at the same moment and cannot
- disagree about it. Everything downstream of `target.color` — the blit, the
- readback, the layout contract — is unchanged and unaware.
-
- Written as nested `if (posted)` blocks it would be exact for one optional stage
- and wrong for three: with shadows, a post chain and a UI layer, "who writes
- `target.color`, and who closes it" has two-by-two-by-N answers.
-
- The invariant is enforced, not just documented. A second close is a layout
- transition out of COLOR_ATTACHMENT_OPTIMAL on an image the layer knows is in
- TRANSFER_SRC, so the validation checks in `three_tests::post` fail on it
- ("VUID-VkImageMemoryBarrier2-oldLayout-01197"). Verified by injecting a second
- `self.target.close(cmd)` here: both fail.
-
- @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn. Only the window path passes true - a screenshot and a headless batch ask for each frame explicitly, and one that answered with the last one would be a lie.`
-
- @param output : "An image the frame goes straight into, left as a colour attachment; null for target.color"
- @param output_view : "A view of output"
- @param see_through : "Drawn over passthrough: no background, and alpha is coverage"
- @param output_eyes : "output holds a layer per view in TARGET_COLOR_FORMAT, a headset's eye images, rather than the eyes side by side"
- @require !output_eyes || (output != null && self.target.views > 1) : "Eye images are for a multiview target"
- @return "Whether the frame went to output; false when it went to target.color as usual"
-*>
-fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false,
-	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null, bool see_through = false,
-	bool output_eyes = false)
+<* Which rendering path a frame takes, decided once at the top of `record_scene`. *>
+enum FrameRoute : char
 {
-	// All zero, not the background with alpha 0: premultiplied, any colour here
-	// would be added over the room.
-	float[4] clear = see_through ? (float[4]){ 0, 0, 0, 0 } : self.clear;
-	bool interface_over = !presenting && self.ui.active();
-	// The scene writes the eye images itself, toned as each fragment is written,
-	// when nothing comes between it and them: no script pass and no interface.
-	// That drops the float scene image and the full-screen tonemap. The clear
-	// colour is written as given, where the chain would tone it too.
-	bool display = output_eyes && self.post.stages.len() == 0 && !interface_over && !self.pass.area_reference
-		&& !self.eyes_through_chain;
-	self.pass.scene_tone = display ? display_tone(self.post.tonemap_mode) : LINEAR;
-	self.pass.tone_exposure = self.post.tonemap_exposure;
-	// A shared test/device renderer may predate this frame path, and a resize can
-	// retire A between frames. Make the always-on HDR input and display encoder
-	// present at the recording boundary as well as at normal construction.
+	DIRECT_EYES,
+	HDR_FULL,
+	HDR_CACHE_REUSE,
+	HDR_CACHE_DIRTY,
+}
+
+<*
+ Whether this frame can render and tone directly into the XR eye swapchain images,
+ bypassing the HDR float scene image, post chain, and scene cache.
+*>
+fn bool Renderer.can_direct_eyes(&self, bool output_eyes, bool interface_over)
+{
+	if (!output_eyes || self.post.stages.len() > 0 || interface_over || self.pass.area_reference) return false;
+	if (self.eyes_through_chain) return false;
+	RenderProfile p = self.active_profile();
+	return p.wants_direct_eyes(&self.gpu, &self.target);
+}
+
+<*
+ Ensures all attachments and pipelines required by the HDR chain route exist.
+ On lazy XR targets this allocates `target.color`, `msaa_color`, and post images
+ only on the first frame that actually leaves `DIRECT_EYES`.
+*>
+fn void? Renderer.ensure_hdr_targets(&self, bool needs_target_color)
+{
+	if (needs_target_color) self.target.ensure_color(&self.gpu)!;
+	if (self.target.samples != SAMPLE_COUNT_1_BIT) self.target.ensure_msaa_color(&self.gpu)!;
 	self.post.ensure_images(&self.gpu, &self.target, self.post.stages.len())!;
 	self.post.ensure_tonemap(&self.gpu, &self.target)!;
-	// Read once: `active` must not change between the begin and the end of one
-	// recording, and reading it twice is how that becomes possible.
-	bool posted = self.post.active();
+}
 
-	// The same read `pass.prepare` makes below: the slot is advanced by the
-	// caller *after* the submit, so every mark recorded here belongs to the run
-	// `timer.begin` opened.
-	uint slot = self.frames.slot;
-
-	// Outside every rendering, and before the one below opens: this flushes the
-	// interface, bakes glyphs and may grow a buffer or rebuild a pipeline. It
-	// records nothing into `cmd` — see `UiLayer.upload` for the contract it
-	// keeps with the fence wait each caller opens with.
-	self.ui.upload(&self.target)!;
-	// The panels the scene samples, drawn before anything opens a rendering and
-	// before the picture key is read, since a redrawn panel moves it.
-	self.record_panels(cmd)!;
-
-	// Before the render pass, because a dispatch cannot be inside one. This is
-	// the scene update, the frame's buffers, and the compute skinning for any
-	// character routed through it. A phase and not a branch: the frame path does
-	// not grow a case per kind of thing that can be drawn.
-	self.pass.prepare(&self.gpu, cmd, &self.target, slot)!;
-	self.timer.mark(cmd, slot, FrameMark.PREPARE);
-
-	// Nothing that reaches the picture has moved since the last frame was drawn,
-	// so `target.color` still holds it, in the TRANSFER_SRC layout `close` left it
-	// in and the blit expects. Every mark between BEGIN and END is still recorded,
-	// because `gpu/timing.c3` requires all of them on every frame.
-	ulong key = self.picture_key();
-	if (may_skip && self.rendered_once && !self.always_render && key == self.rendered_key)
-	{
-		self.timer.mark(cmd, slot, FrameMark.SHADOW);
-		self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
-		self.timer.mark(cmd, slot, FrameMark.PREPASS);
-		self.timer.scene_begin(cmd, slot);
-		self.timer.scene_end(cmd, slot);
-		self.timer.mark(cmd, slot, FrameMark.SCENE);
-		self.timer.mark(cmd, slot, FrameMark.POST);
-		self.skipped_frames++;
-		return false;
-	}
-	self.rendered_key = key;
-	// Only the window path leaves a picture the window path may re-present. A
-	// screenshot draws the interface *into* the target where the window draws it
-	// over the blit, so a frame recorded for one is not a frame the other may
-	// stand on.
-	self.rendered_once = may_skip;
-	self.rendered_frames++;
-
-	// The exact frame key changed, but most of the shaded scene may not have.
-	// Explicit captures use the same cache when their target has an uncontaminated
-	// scene image; `scene_cache_disabled` gives comparisons a forced-full path.
+<*
+ Picks the HDR frame route (`HDR_CACHE_REUSE`, `HDR_CACHE_DIRTY`, or `HDR_FULL`)
+ and updates scene-cache pixel accounting.
+*>
+fn FrameRoute Renderer.choose_hdr_route(&self, bool presenting, bool posted, float[4] clear, vk::Rect2D* out_dirty)
+{
 	ulong cache_global = KEY_SEED;
 	cache_global = @hash_value(cache_global, clear);
 	cache_global = @hash_value(cache_global, posted);
@@ -714,90 +685,122 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	cache_global = @hash_value(cache_global, self.target.color);
 	cache_global = @hash_value(cache_global, self.target.depth);
 	if (posted) cache_global = @hash_value(cache_global, self.post.scene.image);
-	// The whole cache, not a region of it: which meshes sample the image a kernel
-	// just rewrote is not something the scene's own dirty rectangles know.
 	cache_global = @hash_value(cache_global, self.compute.image_epoch);
 	cache_global = @hash_value(cache_global, self.panel_epoch);
-	vk::Rect2D cache_full = scene_cache_full(self.target.extent);
+
+	vk::Rect2D full = scene_cache_full(self.target.extent);
 	// Not with MSAA: a partial redraw would need last frame's samples, which are never stored.
-	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial && !display
+	bool cache_safe = !self.scene_cache_disabled && !self.pass.scene_rect_partial
 		&& self.target.samples == SAMPLE_COUNT_1_BIT
 		&& self.pass.prepared_views.len() == 0
 		&& (posted || presenting || !self.ui.active());
-	vk::Rect2D cache_dirty = cache_full;
-	if (cache_safe) { cache_dirty = self.pass.scene_cache_update(&self.scene_cache, &self.target, cache_global); }
+	vk::Rect2D dirty = full;
+	if (cache_safe) { dirty = self.pass.scene_cache_update(&self.scene_cache, &self.target, cache_global); }
 	else { self.scene_cache.invalidate(); }
-	bool cache_partial = cache_safe
-		&& self.scene_cache.valid && !scene_cache_empty(cache_dirty)
-		&& !scene_cache_same(cache_dirty, cache_full);
-	bool cache_reuse = cache_safe && self.scene_cache.valid && scene_cache_empty(cache_dirty);
+
+	*out_dirty = dirty;
+	FrameRoute route = HDR_FULL;
+	if (cache_safe && self.scene_cache.valid)
+	{
+		if (scene_cache_empty(dirty)) { route = HDR_CACHE_REUSE; }
+		else if (!scene_cache_same(dirty, full)) { route = HDR_CACHE_DIRTY; }
+	}
+
 	ulong frame_pixels = (ulong)self.target.extent.width * (ulong)self.target.extent.height;
-	ulong dirty_pixels = cache_partial
-		? (ulong)cache_dirty.extent.width * (ulong)cache_dirty.extent.height
-		: (cache_reuse ? 0 : frame_pixels);
+	ulong dirty_pixels = route == HDR_CACHE_DIRTY
+		? (ulong)dirty.extent.width * (ulong)dirty.extent.height
+		: (route == HDR_CACHE_REUSE ? 0 : frame_pixels);
 	self.scene_cache_pixels += dirty_pixels;
 	self.scene_cache_reused += frame_pixels - dirty_pixels;
+	return route;
+}
 
-	// The shadow map, and it is a line rather than a branch. It begins and ends a
-	// rendering of its own, so it has to be here and not inside the block below;
-	// it records nothing at all in a frame with shadows off, so an unshadowed
-	// frame is byte-identical to one from before this existed.
-	// 
-	// It does not touch `target.color` and so does not touch the invariant the
-	// rest of this function holds.
+<*
+ Direct-to-eyes XR route: draws shadows, optional AO, and the multiview scene
+ straight into the XR swapchain layers with inline tone mapping and MSAA resolve.
+ Touches neither `PostPass` images nor `SceneCache`.
+*>
+fn void Renderer.record_direct_eyes(&self, vk::CommandBuffer cmd, uint slot,
+	vk::Image output, vk::ImageView output_view, float[4] clear, bool see_through)
+{
+	self.scene_cache.invalidate();
+	self.scene_cache_pixels += (ulong)self.target.extent.width * (ulong)self.target.extent.height;
+
 	self.pass.record_shadow(cmd);
-	// Recorded even when the call above recorded nothing, which is the one place
-	// the byte-identity claim does not hold: with shadows off the buffer carries
-	// this timestamp and `stats().shadowMs` reads 0. The alternative is a frame
-	// that reports no timings at all — see `gpu/timing.c3`.
+	self.timer.mark(cmd, slot, FrameMark.SHADOW);
+	self.pass.record_ambient_occlusion(cmd);
+	self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
+	// Multiview prepass (if enabled) runs inside the scene rendering below.
+	self.timer.mark(cmd, slot, FrameMark.PREPASS);
+
+	self.timer.scene_begin(cmd, slot);
+	self.target.begin_render_to(cmd, output, output_view, clear, store_depth: false, format: TARGET_COLOR_FORMAT);
+	self.pass.cache_rect = scene_cache_full(self.target.extent);
+	self.pass.cache_partial = false;
+	self.pass.see_through = see_through;
+	self.pass.record(cmd);
+	self.pass.see_through = false;
+	vk::cmdEndRendering(cmd);
+	self.timer.scene_end(cmd, slot);
+	self.timer.mark(cmd, slot, FrameMark.SCENE);
+	self.timer.mark(cmd, slot, FrameMark.POST);
+}
+
+<*
+ Standard HDR / desktop / post-chain route: handles full redraws, incremental
+ `SceneCache` reuse/partial redraws, separate depth prepass, post chain + tonemap,
+ and optional offscreen UI overlay.
+*>
+fn bool? Renderer.record_hdr_frame(&self, vk::CommandBuffer cmd, uint slot,
+	bool presenting, bool interface_over, vk::Image output, vk::ImageView output_view,
+	bool output_eyes, float[4] clear, bool see_through)
+{
+	bool direct_tonemap = output != null && !output_eyes && !interface_over;
+	self.ensure_hdr_targets(needs_target_color: !direct_tonemap)!;
+	bool posted = self.post.active();
+	if (!posted) self.target.ensure_color(&self.gpu)!;
+
+	vk::Rect2D cache_dirty;
+	FrameRoute route = self.choose_hdr_route(presenting, posted, clear, &cache_dirty);
+	bool cache_reuse = route == HDR_CACHE_REUSE;
+	bool cache_partial = route == HDR_CACHE_DIRTY;
+
+	self.pass.record_shadow(cmd);
 	self.timer.mark(cmd, slot, FrameMark.SHADOW);
 	if (!cache_reuse) self.pass.record_ambient_occlusion(cmd);
 	self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
 
-	// The depth prepass, and outside the query below on purpose: it is what makes
-	// `fragmentsShaded` mean "how many times the scene pass shaded a pixel" rather
-	// than that plus the prepass's own cut-out fragments. `docs/stats.md` says so.
 	self.pass.cache_rect = cache_dirty;
 	bool prepassed = cache_reuse ? false
 		: self.pass.record_depth_prepass(cmd, &self.target, cache_partial, posted);
 	self.timer.mark(cmd, slot, FrameMark.PREPASS);
 
-	// Around the scene rendering and outside it — `gpu/timing.c3` says why.
 	self.timer.scene_begin(cmd, slot);
-
-	if (cache_reuse)
+	switch (route)
 	{
-		// The preserved scene attachment is already in the layout its next
-		// consumer expects. There is no rendering to open or clear.
-	}
-	else if (cache_partial)
-	{
-		self.target.begin_cached_render_to(cmd,
-			posted ? self.post.scene.image : self.target.color,
-			posted ? self.post.scene.view : self.target.color_view,
-			cache_dirty, clear, posted, prepassed);
-	}
-	else if (display)
-	{
-		self.target.begin_render_to(cmd, output, output_view, clear, store_depth: false, format: TARGET_COLOR_FORMAT);
-	}
-	else if (posted)
-	{
-		// Kept for a later frame's cache or a post pass that samples it, and
-		// otherwise not written back at all.
-		bool store_depth = cache_safe || self.post.reads_depth();
-		GpuImage* scene = self.post.scene_target();
-		self.target.begin_render_to(cmd, scene.image, scene.view, clear, prepassed, store_depth);
-	}
-	else
-	{
-		self.target.begin_render(cmd, clear, prepassed);
+		case HDR_CACHE_REUSE:
+			// Preserved scene attachment is already in the layout its next consumer expects.
+			break;
+		case HDR_CACHE_DIRTY:
+			self.target.begin_cached_render_to(cmd,
+				posted ? self.post.scene.image : self.target.color,
+				posted ? self.post.scene.view : self.target.color_view,
+				cache_dirty, clear, posted, prepassed);
+		case HDR_FULL:
+			if (posted)
+			{
+				bool store_depth = !self.scene_cache_disabled || self.post.reads_depth();
+				GpuImage* scene = self.post.scene_target();
+				self.target.begin_render_to(cmd, scene.image, scene.view, clear, prepassed, store_depth);
+			}
+			else
+			{
+				self.target.begin_render(cmd, clear, prepassed);
+			}
+		case DIRECT_EYES:
+			unreachable("DIRECT_EYES handled before record_hdr_frame");
 	}
 
-	// Everything drawn into the target, between `begin_render` and `close`. One
-	// call, on purpose: the frame path does not grow a branch per kind of thing
-	// that can be drawn. A pass that was never given a pipeline records nothing,
-	// which lets a headless clear-colour render work with no shader on disk.
 	if (!cache_reuse)
 	{
 		self.pass.cache_rect = cache_dirty;
@@ -809,20 +812,11 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 		vk::cmdEndRendering(cmd);
 	}
 
-	// The scene's rendering ends here on both paths, which lets the chain below be
-	// a list of passes rather than a thing that also has to know how the frame
-	// started.
 	self.timer.scene_end(cmd, slot);
 	self.timer.mark(cmd, slot, FrameMark.SCENE);
 
-	// The asset table comes down with it because each post shader's own samplers
-	// resolve through it — bindings 0 and 1 are the chain's own images, and
-	// everything above them is an image a script named.
-	// Straight into `output` when there is nothing to draw over the frame after
-	// the tonemap: one image and one copy fewer. Eye images take only the scene's
-	// own writes, because the tonemap draws the eyes side by side.
-	bool direct = display || (output != null && !output_eyes && posted && !interface_over);
-	if (posted && !display)
+	bool direct = direct_tonemap && posted;
+	if (posted)
 	{
 		self.post.record_chain(
 			cmd,
@@ -837,19 +831,9 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 			see_through
 		)!;
 	}
-
 	self.timer.mark(cmd, slot, FrameMark.POST);
 
-	// The interface, over the finished frame. A rendering of its own because it
-	// must not clear what it is drawn over and has no depth to test — see
-	// `Target.begin_overlay`. It writes `target.color` like the stages above it
-	// and, like them, does not close it.
-	//
-	// Unless this frame is being presented, in which case `frame()` draws it
-	// after the blit instead, at the window's own pixels — see `Composite`. It
-	// has to be one or the other and never both: the two copies would composite
-	// over each other, and a translucent panel would darken twice.
-	if (!presenting && self.ui.active())
+	if (interface_over)
 	{
 		self.target.begin_overlay(cmd);
 		self.ui.record(cmd, self.target.extent)!;
@@ -857,10 +841,71 @@ fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = f
 	}
 
 	if (direct) return true;
-	// With no post pass a reused target was already left in TRANSFER_SRC by the
-	// previous frame. Closing it again would claim the wrong old layout.
+	// With no post pass a reused target was already left in TRANSFER_SRC by the previous frame.
 	if (posted || !cache_reuse) self.target.close(cmd);
 	return false;
+}
+
+<*
+ A whole frame of scene, recorded into `cmd`: prepare once, skip unchanged desktop
+ frames when allowed, then dispatch to either `record_direct_eyes` or `record_hdr_frame`.
+
+ @param may_skip : `Whether a frame identical to the last one drawn may be left undrawn.`
+ @param output : "An image the frame goes straight into, left as a colour attachment; null for target.color"
+ @param output_view : "A view of output"
+ @param see_through : "Drawn over passthrough: no background, and alpha is coverage"
+ @param output_eyes : "output holds a layer per view in TARGET_COLOR_FORMAT, a headset's eye images"
+ @require !output_eyes || (output != null && self.target.views > 1) : "Eye images are for a multiview target"
+ @return "Whether the frame went to output; false when it went to target.color as usual"
+*>
+fn bool? Renderer.record_scene(&self, vk::CommandBuffer cmd, bool presenting = false, bool may_skip = false,
+	vk::Image output = (vk::Image)null, vk::ImageView output_view = (vk::ImageView)null, bool see_through = false,
+	bool output_eyes = false)
+{
+	float[4] clear = see_through ? (float[4]){ 0, 0, 0, 0 } : self.clear;
+	bool interface_over = !presenting && self.ui.active();
+	bool direct_eyes = self.can_direct_eyes(output_eyes, interface_over);
+
+	self.pass.scene_tone = direct_eyes ? display_tone(self.post.tonemap_mode) : LINEAR;
+	self.pass.tone_exposure = self.post.tonemap_exposure;
+
+	uint slot = self.frames.slot;
+	self.ui.upload(&self.target)!;
+	self.record_panels(cmd)!;
+
+	bool frame_skip = may_skip && self.active_profile().frame_skip;
+	bool may_cache = !direct_eyes && !self.scene_cache_disabled
+		&& self.target.samples == SAMPLE_COUNT_1_BIT
+		&& self.pass.extra_views.len() == 0;
+	self.pass.prepare(&self.gpu, cmd, &self.target, slot, compute_frame_key: frame_skip || may_cache)!;
+	self.timer.mark(cmd, slot, FrameMark.PREPARE);
+
+	if (frame_skip)
+	{
+		ulong key = self.picture_key();
+		if (self.rendered_once && !self.always_render && key == self.rendered_key)
+		{
+			self.timer.mark(cmd, slot, FrameMark.SHADOW);
+			self.timer.mark(cmd, slot, FrameMark.OCCLUSION);
+			self.timer.mark(cmd, slot, FrameMark.PREPASS);
+			self.timer.scene_begin(cmd, slot);
+			self.timer.scene_end(cmd, slot);
+			self.timer.mark(cmd, slot, FrameMark.SCENE);
+			self.timer.mark(cmd, slot, FrameMark.POST);
+			self.skipped_frames++;
+			return false;
+		}
+		self.rendered_key = key;
+	}
+	self.rendered_once = frame_skip;
+	self.rendered_frames++;
+
+	if (direct_eyes)
+	{
+		self.record_direct_eyes(cmd, slot, output, output_view, clear, see_through);
+		return true;
+	}
+	return self.record_hdr_frame(cmd, slot, presenting, interface_over, output, output_view, output_eyes, clear, see_through);
 }
 
 <*

@@ -8,16 +8,36 @@
  engine opens its device to that order (`vulkan_request`); then the session is
  made against that device.
 *>
-module three @feat(ANDROID);
+module three;
 
 import std::io;
 import std::collections::list;
 import xr;
 import vk;
-import three::ndk;
 
 // Requested even though Quest reports more: VK_FORMAT_R8G8B8A8_SRGB, then BGRA.
-const long[2] XR_COLOR_FORMATS = { (long)vk::FORMAT_R8G8B8A8_SRGB, (long)vk::FORMAT_B8G8B8A8_SRGB };
+const long[2] XR_COLOR_FORMATS = { (long)vk::Format.FORMAT_R8G8B8A8_SRGB, (long)vk::Format.FORMAT_B8G8R8A8_SRGB };
+
+<*
+ OS handles required only on Android (`JavaVM*` and `ANativeActivity.clazz`).
+ Zero-initialized on desktop PCVR.
+*>
+struct XrPlatformInit
+{
+	void* android_vm;
+	void* android_activity;
+}
+
+fn xr::CompositionLayerSettingsFlagsFB xr_filter_flags(XrLayerFilter filter)
+{
+	switch (filter)
+	{
+		case NONE:    return {};
+		case SHARPEN: return NORMAL_SHARPENING;
+		case SUPER:   return QUALITY_SHARPENING;
+		case AUTO:    return QUALITY_SHARPENING | AUTO_LAYER_FILTER;
+	}
+}
 
 struct XrHost
 {
@@ -32,7 +52,11 @@ struct XrHost
 	List {vk::ImageView} views;
 	vk::Device device;
 	long format;
-	// One eye.
+	// Runtime's recommended single-eye size (before render scale).
+	uint recommended_eye_width;
+	uint recommended_eye_height;
+	float render_scale;
+	// Active single-eye size.
 	uint eye_width;
 	uint eye_height;
 	// One per eye, or 1 with the eyes side by side in an image twice as wide.
@@ -55,7 +79,7 @@ struct XrHost
 	xr::PassthroughLayerFB passthrough_layer;
 	bool passthrough_running;
 	// How the compositor filters the eye layer; none is bilinear.
-	CompositionLayerSettingsFlagsFB layer_filter;
+	xr::CompositionLayerSettingsFlagsFB layer_filter;
 	XrInput input;
 }
 
@@ -63,34 +87,43 @@ struct XrHost
  Brings up the loader, the instance and the system, and records what the
  runtime wants of Vulkan in `vulkan_request`.
 
- @param [&inout] app : "The glue's app, for the JavaVM and the activity"
- @param render_scale : "Fraction of the runtime's recommended eye size"
- @param layer_filter : "How the compositor filters the eyes; none is bilinear"
- @require render_scale > 0 : "Scale must be positive"
- @return? xr::COMMAND_MISSING, xr::CALL_FAILED
+ @param platform : "Android JNI/activity handles on Quest; zeroed on desktop PCVR"
+ @param profile : "Resolved render profile (render scale, layer filter, foveation)"
+ @require profile.xr_render_scale > 0 : "Scale must be positive"
+ @return? xr::LOADER_MISSING, xr::COMMAND_MISSING, xr::CALL_FAILED
 *>
-fn void? XrHost.open(&self, ndk::App* app, float render_scale, CompositionLayerSettingsFlagsFB layer_filter = {})
+fn void? XrHost.open(&self, XrPlatformInit platform, RenderProfile profile)
 {
-	xr::load_global()!;
-	if (xr::cmd.initialize_loader != null)
-	{
-		xr::LoaderInitInfoAndroidKHR loader = {
-			.type = xr::TYPE_LOADER_INIT_INFO_ANDROID_KHR,
-			.application_vm = app.activity.vm,
-			.application_context = app.activity.clazz,
-		};
-		xr::check(xr::cmd.initialize_loader(&loader), "xrInitializeLoaderKHR")!;
-	}
+	float render_scale = profile.xr_render_scale;
+	xr::CompositionLayerSettingsFlagsFB layer_filter = xr_filter_flags(profile.xr_layer_filter);
 
-	// The two optional ones only when the runtime has them: asking for an
-	// extension it lacks fails the whole instance.
+	xr::load_global()!;
+	$if env::ANDROID:
+		if (xr::cmd.initialize_loader != null && platform.android_vm != null)
+		{
+			xr::LoaderInitInfoAndroidKHR loader = {
+				.type = xr::TYPE_LOADER_INIT_INFO_ANDROID_KHR,
+				.application_vm = platform.android_vm,
+				.application_context = platform.android_activity,
+			};
+			xr::check(xr::cmd.initialize_loader(&loader), "xrInitializeLoaderKHR")!;
+		}
+	$endif
+
+	// Optional extensions only when the runtime advertises them: asking for an
+	// unsupported extension fails `xrCreateInstance`.
 	bool refresh_rate = xr::has_extension(xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) ?? false;
 	bool performance = xr::has_extension(xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME) ?? false;
 	bool passthrough = xr::has_extension(xr::FB_PASSTHROUGH_EXTENSION_NAME) ?? false;
 	bool filter = layer_filter && (xr::has_extension(xr::FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME) ?? false);
-	bool auto_filter = filter && (layer_filter & AUTO_LAYER_FILTER) && (xr::has_extension(xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME) ?? false);
-	ZString[7] extensions = { "XR_KHR_vulkan_enable", "XR_KHR_android_create_instance", null, null, null, null, null };
-	uint enabled = 2;
+	bool auto_filter = filter && (layer_filter & AUTO_LAYER_FILTER)
+		&& (xr::has_extension(xr::META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME) ?? false);
+	ZString[7] extensions;
+	uint enabled = 0;
+	extensions[enabled++] = "XR_KHR_vulkan_enable";
+	$if env::ANDROID:
+		if (platform.android_vm != null) extensions[enabled++] = "XR_KHR_android_create_instance";
+	$endif
 	if (refresh_rate) extensions[enabled++] = xr::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
 	if (performance) extensions[enabled++] = xr::EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
 	if (passthrough) extensions[enabled++] = xr::FB_PASSTHROUGH_EXTENSION_NAME;
@@ -105,14 +138,18 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale, CompositionLayerS
 	{
 		io::eprintn("xr: the runtime has no XR_FB_composition_layer_settings; no eye layer filter");
 	}
-	xr::InstanceCreateInfoAndroidKHR android_info = {
-		.type = xr::TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
-		.application_vm = app.activity.vm,
-		.application_activity = app.activity.clazz,
-	};
+	void* instance_next = null;
+	$if env::ANDROID:
+		xr::InstanceCreateInfoAndroidKHR android_info = {
+			.type = xr::TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR,
+			.application_vm = platform.android_vm,
+			.application_activity = platform.android_activity,
+		};
+		if (platform.android_vm != null) instance_next = &android_info;
+	$endif
 	xr::InstanceCreateInfo info = {
 		.type = xr::TYPE_INSTANCE_CREATE_INFO,
-		.next = &android_info,
+		.next = instance_next,
 		.application_info = {
 			.application_name = "three.c3",
 			.application_version = 1,
@@ -146,13 +183,16 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale, CompositionLayerS
 	uint count;
 	xr::check(xr::cmd.enumerate_view_configuration_views(self.instance, self.system,
 		xr::VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &count, &views[0]), "xrEnumerateViewConfigurationViews")!;
-	self.eye_width = (uint)((float)views[0].recommended_image_rect_width * render_scale) & ~3u;
-	self.eye_height = (uint)((float)views[0].recommended_image_rect_height * render_scale) & ~3u;
-	io::printfn("xr: eye %dx%d recommended, rendering %dx%d",
-		views[0].recommended_image_rect_width, views[0].recommended_image_rect_height, self.eye_width, self.eye_height);
+	self.recommended_eye_width = views[0].recommended_image_rect_width;
+	self.recommended_eye_height = views[0].recommended_image_rect_height;
+	self.render_scale = render_scale;
+	self.eye_width = max(4u, (uint)((float)self.recommended_eye_width * render_scale) & ~3u);
+	self.eye_height = max(4u, (uint)((float)self.recommended_eye_height * render_scale) & ~3u);
+	io::printfn("xr: eye %dx%d recommended, rendering %dx%d (scale %.2f)",
+		self.recommended_eye_width, self.recommended_eye_height, self.eye_width, self.eye_height, render_scale);
 
 	// Must be asked before a session is made, even though the engine's own
-	// version choice already falls inside what Quest allows.
+	// version choice already falls inside what runtimes allow.
 	xr::GraphicsRequirementsVulkanKHR requirements = { .type = xr::TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR };
 	xr::check(xr::cmd.get_vulkan_graphics_requirements(self.instance, self.system, &requirements),
 		"xrGetVulkanGraphicsRequirementsKHR")!;
@@ -175,7 +215,7 @@ fn void? XrHost.open(&self, ndk::App* app, float render_scale, CompositionLayerS
 		.device_extensions = self.device_extensions.array_view(),
 		.pick_device = &pick_xr_device,
 		.pick_context = self,
-		.fragment_density_map = true,
+		.fragment_density_map = profile.foveation,
 	};
 	vulkan_request = &self.request;
 }
@@ -288,6 +328,18 @@ fn void? XrHost.start(&self, Gpu* gpu, uint layers = 1)
 		: self.space_type == xr::REFERENCE_SPACE_TYPE_LOCAL_FLOOR ? "local-floor" : "local");
 
 	self.format = self.pick_format()!;
+	self.images.init(mem);
+	self.views.init(mem);
+	self.device = gpu.handle;
+	self.create_swapchain(gpu, layers)!;
+}
+
+<*
+ Creates the OpenXR colour swapchain and its Vulkan array views at the current
+ `eye_width`/`eye_height` and `layers`.
+*>
+fn void? XrHost.create_swapchain(&self, Gpu* gpu, uint layers)
+{
 	self.layers = layers;
 	xr::SwapchainCreateInfo swap_info = {
 		.type = xr::TYPE_SWAPCHAIN_CREATE_INFO,
@@ -310,9 +362,8 @@ fn void? XrHost.start(&self, Gpu* gpu, uint layers = 1)
 	defer free(found);
 	foreach (&image : found) image.type = xr::TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR;
 	xr::check(xr::cmd.enumerate_swapchain_images(self.swapchain, count, &count, found.ptr), "xrEnumerateSwapchainImages")!;
-	self.images.init(mem);
-	self.views.init(mem);
-	self.device = gpu.handle;
+	self.images.clear();
+	self.views.clear();
 	// Views only in the target's own format, the one the scene and the tonemap
 	// are built for.
 	bool drawable = (vk::Format)self.format == TARGET_COLOR_FORMAT;
@@ -325,8 +376,39 @@ fn void? XrHost.start(&self, Gpu* gpu, uint layers = 1)
 		if (catch view) return xr::CALL_FAILED~;
 		self.views.push(view);
 	}
-	io::printfn("xr: swapchain %dx%d, %d layers, format %d, %d images", swap_info.width, self.eye_height, layers,
-		self.format, count);
+	io::printfn("xr: swapchain %dx%d, %d layers, format %d, %d images (scale %.2f)", swap_info.width, self.eye_height,
+		layers, self.format, count, self.render_scale);
+}
+
+<* Destroys swapchain image views and the swapchain handle. Caller must idle the GPU first. *>
+fn void XrHost.destroy_swapchain(&self)
+{
+	foreach (view : self.views) vk::destroyImageView(self.device, view, null);
+	self.views.clear();
+	self.images.clear();
+	if (self.swapchain != null)
+	{
+		xr::cmd.destroy_swapchain(self.swapchain);
+		self.swapchain = (xr::Swapchain)null;
+	}
+}
+
+<*
+ Rebuilds the XR swapchain at a new `render_scale` (between frames, after `gpu.wait_idle()`).
+
+ @require render_scale >= 0.4f && render_scale <= 1.5f : "Scale out of range"
+ @return? xr::CALL_FAILED
+*>
+fn void? XrHost.rebuild_swapchain(&self, Gpu* gpu, float render_scale)
+{
+	uint next_w = max(4u, (uint)((float)self.recommended_eye_width * render_scale) & ~3u);
+	uint next_h = max(4u, (uint)((float)self.recommended_eye_height * render_scale) & ~3u);
+	self.render_scale = render_scale;
+	if (next_w == self.eye_width && next_h == self.eye_height && self.swapchain != null) return;
+	self.destroy_swapchain();
+	self.eye_width = next_w;
+	self.eye_height = next_h;
+	self.create_swapchain(gpu, self.layers)!;
 }
 
 <*
@@ -598,9 +680,8 @@ fn void XrHost.request_exit(&self)
 
 fn void XrHost.close(&self)
 {
-	foreach (view : self.views) vk::destroyImageView(self.device, view, null);
+	self.destroy_swapchain();
 	self.views.free();
-	if (self.swapchain != null) xr::cmd.destroy_swapchain(self.swapchain);
 	self.destroy_passthrough();
 	self.input.close();
 	if (self.space != null) xr::cmd.destroy_space(self.space);

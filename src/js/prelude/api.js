@@ -2642,6 +2642,24 @@ export const three = {
 	get sceneCache() { return H.sceneCacheGet(); },
 	set sceneCache(v) { H.sceneCacheSet(!!v); },
 
+	// Read-only hardware and active render profile facts, so a game can adapt its
+	// defaults cleanly across desktop, PCVR, and Quest without platform sniffing.
+	get platform() { return H.platformInfo(); },
+
+	// Live-safe render tuning knobs sharing the same names as `--tune` and
+	// Android `debug.three.*` properties.
+	tuning: {
+		get profile() { return H.platformInfo().profile; },
+		get shadowFilter() { return H.renderShadowFilterGet(); },
+		set shadowFilter(v) { H.renderShadowFilterSet(String(v)); },
+		get directEyes() { return H.renderDirectEyesGet(); },
+		set directEyes(v) { H.renderDirectEyesSet(String(v)); },
+		get depthPrepass() { return H.depthPrepassGet(); },
+		set depthPrepass(v) { H.depthPrepassSet(!!v); },
+		get sceneCache() { return H.sceneCacheGet(); },
+		set sceneCache(v) { H.sceneCacheSet(!!v); },
+	},
+
 	// The shaders that run over the finished frame.
 	//
 	// `three.setPost({ fragment, uniforms })` compiles a `float3 post(Post p)`

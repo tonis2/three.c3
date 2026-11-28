@@ -250,6 +250,18 @@ export const xr = {
 	set passthrough(on) { H.xrPassthroughSet(!!on); },
 	get passthroughSupported() { return H.xrPassthroughSupported(); },
 
+	// Live eye render scale (0.4 to 1.5 of the runtime's recommended size), applied
+	// between frames, and the current single-eye resolution `{ width, height }`.
+	get renderScale() { return H.xrRenderScaleGet(); },
+	set renderScale(scale) {
+		scale = +scale;
+		if (!Number.isFinite(scale) || scale < 0.4 || scale > 1.5) {
+			throw new RangeError('three.xr.renderScale wants a number between 0.4 and 1.5');
+		}
+		H.xrRenderScaleSet(scale);
+	},
+	get eyeSize() { return H.xrEyeSizeGet(); },
+
 	// The mouse and keyboard as the two hands, off a headset: the right hand
 	// points where the pointer is. See docs/functions.md for the keys.
 	get emulate() { return H.xrEmulateGet(); },

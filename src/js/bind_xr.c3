@@ -34,6 +34,9 @@ fn void? JsRuntime.bind_xr_verbs(&self, js::Value host)
 	self.js.@bind(host, "xrPassthroughSupported", &js_xr_passthrough_supported, self)!;
 	self.js.@bind(host, "xrEmulateGet", &js_xr_emulate_get, self)!;
 	self.js.@bind(host, "xrEmulateSet", &js_xr_emulate_set, self)!;
+	self.js.@bind(host, "xrRenderScaleGet", &js_xr_render_scale_get, self)!;
+	self.js.@bind(host, "xrRenderScaleSet", &js_xr_render_scale_set, self)!;
+	self.js.@bind(host, "xrEyeSizeGet", &js_xr_eye_size_get, self)!;
 }
 
 // What `xrHand` answers with.
@@ -279,4 +282,48 @@ fn void js_xr_emulate_set(JsRuntime* self, bool on)
 	if (on == self.hands.emulate) return;
 	self.hands.emulate = on;
 	self.controls.enabled = !on;
+}
+
+struct XrEyeSizeView
+{
+	uint width;
+	uint height;
+}
+
+// `xrRenderScaleGet()` — active or pending XR eye render scale.
+fn float js_xr_render_scale_get(JsRuntime* self)
+{
+	if (self.renderer == null) return XR_RENDER_SCALE;
+	XrDisplay* d = &self.renderer.xr_display;
+	if (d.scale_request > 0.0f) return d.scale_request;
+	if (d.render_scale > 0.0f) return d.render_scale;
+	return self.renderer.active_profile().xr_render_scale;
+}
+
+<*
+ `xrRenderScaleSet(scale)` — requests a live XR eye swapchain resize (0.4..1.5),
+ applied between frames by the XR loop.
+
+ @return? js::THREW
+*>
+fn void? js_xr_render_scale_set(JsRuntime* self, float scale)
+{
+	if (!math::is_finite(scale) || scale < 0.4f || scale > 1.5f)
+	{
+		return self.js.fail("three.xr.renderScale wants a number between 0.4 and 1.5, got %s", scale)~;
+	}
+	if (self.renderer != null) self.renderer.xr_display.scale_request = scale;
+}
+
+// `xrEyeSizeGet()` — current single-eye pixel dimensions `{ width, height }`.
+fn XrEyeSizeView js_xr_eye_size_get(JsRuntime* self)
+{
+	if (self.renderer == null) return { };
+	XrDisplay* d = &self.renderer.xr_display;
+	if (d.eye_width > 0 && d.eye_height > 0) return { .width = d.eye_width, .height = d.eye_height };
+	if (self.renderer.target.views > 1)
+	{
+		return { .width = self.renderer.target.view_extent.width, .height = self.renderer.target.view_extent.height };
+	}
+	return { };
 }

@@ -6,7 +6,7 @@
  OpenXR's order is fixed: actions, then suggested bindings, then one attach per
  session, after which the set can no longer change.
 *>
-module three @feat(ANDROID);
+module three;
 
 import std::io;
 import xr;

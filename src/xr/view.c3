@@ -7,7 +7,7 @@
  head alone, because tilting the world under a headset is a quick way to make
  somebody sick.
 *>
-module three @feat(ANDROID);
+module three;
 
 import std::math;
 import std::math::vector;

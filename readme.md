@@ -41,7 +41,7 @@ path the commands below use.
 - **Physics** — rigid bodies, joints, heightfields
 - **Navigation** — baked fields for characters to find their way over
 - **UI** — declared from JavaScript classes
-- **VR** — Meta Quest 3, with the hands emulated by mouse and keyboard at a desk
+- **VR** — Desktop PCVR (OpenXR on Linux/Windows) and Meta Quest 3, with hands emulated by mouse and keyboard at a desk
 - **MCP server** — a coding agent runs scripts and sees the frame they drew
 
 ### Examples
@@ -141,21 +141,27 @@ There are two tools:
 
 The agent reads the API from [`docs/`](docs/); `run_script`'s description tells it where that is.
 
-### Meta Quest 3
+### PCVR & Meta Quest 3
 
 ```sh
+# Desktop PC, PCVR (OpenXR), and Quest preview from one helper
+./run.sh pc examples/vr_castle.js
+./run.sh pcvr examples/vr_castle.js --fast
+./run.sh preview examples/vr_castle.js 1.0 -- --debug
+
+# Quest 3 APK build, hot-push, tuning, and profiling
 ./setup.sh android                                           # once: the OpenXR loader
-packaging/android/build-apk.sh examples/vr_castle.js --run
-packaging/android/quest.sh push examples/vr_castle.js        # reloads in place, no rebuild
-packaging/android/quest.sh mcp                               # the agent tools, on the headset
-packaging/android/quest.sh logs
+./run.sh quest examples/vr_castle.js --run
+./run.sh quest examples/vr_castle.js --push                  # reloads in place, no rebuild
+./run.sh quest-tune msaa=2 shadow_filter=1tap                # same keys as --tune on PC
+./run.sh quest-perf 15
+./run.sh quest-mcp                                           # the agent tools, on the headset
+./run.sh quest-logs
 ```
 
-Needs the Android SDK and NDK (`ANDROID_HOME`) and a headset in developer mode on USB.
+Desktop PCVR uses `./build/three --vr --script <game>` and loads the system OpenXR loader at runtime (no build-time OpenXR SDK required). Quest builds need the Android SDK and NDK (`ANDROID_HOME`) and a headset in developer mode on USB.
 
-In a script the hands are `three.xr.left` and `three.xr.right`, and `three.xr.passthrough` shows the
-room. Set `three.xr.emulate = true` to try a VR scene at a desk, with the mouse and keyboard as the
-hands. See "The headset" in [`docs/functions.md`](docs/functions.md).
+In a script, `three.platform` reports `{ os, profile, gpu, tiler, multiview, msaa, foveationSupported }` and `three.tuning` exposes live-safe tuning knobs (`shadowFilter`, `directEyes`, `depthPrepass`, `sceneCache`). Hands are `three.xr.left` and `three.xr.right`, `three.xr.renderScale` resizes the eye swapchain live, and `three.xr.passthrough` shows the room. Set `three.xr.emulate = true` to try a VR scene at a desk. See "The headset" in [`docs/functions.md`](docs/functions.md).
 
 ### Building
 

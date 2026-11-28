@@ -66,6 +66,7 @@ alias JsSetup = fn void(JsRuntime* runtime);
  keeps `Options` a plain value with nothing to free.
 *>
 const usz MAX_SCRIPTS = 8;
+const usz MAX_TUNES   = 16;
 
 struct Options
 {
@@ -76,10 +77,16 @@ struct Options
 	*>
 	String[MAX_SCRIPTS] script_list;
 	usz script_count;
+	String[MAX_TUNES] tune_list;
+	usz tune_count;
 	String screenshot;
 	uint width;
 	uint height;
 	bool headless;
+	// `--vr`: open a Desktop OpenXR session instead of a flat window.
+	bool vr;
+	bool profile_set;
+	RenderPreset profile_preset;
 	<*
 	 How many frames to run before stopping. 0 is "not asked for", which is the
 	 window's endless loop or — with `--screenshot` — the single frame that mode
@@ -128,6 +135,36 @@ struct Options
  The `--script`s, in order. Borrowed from `self`.
 *>
 fn String[] Options.scripts(&self) => self.script_list[:self.script_count];
+
+fn String[] Options.tunes(&self) => self.tune_list[:self.tune_count];
+
+<*
+ Resolves the run's `RenderProfile` from preset flags (`--profile`, `--vr`, `--quest`),
+ `THREE_*` environment variables, and `--tune key=value` flags in that order.
+*>
+fn RenderProfile Options.resolve_profile(&self)
+{
+	RenderPreset base = self.vr ? RenderPreset.PCVR : (self.quest > 0.0f ? RenderPreset.QUEST : RenderPreset.DESKTOP);
+	if (self.profile_set) base = self.profile_preset;
+	RenderProfile profile = render_profile(base);
+	if (!self.vr)
+	{
+		// Flat desktop/windowed preview renders one view into a regular target.
+		profile.views = 1;
+		profile.foveation = false;
+		profile.foveation_level = OFF;
+		profile.lazy_post_images = false;
+		if (self.quest > 0.0f)
+		{
+			profile.headset_density = self.quest * QUEST3_EYE_ROWS / QUEST3_EYE_TAN_SPAN;
+			profile.frame_skip = true;
+			profile.scene_cache = false;
+		}
+	}
+	profile.apply_env();
+	foreach (spec : self.tunes()) profile.apply_tune(spec);
+	return profile;
+}
 
 
 <*
@@ -272,7 +309,8 @@ struct Engine
  @param views : "Views drawn side by side in one multiview pass, where the device has multiview: 2 for a headset"
  @param samples : "Samples per pixel for the scene: 1, or 2 or 4 for MSAA"
 *>
-fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint views = 1, uint samples = 1)
+fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint views = 1, uint samples = 1,
+	RenderProfile profile = {})
 {
 	// The window is a viewer, never a render target. It is opened first only
 	// because the surface has to come from somewhere; nothing about it reaches the
@@ -299,11 +337,12 @@ fn void? Engine.open(&self, uint width, uint height, bool headless = false, uint
 	}
 	self.stage = SURFACE;
 
-	self.renderer.init(self.instance, self.surface, width, height, debugging, views, samples)!;
+	self.renderer.init(self.instance, self.surface, width, height, debugging, views, samples, profile)!;
 	self.stage = RENDERER;
 
 	if (debugging) self.renderer.gpu.report();
 	self.renderer.pass.init(&self.renderer.gpu, &self.renderer.target)!;
+	if (profile.configured) self.renderer.apply_profile(profile);
 }
 
 <*
@@ -329,19 +368,29 @@ fn c3w::Window* Engine.viewer(&self) => self.windowed ? &self.window : null;
 
 fn void? run(Options opts)
 {
+	RenderProfile profile = opts.resolve_profile();
+	if (opts.vr)
+	{
+		run_desktop_vr(opts, profile)!;
+		return;
+	}
+
 	// On the heap: at 65 KB the engine is over c3c's stack object limit, and
 	// there is exactly one of it for the whole run.
 	Engine* engine = mem::new(Engine);
 	defer mem::free(engine);
 	defer engine.close();
-	engine.open(opts.width, opts.height, opts.headless, samples: opts.quest > 0.0f ? XR_MSAA : 1)!;
+	engine.open(opts.width, opts.height, opts.headless, views: profile.views, samples: profile.msaa, profile: profile)!;
 
 	Renderer* renderer = &engine.renderer;
 	if (opts.quest > 0.0f)
 	{
-		renderer.draw_like_quest(opts.quest);
 		io::printfn("quest: drawing like a Quest 3 eye at %.2f: %.0f pixels per unit of view tangent, %dx MSAA",
 			opts.quest, renderer.headset_density, (uint)renderer.target.samples);
+	}
+	if (debugging || opts.profile_set || opts.tune_count > 0 || opts.quest > 0.0f)
+	{
+		renderer.profile.report(&renderer.gpu, &renderer.target);
 	}
 	c3w::Window* window = engine.viewer();
 	bool windowed = engine.windowed;
